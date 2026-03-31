@@ -16,7 +16,10 @@ export function createSupabaseServerClient(request: Request, response: Response)
     {
       cookies: {
         getAll() {
-          return parseCookieHeader(request.headers.get('Cookie') ?? '');
+          return parseCookieHeader(request.headers.get('Cookie') ?? '')
+            .filter((cookie): cookie is { name: string; value: string } =>
+              cookie.value !== undefined
+            );
         },
         setAll(cookiesToSet: { name: string; value: string; options: Record<string, any> }[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
