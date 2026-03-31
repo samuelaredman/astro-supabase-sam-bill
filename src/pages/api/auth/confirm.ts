@@ -1,4 +1,4 @@
-import { createSupabaseServerClient } from "../../utils/database";
+import { createSupabaseServerClient } from "../../../utils/database";
 import type { APIRoute } from "astro";
 import type { EmailOtpType } from "@supabase/supabase-js";
 
