@@ -10,26 +10,27 @@ export const supabase = supabaseUrl && supabaseKey
   : null;
 
 export function createSupabaseServerClient(request: Request, response: Response) {
-  return createServerClient(
-    import.meta.env.SUPABASE_DATABASE_URL,
-    import.meta.env.SUPABASE_ANON_KEY,
-    {
-      cookies: {
-        getAll() {
-          return parseCookieHeader(request.headers.get('Cookie') ?? '')
-            .filter((cookie): cookie is { name: string; value: string } =>
-              cookie.value !== undefined
-            );
-        },
-        setAll(cookiesToSet: { name: string; value: string; options: Record<string, any> }[]) {
-          cookiesToSet.forEach(({ name, value, options }) => {
-            response.headers.append(
-              'Set-Cookie',
-              serializeCookieHeader(name, value, options)
-            );
-          });
-        },
+  const url = import.meta.env.SUPABASE_DATABASE_URL;
+  const key = import.meta.env.SUPABASE_ANON_KEY;
+  
+  if (!url || !key) throw new Error('Missing Supabase environment variables');
+
+  return createServerClient(url, key, {
+    cookies: {
+      getAll() {
+        return parseCookieHeader(request.headers.get('Cookie') ?? '')
+          .filter((cookie): cookie is { name: string; value: string } =>
+            cookie.value !== undefined
+          );
       },
-    }
-  );
+      setAll(cookiesToSet: { name: string; value: string; options: Record<string, any> }[]) {
+        cookiesToSet.forEach(({ name, value, options }) => {
+          response.headers.append(
+            'Set-Cookie',
+            serializeCookieHeader(name, value, options)
+          );
+        });
+      },
+    },
+  });
 }
