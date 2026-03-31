@@ -1,8 +1,8 @@
-export const prerender = false;
-
 import { createSupabaseServerClient } from "../../../utils/database";
 import type { APIRoute } from "astro";
 import type { EmailOtpType } from "@supabase/supabase-js";
+
+export const prerender = false;
 
 export const GET: APIRoute = async ({ request, redirect }) => {
   const response = new Response();
