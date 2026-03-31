@@ -1,7 +1,7 @@
+export const prerender = false;
+
 import type { APIRoute } from "astro";
 import { createSupabaseServerClient } from "../../../utils/database";
-
-export const prerender = false;
 
 export const POST: APIRoute = async ({ request }) => {
   const response = new Response();
