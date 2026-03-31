@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import { createServerClient, parseCookieHeader, serializeCookieHeader } from '@supabase/ssr';
+import { createServerClient, parseCookieHeader, serializeCookieHeader } from '@supabase/supabase-js';
 import type { Database } from '../../supabase/types'
 
 const supabaseUrl = import.meta.env.SUPABASE_DATABASE_URL
