@@ -1,22 +1,635 @@
 ---
 export const prerender = false;
-
 import { getSupabase } from "../../utils/database";
-const supabase = getSupabase();
 
+const supabase = getSupabase();
 const { slug } = Astro.params;
 
 const { data: game } = await (supabase as any)
   .from('games')
-  .select('*')
+  .select(`
+    id, title, slug, cover_img_url, game_description,
+    date_released, platform,
+    developers:developer_id ( id, name, slug ),
+    publishers:publisher_id ( id, name, slug )
+  `)
   .eq('slug', slug)
   .single();
 
 if (!game) return Astro.redirect('/404');
+
+const { data: reviews } = await (supabase as any)
+  .from('reviews')
+  .select(`
+    id, score, title, body, published_at, created_at,
+    contains_spoilers, play_time_hours,
+    played_on:platform_played_on ( id, name, slug ),
+    profiles ( id, username, avatar_url )
+  `)
+  .eq('game_id', game.id)
+  .eq('status', 'published')
+  .order('published_at', { ascending: false });
+
+const reviewList = reviews ?? [];
+
+const avgScore = reviewList.length > 0
+  ? (reviewList.reduce((sum: number, r: any) => sum + r.score, 0) / reviewList.length).toFixed(1)
+  : null;
+
+function timeAgo(dateStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (diff < 60) return `${diff}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  return `${Math.floor(diff / 86400)}d`;
+}
+
+function scoreColor(score: number): string {
+  if (score >= 9) return "score-great";
+  if (score >= 7) return "score-good";
+  if (score >= 5) return "score-mid";
+  return "score-low";
+}
+
+function getInitials(username: string): string {
+  return username.slice(0, 2).toUpperCase();
+}
+
+const releaseYear = game.date_released
+  ? new Date(game.date_released).getFullYear()
+  : null;
 ---
-<html>
-  <head><title>{game.title}</title></head>
-  <body>
-    <h1>{game.title}</h1>
-  </body>
+
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{game.title} — Cartridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <style>
+    :root[data-theme="light"] {
+      --bg: #f9f8f6;
+      --bg-card: #ffffff;
+      --bg-hover: #f4f3f0;
+      --border: #e8e6e1;
+      --border-subtle: #f0ede8;
+      --text-primary: #141412;
+      --text-secondary: #6b6860;
+      --text-tertiary: #a09d98;
+      --accent: #141412;
+      --accent-text: #ffffff;
+      --score-great: #1a6b3c; --score-great-bg: #eaf5ee;
+      --score-good: #1a4a6b;  --score-good-bg: #eaf0f5;
+      --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
+      --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
+      --tag-bg: #f0ede8; --tag-text: #6b6860;
+      --shadow: 0 1px 3px rgba(0,0,0,0.06);
+      --shadow-md: 0 4px 16px rgba(0,0,0,0.1);
+    }
+    :root[data-theme="dark"] {
+      --bg: #0f0f0e;
+      --bg-card: #1a1a18;
+      --bg-hover: #222220;
+      --border: #2a2a27;
+      --border-subtle: #222220;
+      --text-primary: #f0ede8;
+      --text-secondary: #908d87;
+      --text-tertiary: #5a5855;
+      --accent: #f0ede8;
+      --accent-text: #141412;
+      --score-great: #4ade80; --score-great-bg: #0d2b1a;
+      --score-good: #60a5fa;  --score-good-bg: #0d1e2b;
+      --score-mid: #fbbf24;   --score-mid-bg: #2b1f0d;
+      --score-low: #f87171;   --score-low-bg: #2b0d0d;
+      --tag-bg: #2a2a27; --tag-text: #908d87;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3);
+      --shadow-md: 0 4px 16px rgba(0,0,0,0.4);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text-primary);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    /* ── Top nav ── */
+    .topnav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      backdrop-filter: blur(8px);
+    }
+
+    .back-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: var(--text-secondary);
+      transition: color 0.15s;
+    }
+    .back-btn:hover { color: var(--text-primary); }
+
+    .logo {
+      font-family: 'DM Serif Display', serif;
+      font-size: 20px;
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-left: auto;
+    }
+    .logo-dot {
+      width: 7px; height: 7px;
+      background: var(--text-primary);
+      border-radius: 50%;
+    }
+
+    .theme-btn {
+      background: none; border: none; cursor: pointer;
+      color: var(--text-secondary); padding: 6px;
+      display: flex; align-items: center;
+      transition: color 0.15s;
+    }
+    .theme-btn:hover { color: var(--text-primary); }
+
+    /* ── Page layout ── */
+    .page {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 40px 24px 80px;
+    }
+
+    /* ── Game hero ── */
+    .game-hero {
+      display: flex;
+      gap: 28px;
+      align-items: flex-start;
+      margin-bottom: 40px;
+    }
+
+    .cover-wrap {
+      flex-shrink: 0;
+      width: 160px;
+    }
+
+    .cover-img {
+      width: 160px;
+      height: 213px;
+      border-radius: 12px;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-md);
+      display: block;
+    }
+
+    .cover-placeholder {
+      width: 160px;
+      height: 213px;
+      border-radius: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 48px;
+    }
+
+    .game-meta {
+      flex: 1;
+      min-width: 0;
+      padding-top: 4px;
+    }
+
+    .game-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 32px;
+      line-height: 1.15;
+      letter-spacing: -0.5px;
+      margin-bottom: 10px;
+    }
+
+    .meta-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    .meta-tag {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .meta-sep { color: var(--text-tertiary); font-size: 13px; }
+
+    .meta-link {
+      font-size: 13px;
+      color: var(--text-secondary);
+      transition: color 0.15s;
+    }
+    .meta-link:hover { color: var(--text-primary); text-decoration: underline; text-underline-offset: 2px; }
+
+    .score-summary {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .avg-score {
+      font-family: 'DM Serif Display', serif;
+      font-size: 48px;
+      line-height: 1;
+      letter-spacing: -2px;
+    }
+
+    .score-details {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .score-label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    .review-count {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    .game-description {
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+      max-width: 600px;
+    }
+
+    .platform-tag {
+      display: inline-flex;
+      align-items: center;
+      background: var(--tag-bg);
+      color: var(--tag-text);
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 6px;
+      margin-top: 14px;
+    }
+
+    /* ── Section header ── */
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 500;
+    }
+
+    .section-count {
+      font-size: 13px;
+      color: var(--text-tertiary);
+    }
+
+    /* ── Review cards ── */
+    .reviews-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .review-card {
+      padding: 20px 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .review-card:last-child { border-bottom: none; }
+
+    .review-top {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .avatar {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      background: var(--bg-hover);
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      overflow: hidden;
+    }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+    .reviewer-info { flex: 1; min-width: 0; }
+
+    .reviewer-name {
+      font-size: 14px;
+      font-weight: 500;
+      transition: color 0.15s;
+    }
+    .reviewer-name:hover { color: var(--text-secondary); }
+
+    .reviewer-meta {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .score-badge {
+      flex-shrink: 0;
+      width: 36px; height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      font-weight: 500;
+      font-family: 'DM Serif Display', serif;
+    }
+
+    .score-great { color: var(--score-great); background: var(--score-great-bg); }
+    .score-good  { color: var(--score-good);  background: var(--score-good-bg);  }
+    .score-mid   { color: var(--score-mid);   background: var(--score-mid-bg);   }
+    .score-low   { color: var(--score-low);   background: var(--score-low-bg);   }
+
+    .review-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 17px;
+      line-height: 1.3;
+      margin-bottom: 6px;
+      letter-spacing: -0.2px;
+    }
+
+    .review-body {
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+    }
+
+    .spoiler-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--tag-bg);
+      color: var(--tag-text);
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 20px;
+      margin-bottom: 8px;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+
+    .review-footer {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .footer-tag {
+      display: inline-flex;
+      align-items: center;
+      background: var(--tag-bg);
+      color: var(--tag-text);
+      font-size: 12px;
+      padding: 3px 9px;
+      border-radius: 6px;
+    }
+
+    /* ── Empty state ── */
+    .empty-state {
+      padding: 60px 0;
+      text-align: center;
+      color: var(--text-tertiary);
+    }
+
+    .empty-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 20px;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+
+    .empty-sub { font-size: 14px; }
+
+    .write-btn {
+      display: inline-block;
+      margin-top: 16px;
+      background: var(--accent);
+      color: var(--accent-text);
+      border-radius: 20px;
+      padding: 9px 20px;
+      font-size: 14px;
+      font-weight: 500;
+      transition: opacity 0.15s;
+    }
+    .write-btn:hover { opacity: 0.85; }
+
+    @media (max-width: 600px) {
+      .game-hero { flex-direction: column; gap: 20px; }
+      .cover-wrap { width: 120px; }
+      .cover-img, .cover-placeholder { width: 120px; height: 160px; }
+      .game-title { font-size: 24px; }
+      .avg-score { font-size: 36px; }
+      .page { padding: 24px 16px 60px; }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Nav -->
+  <nav class="topnav">
+    <a href="/" class="back-btn">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 12L6 8L10 4"/>
+      </svg>
+      Back
+    </a>
+    <a href="/" class="logo">
+      <span class="logo-dot"></span>
+      Cartridge
+    </a>
+    <button class="theme-btn" id="themeBtn" onclick="toggleTheme()">
+      <svg id="themeIcon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="9" cy="9" r="3.5"/>
+        <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
+      </svg>
+    </button>
+  </nav>
+
+  <div class="page">
+
+    <!-- Game hero -->
+    <div class="game-hero">
+      <div class="cover-wrap">
+        {game.cover_img_url
+          ? <img class="cover-img" src={game.cover_img_url} alt={game.title} />
+          : <div class="cover-placeholder">🎮</div>
+        }
+      </div>
+
+      <div class="game-meta">
+        <h1 class="game-title">{game.title}</h1>
+
+        <div class="meta-row">
+          {releaseYear && <span class="meta-tag">{releaseYear}</span>}
+          {releaseYear && game.developers && <span class="meta-sep">·</span>}
+          {game.developers && (
+            <a href={`/developers/${game.developers.slug}`} class="meta-link">
+              {game.developers.name}
+            </a>
+          )}
+          {game.publishers && game.publishers.id !== game.developers?.id && (
+            <>
+              <span class="meta-sep">·</span>
+              <a href={`/developers/${game.publishers.slug}`} class="meta-link">
+                {game.publishers.name}
+              </a>
+            </>
+          )}
+        </div>
+
+        {avgScore && (
+          <div class="score-summary">
+            <div class="avg-score">{avgScore}</div>
+            <div class="score-details">
+              <span class="score-label">Average score</span>
+              <span class="review-count">{reviewList.length} {reviewList.length === 1 ? 'review' : 'reviews'}</span>
+            </div>
+          </div>
+        )}
+
+        {game.game_description && (
+          <p class="game-description">{game.game_description}</p>
+        )}
+
+        {game.platform && (
+          <span class="platform-tag">{game.platform}</span>
+        )}
+      </div>
+    </div>
+
+    <!-- Reviews section -->
+    <div class="section-header">
+      <span class="section-title">Reviews</span>
+      <span class="section-count">{reviewList.length} {reviewList.length === 1 ? 'review' : 'reviews'}</span>
+    </div>
+
+    {reviewList.length === 0 ? (
+      <div class="empty-state">
+        <div class="empty-title">No reviews yet</div>
+        <p class="empty-sub">Be the first to review {game.title}.</p>
+        <a href="/" class="write-btn">+ Write a review</a>
+      </div>
+    ) : (
+      <div class="reviews-list">
+        {reviewList.map((review: any) => (
+          <div class="review-card">
+            <div class="review-top">
+              <div class="avatar">
+                {review.profiles?.avatar_url
+                  ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+                  : getInitials(review.profiles?.username ?? "??")
+                }
+              </div>
+              <div class="reviewer-info">
+                <a href={`/reviewers/${review.profiles?.username}`} class="reviewer-name">
+                  @{review.profiles?.username ?? "unknown"}
+                </a>
+                <div class="reviewer-meta">
+                  <span>{timeAgo(review.published_at ?? review.created_at)}</span>
+                  {review.played_on && (
+                    <>
+                      <span>·</span>
+                      <span>{review.played_on.name}</span>
+                    </>
+                  )}
+                  {review.play_time_hours && (
+                    <>
+                      <span>·</span>
+                      <span>{review.play_time_hours}h played</span>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div class={`score-badge ${scoreColor(review.score)}`}>
+                {review.score}
+              </div>
+            </div>
+
+            {review.contains_spoilers && (
+              <div class="spoiler-pill">⚠ spoilers</div>
+            )}
+
+            {review.title && (
+              <div class="review-title">{review.title}</div>
+            )}
+
+            <div class="review-body">{review.body}</div>
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
+
+  <script>
+    const saved = localStorage.getItem('theme') ||
+      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', saved);
+    updateThemeIcon(saved);
+
+    function toggleTheme() {
+      const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      updateThemeIcon(next);
+    }
+
+    function updateThemeIcon(theme) {
+      const icon = document.getElementById('themeIcon');
+      if (!icon) return;
+      icon.innerHTML = theme === 'dark'
+        ? '<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
+        : '<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>';
+    }
+
+    window.toggleTheme = toggleTheme;
+  </script>
+</body>
 </html>
