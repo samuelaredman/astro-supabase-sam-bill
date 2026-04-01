@@ -1,6 +1,17 @@
 ---
-import { getSupabase } from "../utils/database";
+import { getSupabase, createSupabaseServerClient } from "../utils/database";
 const supabase = getSupabase();
+
+// Check if user is logged in
+const serverClient = createSupabaseServerClient(Astro.request, new Response());
+const { data: { session } } = await serverClient.auth.getSession();
+const isLoggedIn = !!session;
+
+// Fetch platforms for composer dropdown
+const { data: platforms } = await (supabase as any)
+  .from("platforms")
+  .select("id, name, slug")
+  .order("name", { ascending: true });
 
 type Platform = { id: string; name: string; slug: string; };
 
@@ -636,6 +647,164 @@ function getInitials(username: string): string {
       margin-bottom: 8px;
     }
     .empty-state-sub { font-size: 14px; }
+
+    /* Composer */
+    .composer {
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+    }
+    .composer-inner {
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .composer-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .composer-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+    }
+    .composer-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .composer-input, .composer-select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--text-primary);
+      width: 100%;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .composer-input:focus, .composer-select:focus { border-color: var(--text-secondary); }
+    .composer-textarea {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--text-primary);
+      width: 100%;
+      outline: none;
+      resize: vertical;
+      min-height: 90px;
+      transition: border-color 0.15s;
+      line-height: 1.5;
+    }
+    .composer-textarea:focus { border-color: var(--text-secondary); }
+
+    /* Score picker */
+    .score-picker {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .score-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text-secondary);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.12s;
+    }
+    .score-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+    .score-btn.selected { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+
+    /* Autocomplete */
+    .autocomplete-wrap { position: relative; }
+    .autocomplete-results {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      z-index: 100;
+      max-height: 200px;
+      overflow-y: auto;
+      display: none;
+      box-shadow: var(--shadow-md);
+    }
+    .autocomplete-results.open { display: block; }
+    .autocomplete-item {
+      padding: 10px 14px;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: background 0.1s;
+    }
+    .autocomplete-item:hover { background: var(--bg-hover); }
+    .autocomplete-item-title { font-weight: 500; }
+    .autocomplete-item-dev { font-size: 12px; color: var(--text-tertiary); }
+
+    /* Composer actions */
+    .composer-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-top: 4px;
+    }
+    .spoiler-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .spoiler-toggle input { cursor: pointer; }
+    .composer-cancel {
+      padding: 8px 16px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: none;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .composer-cancel:hover { background: var(--bg-hover); }
+    .composer-submit {
+      padding: 8px 18px;
+      border-radius: 20px;
+      border: none;
+      background: var(--accent);
+      color: var(--accent-text);
+      font-size: 14px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .composer-submit:hover { opacity: 0.85; }
+    .composer-submit:disabled { opacity: 0.45; cursor: not-allowed; }
+    .composer-error {
+      font-size: 13px;
+      color: #c0392b;
+      min-height: 18px;
+    }
   </style>
 </head>
 
@@ -719,7 +888,83 @@ function getInitials(username: string): string {
           <div class="feed-title">Recent Reviews</div>
           <div class="feed-subtitle">{feedData.length} reviews loaded</div>
         </div>
-        <button class="new-review-btn">+ Write a review</button>
+        <button class="new-review-btn" id="openComposer" onclick="handleWriteReview()">+ Write a review</button>
+      </div>
+
+      <!-- Composer -->
+      <div class="composer" id="composer" style="display:none">
+        <div class="composer-inner">
+
+          <!-- Game search -->
+          <div class="composer-field">
+            <label class="composer-label">Game</label>
+            <div class="autocomplete-wrap">
+              <input
+                type="text"
+                id="gameSearch"
+                class="composer-input"
+                placeholder="Search for a game..."
+                autocomplete="off"
+              />
+              <div class="autocomplete-results" id="gameResults"></div>
+            </div>
+            <input type="hidden" id="gameId" />
+          </div>
+
+          <!-- Score -->
+          <div class="composer-field">
+            <label class="composer-label">Score</label>
+            <div class="score-picker" id="scorePicker">
+              {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                <button class="score-btn" data-score={n}>{n}</button>
+              ))}
+            </div>
+            <input type="hidden" id="scoreVal" />
+          </div>
+
+          <!-- Review title -->
+          <div class="composer-field">
+            <label class="composer-label">Title</label>
+            <input type="text" id="reviewTitle" class="composer-input" placeholder="Sum it up in a line..." maxlength="120" />
+          </div>
+
+          <!-- Review body -->
+          <div class="composer-field">
+            <label class="composer-label">Review</label>
+            <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4"></textarea>
+          </div>
+
+          <!-- Platform + playtime row -->
+          <div class="composer-row">
+            <div class="composer-field" style="flex:1">
+              <label class="composer-label">Platform played on</label>
+              <select id="platformSelect" class="composer-select">
+                <option value="">Select platform...</option>
+                {(platforms ?? []).map((p: any) => (
+                  <option value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+            <div class="composer-field" style="width:120px">
+              <label class="composer-label">Hours played</label>
+              <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
+            </div>
+          </div>
+
+          <!-- Spoilers toggle + submit -->
+          <div class="composer-actions">
+            <label class="spoiler-toggle">
+              <input type="checkbox" id="spoilerCheck" />
+              <span>Contains spoilers</span>
+            </label>
+            <div style="display:flex;gap:8px;margin-left:auto">
+              <button class="composer-cancel" onclick="closeComposer()">Cancel</button>
+              <button class="composer-submit" id="submitReview" onclick="submitReview()">Post review</button>
+            </div>
+          </div>
+
+          <div class="composer-error" id="composerError"></div>
+        </div>
       </div>
 
       {feedData.length === 0 ? (
@@ -825,35 +1070,155 @@ function getInitials(username: string): string {
 
   </div>
 
-  <script>
+  <script define:vars={{ isLoggedIn }}>
+    // ── Theme ──
     function toggleTheme() {
       const html = document.documentElement;
-      const current = html.getAttribute('data-theme');
-      const next = current === 'light' ? 'dark' : 'light';
+      const next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
       html.setAttribute('data-theme', next);
       localStorage.setItem('theme', next);
       updateThemeUI(next);
     }
-
-    function updateThemeUI(theme: string) {
+    function updateThemeUI(theme) {
       const label = document.getElementById('themeLabel');
       const icon = document.getElementById('themeIcon');
       if (!label || !icon) return;
       if (theme === 'dark') {
         label.textContent = 'Dark mode';
-        icon.innerHTML = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/></svg>`;
+        icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/></svg>';
       } else {
         label.textContent = 'Light mode';
-        icon.innerHTML = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>`;
+        icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>';
       }
     }
-
-    (window as any).toggleTheme = toggleTheme;
-
+    window.toggleTheme = toggleTheme;
     const saved = localStorage.getItem('theme') ||
       (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     document.documentElement.setAttribute('data-theme', saved);
     updateThemeUI(saved);
+
+    // ── Composer ──
+    function handleWriteReview() {
+      if (!isLoggedIn) { window.location.href = '/signin'; return; }
+      document.getElementById('composer').style.display = 'block';
+      document.getElementById('gameSearch').focus();
+    }
+    function closeComposer() {
+      document.getElementById('composer').style.display = 'none';
+      resetComposer();
+    }
+    function resetComposer() {
+      document.getElementById('gameSearch').value = '';
+      document.getElementById('gameId').value = '';
+      document.getElementById('reviewTitle').value = '';
+      document.getElementById('reviewBody').value = '';
+      document.getElementById('hoursPlayed').value = '';
+      document.getElementById('scoreVal').value = '';
+      document.getElementById('platformSelect').value = '';
+      document.getElementById('spoilerCheck').checked = false;
+      document.getElementById('composerError').textContent = '';
+      document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'));
+      document.getElementById('gameResults').classList.remove('open');
+    }
+    window.handleWriteReview = handleWriteReview;
+    window.closeComposer = closeComposer;
+
+    // Score picker
+    document.querySelectorAll('.score-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        document.getElementById('scoreVal').value = btn.dataset.score;
+      });
+    });
+
+    // Game autocomplete
+    let searchTimeout;
+    document.getElementById('gameSearch').addEventListener('input', (e) => {
+      clearTimeout(searchTimeout);
+      const q = e.target.value.trim();
+      if (q.length < 2) {
+        document.getElementById('gameResults').classList.remove('open');
+        return;
+      }
+      searchTimeout = setTimeout(() => searchGames(q), 300);
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.autocomplete-wrap')) {
+        document.getElementById('gameResults').classList.remove('open');
+      }
+    });
+
+    async function searchGames(q) {
+      const res = await fetch('/api/games/search?q=' + encodeURIComponent(q));
+      const games = await res.json();
+      const results = document.getElementById('gameResults');
+      results.innerHTML = '';
+      if (!games.length) {
+        results.innerHTML = '<div class="autocomplete-item" style="color:var(--text-tertiary)">No games found</div>';
+      } else {
+        games.forEach(game => {
+          const item = document.createElement('div');
+          item.className = 'autocomplete-item';
+          item.innerHTML = '<div><div class="autocomplete-item-title">' + game.title + '</div><div class="autocomplete-item-dev">' + (game.developer || '') + '</div></div>';
+          item.addEventListener('click', () => {
+            document.getElementById('gameSearch').value = game.title;
+            document.getElementById('gameId').value = game.id;
+            results.classList.remove('open');
+          });
+          results.appendChild(item);
+        });
+      }
+      results.classList.add('open');
+    }
+
+    // Submit
+    async function submitReview() {
+      const gameId = document.getElementById('gameId').value;
+      const score = document.getElementById('scoreVal').value;
+      const title = document.getElementById('reviewTitle').value.trim();
+      const body = document.getElementById('reviewBody').value.trim();
+      const platformId = document.getElementById('platformSelect').value;
+      const hours = document.getElementById('hoursPlayed').value;
+      const spoilers = document.getElementById('spoilerCheck').checked;
+      const errorEl = document.getElementById('composerError');
+
+      errorEl.textContent = '';
+      if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
+      if (!score) { errorEl.textContent = 'Please select a score.'; return; }
+      if (!title) { errorEl.textContent = 'Please add a title.'; return; }
+      if (!body) { errorEl.textContent = 'Please write a review.'; return; }
+
+      const btn = document.getElementById('submitReview');
+      btn.disabled = true;
+      btn.textContent = 'Posting...';
+
+      const res = await fetch('/api/reviews/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          game_id: gameId,
+          score: parseInt(score),
+          title,
+          body,
+          platform_played_on: platformId || null,
+          play_time_hours: hours ? parseInt(hours) : null,
+          contains_spoilers: spoilers,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        errorEl.textContent = data.error ?? 'Something went wrong.';
+        btn.disabled = false;
+        btn.textContent = 'Post review';
+      } else {
+        closeComposer();
+        window.location.reload();
+      }
+    }
+    window.submitReview = submitReview;
   </script>
 </body>
 </html>
