@@ -1,5 +1,3 @@
-export const prerender = false;
-
 import type { APIRoute } from "astro";
 import { createSupabaseServerClient } from "../../../utils/database";
 
@@ -25,11 +23,14 @@ export const POST: APIRoute = async ({ request }) => {
     });
   }
 
+  // Build response preserving ALL Set-Cookie headers individually
+  const headers = new Headers({ "Content-Type": "application/json" });
+  response.headers.forEach((value, key) => {
+    headers.append(key, value);
+  });
+
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
-    headers: {
-      "Content-Type": "application/json",
-      ...Object.fromEntries(response.headers),
-    },
+    headers,
   });
 };
