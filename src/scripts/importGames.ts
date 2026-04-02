@@ -1,4 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
+import * as dotenv from 'dotenv'
+dotenv.config()
 
 const supabase = createClient(
   process.env.PUBLIC_SUPABASE_URL!,
@@ -23,17 +25,29 @@ async function fetchGames(token: string, offset: number) {
       'Content-Type': 'text/plain'
     },
     body: `
-      fields id, name, slug, summary, cover.url, 
-             first_release_date, platforms.name,
+      fields id, name, slug, summary, cover.url,
+             first_release_date,
              genres.id, genres.name,
-             involved_companies.company.name;
-      where rating_count > 10;
+             involved_companies.company.id,
+             involved_companies.company.name,
+             involved_companies.developer,
+             involved_companies.publisher;
+      where rating_count > 100;
       sort rating_count desc;
       limit 500;
       offset ${offset};
     `
   })
   return res.json()
+}
+
+async function upsertCompany(igdbId: number, name: string) {
+  const { data } = await supabase
+    .from('companies')
+    .upsert({ igdb_id: igdbId, name }, { onConflict: 'igdb_id' })
+    .select()
+    .single()
+  return data
 }
 
 async function importGames() {
@@ -55,16 +69,16 @@ async function importGames() {
           igdb_id: game.id,
           title: game.name,
           slug: game.slug,
-          description: game.summary,
-          cover_image: game.cover?.url,
-          developer: game.involved_companies?.[0]?.company?.name ?? null,
-          platform: game.platforms?.map((p: any) => p.name).join(', ') ?? null,
-          release_date: game.first_release_date
+          game_description: game.summary ?? null,
+          cover_img_url: game.cover?.url ?? null,
+          date_released: game.first_release_date
             ? new Date(game.first_release_date * 1000).toISOString()
             : null,
         }, { onConflict: 'igdb_id' })
         .select()
         .single()
+
+      if (!newGame) continue
 
       // insert genres
       for (const genre of game.genres ?? []) {
@@ -74,18 +88,41 @@ async function importGames() {
           .select()
           .single()
 
-        await supabase
-          .from('game_genres')
-          .upsert({ game_id: newGame.id, genre_id: g.id }, { onConflict: 'game_id,genre_id' })
+        if (g) {
+          await supabase
+            .from('game_genres')
+            .upsert({ game_id: newGame.id, genre_id: g.id }, { onConflict: 'game_id,genre_id' })
+        }
+      }
+
+      // insert developers and publishers
+      for (const ic of game.involved_companies ?? []) {
+        if (!ic.company) continue
+
+        const company = await upsertCompany(ic.company.id, ic.company.name)
+        if (!company) continue
+
+        if (ic.developer) {
+          await supabase
+            .from('game_developers')
+            .upsert({ game_id: newGame.id, company_id: company.id }, { onConflict: 'game_id,company_id' })
+        }
+
+        if (ic.publisher) {
+          await supabase
+            .from('game_publishers')
+            .upsert({ game_id: newGame.id, company_id: company.id }, { onConflict: 'game_id,company_id' })
+        }
       }
 
       total++
+      console.log(`Imported: ${game.name}`)
     }
 
-    console.log(`Imported ${total} games so far...`)
+    console.log(`Total imported: ${total}`)
     offset += 500
 
-    // IGDB rate limit — 4 requests per second
+    // respect IGDB rate limit
     await new Promise(r => setTimeout(r, 250))
   }
 
