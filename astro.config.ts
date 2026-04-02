@@ -3,6 +3,7 @@ import netlify from '@astrojs/netlify';
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
+  output: 'server',
   markdown: {
     shikiConfig: {
       theme: 'github-light-high-contrast',
@@ -14,14 +15,5 @@ export default defineConfig({
       allowedHosts: ['.netlify.app']
     }
   },
-  adapter: netlify()
+  adapter: netlify(),
 });
-
-//SSR
-import { defineConfig } from 'astro/config'
-import netlify from '@astrojs/netlify'
-
-export default defineConfig({
-  output: 'server',
-  adapter: netlify()
-})
