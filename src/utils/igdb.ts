@@ -16,7 +16,7 @@ async function igdbFetch(endpoint: string, query: string) {
 }
 
 export async function getGameDetails(igdbId: number) {
-  const [games, involvedCompanies, genres, gameModes, themes, 
+  const [_, involvedCompanies, genres, gameModes, themes, 
          franchises, engines, alternativeTitles, keywords] = await Promise.all([
 
     igdbFetch("games", `
