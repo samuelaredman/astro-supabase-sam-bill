@@ -1,11 +1,10 @@
 import type { APIRoute } from "astro";
-import { getSupabase, createSupabaseServerClient } from "../../utils/database";
+import { getSupabase, createSupabaseServerClient } from "../../../utils/database";
 
 export const POST: APIRoute = async ({ request }) => {
   const response = new Response();
   const serverClient = createSupabaseServerClient(request, response);
 
-  // Check session
   const { data: { session } } = await serverClient.auth.getSession();
   if (!session) {
     return new Response(JSON.stringify({ error: "You must be signed in to post a review." }), {
@@ -16,7 +15,6 @@ export const POST: APIRoute = async ({ request }) => {
 
   const supabase = getSupabase();
 
-  // Get profile_id from auth user
   const { data: profile, error: profileError } = await (supabase as any)
     .from("profiles")
     .select("id")
