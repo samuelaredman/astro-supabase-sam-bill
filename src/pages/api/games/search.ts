@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { getSupabase } from "../../utils/database";
+import { getSupabase } from "../../../utils/database";
 
 export const GET: APIRoute = async ({ request }) => {
   const url = new URL(request.url);
@@ -14,7 +14,7 @@ export const GET: APIRoute = async ({ request }) => {
   const supabase = getSupabase();
   const { data, error } = await (supabase as any)
     .from("games")
-    .select("id, title, slug, developers:developer_id ( name )")
+    .select("id, title, slug")
     .ilike("title", `%${q}%`)
     .limit(8);
 
@@ -28,7 +28,6 @@ export const GET: APIRoute = async ({ request }) => {
     id: g.id,
     title: g.title,
     slug: g.slug,
-    developer: g.developers?.name ?? "",
   }));
 
   return new Response(JSON.stringify(results), {
