@@ -5,6 +5,11 @@ import { fetchFromIGDB } from '../lib/igdb'
 export const prerender = false
 
 const query = Astro.url.searchParams.get('q') || ''
+const genreFilter = Astro.url.searchParams.get('genre') || ''
+const platformFilter = Astro.url.searchParams.get('platform') || ''
+const sortBy = Astro.url.searchParams.get('sort') || 'relevant'
+const tab = Astro.url.searchParams.get('tab') || 'games'
+
 let games = []
 let igdbGames = []
 let profiles = []
@@ -15,18 +20,14 @@ if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData()
   const igdbId = parseInt(form.get('igdb_id') as string)
 
-  // check if already in Supabase
   const { data: existing } = await supabase
     .from('games')
     .select('slug')
     .eq('id', igdbId)
     .single()
 
-  if (existing) {
-    return Astro.redirect(`/games/${existing.slug}`)
-  }
+  if (existing) return Astro.redirect(`/games/${existing.slug}`)
 
-  // fetch full game data from IGDB
   const [igdbGame] = await fetchFromIGDB('games',
     `fields id, name, slug, summary, cover.url, first_release_date,
             genres.id, genres.name,
@@ -37,13 +38,11 @@ if (Astro.request.method === 'POST') {
             involved_companies.publisher;
      where id = ${igdbId};`)
 
-  // generate slug
   const slug = igdbGame.slug || igdbGame.name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
 
-  // save game to Supabase
   await supabase.from('games').insert({
     id: igdbId,
     title: igdbGame.name,
@@ -55,147 +54,907 @@ if (Astro.request.method === 'POST') {
       : null
   })
 
-  // save genres
   for (const genre of igdbGame.genres ?? []) {
-    await supabase.from('genres')
-      .upsert({ id: genre.id, name: genre.name }, { onConflict: 'id' })
-    await supabase.from('game_genres')
-      .upsert({ game_id: igdbId, genre_id: genre.id }, { onConflict: 'game_id,genre_id' })
+    await supabase.from('genres').upsert({ id: genre.id, name: genre.name }, { onConflict: 'id' })
+    await supabase.from('game_genres').upsert({ game_id: igdbId, genre_id: genre.id }, { onConflict: 'game_id,genre_id' })
   }
 
-  // save platforms
   for (const platform of igdbGame.platforms ?? []) {
-    await supabase.from('platforms')
-      .upsert({ id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'id' })
-    await supabase.from('game_platforms')
-      .upsert({ game_id: igdbId, platform_id: platform.id }, { onConflict: 'game_id,platform_id' })
+    await supabase.from('platforms').upsert({ id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'id' })
+    await supabase.from('game_platforms').upsert({ game_id: igdbId, platform_id: platform.id }, { onConflict: 'game_id,platform_id' })
   }
 
-  // save companies
   for (const ic of igdbGame.involved_companies ?? []) {
     if (!ic.company) continue
-    await supabase.from('companies')
-      .upsert({ id: ic.company.id, name: ic.company.name }, { onConflict: 'id' })
-    if (ic.developer) {
-      await supabase.from('game_developers')
-        .upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
-    }
-    if (ic.publisher) {
-      await supabase.from('game_publishers')
-        .upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
-    }
+    await supabase.from('companies').upsert({ id: ic.company.id, name: ic.company.name }, { onConflict: 'id' })
+    if (ic.developer) await supabase.from('game_developers').upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
+    if (ic.publisher) await supabase.from('game_publishers').upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
   }
 
   return Astro.redirect(`/games/${slug}`)
 }
 
+// fetch filter options
+const { data: genres } = await supabase.from('genres').select('id, name').order('name')
+const { data: platforms } = await supabase.from('platforms').select('id, name').order('name')
+
 // search
 if (query.length > 1) {
+  let gamesQuery = supabase
+    .from('games')
+    .select(`
+      id, title, slug, cover_img_url, date_released,
+      game_genres(genres(id, name)),
+      game_platforms(platforms(id, name))
+    `)
+    .ilike('title', `%${query}%`)
+    .limit(12)
+
+  if (genreFilter) {
+    gamesQuery = gamesQuery.eq('game_genres.genre_id', genreFilter)
+  }
+
+  if (platformFilter) {
+    gamesQuery = gamesQuery.eq('game_platforms.platform_id', platformFilter)
+  }
+
   const [gamesRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
-    // search Supabase games
-    supabase
-      .from('games')
-      .select('id, title, slug, cover_img_url')
-      .ilike('title', `%${query}%`)
-      .limit(5),
-
-    // search profiles
-    supabase
-      .from('profiles')
-      .select('id, username, avatar_url')
-      .ilike('username', `%${query}%`)
-      .limit(5),
-
-    // search companies
-    supabase
-      .from('companies')
-      .select('id, name, slug')
-      .ilike('name', `%${query}%`)
-      .limit(5),
-
-    // search IGDB for games not in our db
-    fetchFromIGDB('games',
-      `fields id, name, slug, cover.url;
-       search "${query}";
-       limit 5;`)
+    gamesQuery,
+    supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
+    supabase.from('companies').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
+    fetchFromIGDB('games', `fields id, name, slug, cover.url; search "${query}"; limit 6;`)
   ])
 
   games = gamesRes.data ?? []
   profiles = profilesRes.data ?? []
   companies = companiesRes.data ?? []
 
-  // filter out igdb results already in our db
   const existingIds = new Set(games.map((g: any) => g.id))
   igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.id))
 }
+
+function getYear(dateStr: string | null) {
+  if (!dateStr) return ''
+  return new Date(dateStr).getFullYear()
+}
+
+function getInitials(username: string) {
+  return username.slice(0, 2).toUpperCase()
+}
 ---
 
-<html>
-  <head><title>Search: {query}</title></head>
-  <body>
-    <h1>Search</h1>
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{query ? `Search: ${query}` : 'Search'} — Cartridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <style>
+    :root[data-theme="light"] {
+      --bg: #f9f8f6;
+      --bg-card: #ffffff;
+      --bg-hover: #f4f3f0;
+      --bg-sidebar: #ffffff;
+      --border: #e8e6e1;
+      --border-subtle: #f0ede8;
+      --text-primary: #141412;
+      --text-secondary: #6b6860;
+      --text-tertiary: #a09d98;
+      --accent: #141412;
+      --accent-text: #ffffff;
+      --logo-color: #141412;
+      --tag-bg: #f0ede8;
+      --tag-text: #6b6860;
+      --shadow: 0 1px 3px rgba(0,0,0,0.06);
+      --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+      --score-great: #1a6b3c; --score-great-bg: #eaf5ee;
+      --score-good: #1a4a6b;  --score-good-bg: #eaf0f5;
+      --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
+      --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
+    }
+    :root[data-theme="dark"] {
+      --bg: #0f0f0e;
+      --bg-card: #1a1a18;
+      --bg-hover: #222220;
+      --bg-sidebar: #141412;
+      --border: #2a2a27;
+      --border-subtle: #222220;
+      --text-primary: #f0ede8;
+      --text-secondary: #908d87;
+      --text-tertiary: #5a5855;
+      --accent: #f0ede8;
+      --accent-text: #141412;
+      --logo-color: #f0ede8;
+      --tag-bg: #2a2a27;
+      --tag-text: #908d87;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3);
+      --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+      --score-great: #4ade80; --score-great-bg: #0d2b1a;
+      --score-good: #60a5fa;  --score-good-bg: #0d1e2b;
+      --score-mid: #fbbf24;   --score-mid-bg: #2b1f0d;
+      --score-low: #f87171;   --score-low-bg: #2b0d0d;
+    }
 
-    <form method="GET">
-      <input name="q" value={query} placeholder="Search games, reviewers, studios..." />
-      <button type="submit">Search</button>
-    </form>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    {query && (
-      <div>
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text-primary);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
 
-        <section>
-          <h2>Games</h2>
-          {games.length === 0 && igdbGames.length === 0 && <p>No games found</p>}
+    a { color: inherit; text-decoration: none; }
 
-          {/* games already in your db */}
-          {games.map((game: any) => (
-            <a href={`/games/${game.slug}`}>
-              {game.cover_img_url && (
-                <img src={`https:${game.cover_img_url}`} width="40" />
-              )}
-              {game.title}
+    .layout {
+      display: grid;
+      grid-template-columns: 240px 1fr 280px;
+      max-width: 1140px;
+      margin: 0 auto;
+      min-height: 100vh;
+    }
+
+    @media (max-width: 1000px) {
+      .layout { grid-template-columns: 200px 1fr; }
+      .sidebar-right { display: none; }
+    }
+    @media (max-width: 680px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar-left { display: none; }
+    }
+
+    /* Sidebar */
+    .sidebar-left {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 28px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border-right: 1px solid var(--border);
+      background: var(--bg-sidebar);
+    }
+
+    .logo {
+      font-family: 'DM Serif Display', serif;
+      font-size: 22px;
+      color: var(--logo-color);
+      padding: 8px 12px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-dot {
+      width: 8px; height: 8px;
+      background: var(--text-primary);
+      border-radius: 50%;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 15px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .nav-item:hover, .nav-item.active {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .nav-item.active { font-weight: 500; }
+    .nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .nav-divider { height: 1px; background: var(--border); margin: 10px 0; }
+    .sidebar-bottom { margin-top: auto; }
+
+    .theme-toggle {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px; border-radius: 10px;
+      cursor: pointer; font-size: 15px;
+      color: var(--text-secondary);
+      background: none; border: none;
+      font-family: inherit; width: 100%; text-align: left;
+      transition: background 0.15s, color 0.15s;
+    }
+    .theme-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+    /* Main content */
+    .main {
+      border-right: 1px solid var(--border);
+      min-height: 100vh;
+    }
+
+    .search-header {
+      position: sticky;
+      top: 0;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 20px;
+      z-index: 10;
+      backdrop-filter: blur(8px);
+    }
+
+    .search-bar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .search-input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 15px;
+      font-family: inherit;
+      color: var(--text-primary);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .search-input:focus { border-color: var(--text-secondary); }
+
+    .search-btn {
+      background: var(--accent);
+      color: var(--accent-text);
+      border: none;
+      border-radius: 10px;
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .search-btn:hover { opacity: 0.85; }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 14px;
+    }
+
+    .tab {
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border: 1px solid transparent;
+      background: none;
+      font-family: inherit;
+      transition: all 0.15s;
+      text-decoration: none;
+    }
+    .tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .tab.active {
+      background: var(--accent);
+      color: var(--accent-text);
+      border-color: var(--accent);
+    }
+
+    /* Filters */
+    .filters {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .filter-select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 13px;
+      font-family: inherit;
+      color: var(--text-secondary);
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .filter-select:focus { border-color: var(--text-secondary); }
+    .filter-select.active { border-color: var(--text-primary); color: var(--text-primary); }
+
+    /* Results */
+    .results { padding: 20px; }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+      margin-top: 24px;
+    }
+    .section-title:first-child { margin-top: 0; }
+
+    /* Game grid */
+    .game-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 14px;
+      margin-bottom: 8px;
+    }
+
+    .game-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      transition: box-shadow 0.15s, transform 0.15s;
+      cursor: pointer;
+    }
+    .game-card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-2px);
+    }
+
+    .game-cover {
+      width: 100%;
+      aspect-ratio: 3/4;
+      background: var(--tag-bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      overflow: hidden;
+    }
+    .game-cover img { width: 100%; height: 100%; object-fit: cover; }
+
+    .game-card-info {
+      padding: 10px;
+    }
+
+    .game-card-title {
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.3;
+      margin-bottom: 4px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .game-card-year {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+
+    .game-card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }
+
+    .tag {
+      background: var(--tag-bg);
+      color: var(--tag-text);
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    /* IGDB results */
+    .igdb-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--tag-bg);
+      color: var(--tag-text);
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 20px;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    /* Profile list */
+    .profile-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .profile-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      transition: background 0.15s;
+    }
+    .profile-item:hover { background: var(--bg-hover); }
+
+    .avatar {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      background: var(--tag-bg);
+      border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 500;
+      color: var(--text-secondary);
+      overflow: hidden; flex-shrink: 0;
+    }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+    .profile-info { flex: 1; }
+    .profile-username { font-size: 14px; font-weight: 500; }
+    .profile-sub { font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
+
+    /* Company list */
+    .company-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .company-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      transition: background 0.15s;
+    }
+    .company-item:hover { background: var(--bg-hover); }
+
+    .company-icon {
+      width: 40px; height: 40px;
+      border-radius: 10px;
+      background: var(--tag-bg);
+      border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; flex-shrink: 0;
+    }
+
+    .company-name { font-size: 14px; font-weight: 500; }
+    .company-sub { font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
+
+    /* Empty / initial state */
+    .empty-state {
+      padding: 80px 20px;
+      text-align: center;
+      color: var(--text-tertiary);
+    }
+    .empty-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 22px;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+    .empty-sub { font-size: 14px; line-height: 1.6; }
+
+    /* Right sidebar */
+    .sidebar-right {
+      padding: 28px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .widget {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    .widget-title {
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 14px;
+    }
+
+    .genre-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .genre-chip {
+      background: var(--tag-bg);
+      color: var(--tag-text);
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: all 0.15s;
+      text-decoration: none;
+    }
+    .genre-chip:hover, .genre-chip.active {
+      background: var(--accent);
+      color: var(--accent-text);
+    }
+
+    /* add game btn */
+    .add-game-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-family: inherit;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .add-game-btn:hover {
+      border-color: var(--text-primary);
+      color: var(--text-primary);
+    }
+  </style>
+</head>
+
+<body>
+<div class="layout">
+
+  <!-- Left sidebar -->
+  <aside class="sidebar-left">
+    <div class="logo">
+      <span class="logo-dot"></span>
+      Cartridge
+    </div>
+
+    <a href="/" class="nav-item">
+      <span class="nav-icon">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/>
+        </svg>
+      </span>
+      Home
+    </a>
+
+    <a href="/explore" class="nav-item">
+      <span class="nav-icon">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="9" cy="9" r="7"/>
+          <path d="M12 6L9.5 9.5L6 12L8.5 8.5L12 6Z"/>
+        </svg>
+      </span>
+      Explore
+    </a>
+
+    <a href="/games" class="nav-item">
+      <span class="nav-icon">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="14" height="10" rx="2"/>
+          <path d="M6 9H8M7 8V10M11 9H11.01M12.5 9H12.51"/>
+        </svg>
+      </span>
+      Games
+    </a>
+
+    <a href="/reviews" class="nav-item">
+      <span class="nav-icon">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 4h12M3 8h8M3 12h5"/>
+        </svg>
+      </span>
+      Reviews
+    </a>
+
+    <div class="nav-divider"></div>
+
+    <a href="/profile" class="nav-item">
+      <span class="nav-icon">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="9" cy="6" r="3"/>
+          <path d="M3 16c0-3.314 2.686-6 6-6s6 2.686 6 6"/>
+        </svg>
+      </span>
+      Profile
+    </a>
+
+    <div class="sidebar-bottom">
+      <button class="theme-toggle" onclick="toggleTheme()">
+        <span class="nav-icon" id="themeIcon">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="9" cy="9" r="3.5"/>
+            <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
+          </svg>
+        </span>
+        <span id="themeLabel">Light mode</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="search-header">
+
+      <!-- Search bar -->
+      <form method="GET" class="search-bar">
+        <input type="hidden" name="tab" value={tab} />
+        <input
+          name="q"
+          value={query}
+          class="search-input"
+          placeholder="Search games, reviewers, studios..."
+          autofocus
+        />
+        <button type="submit" class="search-btn">Search</button>
+      </form>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        {[
+          { id: 'games', label: 'Games' },
+          { id: 'reviewers', label: 'Reviewers' },
+          { id: 'studios', label: 'Studios' },
+        ].map(t => (
+          
+            href={`/search?q=${query}&tab=${t.id}`}
+            class={`tab ${tab === t.id ? 'active' : ''}`}
+          >
+            {t.label}
+          </a>
+        ))}
+      </div>
+
+      <!-- Filters (games tab only) -->
+      {tab === 'games' && (
+        <form method="GET" class="filters">
+          <input type="hidden" name="q" value={query} />
+          <input type="hidden" name="tab" value="games" />
+
+          <select
+            name="genre"
+            class={`filter-select ${genreFilter ? 'active' : ''}`}
+            onchange="this.form.submit()"
+          >
+            <option value="">All genres</option>
+            {(genres ?? []).map((g: any) => (
+              <option value={g.id} selected={genreFilter === String(g.id)}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            name="platform"
+            class={`filter-select ${platformFilter ? 'active' : ''}`}
+            onchange="this.form.submit()"
+          >
+            <option value="">All platforms</option>
+            {(platforms ?? []).map((p: any) => (
+              <option value={p.id} selected={platformFilter === String(p.id)}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            name="sort"
+            class="filter-select"
+            onchange="this.form.submit()"
+          >
+            <option value="relevant" selected={sortBy === 'relevant'}>Most relevant</option>
+            <option value="newest" selected={sortBy === 'newest'}>Newest first</option>
+            <option value="oldest" selected={sortBy === 'oldest'}>Oldest first</option>
+          </select>
+
+          {(genreFilter || platformFilter) && (
+            <a href={`/search?q=${query}&tab=games`} class="filter-select" style="text-decoration:none">
+              Clear filters ✕
             </a>
-          ))}
+          )}
+        </form>
+      )}
+    </div>
 
-          {/* games from IGDB not in your db yet */}
+    <div class="results">
+      {!query && (
+        <div class="empty-state">
+          <div class="empty-title">Search Cartridge</div>
+          <div class="empty-sub">Find games, reviewers, and studios.</div>
+        </div>
+      )}
+
+      {query && tab === 'games' && (
+        <div>
+          {/* Supabase results */}
+          {games.length > 0 && (
+            <div>
+              <div class="section-title">Games</div>
+              <div class="game-grid">
+                {games.map((game: any) => (
+                  <a href={`/games/${game.slug}`} class="game-card">
+                    <div class="game-cover">
+                      {game.cover_img_url
+                        ? <img src={`https:${game.cover_img_url}`} alt={game.title} />
+                        : '🎮'
+                      }
+                    </div>
+                    <div class="game-card-info">
+                      <div class="game-card-title">{game.title}</div>
+                      <div class="game-card-year">{getYear(game.date_released)}</div>
+                      <div class="game-card-tags">
+                        {game.game_genres?.slice(0, 2).map((gg: any) => (
+                          <span class="tag">{gg.genres?.name}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* IGDB results not in our db */}
           {igdbGames.length > 0 && (
             <div>
-              <p>From IGDB:</p>
-              {igdbGames.map((game: any) => (
-                <form method="POST">
-                  <input type="hidden" name="igdb_id" value={game.id} />
-                  {game.cover?.url && (
-                    <img src={`https:${game.cover.url}`} width="40" />
-                  )}
-                  <span>{game.name}</span>
-                  <button type="submit">View →</button>
-                </form>
+              <div class="section-title">
+                More from IGDB
+              </div>
+              <span class="igdb-label">Not yet in Cartridge</span>
+              <div class="game-grid">
+                {igdbGames.map((game: any) => (
+                  <form method="POST">
+                    <input type="hidden" name="igdb_id" value={game.id} />
+                    <button type="submit" style="width:100%;background:none;border:none;padding:0;cursor:pointer;text-align:left">
+                      <div class="game-card">
+                        <div class="game-cover">
+                          {game.cover?.url
+                            ? <img src={`https:${game.cover.url}`} alt={game.name} />
+                            : '🎮'
+                          }
+                        </div>
+                        <div class="game-card-info">
+                          <div class="game-card-title">{game.name}</div>
+                          <div class="game-card-year" style="color:var(--text-tertiary);font-size:11px">
+                            Click to add →
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  </form>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {games.length === 0 && igdbGames.length === 0 && (
+            <div class="empty-state">
+              <div class="empty-title">No games found</div>
+              <div class="empty-sub">Try a different search term.</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {query && tab === 'reviewers' && (
+        <div>
+          <div class="section-title">Reviewers</div>
+          {profiles.length === 0 ? (
+            <div class="empty-state">
+              <div class="empty-title">No reviewers found</div>
+              <div class="empty-sub">Try a different search term.</div>
+            </div>
+          ) : (
+            <div class="profile-list">
+              {profiles.map((profile: any) => (
+                <a href={`/reviewers/${profile.username}`} class="profile-item">
+                  <div class="avatar">
+                    {profile.avatar_url
+                      ? <img src={profile.avatar_url} alt={profile.username} />
+                      : getInitials(profile.username)
+                    }
+                  </div>
+                  <div class="profile-info">
+                    <div class="profile-username">@{profile.username}</div>
+                    <div class="profile-sub">Reviewer</div>
+                  </div>
+                </a>
               ))}
             </div>
           )}
-        </section>
+        </div>
+      )}
 
-        <section>
-          <h2>Reviewers</h2>
-          {profiles.length === 0 && <p>No reviewers found</p>}
-          {profiles.map((profile: any) => (
-            <a href={`/reviewers/${profile.username}`}>
-              {profile.username}
-            </a>
-          ))}
-        </section>
+      {query && tab === 'studios' && (
+        <div>
+          <div class="section-title">Studios</div>
+          {companies.length === 0 ? (
+            <div class="empty-state">
+              <div class="empty-title">No studios found</div>
+              <div class="empty-sub">Try a different search term.</div>
+            </div>
+          ) : (
+            <div class="company-list">
+              {companies.map((company: any) => (
+                <a href={`/studios/${company.slug}`} class="company-item">
+                  <div class="company-icon">🏢</div>
+                  <div>
+                    <div class="company-name">{company.name}</div>
+                    <div class="company-sub">Studio</div>
+                  </div>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  </main>
 
-        <section>
-          <h2>Studios</h2>
-          {companies.length === 0 && <p>No studios found</p>}
-          {companies.map((company: any) => (
-            <a href={`/studios/${company.slug}`}>
-              {company.name}
-            </a>
-          ))}
-        </section>
-
+  <!-- Right sidebar -->
+  <aside class="sidebar-right">
+    <div class="widget">
+      <div class="widget-title">Browse by genre</div>
+      <div class="genre-chip-list">
+        {(genres ?? []).slice(0, 12).map((g: any) => (
+          
+            href={`/search?q=${query}&tab=games&genre=${g.id}`}
+            class={`genre-chip ${genreFilter === String(g.id) ? 'active' : ''}`}
+          >
+            {g.name}
+          </a>
+        ))}
       </div>
-    )}
-  </body>
+    </div>
+
+    <div class="widget">
+      <div class="widget-title">Browse by platform</div>
+      <div class="genre-chip-list">
+        {(platforms ?? []).slice(0, 10).map((p: any) => (
+          
+            href={`/search?q=${query}&tab=games&platform=${p.id}`}
+            class={`genre-chip ${platformFilter === String(p.id) ? 'active' : ''}`}
+          >
+            {p.name}
+          </a>
+        ))}
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+  function toggleTheme() {
+    const html = document.documentElement
+    const next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light'
+    html.setAttribute('data-theme', next)
+    localStorage.setItem('theme', next)
+    updateThemeUI(next)
+  }
+
+  function updateThemeUI(theme: string) {
+    const label = document.getElementById('themeLabel')
+    const icon = document.getElementById('themeIcon')
+    if (!label || !icon) return
+    if (theme === 'dark') {
+      label.textContent = 'Dark mode'
+      icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/></svg>'
+    } else {
+      label.textContent = 'Light mode'
+      icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>'
+    }
+  }
+
+  const saved = localStorage.getItem('theme') ||
+    (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+  document.documentElement.setAttribute('data-theme', saved)
+  updateThemeUI(saved)
+</script>
+</body>
 </html>
