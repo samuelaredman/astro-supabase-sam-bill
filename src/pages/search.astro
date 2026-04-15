@@ -1,37 +1,132 @@
 ---
 import { supabase } from '../lib/supabase'
+import { fetchFromIGDB } from '../lib/igdb'
 
 export const prerender = false
 
 const query = Astro.url.searchParams.get('q') || ''
 let games = []
+let igdbGames = []
 let profiles = []
 let companies = []
 
-if (query.length > 0) {
-  const [gamesRes, profilesRes, companiesRes] = await Promise.all([
+// handle adding a new game from IGDB
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData()
+  const igdbId = parseInt(form.get('igdb_id') as string)
+
+  // check if already in Supabase
+  const { data: existing } = await supabase
+    .from('games')
+    .select('slug')
+    .eq('id', igdbId)
+    .single()
+
+  if (existing) {
+    return Astro.redirect(`/games/${existing.slug}`)
+  }
+
+  // fetch full game data from IGDB
+  const [igdbGame] = await fetchFromIGDB('games',
+    `fields id, name, slug, summary, cover.url, first_release_date,
+            genres.id, genres.name,
+            platforms.id, platforms.name, platforms.slug,
+            involved_companies.company.id,
+            involved_companies.company.name,
+            involved_companies.developer,
+            involved_companies.publisher;
+     where id = ${igdbId};`)
+
+  // generate slug
+  const slug = igdbGame.slug || igdbGame.name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+
+  // save game to Supabase
+  await supabase.from('games').insert({
+    id: igdbId,
+    title: igdbGame.name,
+    slug,
+    game_description: igdbGame.summary,
+    cover_img_url: igdbGame.cover?.url,
+    date_released: igdbGame.first_release_date
+      ? new Date(igdbGame.first_release_date * 1000).toISOString()
+      : null
+  })
+
+  // save genres
+  for (const genre of igdbGame.genres ?? []) {
+    await supabase.from('genres')
+      .upsert({ id: genre.id, name: genre.name }, { onConflict: 'id' })
+    await supabase.from('game_genres')
+      .upsert({ game_id: igdbId, genre_id: genre.id }, { onConflict: 'game_id,genre_id' })
+  }
+
+  // save platforms
+  for (const platform of igdbGame.platforms ?? []) {
+    await supabase.from('platforms')
+      .upsert({ id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'id' })
+    await supabase.from('game_platforms')
+      .upsert({ game_id: igdbId, platform_id: platform.id }, { onConflict: 'game_id,platform_id' })
+  }
+
+  // save companies
+  for (const ic of igdbGame.involved_companies ?? []) {
+    if (!ic.company) continue
+    await supabase.from('companies')
+      .upsert({ id: ic.company.id, name: ic.company.name }, { onConflict: 'id' })
+    if (ic.developer) {
+      await supabase.from('game_developers')
+        .upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
+    }
+    if (ic.publisher) {
+      await supabase.from('game_publishers')
+        .upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
+    }
+  }
+
+  return Astro.redirect(`/games/${slug}`)
+}
+
+// search
+if (query.length > 1) {
+  const [gamesRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
+    // search Supabase games
     supabase
       .from('games')
       .select('id, title, slug, cover_img_url')
       .ilike('title', `%${query}%`)
       .limit(5),
 
+    // search profiles
     supabase
       .from('profiles')
       .select('id, username, avatar_url')
       .ilike('username', `%${query}%`)
       .limit(5),
 
+    // search companies
     supabase
       .from('companies')
       .select('id, name, slug')
       .ilike('name', `%${query}%`)
       .limit(5),
+
+    // search IGDB for games not in our db
+    fetchFromIGDB('games',
+      `fields id, name, slug, cover.url;
+       search "${query}";
+       limit 5;`)
   ])
 
   games = gamesRes.data ?? []
   profiles = profilesRes.data ?? []
   companies = companiesRes.data ?? []
+
+  // filter out igdb results already in our db
+  const existingIds = new Set(games.map((g: any) => g.id))
+  igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.id))
 }
 ---
 
@@ -47,15 +142,37 @@ if (query.length > 0) {
 
     {query && (
       <div>
+
         <section>
           <h2>Games</h2>
-          {games.length === 0 && <p>No games found</p>}
+          {games.length === 0 && igdbGames.length === 0 && <p>No games found</p>}
+
+          {/* games already in your db */}
           {games.map((game: any) => (
             <a href={`/games/${game.slug}`}>
-              {game.cover_img_url && <img src={`https:${game.cover_img_url}`} width="40" />}
+              {game.cover_img_url && (
+                <img src={`https:${game.cover_img_url}`} width="40" />
+              )}
               {game.title}
             </a>
           ))}
+
+          {/* games from IGDB not in your db yet */}
+          {igdbGames.length > 0 && (
+            <div>
+              <p>From IGDB:</p>
+              {igdbGames.map((game: any) => (
+                <form method="POST">
+                  <input type="hidden" name="igdb_id" value={game.id} />
+                  {game.cover?.url && (
+                    <img src={`https:${game.cover.url}`} width="40" />
+                  )}
+                  <span>{game.name}</span>
+                  <button type="submit">View →</button>
+                </form>
+              ))}
+            </div>
+          )}
         </section>
 
         <section>
@@ -77,6 +194,7 @@ if (query.length > 0) {
             </a>
           ))}
         </section>
+
       </div>
     )}
   </body>
