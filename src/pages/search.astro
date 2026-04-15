@@ -1,8 +1,9 @@
 ---
-import { supabase } from '../lib/supabase'
-import { fetchFromIGDB } from '../lib/igdb'
+import { createSupabaseServerClient } from '../utils/database'
 
 export const prerender = false
+
+const supabase = createSupabaseServerClient(Astro.request, new Response())
 
 const query = Astro.url.searchParams.get('q') || ''
 const genreFilter = Astro.url.searchParams.get('genre') || ''
@@ -11,123 +12,25 @@ const sortBy = Astro.url.searchParams.get('sort') || 'relevant'
 const tab = Astro.url.searchParams.get('tab') || 'games'
 
 let games: any[] = []
-let igdbGames: any[] = []
 let profiles: any[] = []
-let companies: any[] = []
 
-// handle adding a new game from IGDB
-if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData()
-  const igdbId = parseInt(form.get('igdb_id') as string)
-
-  const { data: existing } = await supabase
-    .from('games')
-    .select('slug')
-    .eq('id', igdbId)
-    .single()
-
-  if (existing) return Astro.redirect(`/games/${existing.slug}`)
-
-  const [igdbGame] = await fetchFromIGDB('games',
-    `fields id, name, slug, summary, cover.url, first_release_date,
-            genres.id, genres.name,
-            platforms.id, platforms.name, platforms.slug,
-            involved_companies.company.id,
-            involved_companies.company.name,
-            involved_companies.developer,
-            involved_companies.publisher;
-     where id = ${igdbId};`)
-
-  const slug = igdbGame.slug || igdbGame.name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-
-  await supabase.from('games').insert({
-    id: igdbId,
-    title: igdbGame.name,
-    slug,
-    game_description: igdbGame.summary,
-    cover_img_url: igdbGame.cover?.url,
-    date_released: igdbGame.first_release_date
-      ? new Date(igdbGame.first_release_date * 1000).toISOString()
-      : null
-  })
-
-  for (const genre of igdbGame.genres ?? []) {
-    await supabase.from('genres').upsert({ id: genre.id, name: genre.name }, { onConflict: 'id' })
-    await supabase.from('game_genres').upsert({ game_id: igdbId, genre_id: genre.id }, { onConflict: 'game_id,genre_id' })
-  }
-
-  for (const platform of igdbGame.platforms ?? []) {
-    await supabase.from('platforms').upsert({ id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'id' })
-    await supabase.from('game_platforms').upsert({ game_id: igdbId, platform_id: platform.id }, { onConflict: 'game_id,platform_id' })
-  }
-
-  for (const ic of igdbGame.involved_companies ?? []) {
-    if (!ic.company) continue
-    await supabase.from('companies').upsert({ id: ic.company.id, name: ic.company.name }, { onConflict: 'id' })
-    if (ic.developer) await supabase.from('game_developers').upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
-    if (ic.publisher) await supabase.from('game_publishers').upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
-  }
-
-  return Astro.redirect(`/games/${slug}`)
-}
-
-// fetch filter options
 const { data: genres } = await supabase.from('genres').select('id, name').order('name')
 const { data: platforms } = await supabase.from('platforms').select('id, name').order('name')
 
-// search
 if (query.length > 1) {
   let gamesQuery = supabase
     .from('games')
-    .select(`
-      id, title, slug, cover_img_url, date_released,
-      game_genres(genres(id, name)),
-      game_platforms(platforms(id, name)),
-      reviews(score, play_time_hours)
-    `)
+    .select(`id, title, slug, cover_img_url, date_released`)
     .ilike('title', `%${query}%`)
-    .limit(12)
+    .limit(20)
 
-  if (genreFilter) gamesQuery = gamesQuery.eq('game_genres.genre_id', genreFilter)
-  if (platformFilter) gamesQuery = gamesQuery.eq('game_platforms.platform_id', platformFilter)
-
-  const [gamesRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
+  const [gamesRes, profilesRes] = await Promise.all([
     gamesQuery,
     supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
-    supabase.from('companies').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
-    fetchFromIGDB('games', `fields id, name, slug, cover.url; search "${query}"; limit 6;`)
   ])
 
-  // compute avg score, total hours, review count per game
-  let gamesRaw = (gamesRes.data ?? []).map((game: any) => {
-    const scores = game.reviews?.map((r: any) => r.score).filter(Boolean) ?? []
-    const hours = game.reviews?.map((r: any) => r.play_time_hours).filter(Boolean) ?? []
-    return {
-      ...game,
-      avg_score: scores.length
-        ? scores.reduce((a: number, b: number) => a + b, 0) / scores.length
-        : null,
-      total_hours: hours.reduce((a: number, b: number) => a + b, 0),
-      review_count: scores.length
-    }
-  })
-
-  // apply sort
-  if (sortBy === 'highest') gamesRaw.sort((a: any, b: any) => (b.avg_score ?? 0) - (a.avg_score ?? 0))
-  else if (sortBy === 'lowest') gamesRaw.sort((a: any, b: any) => (a.avg_score ?? 0) - (b.avg_score ?? 0))
-  else if (sortBy === 'most_played') gamesRaw.sort((a: any, b: any) => b.total_hours - a.total_hours)
-  else if (sortBy === 'newest') gamesRaw.sort((a: any, b: any) => new Date(b.date_released ?? 0).getTime() - new Date(a.date_released ?? 0).getTime())
-  else if (sortBy === 'oldest') gamesRaw.sort((a: any, b: any) => new Date(a.date_released ?? 0).getTime() - new Date(b.date_released ?? 0).getTime())
-
-  games = gamesRaw
+  games = gamesRes.data ?? []
   profiles = profilesRes.data ?? []
-  companies = companiesRes.data ?? []
-
-  const existingIds = new Set(games.map((g: any) => g.id))
-  igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.id))
 }
 
 function getYear(dateStr: string | null) {
@@ -137,14 +40,6 @@ function getYear(dateStr: string | null) {
 
 function getInitials(username: string) {
   return username.slice(0, 2).toUpperCase()
-}
-
-function scoreClass(score: number | null) {
-  if (!score) return ''
-  if (score >= 9) return 'score-great'
-  if (score >= 7) return 'score-good'
-  if (score >= 5) return 'score-mid'
-  return 'score-low'
 }
 ---
 
