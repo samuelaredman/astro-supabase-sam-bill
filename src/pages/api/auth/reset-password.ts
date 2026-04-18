@@ -13,9 +13,11 @@ export const POST: APIRoute = async ({ request }) => {
     });
   }
 
+const siteUrl = import.meta.env.SITE_URL ?? "https://greview.netlify.app";
+  
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo: `${new URL(request.url).origin}/reset-password-confirm`,
-  });
+  redirectTo: `${siteUrl}/reset-password-confirm`,
+});
 
   if (error) {
     return new Response(JSON.stringify({ error: error.message }), {
