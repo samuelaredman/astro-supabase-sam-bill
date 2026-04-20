@@ -1,0 +1,771 @@
+---
+export const prerender = false;
+import { supabase } from '../../lib/supabase'
+import { fetchFromIGDB } from '../../lib/igdb'
+
+const { slug } = Astro.params;
+
+const { data: platform } = await supabase
+  .from('platforms')
+  .select('id, name, slug, igdb_id')
+  .eq('slug', slug)
+  .single()
+
+if (!platform) return Astro.redirect('/404')
+
+// fetch all games on this platform with their review scores
+const { data: gamePlatforms } = await supabase
+  .from('game_platforms')
+  .select(`games(id, title, slug, cover_img_url, date_released)`)
+  .eq('platform_id', platform.id)
+
+const allGames = (gamePlatforms ?? [])
+  .map((gp: any) => gp.games)
+  .filter(Boolean)
+  .sort((a: any, b: any) =>
+    new Date(b.date_released ?? 0).getTime() - new Date(a.date_released ?? 0).getTime()
+  )
+
+// fetch review scores for all games
+const gameIds = allGames.map((g: any) => g.id)
+
+const { data: gameReviewScores } = await supabase
+  .from('reviews')
+  .select('game_id, score')
+  .in('game_id', gameIds.length > 0 ? gameIds : ['00000000-0000-0000-0000-000000000000'])
+  .eq('status', 'published')
+
+const reviewsByGame: Record<string, number[]> = {}
+for (const r of gameReviewScores ?? []) {
+  if (!reviewsByGame[r.game_id]) reviewsByGame[r.game_id] = []
+  reviewsByGame[r.game_id].push(r.score)
+}
+
+function gameAvgScore(gameId: string): string | null {
+  const scores = reviewsByGame[gameId]
+  if (!scores || scores.length === 0) return null
+  return (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)
+}
+
+function gameReviewCount(gameId: string): number {
+  return reviewsByGame[gameId]?.length ?? 0
+}
+
+// console scores (platform_reviews table)
+const { data: platformReviews } = await supabase
+  .from('platform_reviews')
+  .select('score, profile_id')
+  .eq('platform_id', platform.id)
+
+const platformScores = (platformReviews ?? []).map((r: any) => r.score)
+const consoleAvg = platformScores.length > 0
+  ? (platformScores.reduce((a: number, b: number) => a + b, 0) / platformScores.length).toFixed(1)
+  : null
+const consoleTotalRatings = platformScores.length
+
+// game-level stats
+const allGameScores = Object.values(reviewsByGame).flat()
+const gameAvg = allGameScores.length > 0
+  ? (allGameScores.reduce((a, b) => a + b, 0) / allGameScores.length).toFixed(1)
+  : null
+const totalGameReviews = allGameScores.length
+
+// exclusives — games that only appear on this platform
+const exclusiveIds = allGames
+  .filter((g: any) => g.id)
+  .map((g: any) => g.id)
+
+const { data: multiPlatformGames } = await supabase
+  .from('game_platforms')
+  .select('game_id')
+  .in('game_id', exclusiveIds.length > 0 ? exclusiveIds : ['00000000-0000-0000-0000-000000000000'])
+  .neq('platform_id', platform.id)
+
+const multiPlatformIds = new Set((multiPlatformGames ?? []).map((r: any) => r.game_id))
+
+const exclusives = allGames
+  .filter((g: any) => !multiPlatformIds.has(g.id))
+  .sort((a: any, b: any) => {
+    const aScore = parseFloat(gameAvgScore(a.id) ?? '0')
+    const bScore = parseFloat(gameAvgScore(b.id) ?? '0')
+    return bScore - aScore
+  })
+
+// group remaining games by year, top 25 per year sorted by score
+const byYear: Record<number, any[]> = {}
+for (const g of allGames) {
+  const year = g.date_released ? new Date(g.date_released).getFullYear() : 0
+  if (!byYear[year]) byYear[year] = []
+  byYear[year].push(g)
+}
+
+// sort each year by avg score descending, cap at 25
+const byYearSorted: Record<number, any[]> = {}
+for (const [year, games] of Object.entries(byYear)) {
+  byYearSorted[parseInt(year)] = games
+    .sort((a: any, b: any) => {
+      const aScore = parseFloat(gameAvgScore(a.id) ?? '0')
+      const bScore = parseFloat(gameAvgScore(b.id) ?? '0')
+      return bScore - aScore
+    })
+    .slice(0, 25)
+}
+const years = Object.keys(byYearSorted)
+  .map(Number)
+  .filter(y => y > 0)
+  .sort((a, b) => b - a)
+
+// fetch IGDB platform details
+let igdbData: any = null
+if (platform.igdb_id) {
+  const [igdbPlatform] = await fetchFromIGDB('platforms',
+    `fields name, summary, generation, platform_logo.url,
+            platform_family.name,
+            platform_versions.platform_version_release_dates.date,
+            platform_versions.platform_version_release_dates.region,
+            websites.url, websites.category;
+     where id = ${platform.igdb_id};`)
+  igdbData = igdbPlatform ?? null
+}
+
+// manually curated console banner photos (landscape press kit images)
+const consoleBanners: Record<string, string> = {
+  'nintendo-switch': 'https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Nintendo_Switch_hardware.jpg/1280px-Nintendo_Switch_hardware.jpg',
+  'playstation-5': 'https://upload.wikimedia.org/wikipedia/commons/thumb/3/39/PlayStation_5_and_DualSense_with_transparent_background.png/1280px-PlayStation_5_and_DualSense_with_transparent_background.png',
+  'playstation-4': 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/PS4-Console-wDS4.jpg/1280px-PS4-Console-wDS4.jpg',
+  'xbox-series-x': 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Xbox_Series_X_and_controller.jpg/1280px-Xbox_Series_X_and_controller.jpg',
+  'xbox-one': 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Xbox-One-Console-wController.jpg/1280px-Xbox-One-Console-wController.jpg',
+  'nintendo-3ds': 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5d/Nintendo-3DS-AquaOpen.jpg/1280px-Nintendo-3DS-AquaOpen.jpg',
+  'pc-windows': '',
+}
+const bannerImage = consoleBanners[platform.slug] ?? null
+
+// earliest release date from IGDB
+const firstRelease = igdbData?.platform_versions
+  ?.flatMap((v: any) => v.platform_version_release_dates ?? [])
+  .map((d: any) => d.date)
+  .filter(Boolean)
+  .sort()
+  ?.[0] ?? null
+
+const releaseYearDisplay = firstRelease
+  ? String(new Date(firstRelease * 1000).getFullYear())
+  : null
+
+const officialSite = igdbData?.websites
+  ?.find((w: any) => w.category === 1)
+  ?.url ?? null
+
+function igdbImage(url: string | null, size = 't_cover_big') {
+  if (!url) return null
+  return `https:${url.replace('t_thumb', size)}`
+}
+
+function scoreClass(score: number): string {
+  if (score >= 9) return 'great'
+  if (score >= 7) return 'good'
+  if (score >= 5) return 'mid'
+  return 'low'
+}
+
+function releaseYear(dateStr: string | null): string | null {
+  if (!dateStr) return null
+  return String(new Date(dateStr).getFullYear())
+}
+
+const consoleScoreClass = consoleAvg ? scoreClass(parseFloat(consoleAvg)) : null
+const gameAvgScoreClass = gameAvg ? scoreClass(parseFloat(gameAvg)) : null
+
+// serialize game data for client-side JS pagination
+function serializeGames(games: any[]) {
+  return games.map((g: any) => {
+    const avg = gameAvgScore(g.id)
+    const count = gameReviewCount(g.id)
+    const sc = avg ? scoreClass(parseFloat(avg)) : null
+    return {
+      title: g.title,
+      slug: g.slug,
+      cover: igdbImage(g.cover_img_url),
+      score: avg,
+      badge: sc ? `badge-${sc}` : null,
+      reviews: count > 0 ? `${count} ${count === 1 ? 'review' : 'reviews'}` : null,
+      year: releaseYear(g.date_released),
+    }
+  })
+}
+
+const exclusivesJson = JSON.stringify(serializeGames(exclusives))
+const byYearJson = JSON.stringify(
+  years.reduce((acc: any, year: number) => {
+    acc[year] = serializeGames(byYearSorted[year] ?? [])
+    return acc
+  }, {})
+)
+const yearsJson = JSON.stringify(years)
+const allGamesJson = JSON.stringify(serializeGames(allGames))
+---
+
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{platform.name} — Cartridge</title>
+  <meta name="description" content={igdbData?.summary?.slice(0, 160) ?? `Browse all ${platform.name} games and reviews on Cartridge.`} />
+  <meta property="og:title" content={`${platform.name} — Cartridge`} />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <style>
+    :root[data-theme="light"] {
+      --bg: #f5f4f2; --bg-card: #ffffff; --bg-hover: #f4f3f0;
+      --border: #e8e6e1; --border-subtle: #f0ede8;
+      --text-primary: #141412; --text-secondary: #6b6860; --text-tertiary: #a09d98;
+      --tag-bg: #f0ede8; --tag-text: #6b6860;
+      --shadow: 0 1px 3px rgba(0,0,0,0.06); --shadow-md: 0 4px 16px rgba(0,0,0,0.1);
+      --score-great: #1a6b3c; --score-great-bg: #eaf5ee;
+      --score-good: #1a4a6b;  --score-good-bg: #eaf0f5;
+      --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
+      --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
+      --game-accent: #c8332a; --game-accent-subtle: rgba(200,51,42,0.06);
+      --hero-overlay: linear-gradient(to bottom, rgba(245,244,242,0.05) 0%, rgba(245,244,242,0.6) 65%, rgba(245,244,242,1) 100%);
+      --hero-side: linear-gradient(to right, rgba(245,244,242,0.3) 0%, transparent 50%);
+    }
+    :root[data-theme="dark"] {
+      --bg: #09090a; --bg-card: #131314; --bg-hover: #1c1c1e;
+      --border: #222224; --border-subtle: #191919;
+      --text-primary: #f0ede8; --text-secondary: #908d87; --text-tertiary: #484644;
+      --tag-bg: #1c1c1e; --tag-text: #6a6866;
+      --shadow: 0 1px 3px rgba(0,0,0,0.5); --shadow-md: 0 4px 16px rgba(0,0,0,0.7);
+      --score-great: #4ade80; --score-great-bg: #0b2016;
+      --score-good: #60a5fa;  --score-good-bg: #0b1828;
+      --score-mid: #fbbf24;   --score-mid-bg: #201808;
+      --score-low: #f87171;   --score-low-bg: #200808;
+      --game-accent: #e84444; --game-accent-subtle: rgba(232,68,68,0.09);
+      --hero-overlay: linear-gradient(to bottom, rgba(9,9,10,0.05) 0%, rgba(9,9,10,0.65) 65%, rgba(9,9,10,1) 100%);
+      --hero-side: linear-gradient(to right, rgba(9,9,10,0.35) 0%, transparent 50%);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text-primary); min-height: 100vh; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+
+    .topnav { position: sticky; top: 0; z-index: 30; background: rgba(9,9,10,0.88); border-bottom: 1px solid var(--border); padding: 13px 28px; display: flex; align-items: center; gap: 16px; backdrop-filter: blur(20px); }
+    [data-theme="light"] .topnav { background: rgba(245,244,242,0.88); }
+    .back-btn { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-tertiary); transition: color 0.15s; }
+    .back-btn:hover { color: var(--text-primary); }
+    .logo { font-family: 'DM Serif Display', serif; font-size: 19px; letter-spacing: -0.3px; display: flex; align-items: center; gap: 7px; margin-left: auto; }
+    .logo-dot { width: 6px; height: 6px; background: var(--game-accent); border-radius: 50%; box-shadow: 0 0 10px var(--game-accent); }
+    .theme-btn { background: none; border: none; cursor: pointer; color: var(--text-tertiary); padding: 6px; display: flex; align-items: center; transition: color 0.15s; margin-left: 8px; }
+    .theme-btn:hover { color: var(--text-primary); }
+
+    .jump-nav { position: sticky; top: 53px; z-index: 20; background: rgba(9,9,10,0.72); border-bottom: 1px solid var(--border); backdrop-filter: blur(16px); display: flex; overflow-x: auto; scrollbar-width: none; }
+    .jump-nav::-webkit-scrollbar { display: none; }
+    [data-theme="light"] .jump-nav { background: rgba(245,244,242,0.82); }
+    .jump-link { font-size: 11px; font-weight: 500; color: var(--text-tertiary); padding: 10px 20px; letter-spacing: 0.08em; text-transform: uppercase; transition: color 0.15s, border-color 0.15s; border-bottom: 2px solid transparent; white-space: nowrap; flex-shrink: 0; }
+    .jump-link:hover { color: var(--text-primary); }
+    .jump-link.active { color: var(--text-primary); border-color: var(--game-accent); }
+
+    .hero { position: relative; width: 100%; height: 460px; overflow: hidden; background: #0c0c10; }
+    .hero-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 40%; opacity: 0.78; }
+    .hero-mosaic { position: absolute; inset: -20px; display: none; flex-wrap: wrap; filter: blur(18px) saturate(1.5) brightness(0.35); transform: scale(1.08); }
+    .hero-mosaic.visible { display: flex; }
+    .hero-mosaic-tile { flex: 1 1 90px; min-width: 90px; min-height: 180px; background-size: cover; background-position: center; }
+    .hero-side-fade { position: absolute; inset: 0; background: var(--hero-side); }
+    .hero-overlay { position: absolute; inset: 0; background: var(--hero-overlay); }
+
+    .page { max-width: 900px; margin: 0 auto; padding: 0 28px 100px; }
+
+    .platform-header { display: flex; gap: 28px; align-items: flex-end; margin-top: -110px; margin-bottom: 32px; position: relative; z-index: 2; }
+    .platform-logo-wrap { flex-shrink: 0; width: 140px; height: 140px; border-radius: 22px; background: var(--bg-card); border: 1px solid rgba(232,68,68,0.3); box-shadow: 0 14px 48px rgba(0,0,0,0.8), 0 0 36px rgba(232,68,68,0.18); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .platform-logo { width: 100%; height: 100%; object-fit: contain; padding: 18px; filter: brightness(0) invert(1); }
+    [data-theme="light"] .platform-logo { filter: brightness(0); opacity: 0.85; }
+    .platform-logo-placeholder { font-size: 60px; }
+    .platform-info { flex: 1; min-width: 0; padding-bottom: 6px; }
+
+    .platform-name-row { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; flex-wrap: wrap; }
+    .platform-name { font-family: 'Cinzel', serif; font-size: 34px; line-height: 1.1; letter-spacing: 0.04em; font-weight: 600; text-shadow: 0 2px 24px rgba(0,0,0,0.8); }
+    .console-score-wrap { display: flex; align-items: baseline; gap: 5px; flex-shrink: 0; }
+    .console-score-num { font-family: 'Century Schoolbook', 'New Century Schoolbook', Georgia, serif; font-size: 28px; font-weight: 400; line-height: 1; letter-spacing: -1px; }
+    .console-score-num.great { color: var(--score-great); }
+    .console-score-num.good  { color: var(--score-good); }
+    .console-score-num.mid   { color: var(--score-mid); }
+    .console-score-num.low   { color: var(--score-low); }
+    .console-score-label { font-size: 11px; color: var(--text-tertiary); font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; }
+
+    .platform-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .platform-meta-item { font-size: 13px; color: var(--text-secondary); }
+    .platform-meta-sep { color: var(--text-tertiary); font-size: 10px; }
+    .platform-website { font-size: 13px; color: var(--game-accent); transition: opacity 0.15s; display: flex; align-items: center; gap: 4px; }
+    .platform-website:hover { opacity: 0.7; }
+    .rate-console-btn { margin-top: 12px; display: inline-flex; align-items: center; gap: 6px; background: var(--game-accent); color: white; border: none; border-radius: 20px; padding: 7px 16px; font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
+    .rate-console-btn:hover { opacity: 0.85; }
+
+    .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 28px; }
+    .stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 20px 18px 16px; }
+    .stat-card.score-card-great { border-bottom: 2px solid var(--score-great); }
+    .stat-card.score-card-good  { border-bottom: 2px solid var(--score-good); }
+    .stat-card.score-card-mid   { border-bottom: 2px solid var(--score-mid); }
+    .stat-card.score-card-low   { border-bottom: 2px solid var(--score-low); }
+    .stat-num { font-family: 'Century Schoolbook', 'New Century Schoolbook', Georgia, serif; font-size: 32px; font-weight: 400; line-height: 1; letter-spacing: -1px; margin-bottom: 5px; color: var(--text-primary); background: none; }
+    .stat-num.great { color: var(--score-great); }
+    .stat-num.good  { color: var(--score-good); }
+    .stat-num.mid   { color: var(--score-mid); }
+    .stat-num.low   { color: var(--score-low); }
+    .stat-label { font-size: 10px; font-weight: 500; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.08em; }
+    .stat-sub { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
+
+    .about-grid { display: grid; grid-template-columns: 1fr 260px; gap: 24px; margin-bottom: 40px; }
+    @media (max-width: 720px) { .about-grid { grid-template-columns: 1fr; } }
+    .description { font-size: 14px; line-height: 1.8; color: var(--text-secondary); }
+    .description.collapsed { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+    .read-more-btn { background: none; border: none; font-family: inherit; font-size: 12px; color: var(--game-accent); cursor: pointer; padding: 8px 0 0; display: block; }
+    .details-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 4px 18px; height: fit-content; }
+    .detail-row { display: flex; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border-subtle); font-size: 12px; }
+    .detail-row:last-child { border-bottom: none; }
+    .detail-label { flex-shrink: 0; width: 80px; color: var(--text-tertiary); padding-top: 2px; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; font-weight: 500; }
+    .detail-value { color: var(--text-secondary); line-height: 1.5; }
+    .detail-link { color: var(--game-accent); transition: opacity 0.15s; }
+    .detail-link:hover { opacity: 0.7; }
+
+    .section { margin-bottom: 48px; }
+    .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-tertiary); }
+    .section-count { font-size: 12px; color: var(--text-tertiary); }
+
+    .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
+    .toolbar-btn { background: var(--tag-bg); color: var(--text-tertiary); border: 1px solid var(--border); border-radius: 20px; padding: 5px 14px; font-size: 11px; font-weight: 500; font-family: inherit; cursor: pointer; transition: all 0.15s; letter-spacing: 0.04em; text-transform: uppercase; }
+    .toolbar-btn.active { background: var(--game-accent); color: white; border-color: transparent; }
+
+    .game-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+    @media (max-width: 700px) { .game-row { grid-template-columns: repeat(3, 1fr); } }
+
+    .row-nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+    .row-nav-info { font-size: 12px; color: var(--text-tertiary); }
+    .row-arrow { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s; color: var(--text-secondary); flex-shrink: 0; }
+    .row-arrow:hover { border-color: var(--game-accent); color: var(--game-accent); }
+    .row-arrow:disabled { opacity: 0.25; cursor: default; pointer-events: none; }
+
+    .year-block { margin-bottom: 36px; }
+    .year-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    .year-label { font-family: 'DM Serif Display', serif; font-size: 22px; letter-spacing: -0.3px; color: var(--text-primary); }
+    .year-count { font-size: 12px; color: var(--text-tertiary); }
+
+    .game-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s; display: block; }
+    .game-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-md); border-color: rgba(232,68,68,0.3); }
+    .game-cover { aspect-ratio: 3/4; background: var(--tag-bg); overflow: hidden; position: relative; }
+    .game-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .game-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 32px; }
+    .game-score-badge { position: absolute; top: 7px; right: 7px; width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'Century Schoolbook', Georgia, serif; }
+    .badge-great { color: var(--score-great); background: var(--score-great-bg); border: 1px solid rgba(74,222,128,0.3); }
+    .badge-good  { color: var(--score-good);  background: var(--score-good-bg);  border: 1px solid rgba(96,165,250,0.3); }
+    .badge-mid   { color: var(--score-mid);   background: var(--score-mid-bg);   border: 1px solid rgba(251,191,36,0.3); }
+    .badge-low   { color: var(--score-low);   background: var(--score-low-bg);   border: 1px solid rgba(248,113,113,0.3); }
+    .exclusive-badge { position: absolute; top: 7px; left: 7px; background: var(--game-accent); color: white; font-size: 8px; font-weight: 700; padding: 2px 5px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .game-info { padding: 9px 10px 11px; }
+    .game-title-text { font-size: 11px; font-weight: 500; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 2px; }
+    .game-year { font-size: 10px; color: var(--text-tertiary); }
+    .game-review-count { font-size: 10px; color: var(--text-tertiary); margin-top: 1px; }
+
+    .games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
+
+    .empty-state { padding: 60px 0; text-align: center; color: var(--text-tertiary); }
+    .empty-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
+
+    @media (max-width: 600px) {
+      .platform-header { flex-direction: column; align-items: flex-start; margin-top: -60px; }
+      .platform-name { font-size: 26px; }
+      .hero { height: 280px; }
+      .stats-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+      .stat-num { font-size: 28px; }
+      .jump-nav { display: none; }
+    }
+  </style>
+</head>
+
+<body>
+  <nav class="topnav">
+    <a href="/" class="back-btn">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
+      Back
+    </a>
+    <a href="/" class="logo"><span class="logo-dot"></span>Cartridge</a>
+    <button class="theme-btn" onclick="toggleTheme()">
+      <svg id="themeIcon" width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="9" cy="9" r="3.5"/>
+        <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
+      </svg>
+    </button>
+  </nav>
+
+  <nav class="jump-nav">
+    <a href="#overview" class="jump-link active">Overview</a>
+    {exclusives.length > 0 && <a href="#exclusives" class="jump-link">Exclusives</a>}
+    {allGames.length > 0 && <a href="#games" class="jump-link">Games</a>}
+  </nav>
+
+  <!-- HERO -->
+  <div class="hero" id="overview">
+    {bannerImage
+      ? <img
+          class="hero-img"
+          src={bannerImage}
+          alt={platform.name}
+          onerror="this.style.display='none'; document.getElementById('heroMosaic').classList.add('visible')"
+        />
+      : null
+    }
+    <div class="hero-mosaic" id="heroMosaic" class:list={[{ visible: !bannerImage }]}></div>
+    <div class="hero-side-fade"></div>
+    <div class="hero-overlay"></div>
+  </div>
+
+  <div class="page">
+
+    <div class="platform-header">
+      <div class="platform-logo-wrap">
+        {igdbData?.platform_logo?.url
+          ? <img class="platform-logo" src={igdbImage(igdbData.platform_logo.url, 't_logo_med') ?? ''} alt={platform.name} />
+          : <span class="platform-logo-placeholder">🎮</span>
+        }
+      </div>
+      <div class="platform-info">
+        <div class="platform-name-row">
+          <h1 class="platform-name">{platform.name}</h1>
+          {consoleAvg && (
+            <div class="console-score-wrap">
+              <span class={`console-score-num ${consoleScoreClass}`}>{consoleAvg}</span>
+              <span class="console-score-label">· {consoleTotalRatings.toLocaleString()} ratings</span>
+            </div>
+          )}
+        </div>
+        <div class="platform-meta">
+          {releaseYearDisplay && <span class="platform-meta-item">Released {releaseYearDisplay}</span>}
+          {igdbData?.generation && (
+            <>
+              {releaseYearDisplay && <span class="platform-meta-sep">•</span>}
+              <span class="platform-meta-item">Gen {igdbData.generation}</span>
+            </>
+          )}
+          {igdbData?.platform_family?.name && (
+            <>
+              <span class="platform-meta-sep">•</span>
+              <span class="platform-meta-item">{igdbData.platform_family.name}</span>
+            </>
+          )}
+          {officialSite && (
+            <>
+              <span class="platform-meta-sep">•</span>
+              <a href={officialSite} target="_blank" rel="noopener" class="platform-website">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 2c0 0-3 2-3 6s3 6 3 6M8 2c0 0 3 2 3 6s-3 6-3 6M2 8h12"/></svg>
+                Website
+              </a>
+            </>
+          )}
+        </div>
+        <button class="rate-console-btn" onclick="openRateModal()">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v12M2 8h12"/></svg>
+          Rate this console
+        </button>
+      </div>
+    </div>
+
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-num">{allGames.length.toLocaleString()}</div>
+        <div class="stat-label">Games</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">{totalGameReviews.toLocaleString()}</div>
+        <div class="stat-label">Game reviews</div>
+        <div class="stat-sub">across all games</div>
+      </div>
+      <div class={`stat-card ${gameAvgScoreClass ? `score-card-${gameAvgScoreClass}` : ''}`}>
+        {gameAvg
+          ? <div class={`stat-num ${gameAvgScoreClass}`}>{gameAvg}</div>
+          : <div class="stat-num" style="color:var(--text-tertiary)">—</div>
+        }
+        <div class="stat-label">Avg game score</div>
+      </div>
+      <div class={`stat-card ${consoleScoreClass ? `score-card-${consoleScoreClass}` : ''}`}>
+        {consoleAvg
+          ? <div class={`stat-num ${consoleScoreClass}`}>{consoleAvg}</div>
+          : <div class="stat-num" style="color:var(--text-tertiary)">—</div>
+        }
+        <div class="stat-label">Console score</div>
+        {consoleTotalRatings > 0 && <div class="stat-sub">{consoleTotalRatings.toLocaleString()} ratings</div>}
+      </div>
+    </div>
+
+    {igdbData?.summary && (
+      <div class="about-grid">
+        <div>
+          <p class="description collapsed" id="desc">{igdbData.summary}</p>
+          <button class="read-more-btn" id="readMoreBtn" onclick="toggleDesc()">Read more →</button>
+        </div>
+        <div class="details-card">
+          {releaseYearDisplay && (
+            <div class="detail-row">
+              <span class="detail-label">Released</span>
+              <span class="detail-value">{releaseYearDisplay}</span>
+            </div>
+          )}
+          {igdbData?.generation && (
+            <div class="detail-row">
+              <span class="detail-label">Generation</span>
+              <span class="detail-value">{igdbData.generation}</span>
+            </div>
+          )}
+          {igdbData?.platform_family?.name && (
+            <div class="detail-row">
+              <span class="detail-label">Family</span>
+              <span class="detail-value">{igdbData.platform_family.name}</span>
+            </div>
+          )}
+          <div class="detail-row">
+            <span class="detail-label">Games</span>
+            <span class="detail-value">{allGames.length.toLocaleString()} on Cartridge</span>
+          </div>
+          {totalGameReviews > 0 && (
+            <div class="detail-row">
+              <span class="detail-label">Reviews</span>
+              <span class="detail-value">{totalGameReviews.toLocaleString()} total</span>
+            </div>
+          )}
+          {officialSite && (
+            <div class="detail-row">
+              <span class="detail-label">Website</span>
+              <a href={officialSite} target="_blank" rel="noopener" class="detail-value detail-link">
+                {officialSite.replace(/^https?:\/\//, '').replace(/\/$/, '')}
+              </a>
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+
+    {exclusives.length > 0 && (
+      <div class="section" id="exclusives">
+        <div class="section-header">
+          <span class="section-title">Exclusives</span>
+          <span class="section-count">{exclusives.length} games</span>
+        </div>
+        <div class="game-row" id="exclusivesRow"></div>
+        <div class="row-nav">
+          <button class="row-arrow" id="excPrev" onclick="pageRow('exc', -1)">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
+          </button>
+          <button class="row-arrow" id="excNext" onclick="pageRow('exc', 1)">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
+          </button>
+          <span class="row-nav-info" id="excInfo"></span>
+        </div>
+      </div>
+    )}
+
+    {allGames.length > 0 && (
+      <div class="section" id="games">
+        <div class="section-header">
+          <span class="section-title">Games</span>
+          <span class="section-count">{allGames.length.toLocaleString()} games</span>
+        </div>
+        <div class="toolbar">
+          <button class="toolbar-btn active" onclick="setView('by-year', this)">By year</button>
+          <button class="toolbar-btn" onclick="setView('highest', this)">Highest rated</button>
+          <button class="toolbar-btn" onclick="setView('most-reviewed', this)">Most reviewed</button>
+        </div>
+        <div id="byYearView"></div>
+        <div id="sortedView" style="display:none">
+          <div class="games-grid" id="sortedGrid"></div>
+        </div>
+      </div>
+    )}
+
+    {allGames.length === 0 && (
+      <div class="empty-state">
+        <div class="empty-title">No games yet</div>
+        <p>We don't have any {platform.name} games in our database yet.</p>
+      </div>
+    )}
+
+  </div>
+
+  <script define:vars={{ exclusivesJson, byYearJson, yearsJson, allGamesJson }}>
+
+    var exclusives = JSON.parse(exclusivesJson);
+    var byYear = JSON.parse(byYearJson);
+    var years = JSON.parse(yearsJson);
+    var allGames = JSON.parse(allGamesJson);
+
+    // hero mosaic fallback from game covers
+    var mosaic = document.getElementById('heroMosaic');
+    if (mosaic) {
+      var coverUrls = allGames.slice(0, 12).map(function(g) { return g.cover; }).filter(Boolean);
+      if (coverUrls.length > 0) {
+        var tiles = coverUrls.concat(coverUrls).concat(coverUrls).slice(0, 24);
+        tiles.forEach(function(url) {
+          var tile = document.createElement('div');
+          tile.className = 'hero-mosaic-tile';
+          tile.style.backgroundImage = 'url(' + url + ')';
+          mosaic.appendChild(tile);
+        });
+      }
+    }
+
+    function makeCard(g, isExclusive) {
+      var coverHtml = g.cover
+        ? '<img src="' + g.cover + '" alt="" loading="lazy" />'
+        : '<div class="game-cover-placeholder">🎮</div>';
+      var badgeHtml = g.score ? '<div class="game-score-badge ' + g.badge + '">' + g.score + '</div>' : '';
+      var excHtml = isExclusive ? '<div class="exclusive-badge">Exclusive</div>' : '';
+      return '<a href="/games/' + g.slug + '" class="game-card">'
+        + '<div class="game-cover">' + coverHtml + badgeHtml + excHtml + '</div>'
+        + '<div class="game-info">'
+        + '<div class="game-title-text">' + g.title + '</div>'
+        + (g.reviews ? '<div class="game-review-count">' + g.reviews + '</div>' : '')
+        + '</div></a>';
+    }
+
+    var rows = {};
+
+    function initRow(key, data, containerId, prevId, nextId, infoId, isExclusive) {
+      rows[key] = { data: data, page: 0, pageSize: 5, containerId: containerId, prevId: prevId, nextId: nextId, infoId: infoId, isExclusive: isExclusive || false };
+      renderRow(key);
+    }
+
+    function renderRow(key) {
+      var r = rows[key];
+      var start = r.page * r.pageSize;
+      var slice = r.data.slice(start, start + r.pageSize);
+      var container = document.getElementById(r.containerId);
+      if (!container) return;
+      container.innerHTML = slice.map(function(g) { return makeCard(g, r.isExclusive); }).join('');
+      var totalPages = Math.ceil(r.data.length / r.pageSize);
+      var prev = document.getElementById(r.prevId);
+      var next = document.getElementById(r.nextId);
+      var info = document.getElementById(r.infoId);
+      if (prev) prev.disabled = r.page === 0;
+      if (next) next.disabled = r.page >= totalPages - 1;
+      if (info) info.textContent = (r.page + 1) + ' / ' + totalPages;
+    }
+
+    function pageRow(key, dir) {
+      var r = rows[key];
+      if (!r) return;
+      var totalPages = Math.ceil(r.data.length / r.pageSize);
+      r.page = Math.max(0, Math.min(totalPages - 1, r.page + dir));
+      renderRow(key);
+    }
+    window.pageRow = pageRow;
+
+    // init exclusives
+    if (exclusives.length > 0) {
+      initRow('exc', exclusives, 'exclusivesRow', 'excPrev', 'excNext', 'excInfo', true);
+    }
+
+    // init year rows
+    function renderByYear() {
+      var container = document.getElementById('byYearView');
+      if (!container) return;
+      var html = '';
+      years.forEach(function(year) {
+        var games = byYear[year] || [];
+        html += '<div class="year-block">'
+          + '<div class="year-header">'
+          + '<span class="year-label">' + year + '</span>'
+          + '<span class="year-count">' + games.length + ' games</span>'
+          + '</div>'
+          + '<div class="game-row" id="row-' + year + '"></div>'
+          + '<div class="row-nav">'
+          + '<button class="row-arrow" id="prev-' + year + '" onclick="pageRow(\'year-' + year + '\', -1)">'
+          + '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>'
+          + '</button>'
+          + '<button class="row-arrow" id="next-' + year + '" onclick="pageRow(\'year-' + year + '\', 1)">'
+          + '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>'
+          + '</button>'
+          + '<span class="row-nav-info" id="info-' + year + '"></span>'
+          + '</div>'
+          + '</div>';
+      });
+      container.innerHTML = html;
+      years.forEach(function(year) {
+        initRow('year-' + year, byYear[year] || [], 'row-' + year, 'prev-' + year, 'next-' + year, 'info-' + year, false);
+      });
+    }
+    renderByYear();
+
+    function setView(type, btn) {
+      document.querySelectorAll('.toolbar-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      var bv = document.getElementById('byYearView');
+      var sv = document.getElementById('sortedView');
+      var sg = document.getElementById('sortedGrid');
+      if (type === 'by-year') { bv.style.display='block'; sv.style.display='none'; return; }
+      var sorted = allGames.slice();
+      if (type === 'highest') {
+        sorted.sort(function(a,b) { return parseFloat(b.score||0) - parseFloat(a.score||0); });
+      } else {
+        sorted.sort(function(a,b) {
+          var ac = a.reviews ? parseInt(a.reviews.replace(/[^0-9]/g,'')) : 0;
+          var bc = b.reviews ? parseInt(b.reviews.replace(/[^0-9]/g,'')) : 0;
+          return bc - ac;
+        });
+      }
+      sg.innerHTML = sorted.map(function(g) { return makeCard(g, false); }).join('');
+      bv.style.display='none'; sv.style.display='block';
+    }
+    window.setView = setView;
+
+    function toggleDesc() {
+      var d = document.getElementById('desc');
+      var b = document.getElementById('readMoreBtn');
+      if (!d || !b) return;
+      d.classList.toggle('collapsed');
+      b.textContent = d.classList.contains('collapsed') ? 'Read more →' : 'Read less ↑';
+    }
+    window.toggleDesc = toggleDesc;
+
+    function openRateModal() {
+      // placeholder — wire up to auth + rating modal when auth is ready
+      alert('Sign in to rate this console');
+    }
+    window.openRateModal = openRateModal;
+
+    var sections = ['overview', 'exclusives', 'games'];
+    var jumpLinks = document.querySelectorAll('.jump-link');
+    window.addEventListener('scroll', function() {
+      var c = 'overview';
+      sections.forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el && window.scrollY >= el.offsetTop - 120) c = id;
+      });
+      jumpLinks.forEach(function(l) {
+        l.classList.toggle('active', l.getAttribute('href') === '#' + c);
+      });
+    });
+
+    function toggleTheme() {
+      var h = document.documentElement;
+      var n = h.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      h.setAttribute('data-theme', n);
+      localStorage.setItem('theme', n);
+      updateIcon(n);
+    }
+    function updateIcon(t) {
+      var i = document.getElementById('themeIcon');
+      if (!i) return;
+      i.innerHTML = t === 'dark'
+        ? '<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
+        : '<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>';
+    }
+    window.toggleTheme = toggleTheme;
+
+    var saved = localStorage.getItem('theme') ||
+      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', saved);
+    updateIcon(saved);
+
+  </script>
+</body>
+</html>
