@@ -1,18 +1,26 @@
 const IGDB_URL = "https://api.igdb.com/v4";
 
 export async function igdbFetch(endpoint: string, query: string) {
+  const clientId = import.meta.env.IGDB_CLIENT_ID || process.env.IGDB_CLIENT_ID
+  const accessToken = import.meta.env.IGDB_ACCESS_TOKEN || process.env.IGDB_ACCESS_TOKEN
+
+  console.log('clientId present:', !!clientId)
+  console.log('accessToken present:', !!accessToken)
+
   const res = await fetch(`${IGDB_URL}/${endpoint}`, {
-    method: "POST",
+    method: 'POST',
     headers: {
-      "Client-ID": import.meta.env.IGDB_CLIENT_ID,
-      "Authorization": `Bearer ${import.meta.env.IGDB_ACCESS_TOKEN}`,
-      "Content-Type": "text/plain",
+      'Client-ID': clientId ?? '',
+      'Authorization': `Bearer ${accessToken ?? ''}`,
+      'Content-Type': 'text/plain',
     },
     body: query,
-  });
+  })
 
-  if (!res.ok) return null;
-  return res.json();
+  console.log('IGDB response status:', res.status)
+
+  if (!res.ok) return null
+  return res.json()
 }
 
 export async function getGameDetails(igdbId: number) {
