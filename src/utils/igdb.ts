@@ -1,6 +1,6 @@
 const IGDB_URL = "https://api.igdb.com/v4";
 
-async function igdbFetch(endpoint: string, query: string) {
+export async function igdbFetch(endpoint: string, query: string) {
   const res = await fetch(`${IGDB_URL}/${endpoint}`, {
     method: "POST",
     headers: {
