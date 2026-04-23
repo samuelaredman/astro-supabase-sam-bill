@@ -4,7 +4,6 @@ import { getSupabase } from '../../utils/database'
 import { igdbFetch } from '../../utils/igdb'
 
 const supabase = getSupabase();
-
 const { slug } = Astro.params;
 
 const { data: platform } = await supabase
@@ -15,11 +14,18 @@ const { data: platform } = await supabase
 
 if (!platform) return Astro.redirect('/404')
 
-// fetch all games on this platform
+// get exact total game count (no row limit)
+const { count: totalGameCount } = await supabase
+  .from('game_platforms')
+  .select('game_id', { count: 'exact', head: true })
+  .eq('platform_id', platform.id)
+
+// fetch top 500 games for display (sorted by most recent)
 const { data: gamePlatforms } = await supabase
   .from('game_platforms')
   .select(`games(id, title, slug, cover_img_url, date_released)`)
   .eq('platform_id', platform.id)
+  .limit(500)
 
 const allGames = (gamePlatforms ?? [])
   .map((gp: any) => gp.games)
@@ -64,7 +70,6 @@ const { data: platformReviews } = await supabase
   .order('created_at', { ascending: false })
 
 const platformReviewList = platformReviews ?? []
-
 const platformScores = platformReviewList.map((r: any) => r.score)
 const consoleAvg = platformScores.length > 0
   ? (platformScores.reduce((a: number, b: number) => a + b, 0) / platformScores.length).toFixed(1)
@@ -78,7 +83,7 @@ const gameAvg = allGameScores.length > 0
   : null
 const totalGameReviews = allGameScores.length
 
-// exclusives — games that only appear on this one platform in our db
+// exclusives — games that only appear on this platform
 const { data: multiPlatformRows } = await supabase
   .from('game_platforms')
   .select('game_id')
@@ -133,16 +138,18 @@ if (platform.igdb_id) {
 
 // manually curated console banner photos
 const consoleBanners: Record<string, string> = {
-  'nintendo-switch':  'https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Nintendo_Switch_hardware.jpg/1280px-Nintendo_Switch_hardware.jpg',
-  'playstation-5':    'https://upload.wikimedia.org/wikipedia/commons/thumb/3/39/PlayStation_5_and_DualSense_with_transparent_background.png/1280px-PlayStation_5_and_DualSense_with_transparent_background.png',
-  'playstation-4':    'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/PS4-Console-wDS4.jpg/1280px-PS4-Console-wDS4.jpg',
-  'xbox-series-x':    'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Xbox_Series_X_and_controller.jpg/1280px-Xbox_Series_X_and_controller.jpg',
-  'xbox-one':         'https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Xbox-One-Console-wController.jpg/1280px-Xbox-One-Console-wController.jpg',
-  'nintendo-3ds':     'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5d/Nintendo-3DS-AquaOpen.jpg/1280px-Nintendo-3DS-AquaOpen.jpg',
+  'nintendo-switch':        'https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Nintendo_Switch_hardware.jpg/1280px-Nintendo_Switch_hardware.jpg',
+  'nintendo-switch-2':      'https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Nintendo_Switch_hardware.jpg/1280px-Nintendo_Switch_hardware.jpg',
+  'playstation-5':          'https://upload.wikimedia.org/wikipedia/commons/thumb/3/39/PlayStation_5_and_DualSense_with_transparent_background.png/1280px-PlayStation_5_and_DualSense_with_transparent_background.png',
+  'playstation-4':          'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/PS4-Console-wDS4.jpg/1280px-PS4-Console-wDS4.jpg',
+  'playstation-4--1':       'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/PS4-Console-wDS4.jpg/1280px-PS4-Console-wDS4.jpg',
+  'xbox-series-x':          'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Xbox_Series_X_and_controller.jpg/1280px-Xbox_Series_X_and_controller.jpg',
+  'xbox-series-xs':         'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Xbox_Series_X_and_controller.jpg/1280px-Xbox_Series_X_and_controller.jpg',
+  'xbox-one':               'https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Xbox-One-Console-wController.jpg/1280px-Xbox-One-Console-wController.jpg',
+  'nintendo-3ds':           'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5d/Nintendo-3DS-AquaOpen.jpg/1280px-Nintendo-3DS-AquaOpen.jpg',
 }
 const bannerImage = consoleBanners[platform.slug] ?? null
 
-// earliest release from IGDB version data
 const firstRelease = igdbData?.platform_versions
   ?.flatMap((v: any) => v.platform_version_release_dates ?? [])
   .map((d: any) => d.date)
@@ -159,7 +166,8 @@ const officialSite = igdbData?.websites
 
 function igdbImage(url: string | null, size = 't_cover_big') {
   if (!url) return null
-  return `https:${url.replace('t_thumb', size)}`
+  const clean = url.startsWith('//') ? `https:${url}` : url
+  return clean.replace(/t_[a-z_]+/, size)
 }
 
 function scoreClass(score: number): string {
@@ -167,11 +175,6 @@ function scoreClass(score: number): string {
   if (score >= 7) return 'good'
   if (score >= 5) return 'mid'
   return 'low'
-}
-
-function releaseYear(dateStr: string | null): string | null {
-  if (!dateStr) return null
-  return String(new Date(dateStr).getFullYear())
 }
 
 function timeAgo(dateStr: string): string {
@@ -189,6 +192,7 @@ function getInitials(username: string): string {
 
 const consoleScoreClass = consoleAvg ? scoreClass(parseFloat(consoleAvg)) : null
 const gameAvgScoreClass = gameAvg ? scoreClass(parseFloat(gameAvg)) : null
+const displayGameCount = totalGameCount ?? allGames.length
 
 function serializeGames(games: any[]) {
   return games.map((g: any) => {
@@ -237,7 +241,7 @@ const yearsJson = JSON.stringify(years)
       --score-good: #1a4a6b;  --score-good-bg: #eaf0f5;
       --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
       --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
-      --game-accent: #c8332a; --game-accent-subtle: rgba(200,51,42,0.06);
+      --game-accent: #c8332a;
       --hero-overlay: linear-gradient(to bottom,rgba(245,244,242,0)0%,rgba(245,244,242,.6)65%,rgba(245,244,242,1)100%);
       --hero-side: linear-gradient(to right,rgba(245,244,242,.3)0%,transparent 50%);
     }
@@ -251,7 +255,7 @@ const yearsJson = JSON.stringify(years)
       --score-good: #60a5fa;  --score-good-bg: #0b1828;
       --score-mid: #fbbf24;   --score-mid-bg: #201808;
       --score-low: #f87171;   --score-low-bg: #200808;
-      --game-accent: #e84444; --game-accent-subtle: rgba(232,68,68,0.09);
+      --game-accent: #e84444;
       --hero-overlay: linear-gradient(to bottom,rgba(9,9,10,0)0%,rgba(9,9,10,.65)65%,rgba(9,9,10,1)100%);
       --hero-side: linear-gradient(to right,rgba(9,9,10,.35)0%,transparent 50%);
     }
@@ -288,10 +292,9 @@ const yearsJson = JSON.stringify(years)
     .page{max-width:900px;margin:0 auto;padding:0 28px 100px}
 
     .platform-header{display:flex;gap:28px;align-items:flex-end;margin-top:-110px;margin-bottom:32px;position:relative;z-index:2}
-    .platform-logo-wrap{flex-shrink:0;width:140px;height:140px;border-radius:22px;background:var(--bg-card);border:1px solid rgba(232,68,68,.3);box-shadow:0 14px 48px rgba(0,0,0,.8),0 0 36px rgba(232,68,68,.18);display:flex;align-items:center;justify-content:center;overflow:hidden}
+    .platform-logo-wrap{flex-shrink:0;width:140px;height:140px;border-radius:22px;background:var(--bg-card);border:1px solid rgba(232,68,68,.3);box-shadow:0 14px 48px rgba(0,0,0,.8),0 0 36px rgba(232,68,68,.18);display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:60px}
     .platform-logo{width:100%;height:100%;object-fit:contain;padding:18px;filter:brightness(0) invert(1)}
     [data-theme="light"] .platform-logo{filter:brightness(0);opacity:.85}
-    .platform-logo-placeholder{font-size:60px}
     .platform-info{flex:1;min-width:0;padding-bottom:6px}
     .platform-name-row{display:flex;align-items:baseline;gap:14px;margin-bottom:8px;flex-wrap:wrap}
     .platform-name{font-family:'Cinzel',serif;font-size:34px;line-height:1.1;letter-spacing:.04em;font-weight:600;text-shadow:0 2px 24px rgba(0,0,0,.8)}
@@ -456,7 +459,7 @@ const yearsJson = JSON.stringify(years)
       <div class="platform-logo-wrap">
         {igdbData?.platform_logo?.url
           ? <img class="platform-logo" src={igdbImage(igdbData.platform_logo.url, 't_logo_med') ?? ''} alt={platform.name} />
-          : <span class="platform-logo-placeholder">🎮</span>
+          : <span>🎮</span>
         }
       </div>
       <div class="platform-info">
@@ -502,7 +505,7 @@ const yearsJson = JSON.stringify(years)
 
     <div class="stats-row">
       <div class="stat-card">
-        <div class="stat-num">{allGames.length.toLocaleString()}</div>
+        <div class="stat-num">{displayGameCount.toLocaleString()}</div>
         <div class="stat-label">Games</div>
       </div>
       <div class="stat-card">
@@ -554,7 +557,7 @@ const yearsJson = JSON.stringify(years)
           )}
           <div class="detail-row">
             <span class="detail-label">Games</span>
-            <span class="detail-value">{allGames.length.toLocaleString()} on Cartridge</span>
+            <span class="detail-value">{displayGameCount.toLocaleString()} on Cartridge</span>
           </div>
           {totalGameReviews > 0 && (
             <div class="detail-row">
@@ -642,11 +645,7 @@ const yearsJson = JSON.stringify(years)
           </div>
           <div id="platformReviewsList">
             {platformReviewList.map((review: any) => (
-              <div
-                class="review-card"
-                data-score={review.score}
-                data-date={review.created_at}
-              >
+              <div class="review-card" data-score={review.score} data-date={review.created_at}>
                 <div class="review-top">
                   <div class="avatar">
                     {review.profiles?.avatar_url
@@ -688,8 +687,9 @@ const yearsJson = JSON.stringify(years)
     var byYear = JSON.parse(byYearJson);
     var years = JSON.parse(yearsJson);
 
+    // hero mosaic fallback
     var mosaic = document.getElementById('heroMosaic');
-    if (mosaic && mosaic.classList.contains('visible') || !document.querySelector('.hero-img')) {
+    if (mosaic && (mosaic.classList.contains('visible') || !document.querySelector('.hero-img'))) {
       var coverUrls = exclusives.slice(0,12).map(function(g){return g.cover;}).filter(Boolean);
       if (coverUrls.length > 0) {
         var tiles = coverUrls.concat(coverUrls).concat(coverUrls).slice(0,24);
