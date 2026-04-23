@@ -78,11 +78,15 @@ export async function getGameDetails(igdbId: number) {
   ]);
 
   // Parse involved companies into roles
-  const companies = {
-    main_developers: [] as any[],
-    supporting_developers: [] as any[],
-    publishers: [] as any[],
-  };
+  const companies: {
+  main_developers: any[];
+  supporting_developers: any[];
+  publishers: any[];
+} = {
+  main_developers: [],
+  supporting_developers: [],
+  publishers: [],
+};
 
   if (involvedCompanies) {
     for (const ic of involvedCompanies) {
