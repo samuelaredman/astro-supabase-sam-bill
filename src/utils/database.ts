@@ -1,12 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 import { createServerClient, parseCookieHeader, serializeCookieHeader } from '@supabase/ssr';
-import type { Database } from '../../supabase/types';
 
 export function getSupabase() {
   const supabaseUrl = import.meta.env.SUPABASE_DATABASE_URL;
   const supabaseKey = import.meta.env.SUPABASE_ANON_KEY;
   if (!supabaseUrl || !supabaseKey) throw new Error('Missing Supabase env vars');
-  return createClient<Database>(supabaseUrl, supabaseKey);
+  return createClient(supabaseUrl, supabaseKey);
 }
 
 export function createSupabaseServerClient(request: Request, response: Response) {
