@@ -14,13 +14,13 @@ const { data: platform } = await supabase
 
 if (!platform) return Astro.redirect('/404')
 
-// get exact total game count (no row limit)
+// exact total count without fetching all rows
 const { count: totalGameCount } = await supabase
   .from('game_platforms')
   .select('game_id', { count: 'exact', head: true })
   .eq('platform_id', platform.id)
 
-// fetch top 500 games for display (sorted by most recent)
+// fetch up to 500 games for display
 const { data: gamePlatforms } = await supabase
   .from('game_platforms')
   .select(`games(id, title, slug, cover_img_url, date_released)`)
@@ -36,7 +36,6 @@ const allGames = (gamePlatforms ?? [])
 
 const gameIds = allGames.map((g: any) => g.id)
 
-// fetch game review scores
 const { data: gameReviewScores } = await supabase
   .from('reviews')
   .select('game_id, score')
@@ -59,13 +58,9 @@ function gameReviewCount(gameId: string): number {
   return reviewsByGame[gameId]?.length ?? 0
 }
 
-// fetch console/platform reviews
 const { data: platformReviews } = await supabase
   .from('platform_reviews')
-  .select(`
-    id, score, title, body, created_at,
-    profiles(id, username, avatar_url)
-  `)
+  .select(`id, score, title, body, created_at, profiles(id, username, avatar_url)`)
   .eq('platform_id', platform.id)
   .order('created_at', { ascending: false })
 
@@ -76,14 +71,12 @@ const consoleAvg = platformScores.length > 0
   : null
 const consoleTotalRatings = platformScores.length
 
-// game-level stats
 const allGameScores = Object.values(reviewsByGame).flat()
 const gameAvg = allGameScores.length > 0
   ? (allGameScores.reduce((a, b) => a + b, 0) / allGameScores.length).toFixed(1)
   : null
 const totalGameReviews = allGameScores.length
 
-// exclusives — games that only appear on this platform
 const { data: multiPlatformRows } = await supabase
   .from('game_platforms')
   .select('game_id')
@@ -94,13 +87,10 @@ const multiPlatformIds = new Set((multiPlatformRows ?? []).map((r: any) => r.gam
 
 const exclusives = allGames
   .filter((g: any) => !multiPlatformIds.has(g.id))
-  .sort((a: any, b: any) => {
-    const aScore = parseFloat(gameAvgScore(a.id) ?? '0')
-    const bScore = parseFloat(gameAvgScore(b.id) ?? '0')
-    return bScore - aScore
-  })
+  .sort((a: any, b: any) =>
+    parseFloat(gameAvgScore(b.id) ?? '0') - parseFloat(gameAvgScore(a.id) ?? '0')
+  )
 
-// group games by year, top 25 per year sorted by score
 const byYear: Record<number, any[]> = {}
 for (const g of allGames) {
   const year = g.date_released ? new Date(g.date_released).getFullYear() : 0
@@ -111,11 +101,9 @@ for (const g of allGames) {
 const byYearSorted: Record<number, any[]> = {}
 for (const [year, games] of Object.entries(byYear)) {
   byYearSorted[parseInt(year)] = (games as any[])
-    .sort((a: any, b: any) => {
-      const aScore = parseFloat(gameAvgScore(a.id) ?? '0')
-      const bScore = parseFloat(gameAvgScore(b.id) ?? '0')
-      return bScore - aScore
-    })
+    .sort((a: any, b: any) =>
+      parseFloat(gameAvgScore(b.id) ?? '0') - parseFloat(gameAvgScore(a.id) ?? '0')
+    )
     .slice(0, 25)
 }
 
@@ -124,7 +112,6 @@ const years = Object.keys(byYearSorted)
   .filter(y => y > 0)
   .sort((a, b) => b - a)
 
-// fetch IGDB platform details
 let igdbData: any = null
 if (platform.igdb_id) {
   const result = await igdbFetch('platforms',
@@ -136,17 +123,14 @@ if (platform.igdb_id) {
   igdbData = result?.[0] ?? null
 }
 
-// manually curated console banner photos
 const consoleBanners: Record<string, string> = {
-  'nintendo-switch':        'https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Nintendo_Switch_hardware.jpg/1280px-Nintendo_Switch_hardware.jpg',
-  'nintendo-switch-2':      'https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Nintendo_Switch_hardware.jpg/1280px-Nintendo_Switch_hardware.jpg',
-  'playstation-5':          'https://upload.wikimedia.org/wikipedia/commons/thumb/3/39/PlayStation_5_and_DualSense_with_transparent_background.png/1280px-PlayStation_5_and_DualSense_with_transparent_background.png',
-  'playstation-4':          'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/PS4-Console-wDS4.jpg/1280px-PS4-Console-wDS4.jpg',
-  'playstation-4--1':       'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/PS4-Console-wDS4.jpg/1280px-PS4-Console-wDS4.jpg',
-  'xbox-series-x':          'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Xbox_Series_X_and_controller.jpg/1280px-Xbox_Series_X_and_controller.jpg',
-  'xbox-series-xs':         'https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Xbox_Series_X_and_controller.jpg/1280px-Xbox_Series_X_and_controller.jpg',
-  'xbox-one':               'https://upload.wikimedia.org/wikipedia/commons/thumb/7/74/Xbox-One-Console-wController.jpg/1280px-Xbox-One-Console-wController.jpg',
-  'nintendo-3ds':           'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5d/Nintendo-3DS-AquaOpen.jpg/1280px-Nintendo-3DS-AquaOpen.jpg',
+  'nintendo-switch':   '/banners/nintendo-switch.jpg',
+  'playstation-5':     '/banners/playstation-5.jpg',
+  'playstation-4':     '/banners/playstation-4.jpg',
+  'xbox-series-x':     '/banners/xbox-series-x.jpg',
+  'xbox-series-xs':    '/banners/xbox-series-x.jpg',
+  'xbox-one':          '/banners/xbox-one.jpg',
+  'nintendo-3ds':      '/banners/nintendo-3ds.jpg',
 }
 const bannerImage = consoleBanners[platform.slug] ?? null
 
@@ -232,32 +216,32 @@ const yearsJson = JSON.stringify(years)
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
   <style>
     :root[data-theme="light"] {
-      --bg: #f5f4f2; --bg-card: #ffffff; --bg-hover: #f4f3f0;
-      --border: #e8e6e1; --border-subtle: #f0ede8;
-      --text-primary: #141412; --text-secondary: #6b6860; --text-tertiary: #a09d98;
-      --tag-bg: #f0ede8; --tag-text: #6b6860;
-      --shadow: 0 1px 3px rgba(0,0,0,0.06); --shadow-md: 0 4px 16px rgba(0,0,0,0.1);
-      --score-great: #1a6b3c; --score-great-bg: #eaf5ee;
-      --score-good: #1a4a6b;  --score-good-bg: #eaf0f5;
-      --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
-      --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
-      --game-accent: #c8332a;
-      --hero-overlay: linear-gradient(to bottom,rgba(245,244,242,0)0%,rgba(245,244,242,.6)65%,rgba(245,244,242,1)100%);
-      --hero-side: linear-gradient(to right,rgba(245,244,242,.3)0%,transparent 50%);
+      --bg:#f5f4f2;--bg-card:#ffffff;--bg-hover:#f4f3f0;
+      --border:#e8e6e1;--border-subtle:#f0ede8;
+      --text-primary:#141412;--text-secondary:#6b6860;--text-tertiary:#a09d98;
+      --tag-bg:#f0ede8;--tag-text:#6b6860;
+      --shadow:0 1px 3px rgba(0,0,0,.06);--shadow-md:0 4px 16px rgba(0,0,0,.1);
+      --score-great:#1a6b3c;--score-great-bg:#eaf5ee;
+      --score-good:#1a4a6b;--score-good-bg:#eaf0f5;
+      --score-mid:#6b5a1a;--score-mid-bg:#f5f0ea;
+      --score-low:#6b1a1a;--score-low-bg:#f5eaea;
+      --game-accent:#c8332a;
+      --hero-overlay:linear-gradient(to bottom,rgba(245,244,242,0)0%,rgba(245,244,242,.6)65%,rgba(245,244,242,1)100%);
+      --hero-side:linear-gradient(to right,rgba(245,244,242,.3)0%,transparent 50%);
     }
     :root[data-theme="dark"] {
-      --bg: #09090a; --bg-card: #131314; --bg-hover: #1c1c1e;
-      --border: #222224; --border-subtle: #191919;
-      --text-primary: #f0ede8; --text-secondary: #908d87; --text-tertiary: #484644;
-      --tag-bg: #1c1c1e; --tag-text: #6a6866;
-      --shadow: 0 1px 3px rgba(0,0,0,.5); --shadow-md: 0 4px 16px rgba(0,0,0,.7);
-      --score-great: #4ade80; --score-great-bg: #0b2016;
-      --score-good: #60a5fa;  --score-good-bg: #0b1828;
-      --score-mid: #fbbf24;   --score-mid-bg: #201808;
-      --score-low: #f87171;   --score-low-bg: #200808;
-      --game-accent: #e84444;
-      --hero-overlay: linear-gradient(to bottom,rgba(9,9,10,0)0%,rgba(9,9,10,.65)65%,rgba(9,9,10,1)100%);
-      --hero-side: linear-gradient(to right,rgba(9,9,10,.35)0%,transparent 50%);
+      --bg:#09090a;--bg-card:#131314;--bg-hover:#1c1c1e;
+      --border:#222224;--border-subtle:#191919;
+      --text-primary:#f0ede8;--text-secondary:#908d87;--text-tertiary:#484644;
+      --tag-bg:#1c1c1e;--tag-text:#6a6866;
+      --shadow:0 1px 3px rgba(0,0,0,.5);--shadow-md:0 4px 16px rgba(0,0,0,.7);
+      --score-great:#4ade80;--score-great-bg:#0b2016;
+      --score-good:#60a5fa;--score-good-bg:#0b1828;
+      --score-mid:#fbbf24;--score-mid-bg:#201808;
+      --score-low:#f87171;--score-low-bg:#200808;
+      --game-accent:#e84444;
+      --hero-overlay:linear-gradient(to bottom,rgba(9,9,10,0)0%,rgba(9,9,10,.65)65%,rgba(9,9,10,1)100%);
+      --hero-side:linear-gradient(to right,rgba(9,9,10,.35)0%,transparent 50%);
     }
 
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -281,6 +265,7 @@ const yearsJson = JSON.stringify(years)
     .jump-link:hover{color:var(--text-primary)}
     .jump-link.active{color:var(--text-primary);border-color:var(--game-accent)}
 
+    /* hero — only shown when banner image exists */
     .hero{position:relative;width:100%;height:460px;overflow:hidden;background:#0c0c10}
     .hero-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 40%;opacity:.78}
     .hero-mosaic{position:absolute;inset:-20px;display:none;flex-wrap:wrap;filter:blur(18px) saturate(1.5) brightness(.35);transform:scale(1.08)}
@@ -291,7 +276,11 @@ const yearsJson = JSON.stringify(years)
 
     .page{max-width:900px;margin:0 auto;padding:0 28px 100px}
 
-    .platform-header{display:flex;gap:28px;align-items:flex-end;margin-top:-110px;margin-bottom:32px;position:relative;z-index:2}
+    /* platform header — overlaps hero when banner present, sits at top otherwise */
+    .platform-header{display:flex;gap:28px;align-items:flex-end;margin-bottom:32px;position:relative;z-index:2}
+    .platform-header.has-banner{margin-top:-110px}
+    .platform-header.no-banner{margin-top:32px}
+
     .platform-logo-wrap{flex-shrink:0;width:140px;height:140px;border-radius:22px;background:var(--bg-card);border:1px solid rgba(232,68,68,.3);box-shadow:0 14px 48px rgba(0,0,0,.8),0 0 36px rgba(232,68,68,.18);display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:60px}
     .platform-logo{width:100%;height:100%;object-fit:contain;padding:18px;filter:brightness(0) invert(1)}
     [data-theme="light"] .platform-logo{filter:brightness(0);opacity:.85}
@@ -406,7 +395,9 @@ const yearsJson = JSON.stringify(years)
     .write-review-btn:hover{opacity:.85}
 
     @media(max-width:600px){
-      .platform-header{flex-direction:column;align-items:flex-start;margin-top:-60px}
+      .platform-header{flex-direction:column;align-items:flex-start}
+      .platform-header.has-banner{margin-top:-60px}
+      .platform-header.no-banner{margin-top:20px}
       .platform-name{font-size:26px}
       .hero{height:280px}
       .stats-row{grid-template-columns:repeat(2,1fr);gap:8px}
@@ -438,24 +429,23 @@ const yearsJson = JSON.stringify(years)
     <a href="#reviews" class="jump-link">Reviews</a>
   </nav>
 
-  <div class="hero" id="overview">
-    {bannerImage
-      ? <img
-          class="hero-img"
-          src={bannerImage}
-          alt={platform.name}
-          onerror="this.style.display='none';document.getElementById('heroMosaic').classList.add('visible')"
-        />
-      : null
-    }
-    <div class="hero-mosaic" id="heroMosaic" class:list={[{ visible: !bannerImage }]}></div>
-    <div class="hero-side-fade"></div>
-    <div class="hero-overlay"></div>
-  </div>
+  {bannerImage && (
+    <div class="hero">
+      <img
+        class="hero-img"
+        src={bannerImage}
+        alt={platform.name}
+        onerror="this.style.display='none';document.getElementById('heroMosaic').classList.add('visible')"
+      />
+      <div class="hero-mosaic" id="heroMosaic"></div>
+      <div class="hero-side-fade"></div>
+      <div class="hero-overlay"></div>
+    </div>
+  )}
 
-  <div class="page">
+  <div class="page" id="overview">
 
-    <div class="platform-header">
+    <div class={`platform-header ${bannerImage ? 'has-banner' : 'no-banner'}`}>
       <div class="platform-logo-wrap">
         {igdbData?.platform_logo?.url
           ? <img class="platform-logo" src={igdbImage(igdbData.platform_logo.url, 't_logo_med') ?? ''} alt={platform.name} />
@@ -687,9 +677,9 @@ const yearsJson = JSON.stringify(years)
     var byYear = JSON.parse(byYearJson);
     var years = JSON.parse(yearsJson);
 
-    // hero mosaic fallback
+    // mosaic fallback — only fires if no banner or banner fails
     var mosaic = document.getElementById('heroMosaic');
-    if (mosaic && (mosaic.classList.contains('visible') || !document.querySelector('.hero-img'))) {
+    if (mosaic) {
       var coverUrls = exclusives.slice(0,12).map(function(g){return g.cover;}).filter(Boolean);
       if (coverUrls.length > 0) {
         var tiles = coverUrls.concat(coverUrls).concat(coverUrls).slice(0,24);
