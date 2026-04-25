@@ -24,52 +24,62 @@ if (Astro.request.method === 'POST') {
   const { data: existing } = await supabase
     .from('games')
     .select('slug')
-    .eq('id', igdbId)
+    .eq('igdb_id', igdbId)
     .single()
 
   if (existing) return Astro.redirect(`/games/${existing.slug}`)
 
-  const [igdbGame] = await igdbFetch('games',
+  const result = await igdbFetch('games',
     `fields id, name, slug, summary, cover.url, first_release_date,
-            genres.id, genres.name,
+            genres.id, genres.name, genres.slug,
             platforms.id, platforms.name, platforms.slug,
             involved_companies.company.id,
             involved_companies.company.name,
+            involved_companies.company.slug,
             involved_companies.developer,
             involved_companies.publisher;
      where id = ${igdbId};`)
+  const igdbGame = result?.[0]
+  if (!igdbGame) return Astro.redirect('/search')
 
   const slug = igdbGame.slug || igdbGame.name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
 
-  await supabase.from('games').insert({
-    id: igdbId,
+  const { data: inserted } = await supabase.from('games').insert({
+    igdb_id: igdbGame.id,
     title: igdbGame.name,
     slug,
     game_description: igdbGame.summary,
-    cover_img_url: igdbGame.cover?.url?.replace('t_thumb', 't_cover_big') ?? null,
+    cover_img_url: igdbGame.cover?.url ?? null,
     date_released: igdbGame.first_release_date
       ? new Date(igdbGame.first_release_date * 1000).toISOString()
       : null
-  })
+  }).select('id').single()
 
-  for (const genre of igdbGame.genres ?? []) {
-    await supabase.from('genres').upsert({ id: genre.id, name: genre.name }, { onConflict: 'id' })
-    await supabase.from('game_genres').upsert({ game_id: igdbId, genre_id: genre.id }, { onConflict: 'game_id,genre_id' })
-  }
+  if (inserted) {
+    for (const genre of igdbGame.genres ?? []) {
+      await supabase.from('genres').upsert({ igdb_id: genre.id, name: genre.name, slug: genre.slug }, { onConflict: 'igdb_id' })
+      const { data: genreRow } = await supabase.from('genres').select('id').eq('igdb_id', genre.id).single()
+      if (genreRow) await supabase.from('game_genres').upsert({ game_id: inserted.id, genre_id: genreRow.id }, { onConflict: 'game_id,genre_id' })
+    }
 
-  for (const platform of igdbGame.platforms ?? []) {
-    await supabase.from('platforms').upsert({ id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'id' })
-    await supabase.from('game_platforms').upsert({ game_id: igdbId, platform_id: platform.id }, { onConflict: 'game_id,platform_id' })
-  }
+    for (const platform of igdbGame.platforms ?? []) {
+      await supabase.from('platforms').upsert({ igdb_id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'igdb_id' })
+      const { data: platformRow } = await supabase.from('platforms').select('id').eq('igdb_id', platform.id).single()
+      if (platformRow) await supabase.from('game_platforms').upsert({ game_id: inserted.id, platform_id: platformRow.id }, { onConflict: 'game_id,platform_id' })
+    }
 
-  for (const ic of igdbGame.involved_companies ?? []) {
-    if (!ic.company) continue
-    await supabase.from('companies').upsert({ id: ic.company.id, name: ic.company.name }, { onConflict: 'id' })
-    if (ic.developer) await supabase.from('game_developers').upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
-    if (ic.publisher) await supabase.from('game_publishers').upsert({ game_id: igdbId, company_id: ic.company.id }, { onConflict: 'game_id,company_id' })
+    for (const ic of igdbGame.involved_companies ?? []) {
+      if (!ic.company) continue
+      await supabase.from('developers').upsert({ igdb_id: ic.company.id, name: ic.company.name, slug: ic.company.slug }, { onConflict: 'igdb_id' })
+      const { data: devRow } = await supabase.from('developers').select('id').eq('igdb_id', ic.company.id).single()
+      if (devRow) {
+        const role = ic.developer ? 'developer' : ic.publisher ? 'publisher' : 'other'
+        await supabase.from('game_companies').upsert({ game_id: inserted.id, company_id: devRow.id, role }, { onConflict: 'game_id,company_id' })
+      }
+    }
   }
 
   return Astro.redirect(`/games/${slug}`)
@@ -79,40 +89,46 @@ const { data: genres } = await supabase.from('genres').select('id, name').order(
 const { data: platforms } = await supabase.from('platforms').select('id, name').order('name')
 
 if (query.length > 1) {
-  const ftsQuery = query.trim().split(/\s+/).join(' & ')
-
-  let gamesQuery = supabase
-    .from('games')
-    .select(`
-      id, title, slug, cover_img_url, date_released,
-      game_genres(genres(id, name)),
-      game_platforms(platforms(id, name)),
-      reviews!reviews_game_id_fkey(score, play_time_hours)
-    `)
-    .limit(12)
-
-  try {
-    gamesQuery = gamesQuery.textSearch('search_vector', ftsQuery, {
-      type: 'websearch',
-      config: 'english'
-    })
-  } catch {
-    gamesQuery = gamesQuery.ilike('title', `%${query}%`)
+  // Use Postgres trigram + FTS search via RPC for accurate title-only matching
+  const rpcParams: any = {
+    search_query: query,
+    result_limit: 20
   }
+  if (genreFilter) rpcParams.genre_id = genreFilter
+  if (platformFilter) rpcParams.platform_id = platformFilter
 
-  if (genreFilter) gamesQuery = gamesQuery.eq('game_genres.genre_id', genreFilter)
-  if (platformFilter) gamesQuery = gamesQuery.eq('game_platforms.platform_id', platformFilter)
-
-  const [gamesRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
-    gamesQuery,
+  const [rpcRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
+    supabase.rpc('search_games', rpcParams),
     supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
     supabase.from('companies').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
-    igdbFetch('games', `fields id, name, slug, cover.url; search "${query}"; limit 6;`)
+    igdbFetch('games', `fields id, name, slug, cover.url; search "${query}"; limit 8;`)
   ])
 
-  let rawGames = gamesRes.data ?? []
+  let rawGameIds = (rpcRes.data ?? []).map((g: any) => g.id)
+
+  // if RPC returned results, fetch full game data with relationships
+  let rawGames: any[] = []
+  if (rawGameIds.length > 0) {
+    const { data: fullGames } = await supabase
+      .from('games')
+      .select(`
+        id, title, slug, cover_img_url, date_released,
+        game_genres(genres(id, name)),
+        game_platforms(platforms(id, name)),
+        reviews!reviews_game_id_fkey(score, play_time_hours)
+      `)
+      .in('id', rawGameIds)
+
+    // preserve RPC score order
+    const orderMap = new Map(rawGameIds.map((id: string, i: number) => [id, i]))
+    rawGames = (fullGames ?? []).sort((a: any, b: any) =>
+      (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
+    )
+  }
+
+  // if trigram/FTS found nothing, fall back to simple ilike on title
   if (rawGames.length === 0) {
-    const { data: fallback } = await supabase
+    let fallbackQuery = supabase
       .from('games')
       .select(`
         id, title, slug, cover_img_url, date_released,
@@ -122,6 +138,31 @@ if (query.length > 1) {
       `)
       .ilike('title', `%${query}%`)
       .limit(12)
+
+    // apply filters manually for fallback
+    if (genreFilter || platformFilter) {
+      const filterIds: string[] = []
+      if (genreFilter) {
+        const { data: gRows } = await supabase.from('game_genres').select('game_id').eq('genre_id', genreFilter)
+        filterIds.push(...(gRows ?? []).map((r: any) => r.game_id))
+      }
+      if (platformFilter) {
+        const { data: pRows } = await supabase.from('game_platforms').select('game_id').eq('platform_id', platformFilter)
+        const pIds = (pRows ?? []).map((r: any) => r.game_id)
+        if (filterIds.length > 0) {
+          const intersection = filterIds.filter(id => pIds.includes(id))
+          filterIds.length = 0
+          filterIds.push(...intersection)
+        } else {
+          filterIds.push(...pIds)
+        }
+      }
+      if (filterIds.length > 0) {
+        fallbackQuery = fallbackQuery.in('id', filterIds)
+      }
+    }
+
+    const { data: fallback } = await fallbackQuery
     rawGames = fallback ?? []
   }
 
@@ -149,12 +190,13 @@ if (query.length > 1) {
   companies = companiesRes.data ?? []
 
   const existingIds = new Set(games.map((g: any) => g.id))
-  igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.id))
+  igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.igdb_id) && !existingIds.has(g.id))
 }
 
 function igdbImage(url: string | null, size = 't_cover_big') {
   if (!url) return null
-  return `https:${url.replace('t_thumb', size)}`
+  const clean = url.startsWith('//') ? `https:${url}` : url
+  return clean.replace(/t_[a-z_]+/, size)
 }
 
 function getYear(dateStr: string | null) {
@@ -303,6 +345,11 @@ function scoreClass(score: number | null) {
     .genre-chip { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; padding: 4px 10px; border-radius: 20px; cursor: pointer; transition: all 0.15s; text-decoration: none; display: inline-block; }
     .genre-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
     .genre-chip.active { background: var(--accent); color: var(--accent-text); }
+
+    .active-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .active-filter-pill { display: inline-flex; align-items: center; gap: 6px; background: var(--accent); color: var(--accent-text); font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 20px; }
+    .active-filter-pill a { color: inherit; opacity: 0.7; font-size: 14px; line-height: 1; }
+    .active-filter-pill a:hover { opacity: 1; }
   </style>
 </head>
 
@@ -362,14 +409,14 @@ function scoreClass(score: number | null) {
 
       <div class="tabs">
         {[
-  { id: 'games', label: 'Games' },
-  { id: 'reviewers', label: 'Reviewers' },
-  { id: 'studios', label: 'Studios' },
-].map((t) => (
-  <a href={`/search?q=${query}&tab=${t.id}`} class={`tab ${tab === t.id ? 'active' : ''}`}>
-    {t.label}
-  </a>
-))}
+          { id: 'games', label: 'Games' },
+          { id: 'reviewers', label: 'Reviewers' },
+          { id: 'studios', label: 'Studios' },
+        ].map((t) => (
+          <a href={`/search?q=${encodeURIComponent(query)}&tab=${t.id}`} class={`tab ${tab === t.id ? 'active' : ''}`}>
+            {t.label}
+          </a>
+        ))}
       </div>
 
       {tab === 'games' && (
@@ -413,11 +460,34 @@ function scoreClass(score: number | null) {
             <option value="most_played" selected={sortBy === 'most_played'}>Most played</option>
           </select>
           {(genreFilter || platformFilter) && (
-            <a href={`/search?q=${query}&tab=games`} class="clear-link">
+            <a href={`/search?q=${encodeURIComponent(query)}&tab=games`} class="clear-link">
               Clear filters ✕
             </a>
           )}
         </form>
+      )}
+
+      {tab === 'games' && (genreFilter || platformFilter) && (
+        <div class="active-filters" style="margin-top:10px">
+          {genreFilter && (() => {
+            const g = (genres ?? []).find((g: any) => String(g.id) === genreFilter)
+            return g ? (
+              <span class="active-filter-pill">
+                {g.name}
+                <a href={`/search?q=${encodeURIComponent(query)}&tab=games&platform=${platformFilter}&sort=${sortBy}`}>×</a>
+              </span>
+            ) : null
+          })()}
+          {platformFilter && (() => {
+            const p = (platforms ?? []).find((p: any) => String(p.id) === platformFilter)
+            return p ? (
+              <span class="active-filter-pill">
+                {p.name}
+                <a href={`/search?q=${encodeURIComponent(query)}&tab=games&genre=${genreFilter}&sort=${sortBy}`}>×</a>
+              </span>
+            ) : null
+          })()}
+        </div>
       )}
     </div>
 
@@ -582,22 +652,32 @@ function scoreClass(score: number | null) {
     <div class="widget">
       <div class="widget-title">Browse by genre</div>
       <div class="genre-chip-list">
-        {(genres ?? []).slice(0, 12).map((g: any) => (
-  <a href={`/search?q=${query}&tab=games&genre=${g.id}`} class={`genre-chip ${genreFilter === String(g.id) ? 'active' : ''}`}>
-    {g.name}
-  </a>
-))}
+        {(genres ?? []).slice(0, 16).map((g: any) => (
+          <a
+            href={`/search?q=${encodeURIComponent(query)}&tab=games&genre=${g.id}&platform=${platformFilter}&sort=${sortBy}`}
+            class={`genre-chip ${genreFilter === String(g.id) ? 'active' : ''}`}
+          >
+            {g.name}
+          </a>
+        ))}
       </div>
     </div>
 
     <div class="widget">
       <div class="widget-title">Browse by platform</div>
       <div class="genre-chip-list">
-        {(platforms ?? []).slice(0, 10).map((p: any) => (
-  <a href={`/search?q=${query}&tab=games&platform=${p.id}`} class={`genre-chip ${platformFilter === String(p.id) ? 'active' : ''}`}>
-    {p.name}
-  </a>
-))}
+        {(platforms ?? [])
+          .filter((p: any) => ['switch','ps5','ps4--1','ps3','ps2','series-x-s','xboxone','xbox360','win','wii','n64','ngc','snes','nes','3ds','nds','gba','dc','genesis-slash-megadrive'].includes(p.slug))
+          .slice(0, 16)
+          .map((p: any) => (
+            <a
+              href={`/search?q=${encodeURIComponent(query)}&tab=games&platform=${p.id}&genre=${genreFilter}&sort=${sortBy}`}
+              class={`genre-chip ${platformFilter === String(p.id) ? 'active' : ''}`}
+            >
+              {p.name}
+            </a>
+          ))
+        }
       </div>
     </div>
 
@@ -605,16 +685,19 @@ function scoreClass(score: number | null) {
       <div class="widget-title">Quick sort</div>
       <div class="genre-chip-list">
         {[
-  { val: 'highest', label: '⭐ Highest rated' },
-  { val: 'lowest', label: '📉 Lowest rated' },
-  { val: 'most_played', label: '🕹️ Most played' },
-  { val: 'newest', label: '🆕 Newest' },
-  { val: 'oldest', label: '📅 Oldest' },
-].map((s) => (
-  <a href={`/search?q=${query}&tab=games&sort=${s.val}&genre=${genreFilter}&platform=${platformFilter}`} class={`genre-chip ${sortBy === s.val ? 'active' : ''}`}>
-    {s.label}
-  </a>
-))}
+          { val: 'highest', label: '⭐ Highest rated' },
+          { val: 'lowest', label: '📉 Lowest rated' },
+          { val: 'most_played', label: '🕹️ Most played' },
+          { val: 'newest', label: '🆕 Newest' },
+          { val: 'oldest', label: '📅 Oldest' },
+        ].map((s) => (
+          <a
+            href={`/search?q=${encodeURIComponent(query)}&tab=games&sort=${s.val}&genre=${genreFilter}&platform=${platformFilter}`}
+            class={`genre-chip ${sortBy === s.val ? 'active' : ''}`}
+          >
+            {s.label}
+          </a>
+        ))}
       </div>
     </div>
   </aside>
