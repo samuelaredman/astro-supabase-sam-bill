@@ -18,130 +18,144 @@ type Review = {
   score: number;
   title: string;
   body: string;
-  play_time_years: number | null;
-  play_time_months: number | null;
-  play_time_weeks: number | null;
-  play_time_days: number | null;
   play_time_hours: number;
   contains_spoilers: boolean;
   status: string;
   published_at: string;
   created_at: string;
-  edited: boolean;
   played_on: Platform | null;
-  games: {
-    id: string;
-    title: string;
-    slug: string;
-    cover_img_url: string | null;
-  } | null;
-  profiles: {
-    id: string;
-    username: string;
-    avatar_url: string | null;
-  } | null;
+  games: { id: string; title: string; slug: string; cover_img_url: string | null; } | null;
+  profiles: { id: string; username: string; avatar_url: string | null; } | null;
 }
 
-const { data: rawReviews, error } = await (supabase as any)
+// recent reviews feed
+const { data: rawReviews } = await (supabase as any)
   .from("reviews")
   .select(`
-    id, score, title, body,
-    play_time_years, play_time_months, play_time_weeks,
-    play_time_days, play_time_hours,
-    contains_spoilers, status, published_at, created_at, edited,
+    id, score, title, body, play_time_hours,
+    contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
     games ( id, title, slug, cover_img_url ),
     profiles ( id, username, avatar_url )
   `)
   .eq("status", "published")
   .order("published_at", { ascending: false })
-  .limit(30);
+  .limit(20)
 
-if (error) console.error("Error fetching reviews:", error);
+const reviews = (rawReviews ?? []) as Review[]
 
-const reviews = rawReviews as Review[] | null;
+const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-const placeholderReviews: Review[] = [
-  {
-    id: "1",
-    score: 9,
-    title: "A masterpiece that redefines the genre",
-    body: "Elden Ring is FromSoftware's magnum opus. The open world feels genuinely dangerous and alive, every corner hides something worth discovering. The bosses are brutal but fair, and the lore rewards those willing to dig deep.",
-    play_time_years: null,
-    play_time_months: null,
-    play_time_weeks: null,
-    play_time_days: 1,
-    play_time_hours: 87,
-    contains_spoilers: false,
-    status: "published",
-    published_at: new Date(Date.now() - 1000 * 60 * 14).toISOString(),
-    created_at: new Date(Date.now() - 1000 * 60 * 13).toISOString(),
-    edited: false,
-    played_on: { id: "p1", name: "PC (Windows)", slug: "pc-windows" },
-    games: { id: "119133", title: "Elden Ring", slug: "elden-ring", cover_img_url: null },
-    profiles: { id: "u1", username: "ashen_one", avatar_url: null }
-  },
-  {
-    id: "2",
-    score: 7,
-    title: "Gorgeous but hollow",
-    body: "Starfield has incredible vibes and I love the ship building, but after 40 hours the repetition really sets in. Procedurally generated planets feel empty. Still worth it for the main quest and faction storylines.",
-    play_time_years: null,
-    play_time_months: null,
-    play_time_weeks: null,
-    play_time_days: null,
-    play_time_hours: 43,
-    contains_spoilers: false,
-    status: "published",
-    published_at: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
-    created_at: new Date(Date.now() - 1000 * 60 * 13).toISOString(),
-    edited: false,
-    played_on: { id: "p2", name: "Xbox Series X/S", slug: "xbox-series-xs" },
-    games: { id: "g2", title: "Starfield", slug: "starfield", cover_img_url: null },
-    profiles: { id: "u2", username: "void_walker", avatar_url: null }
-  },
-  {
-    id: "3",
-    score: 10,
-    title: "The best game I've played in a decade",
-    body: "Baldur's Gate 3 is a miracle. The sheer breadth of choices, the writing, the acting — nothing comes close. I finished my first playthrough at 120 hours and immediately started a second.",
-    play_time_years: null,
-    play_time_months: null,
-    play_time_weeks: null,
-    play_time_days: null,
-    play_time_hours: 120,
-    contains_spoilers: false,
-    status: "published",
-    published_at: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
-    created_at: new Date(Date.now() - 1000 * 60 * 13).toISOString(),
-    edited: false,
-    played_on: { id: "p1", name: "PC (Windows)", slug: "pc-windows" },
-    games: { id: "g3", title: "Baldur's Gate 3", slug: "baldurs-gate-iii", cover_img_url: null },
-    profiles: { id: "u3", username: "tavern_keeper", avatar_url: null }
-  },
-];
+// most reviewed today — for hero
+const { data: todayRaw } = await (supabase as any)
+  .from('reviews')
+  .select('game_id, games(id, title, slug, cover_img_url)')
+  .eq('status', 'published')
+  .gte('published_at', oneDayAgo)
+  .limit(100)
 
-const feedData: Review[] = (reviews && reviews.length > 0) ? reviews as Review[] : placeholderReviews;
+const todayMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
+for (const r of todayRaw ?? []) {
+  const g = (r as any).games
+  if (!g) continue
+  if (!todayMap[g.id]) todayMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
+  todayMap[g.id].count++
+}
+const mostReviewedToday = Object.values(todayMap).sort((a, b) => b.count - a.count)[0] ?? null
+
+// trending this week — most reviewed games
+const { data: trendingRaw } = await (supabase as any)
+  .from('reviews')
+  .select('game_id, games(id, title, slug, cover_img_url)')
+  .eq('status', 'published')
+  .gte('published_at', oneWeekAgo)
+  .limit(200)
+
+const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
+for (const r of trendingRaw ?? []) {
+  const g = (r as any).games
+  if (!g) continue
+  if (!trendingMap[g.id]) trendingMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
+  trendingMap[g.id].count++
+}
+const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
+
+// top rated this week — games with best avg score from this week's reviews
+const { data: weekReviewsRaw } = await (supabase as any)
+  .from('reviews')
+  .select('game_id, score, games(id, title, slug, cover_img_url)')
+  .eq('status', 'published')
+  .gte('published_at', oneWeekAgo)
+  .limit(500)
+
+const weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {}
+for (const r of weekReviewsRaw ?? []) {
+  const g = (r as any).games
+  if (!g) continue
+  if (!weekGameMap[g.id]) weekGameMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, scores: [] }
+  if (r.score != null) weekGameMap[g.id].scores.push(r.score)
+}
+
+const topRated = Object.entries(weekGameMap)
+  .map(([id, g]) => {
+    if (g.scores.length < 2) return null
+    const avg = g.scores.reduce((a, b) => a + b, 0) / g.scores.length
+    return { id, ...g, avg_score: avg, review_count: g.scores.length }
+  })
+  .filter(Boolean)
+  .sort((a: any, b: any) => b.avg_score - a.avg_score)
+  .slice(0, 12)
+
+// site stats
+const [reviewCountRes, gameCountRes, profileCountRes] = await Promise.all([
+  (supabase as any).from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
+  (supabase as any).from('games').select('*', { count: 'exact', head: true }),
+  (supabase as any).from('profiles').select('*', { count: 'exact', head: true }),
+])
+const totalReviews = reviewCountRes.count ?? 0
+const totalGames = gameCountRes.count ?? 0
+const totalReviewers = profileCountRes.count ?? 0
+
+// featured game — most reviewed today
+const featuredGame = mostReviewedToday
+
+// genre chips for browse
+const { data: genres } = await (supabase as any)
+  .from('genres')
+  .select('id, name')
+  .order('name')
+
+const featuredGenres = ['Action','Adventure','Role-playing (RPG)','Shooter','Platform','Puzzle','Strategy','Indie','Fighting','Racing']
+
+function igdbImage(url: string | null, size = 't_cover_big') {
+  if (!url) return null
+  const clean = url.startsWith('//') ? `https:${url}` : url
+  return clean.replace(/t_[a-z_]+/, size)
+}
 
 function timeAgo(dateStr: string): string {
-  const now = Date.now();
-  const then = new Date(dateStr).getTime();
-  const diff = Math.floor((now - then) / 1000);
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  return `${Math.floor(diff / 86400)}d`;
+  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
+  if (diff < 60) return `${diff}s`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`
+  return `${Math.floor(diff / 86400)}d`
 }
 
 function scoreColor(score: number): string {
-  if (score >= 9) return "score-great";
-  if (score >= 7) return "score-good";
-  if (score >= 5) return "score-mid";
-  return "score-low";
+  if (score >= 9) return "score-great"
+  if (score >= 7) return "score-good"
+  if (score >= 5) return "score-mid"
+  return "score-low"
 }
 
 function getInitials(username: string): string {
-  return username.slice(0, 2).toUpperCase();
+  return username.slice(0, 2).toUpperCase()
+}
+
+function formatCount(n: number): string {
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+  return String(n)
 }
 ---
 
@@ -151,1006 +165,591 @@ function getInitials(username: string): string {
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-  <meta name="theme-color" content="#141412" media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content="#0f0f0e" media="(prefers-color-scheme: dark)" />
   <title>Cartridge — Game Reviews</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
   <style>
     :root[data-theme="light"] {
-      --bg: #f9f8f6;
-      --bg-card: #ffffff;
-      --bg-hover: #f4f3f0;
-      --bg-sidebar: #ffffff;
-      --border: #e8e6e1;
-      --border-subtle: #f0ede8;
-      --text-primary: #141412;
-      --text-secondary: #6b6860;
-      --text-tertiary: #a09d98;
-      --accent: #141412;
-      --accent-text: #ffffff;
-      --score-great: #1a6b3c;
-      --score-great-bg: #eaf5ee;
-      --score-good: #1a4a6b;
-      --score-good-bg: #eaf0f5;
-      --score-mid: #6b5a1a;
-      --score-mid-bg: #f5f0ea;
-      --score-low: #6b1a1a;
-      --score-low-bg: #f5eaea;
-      --logo-color: #141412;
-      --tag-bg: #f0ede8;
-      --tag-text: #6b6860;
-      --divider: #e8e6e1;
-      --shadow: 0 1px 3px rgba(0,0,0,0.06);
-      --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+      --bg: #f9f8f6; --bg-card: #ffffff; --bg-hover: #f4f3f0; --bg-sidebar: #ffffff;
+      --border: #e8e6e1; --border-subtle: #f0ede8;
+      --text-primary: #141412; --text-secondary: #6b6860; --text-tertiary: #a09d98;
+      --accent: #141412; --accent-text: #ffffff; --logo-color: #141412;
+      --tag-bg: #f0ede8; --tag-text: #6b6860;
+      --shadow: 0 1px 3px rgba(0,0,0,0.06); --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+      --score-great: #1a6b3c; --score-great-bg: #eaf5ee;
+      --score-good: #1a4a6b; --score-good-bg: #eaf0f5;
+      --score-mid: #6b5a1a; --score-mid-bg: #f5f0ea;
+      --score-low: #6b1a1a; --score-low-bg: #f5eaea;
     }
-
     :root[data-theme="dark"] {
-      --bg: #0f0f0e;
-      --bg-card: #1a1a18;
-      --bg-hover: #222220;
-      --bg-sidebar: #141412;
-      --border: #2a2a27;
-      --border-subtle: #222220;
-      --text-primary: #f0ede8;
-      --text-secondary: #908d87;
-      --text-tertiary: #5a5855;
-      --accent: #f0ede8;
-      --accent-text: #141412;
-      --score-great: #4ade80;
-      --score-great-bg: #0d2b1a;
-      --score-good: #60a5fa;
-      --score-good-bg: #0d1e2b;
-      --score-mid: #fbbf24;
-      --score-mid-bg: #2b1f0d;
-      --score-low: #f87171;
-      --score-low-bg: #2b0d0d;
-      --logo-color: #f0ede8;
-      --tag-bg: #2a2a27;
-      --tag-text: #908d87;
-      --divider: #2a2a27;
-      --shadow: 0 1px 3px rgba(0,0,0,0.3);
-      --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+      --bg: #0f0f0e; --bg-card: #1a1a18; --bg-hover: #222220; --bg-sidebar: #141412;
+      --border: #2a2a27; --border-subtle: #222220;
+      --text-primary: #f0ede8; --text-secondary: #908d87; --text-tertiary: #5a5855;
+      --accent: #f0ede8; --accent-text: #141412; --logo-color: #f0ede8;
+      --tag-bg: #2a2a27; --tag-text: #908d87;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3); --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+      --score-great: #4ade80; --score-great-bg: #0d2b1a;
+      --score-good: #60a5fa; --score-good-bg: #0d1e2b;
+      --score-mid: #fbbf24; --score-mid-bg: #2b1f0d;
+      --score-low: #f87171; --score-low-bg: #2b0d0d;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      font-family: 'DM Sans', sans-serif;
-      background: var(--bg);
-      color: var(--text-primary);
-      min-height: 100vh;
-      transition: background 0.2s ease, color 0.2s ease;
-      -webkit-font-smoothing: antialiased;
-    }
-
+    body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text-primary); min-height: 100vh; -webkit-font-smoothing: antialiased; transition: background 0.2s, color 0.2s; }
     a { color: inherit; text-decoration: none; }
 
-    .layout {
-      display: grid;
-      grid-template-columns: 240px 1fr 280px;
-      max-width: 1140px;
-      margin: 0 auto;
-      min-height: 100vh;
-    }
+    .layout { display: grid; grid-template-columns: 240px 1fr 280px; max-width: 1140px; margin: 0 auto; min-height: 100vh; }
+    @media (max-width: 1000px) { .layout { grid-template-columns: 200px 1fr; } .sidebar-right { display: none; } }
+    @media (max-width: 680px) { .layout { grid-template-columns: 1fr; } .sidebar-left { display: none; } }
 
-    @media (max-width: 1000px) {
-      .layout { grid-template-columns: 200px 1fr; }
-      .sidebar-right { display: none; }
-    }
-    @media (max-width: 680px) {
-      .layout { grid-template-columns: 1fr; }
-      .sidebar-left { display: none; }
-    }
-
-    .sidebar-left {
-      position: sticky;
-      top: 0;
-      height: 100vh;
-      padding: 28px 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      border-right: 1px solid var(--border);
-      background: var(--bg-sidebar);
-    }
-
-    .logo {
-      font-family: 'DM Serif Display', serif;
-      font-size: 22px;
-      color: var(--logo-color);
-      letter-spacing: -0.5px;
-      padding: 8px 12px;
-      margin-bottom: 16px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .logo-dot {
-      width: 8px;
-      height: 8px;
-      background: var(--text-primary);
-      border-radius: 50%;
-      display: inline-block;
-    }
-
-    .nav-item {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      font-size: 15px;
-      font-weight: 400;
-      color: var(--text-secondary);
-      cursor: pointer;
-      transition: background 0.15s, color 0.15s;
-    }
-
-    .nav-item:hover, .nav-item.active {
-      background: var(--bg-hover);
-      color: var(--text-primary);
-    }
-
+    /* SIDEBAR LEFT */
+    .sidebar-left { position: sticky; top: 0; height: 100vh; padding: 28px 20px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid var(--border); background: var(--bg-sidebar); }
+    .logo { font-family: 'DM Serif Display', serif; font-size: 22px; color: var(--logo-color); padding: 8px 12px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .logo-dot { width: 8px; height: 8px; background: var(--text-primary); border-radius: 50%; }
+    .nav-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; font-size: 15px; color: var(--text-secondary); transition: background 0.15s, color 0.15s; }
+    .nav-item:hover, .nav-item.active { background: var(--bg-hover); color: var(--text-primary); }
     .nav-item.active { font-weight: 500; }
-
-    .nav-icon {
-      width: 18px;
-      height: 18px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-
-    .nav-divider {
-      height: 1px;
-      background: var(--border);
-      margin: 10px 0;
-    }
-
-    .sidebar-bottom {
-      margin-top: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .theme-toggle {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      cursor: pointer;
-      font-size: 15px;
-      color: var(--text-secondary);
-      background: none;
-      border: none;
-      font-family: inherit;
-      width: 100%;
-      text-align: left;
-      transition: background 0.15s, color 0.15s;
-    }
+    .nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .nav-divider { height: 1px; background: var(--border); margin: 10px 0; }
+    .sidebar-bottom { margin-top: auto; }
+    .theme-toggle { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; cursor: pointer; font-size: 15px; color: var(--text-secondary); background: none; border: none; font-family: inherit; width: 100%; text-align: left; transition: background 0.15s, color 0.15s; }
     .theme-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-    .feed {
-      border-right: 1px solid var(--border);
-      min-height: 100vh;
-    }
-
-    .feed-header {
-      position: sticky;
-      top: 0;
-      background: var(--bg-card);
-      border-bottom: 1px solid var(--border);
-      padding: 16px 20px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      z-index: 10;
-      backdrop-filter: blur(8px);
-    }
-
-    .feed-title {
-      font-size: 17px;
-      font-weight: 500;
-      letter-spacing: -0.2px;
-    }
-
-    .feed-subtitle {
-      font-size: 13px;
-      color: var(--text-tertiary);
-      margin-top: 1px;
-    }
-
-    .new-review-btn {
-      background: var(--accent);
-      color: var(--accent-text);
-      border: none;
-      border-radius: 20px;
-      padding: 8px 18px;
-      font-size: 14px;
-      font-weight: 500;
-      font-family: inherit;
-      cursor: pointer;
-      transition: opacity 0.15s;
-    }
+    /* MAIN FEED */
+    .feed { border-right: 1px solid var(--border); min-height: 100vh; }
+    .feed-header { position: sticky; top: 0; background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; z-index: 10; backdrop-filter: blur(8px); }
+    .feed-title { font-size: 17px; font-weight: 500; letter-spacing: -0.2px; }
+    .feed-subtitle { font-size: 13px; color: var(--text-tertiary); margin-top: 1px; }
+    .new-review-btn { background: var(--accent); color: var(--accent-text); border: none; border-radius: 20px; padding: 8px 18px; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; white-space: nowrap; }
     .new-review-btn:hover { opacity: 0.85; }
 
-    .review-card {
-      padding: 18px 20px;
-      border-bottom: 1px solid var(--border-subtle);
-      transition: background 0.15s;
-      cursor: pointer;
-    }
+    /* HERO */
+    .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
+    .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.4; filter: blur(2px) saturate(1.4); transform: scale(1.05); }
+    .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.6) 50%, rgba(10,10,10,0.2) 100%); }
+    .hero-content { position: relative; z-index: 2; padding: 28px 24px; display: flex; align-items: flex-end; gap: 20px; width: 100%; }
+    .hero-cover { width: 90px; height: 120px; border-radius: 10px; object-fit: cover; box-shadow: 0 8px 32px rgba(0,0,0,0.6); flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); }
+    .hero-cover-placeholder { width: 90px; height: 120px; border-radius: 10px; background: #222; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 36px; }
+    .hero-info { flex: 1; min-width: 0; }
+    .hero-label { font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+    .hero-title { font-family: 'DM Serif Display', serif; font-size: 26px; color: #fff; line-height: 1.2; margin-bottom: 8px; letter-spacing: -0.3px; }
+    .hero-score { display: inline-flex; align-items: center; gap: 6px; }
+    .hero-score-num { font-family: 'DM Serif Display', serif; font-size: 22px; color: #4ade80; }
+    .hero-score-label { font-size: 12px; color: rgba(255,255,255,0.5); }
+    .hero-cta { display: inline-block; margin-top: 10px; background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.2); border-radius: 20px; padding: 6px 14px; font-size: 13px; backdrop-filter: blur(8px); transition: background 0.15s; }
+    .hero-cta:hover { background: rgba(255,255,255,0.25); }
+
+    /* TOP RATED ROW */
+    .section-block { padding: 20px 20px 0; border-bottom: 1px solid var(--border-subtle); }
+    .section-block-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .section-block-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-tertiary); }
+    .section-block-link { font-size: 12px; color: var(--text-tertiary); transition: color 0.15s; }
+    .section-block-link:hover { color: var(--text-primary); }
+    .top-rated-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 20px; scrollbar-width: none; }
+    .top-rated-scroll::-webkit-scrollbar { display: none; }
+    .top-rated-card { flex-shrink: 0; width: 100px; display: block; }
+    .top-rated-card:hover .top-rated-cover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
+    .top-rated-cover { width: 100px; height: 133px; border-radius: 8px; object-fit: cover; border: 1px solid var(--border); transition: transform 0.15s, box-shadow 0.15s; display: block; background: var(--tag-bg); }
+    .top-rated-cover-placeholder { width: 100px; height: 133px; border-radius: 8px; border: 1px solid var(--border); background: var(--tag-bg); display: flex; align-items: center; justify-content: center; font-size: 28px; }
+    .top-rated-info { margin-top: 6px; }
+    .top-rated-title { font-size: 11px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
+    .top-rated-score { font-size: 11px; font-weight: 600; margin-top: 2px; }
+    .top-rated-score.score-great { color: var(--score-great); }
+    .top-rated-score.score-good { color: var(--score-good); }
+    .top-rated-score.score-mid { color: var(--score-mid); }
+    .top-rated-score.score-low { color: var(--score-low); }
+
+    /* GENRE CHIPS */
+    .genre-section { padding: 16px 20px; border-bottom: 1px solid var(--border-subtle); display: flex; gap: 6px; flex-wrap: wrap; }
+    .genre-chip { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; }
+    .genre-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+    /* REVIEW CARDS */
+    .review-card { padding: 18px 20px; border-bottom: 1px solid var(--border-subtle); transition: background 0.15s; cursor: pointer; }
     .review-card:hover { background: var(--bg-hover); }
-
-    .card-top {
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-    }
-
-    .avatar {
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      background: var(--bg-hover);
-      border: 1px solid var(--border);
-      flex-shrink: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--text-secondary);
-      overflow: hidden;
-    }
-
+    .card-top { display: flex; gap: 12px; align-items: flex-start; }
+    .avatar { width: 38px; height: 38px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 500; color: var(--text-secondary); overflow: hidden; }
     .avatar img { width: 100%; height: 100%; object-fit: cover; }
-
     .card-body { flex: 1; min-width: 0; }
-
-    .card-meta {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-bottom: 6px;
-      flex-wrap: wrap;
-    }
-
+    .card-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
     .username { font-size: 14px; font-weight: 500; }
     .meta-dot { color: var(--text-tertiary); font-size: 12px; }
     .timestamp { font-size: 13px; color: var(--text-tertiary); }
-
-    .game-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-
-    .game-cover {
-      width: 32px;
-      height: 32px;
-      border-radius: 6px;
-      background: var(--tag-bg);
-      border: 1px solid var(--border);
-      flex-shrink: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-      overflow: hidden;
-    }
-
-    .game-cover img { width: 100%; height: 100%; object-fit: cover; }
-
-    .game-info { flex: 1; min-width: 0; }
-
-    .game-title {
-      font-size: 14px;
-      font-weight: 500;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .score-badge {
-      flex-shrink: 0;
-      width: 36px;
-      height: 36px;
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 15px;
-      font-weight: 500;
-      font-family: 'DM Serif Display', serif;
-    }
-
+    .game-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .game-cover-sm { width: 32px; height: 32px; border-radius: 6px; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; overflow: hidden; }
+    .game-cover-sm img { width: 100%; height: 100%; object-fit: cover; }
+    .game-title-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+    .score-badge { flex-shrink: 0; width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; font-family: 'DM Serif Display', serif; }
     .score-great { color: var(--score-great); background: var(--score-great-bg); }
-    .score-good  { color: var(--score-good);  background: var(--score-good-bg);  }
-    .score-mid   { color: var(--score-mid);   background: var(--score-mid-bg);   }
-    .score-low   { color: var(--score-low);   background: var(--score-low-bg);   }
-
-    .review-title {
-      font-family: 'DM Serif Display', serif;
-      font-size: 16px;
-      line-height: 1.35;
-      margin-bottom: 5px;
-      letter-spacing: -0.2px;
-    }
-
-    .review-body {
-      font-size: 14px;
-      line-height: 1.6;
-      color: var(--text-secondary);
-      display: -webkit-box;
-      -webkit-line-clamp: 3;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
-
-    .spoiler-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: var(--tag-bg);
-      color: var(--tag-text);
-      font-size: 11px;
-      font-weight: 500;
-      padding: 2px 8px;
-      border-radius: 20px;
-      margin-bottom: 6px;
-      letter-spacing: 0.3px;
-      text-transform: uppercase;
-    }
-
-    .card-footer {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-top: 10px;
-      padding-top: 10px;
-    }
-
-    .footer-tag {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: var(--tag-bg);
-      color: var(--tag-text);
-      font-size: 12px;
-      padding: 3px 9px;
-      border-radius: 6px;
-    }
-
-    .read-more {
-      margin-left: auto;
-      font-size: 13px;
-      color: var(--text-tertiary);
-      transition: color 0.15s;
-    }
+    .score-good { color: var(--score-good); background: var(--score-good-bg); }
+    .score-mid { color: var(--score-mid); background: var(--score-mid-bg); }
+    .score-low { color: var(--score-low); background: var(--score-low-bg); }
+    .review-title { font-family: 'DM Serif Display', serif; font-size: 16px; line-height: 1.35; margin-bottom: 5px; letter-spacing: -0.2px; }
+    .review-body { font-size: 14px; line-height: 1.6; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .spoiler-pill { display: inline-flex; align-items: center; gap: 4px; background: var(--tag-bg); color: var(--tag-text); font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 20px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px; }
+    .card-footer { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .footer-tag { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; padding: 3px 9px; border-radius: 6px; }
+    .read-more { margin-left: auto; font-size: 13px; color: var(--text-tertiary); transition: color 0.15s; }
     .review-card:hover .read-more { color: var(--text-primary); }
 
-    .sidebar-right {
-      padding: 28px 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 24px;
-    }
+    .empty-state { padding: 60px 20px; text-align: center; color: var(--text-tertiary); }
+    .empty-state-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
 
-    .widget {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 16px;
-      box-shadow: var(--shadow);
-    }
-
-    .widget-title {
-      font-size: 14px;
-      font-weight: 500;
-      margin-bottom: 14px;
-      color: var(--text-primary);
-    }
-
-    .trending-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 0;
-      border-bottom: 1px solid var(--border-subtle);
-      transition: opacity 0.15s;
-    }
-    .trending-item:last-child { border-bottom: none; }
+    /* SIDEBAR RIGHT */
+    .sidebar-right { padding: 28px 20px; display: flex; flex-direction: column; gap: 20px; }
+    .widget { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); }
+    .widget-title { font-size: 14px; font-weight: 500; margin-bottom: 14px; }
+    .trending-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); transition: opacity 0.15s; }
+    .trending-item:last-child { border-bottom: none; padding-bottom: 0; }
     .trending-item:hover { opacity: 0.7; }
-
-    .trending-rank {
-      font-size: 12px;
-      color: var(--text-tertiary);
-      width: 16px;
-      flex-shrink: 0;
-      font-weight: 500;
-    }
-
+    .trending-rank { font-size: 12px; color: var(--text-tertiary); width: 16px; flex-shrink: 0; font-weight: 500; }
+    .trending-cover { width: 32px; height: 32px; border-radius: 5px; object-fit: cover; flex-shrink: 0; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 14px; overflow: hidden; }
+    .trending-cover img { width: 100%; height: 100%; object-fit: cover; }
     .trending-info { flex: 1; min-width: 0; }
-
-    .trending-game {
-      font-size: 13px;
-      font-weight: 500;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
+    .trending-game { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .trending-count { font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
-
-    .stat-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 6px 0;
-    }
-
+    .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); }
+    .stat-row:last-child { border-bottom: none; padding-bottom: 0; }
     .stat-label { font-size: 13px; color: var(--text-secondary); }
-    .stat-value { font-size: 14px; font-weight: 500; }
+    .stat-value { font-size: 14px; font-weight: 600; }
+    .genre-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .widget-genre-chip { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; padding: 4px 10px; border-radius: 20px; transition: all 0.15s; display: inline-block; }
+    .widget-genre-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-    .empty-state {
-      padding: 60px 20px;
-      text-align: center;
-      color: var(--text-tertiary);
-    }
-    .empty-state-title {
-      font-family: 'DM Serif Display', serif;
-      font-size: 20px;
-      color: var(--text-secondary);
-      margin-bottom: 8px;
-    }
-    .empty-state-sub { font-size: 14px; }
-
-    /* Composer */
-    .composer {
-      border-bottom: 1px solid var(--border);
-      background: var(--bg-card);
-    }
-    .composer-inner {
-      padding: 16px 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-    .composer-field {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .composer-row {
-      display: flex;
-      gap: 12px;
-      align-items: flex-end;
-    }
-    .composer-label {
-      font-size: 12px;
-      font-weight: 500;
-      color: var(--text-tertiary);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .composer-input, .composer-select {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 9px 12px;
-      font-size: 14px;
-      font-family: inherit;
-      color: var(--text-primary);
-      width: 100%;
-      outline: none;
-      transition: border-color 0.15s;
-    }
+    /* COMPOSER */
+    .composer { border-bottom: 1px solid var(--border); background: var(--bg-card); }
+    .composer-inner { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+    .composer-field { display: flex; flex-direction: column; gap: 6px; }
+    .composer-row { display: flex; gap: 12px; align-items: flex-end; }
+    .composer-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
+    .composer-input, .composer-select { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; font-family: inherit; color: var(--text-primary); width: 100%; outline: none; transition: border-color 0.15s; }
     .composer-input:focus, .composer-select:focus { border-color: var(--text-secondary); }
-    .composer-textarea {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 9px 12px;
-      font-size: 14px;
-      font-family: inherit;
-      color: var(--text-primary);
-      width: 100%;
-      outline: none;
-      resize: vertical;
-      min-height: 90px;
-      transition: border-color 0.15s;
-      line-height: 1.5;
-    }
+    .composer-textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; font-family: inherit; color: var(--text-primary); width: 100%; outline: none; resize: vertical; min-height: 90px; transition: border-color 0.15s; line-height: 1.5; }
     .composer-textarea:focus { border-color: var(--text-secondary); }
-
-    .score-picker {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .score-btn {
-      width: 36px;
-      height: 36px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--bg);
-      color: var(--text-secondary);
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      font-family: inherit;
-      transition: all 0.12s;
-    }
+    .score-picker { display: flex; gap: 6px; flex-wrap: wrap; }
+    .score-btn { width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text-secondary); font-size: 14px; font-weight: 500; cursor: pointer; font-family: inherit; transition: all 0.12s; }
     .score-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
     .score-btn.selected { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-
     .autocomplete-wrap { position: relative; }
-    .autocomplete-results {
-      position: absolute;
-      top: calc(100% + 4px);
-      left: 0;
-      right: 0;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      z-index: 100;
-      max-height: 200px;
-      overflow-y: auto;
-      display: none;
-      box-shadow: var(--shadow-md);
-    }
+    .autocomplete-results { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; z-index: 100; max-height: 200px; overflow-y: auto; display: none; box-shadow: var(--shadow-md); }
     .autocomplete-results.open { display: block; }
-    .autocomplete-item {
-      padding: 10px 14px;
-      font-size: 14px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      transition: background 0.1s;
-    }
+    .autocomplete-item { padding: 10px 14px; font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 10px; transition: background 0.1s; }
     .autocomplete-item:hover { background: var(--bg-hover); }
     .autocomplete-item-title { font-weight: 500; }
-    .autocomplete-item-dev { font-size: 12px; color: var(--text-tertiary); }
-
-    .composer-actions {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding-top: 4px;
-    }
-    .spoiler-toggle {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 13px;
-      color: var(--text-secondary);
-      cursor: pointer;
-    }
-    .spoiler-toggle input { cursor: pointer; }
-    .composer-cancel {
-      padding: 8px 16px;
-      border-radius: 20px;
-      border: 1px solid var(--border);
-      background: none;
-      font-size: 14px;
-      font-family: inherit;
-      color: var(--text-secondary);
-      cursor: pointer;
-      transition: background 0.15s;
-    }
+    .composer-actions { display: flex; align-items: center; gap: 12px; padding-top: 4px; }
+    .spoiler-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
+    .composer-cancel { padding: 8px 16px; border-radius: 20px; border: 1px solid var(--border); background: none; font-size: 14px; font-family: inherit; color: var(--text-secondary); cursor: pointer; transition: background 0.15s; }
     .composer-cancel:hover { background: var(--bg-hover); }
-    .composer-submit {
-      padding: 8px 18px;
-      border-radius: 20px;
-      border: none;
-      background: var(--accent);
-      color: var(--accent-text);
-      font-size: 14px;
-      font-weight: 500;
-      font-family: inherit;
-      cursor: pointer;
-      transition: opacity 0.15s;
-    }
+    .composer-submit { padding: 8px 18px; border-radius: 20px; border: none; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
     .composer-submit:hover { opacity: 0.85; }
     .composer-submit:disabled { opacity: 0.45; cursor: not-allowed; }
-    .composer-error {
-      font-size: 13px;
-      color: #c0392b;
-      min-height: 18px;
-    }
+    .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; }
   </style>
 </head>
 
 <body>
-  <div class="layout">
+<div class="layout">
 
-    <!-- Left sidebar -->
-    <aside class="sidebar-left">
-      <div class="logo">
-        <span class="logo-dot"></span>
-        Cartridge
-      </div>
-
-      <a href="/" class="nav-item active">
-        <span class="nav-icon">
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/>
-          </svg>
+  <aside class="sidebar-left">
+    <div class="logo"><span class="logo-dot"></span>Cartridge</div>
+    <a href="/" class="nav-item active">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
+      Home
+    </a>
+    <a href="/search" class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
+      Search
+    </a>
+    <div class="nav-divider"></div>
+    <a href="/profile" class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="3"/><path d="M3 16c0-3.314 2.686-6 6-6s6 2.686 6 6"/></svg></span>
+      Profile
+    </a>
+    <div class="sidebar-bottom">
+      <button class="theme-toggle" id="themeToggle">
+        <span class="nav-icon" id="themeIcon">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>
         </span>
-        Home
-      </a>
+        <span id="themeLabel">Light mode</span>
+      </button>
+    </div>
+  </aside>
 
-      <a href="/search" class="nav-item">
-        <span class="nav-icon">
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="8" cy="8" r="5"/>
-            <path d="M13 13l3 3"/>
-          </svg>
-        </span>
-        Search
-      </a>
-
-      <div class="nav-divider"></div>
-
-      <a href="/profile" class="nav-item">
-        <span class="nav-icon">
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="9" cy="6" r="3"/>
-            <path d="M3 16c0-3.314 2.686-6 6-6s6 2.686 6 6"/>
-          </svg>
-        </span>
-        Profile
-      </a>
-
-      <div class="sidebar-bottom">
-        <button class="theme-toggle" id="themeToggle">
-          <span class="nav-icon" id="themeIcon">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="9" cy="9" r="3.5"/>
-              <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
-            </svg>
-          </span>
-          <span id="themeLabel">Light mode</span>
-        </button>
+  <main class="feed">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Recent Reviews</div>
+        <div class="feed-subtitle">{reviews.length > 0 ? `${reviews.length} reviews` : 'Be the first to review a game'}</div>
       </div>
-    </aside>
+      <button class="new-review-btn" id="openComposer">+ Write a review</button>
+    </div>
 
-    <!-- Main feed -->
-    <main class="feed">
-      <div class="feed-header">
-        <div>
-          <div class="feed-title">Recent Reviews</div>
-          <div class="feed-subtitle">{feedData.length} reviews loaded</div>
-        </div>
-        <button class="new-review-btn" id="openComposer">+ Write a review</button>
-      </div>
-
-      <!-- Composer -->
-      <div class="composer" id="composer" style="display:none">
-        <div class="composer-inner">
-
-          <div class="composer-field">
-            <label class="composer-label">Game</label>
-            <div class="autocomplete-wrap">
-              <input
-                type="text"
-                id="gameSearch"
-                class="composer-input"
-                placeholder="Search for a game..."
-                autocomplete="off"
-              />
-              <div class="autocomplete-results" id="gameResults"></div>
+    <!-- HERO — featured top rated game -->
+    {featuredGame && (
+      <div class="hero">
+        {igdbImage((featuredGame as any).cover_img_url, 't_1080p') && (
+          <div
+            class="hero-bg"
+            style={`background-image: url('${igdbImage((featuredGame as any).cover_img_url, 't_1080p')}')`}
+          ></div>
+        )}
+        <div class="hero-overlay"></div>
+        <div class="hero-content">
+          {igdbImage((featuredGame as any).cover_img_url)
+            ? <img class="hero-cover" src={igdbImage((featuredGame as any).cover_img_url) ?? ''} alt={(featuredGame as any).title} />
+            : <div class="hero-cover-placeholder">🎮</div>
+          }
+          <div class="hero-info">
+            <div class="hero-label">Most Reviewed Today</div>
+            <div class="hero-title">{(featuredGame as any).title}</div>
+            <div class="hero-score">
+              <span class="hero-score-num">{(featuredGame as any).count}</span>
+              <span class="hero-score-label">{(featuredGame as any).count === 1 ? 'review' : 'reviews'} today</span>
             </div>
-            <input type="hidden" id="gameId" />
+            <a href={`/games/${(featuredGame as any).slug}`} class="hero-cta">Read reviews →</a>
           </div>
+        </div>
+      </div>
+    )}
 
-          <div class="composer-field">
-            <label class="composer-label">Score</label>
-            <div class="score-picker" id="scorePicker">
-              {[1,2,3,4,5,6,7,8,9,10].map(n => (
-                <button class="score-btn" data-score={n}>{n}</button>
+    <!-- TOP RATED ROW -->
+    {topRated.length > 0 && (
+      <div class="section-block">
+        <div class="section-block-header">
+          <span class="section-block-title">Top Rated This Week</span>
+          <a href="/search?sort=highest" class="section-block-link">See all →</a>
+        </div>
+        <div class="top-rated-scroll">
+          {topRated.map((game: any) => (
+            <a href={`/games/${game.slug}`} class="top-rated-card">
+              {igdbImage(game.cover_img_url)
+                ? <img class="top-rated-cover" src={igdbImage(game.cover_img_url) ?? ''} alt={game.title} loading="lazy" />
+                : <div class="top-rated-cover-placeholder">🎮</div>
+              }
+              <div class="top-rated-info">
+                <div class="top-rated-title">{game.title}</div>
+                <div class={`top-rated-score ${scoreColor(game.avg_score)}`}>
+                  ★ {game.avg_score.toFixed(1)}
+                </div>
+              </div>
+            </a>
+          ))}
+        </div>
+      </div>
+    )}
+
+    <!-- GENRE BROWSE CHIPS -->
+    {(genres ?? []).length > 0 && (
+      <div class="genre-section">
+        {(genres ?? [])
+          .filter((g: any) => featuredGenres.some(n => g.name.toLowerCase().includes(n.toLowerCase())))
+          .slice(0, 10)
+          .map((g: any) => (
+            <a href={`/search?tab=games&genre=${g.id}`} class="genre-chip">{g.name}</a>
+          ))
+        }
+      </div>
+    )}
+
+    <!-- COMPOSER -->
+    <div class="composer" id="composer" style="display:none">
+      <div class="composer-inner">
+        <div class="composer-field">
+          <label class="composer-label">Game</label>
+          <div class="autocomplete-wrap">
+            <input type="text" id="gameSearch" class="composer-input" placeholder="Search for a game..." autocomplete="off" />
+            <div class="autocomplete-results" id="gameResults"></div>
+          </div>
+          <input type="hidden" id="gameId" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Score</label>
+          <div class="score-picker" id="scorePicker">
+            {[1,2,3,4,5,6,7,8,9,10].map(n => (
+              <button class="score-btn" data-score={n}>{n}</button>
+            ))}
+          </div>
+          <input type="hidden" id="scoreVal" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Title</label>
+          <input type="text" id="reviewTitle" class="composer-input" placeholder="Sum it up in a line..." maxlength="120" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Review</label>
+          <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4"></textarea>
+        </div>
+        <div class="composer-row">
+          <div class="composer-field" style="flex:1">
+            <label class="composer-label">Platform played on</label>
+            <select id="platformSelect" class="composer-select">
+              <option value="">Select platform...</option>
+              {(platforms ?? []).map((p: any) => (
+                <option value={p.id}>{p.name}</option>
               ))}
-            </div>
-            <input type="hidden" id="scoreVal" />
+            </select>
           </div>
-
-          <div class="composer-field">
-            <label class="composer-label">Title</label>
-            <input type="text" id="reviewTitle" class="composer-input" placeholder="Sum it up in a line..." maxlength="120" />
+          <div class="composer-field" style="width:120px">
+            <label class="composer-label">Hours played</label>
+            <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
           </div>
-
-          <div class="composer-field">
-            <label class="composer-label">Review</label>
-            <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4"></textarea>
-          </div>
-
-          <div class="composer-row">
-            <div class="composer-field" style="flex:1">
-              <label class="composer-label">Platform played on</label>
-              <select id="platformSelect" class="composer-select">
-                <option value="">Select platform...</option>
-                {(platforms ?? []).map((p: any) => (
-                  <option value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            </div>
-            <div class="composer-field" style="width:120px">
-              <label class="composer-label">Hours played</label>
-              <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
-            </div>
-          </div>
-
-          <div class="composer-actions">
-            <label class="spoiler-toggle">
-              <input type="checkbox" id="spoilerCheck" />
-              <span>Contains spoilers</span>
-            </label>
-            <div style="display:flex;gap:8px;margin-left:auto">
-              <button class="composer-cancel" id="cancelComposer">Cancel</button>
-              <button class="composer-submit" id="submitReview">Post review</button>
-            </div>
-          </div>
-
-          <div class="composer-error" id="composerError"></div>
         </div>
+        <div class="composer-actions">
+          <label class="spoiler-toggle">
+            <input type="checkbox" id="spoilerCheck" />
+            <span>Contains spoilers</span>
+          </label>
+          <div style="display:flex;gap:8px;margin-left:auto">
+            <button class="composer-cancel" id="cancelComposer">Cancel</button>
+            <button class="composer-submit" id="submitReview">Post review</button>
+          </div>
+        </div>
+        <div class="composer-error" id="composerError"></div>
       </div>
+    </div>
 
-      {feedData.length === 0 ? (
-        <div class="empty-state">
-          <div class="empty-state-title">No reviews yet</div>
-          <div class="empty-state-sub">Be the first to review a game.</div>
-        </div>
-      ) : (
-        feedData.map((review) => (
-          <article class="review-card">
-            <div class="card-top">
-              <div class="avatar">
-                {review.profiles?.avatar_url
-                  ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
-                  : getInitials(review.profiles?.username ?? "??")
-                }
+    <!-- REVIEW FEED -->
+    {reviews.length === 0 ? (
+      <div class="empty-state">
+        <div class="empty-state-title">No reviews yet</div>
+        <p>Be the first to review a game.</p>
+      </div>
+    ) : (
+      reviews.map((review) => (
+        <article class="review-card">
+          <div class="card-top">
+            <div class="avatar">
+              {review.profiles?.avatar_url
+                ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+                : getInitials(review.profiles?.username ?? "??")
+              }
+            </div>
+            <div class="card-body">
+              <div class="card-meta">
+                <a href={`/reviewers/${review.profiles?.username}`} class="username">@{review.profiles?.username ?? "unknown"}</a>
+                <span class="meta-dot">·</span>
+                <span class="timestamp">{timeAgo(review.published_at ?? review.created_at)}</span>
               </div>
-              <div class="card-body">
-                <div class="card-meta">
-                  <a href={`/reviewers/${review.profiles?.username}`} class="username">@{review.profiles?.username ?? "unknown"}</a>
-                  <span class="meta-dot">·</span>
-                  <span class="timestamp">{timeAgo(review.published_at ?? review.created_at)}</span>
-                </div>
-                <div class="game-row">
-                  <a href={`/games/${review.games?.slug}`} class="game-cover">
-                    {review.games?.cover_img_url
-                      ? <img src={review.games.cover_img_url} alt={review.games.title} />
-                      : "🎮"
-                    }
-                  </a>
-                  <div class="game-info">
-                    <a href={`/games/${review.games?.slug}`} class="game-title">{review.games?.title ?? "Unknown Game"}</a>
-                  </div>
-                  <div class={`score-badge ${scoreColor(review.score)}`}>
-                    {review.score}
-                  </div>
-                </div>
-                {review.contains_spoilers && (
-                  <div class="spoiler-pill">⚠ spoilers</div>
-                )}
-                {review.title && (
-                  <div class="review-title">{review.title}</div>
-                )}
-                <div class="review-body">{review.body}</div>
-                <div class="card-footer">
-                  {review.played_on && (
-                    <span class="footer-tag">{review.played_on.name}</span>
-                  )}
-                  {review.play_time_hours && (
-                    <span class="footer-tag">{review.play_time_hours}h played</span>
-                  )}
-                  <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
-                </div>
+              <div class="game-row">
+                <a href={`/games/${review.games?.slug}`} class="game-cover-sm">
+                  {review.games?.cover_img_url
+                    ? <img src={igdbImage(review.games.cover_img_url, 't_thumb') ?? ''} alt={review.games.title} />
+                    : "🎮"
+                  }
+                </a>
+                <a href={`/games/${review.games?.slug}`} class="game-title-text">{review.games?.title ?? "Unknown Game"}</a>
+                <div class={`score-badge ${scoreColor(review.score)}`}>{review.score}</div>
+              </div>
+              {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
+              {review.title && <div class="review-title">{review.title}</div>}
+              <div class="review-body">{review.body}</div>
+              <div class="card-footer">
+                {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
+                {review.play_time_hours > 0 && <span class="footer-tag">{review.play_time_hours}h played</span>}
+                <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
               </div>
             </div>
-          </article>
-        ))
-      )}
-    </main>
+          </div>
+        </article>
+      ))
+    )}
+  </main>
 
-    <!-- Right sidebar -->
-    <aside class="sidebar-right">
-      <div class="widget">
-        <div class="widget-title">Trending this week</div>
-        {[
-          { title: "Elden Ring", count: "1.2k reviews" },
-          { title: "Baldur's Gate 3", count: "984 reviews" },
-          { title: "Tears of the Kingdom", count: "761 reviews" },
-          { title: "Starfield", count: "602 reviews" },
-          { title: "Alan Wake 2", count: "438 reviews" },
-        ].map((game, i) => (
-          <div class="trending-item">
+  <aside class="sidebar-right">
+
+    <!-- TRENDING THIS WEEK -->
+    <div class="widget">
+      <div class="widget-title">Trending this week</div>
+      {trending.length === 0 ? (
+        <div style="font-size:13px;color:var(--text-tertiary)">No activity yet this week.</div>
+      ) : (
+        trending.map((game, i) => (
+          <a href={`/games/${game.slug}`} class="trending-item" style="display:flex">
             <span class="trending-rank">{i + 1}</span>
+            <div class="trending-cover">
+              {game.cover
+                ? <img src={igdbImage(game.cover, 't_thumb') ?? ''} alt={game.title} />
+                : '🎮'
+              }
+            </div>
             <div class="trending-info">
               <div class="trending-game">{game.title}</div>
-              <div class="trending-count">{game.count}</div>
+              <div class="trending-count">{game.count} review{game.count !== 1 ? 's' : ''} this week</div>
             </div>
-          </div>
-        ))}
+          </a>
+        ))
+      )}
+    </div>
+
+    <!-- SITE STATS -->
+    <div class="widget">
+      <div class="widget-title">Site stats</div>
+      <div class="stat-row">
+        <span class="stat-label">Total reviews</span>
+        <span class="stat-value">{formatCount(totalReviews)}</span>
       </div>
-
-      <div class="widget">
-        <div class="widget-title">Site stats</div>
-        {[
-          { label: "Total reviews", value: "—" },
-          { label: "Games tracked", value: "—" },
-          { label: "Active reviewers", value: "—" },
-        ].map((stat) => (
-          <div class="stat-row">
-            <span class="stat-label">{stat.label}</span>
-            <span class="stat-value">{stat.value}</span>
-          </div>
-        ))}
+      <div class="stat-row">
+        <span class="stat-label">Games tracked</span>
+        <span class="stat-value">{formatCount(totalGames)}</span>
       </div>
-    </aside>
+      <div class="stat-row">
+        <span class="stat-label">Reviewers</span>
+        <span class="stat-value">{formatCount(totalReviewers)}</span>
+      </div>
+    </div>
 
-  </div>
 
-  <script define:vars={{ isLoggedIn }}>
-    // Theme
-    const themeToggle = document.getElementById('themeToggle');
+  </aside>
 
-    function updateThemeUI(theme) {
-      const label = document.getElementById('themeLabel');
-      const icon = document.getElementById('themeIcon');
-      if (!label || !icon) return;
-      if (theme === 'dark') {
-        label.textContent = 'Dark mode';
-        icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/></svg>';
-      } else {
-        label.textContent = 'Light mode';
-        icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>';
-      }
+</div>
+
+<script define:vars={{ isLoggedIn }}>
+  // Theme
+  function updateThemeUI(theme) {
+    const label = document.getElementById('themeLabel')
+    const icon = document.getElementById('themeIcon')
+    if (!label || !icon) return
+    if (theme === 'dark') {
+      label.textContent = 'Dark mode'
+      icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/></svg>'
+    } else {
+      label.textContent = 'Light mode'
+      icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>'
     }
+  }
 
-    const saved = localStorage.getItem('theme') ||
-      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    document.documentElement.setAttribute('data-theme', saved);
-    updateThemeUI(saved);
+  const saved = localStorage.getItem('theme') ||
+    (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+  document.documentElement.setAttribute('data-theme', saved)
+  updateThemeUI(saved)
 
-    themeToggle.addEventListener('click', () => {
-      const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
-      document.documentElement.setAttribute('data-theme', next);
-      localStorage.setItem('theme', next);
-      updateThemeUI(next);
-    });
+  document.getElementById('themeToggle').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light'
+    document.documentElement.setAttribute('data-theme', next)
+    localStorage.setItem('theme', next)
+    updateThemeUI(next)
+  })
 
-    // Composer
-    document.getElementById('openComposer').addEventListener('click', () => {
-      if (!isLoggedIn) { window.location.href = '/signin'; return; }
-      document.getElementById('composer').style.display = 'block';
-      document.getElementById('gameSearch').focus();
-    });
+  // Composer
+  document.getElementById('openComposer').addEventListener('click', () => {
+    if (!isLoggedIn) { window.location.href = '/signin'; return; }
+    document.getElementById('composer').style.display = 'block'
+    document.getElementById('gameSearch').focus()
+  })
 
-    document.getElementById('cancelComposer').addEventListener('click', () => {
-      document.getElementById('composer').style.display = 'none';
-      resetComposer();
-    });
+  document.getElementById('cancelComposer').addEventListener('click', () => {
+    document.getElementById('composer').style.display = 'none'
+    resetComposer()
+  })
 
-    function resetComposer() {
-      document.getElementById('gameSearch').value = '';
-      document.getElementById('gameId').value = '';
-      document.getElementById('reviewTitle').value = '';
-      document.getElementById('reviewBody').value = '';
-      document.getElementById('hoursPlayed').value = '';
-      document.getElementById('scoreVal').value = '';
-      document.getElementById('platformSelect').value = '';
-      document.getElementById('spoilerCheck').checked = false;
-      document.getElementById('composerError').textContent = '';
-      document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'));
-      document.getElementById('gameResults').classList.remove('open');
+  function resetComposer() {
+    document.getElementById('gameSearch').value = ''
+    document.getElementById('gameId').value = ''
+    document.getElementById('reviewTitle').value = ''
+    document.getElementById('reviewBody').value = ''
+    document.getElementById('hoursPlayed').value = ''
+    document.getElementById('scoreVal').value = ''
+    document.getElementById('platformSelect').value = ''
+    document.getElementById('spoilerCheck').checked = false
+    document.getElementById('composerError').textContent = ''
+    document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'))
+    document.getElementById('gameResults').classList.remove('open')
+  }
+
+  // Score picker
+  document.querySelectorAll('.score-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'))
+      btn.classList.add('selected')
+      document.getElementById('scoreVal').value = btn.dataset.score
+    })
+  })
+
+  // Game autocomplete
+  let searchTimeout
+  document.getElementById('gameSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout)
+    const q = e.target.value.trim()
+    if (q.length < 2) { document.getElementById('gameResults').classList.remove('open'); return; }
+    searchTimeout = setTimeout(() => searchGames(q), 300)
+  })
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.autocomplete-wrap')) {
+      document.getElementById('gameResults').classList.remove('open')
     }
+  })
 
-    // Score picker
-    document.querySelectorAll('.score-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'));
-        btn.classList.add('selected');
-        document.getElementById('scoreVal').value = btn.dataset.score;
-      });
-    });
-
-    // Game autocomplete
-    let searchTimeout;
-    document.getElementById('gameSearch').addEventListener('input', (e) => {
-      clearTimeout(searchTimeout);
-      const q = e.target.value.trim();
-      if (q.length < 2) {
-        document.getElementById('gameResults').classList.remove('open');
-        return;
-      }
-      searchTimeout = setTimeout(() => searchGames(q), 300);
-    });
-
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('.autocomplete-wrap')) {
-        document.getElementById('gameResults').classList.remove('open');
-      }
-    });
-
-    async function searchGames(q) {
-      const res = await fetch('/api/games/search?q=' + encodeURIComponent(q));
-      const games = await res.json();
-      const results = document.getElementById('gameResults');
-      results.innerHTML = '';
-      if (!games.length) {
-        results.innerHTML = '<div class="autocomplete-item" style="color:var(--text-tertiary)">No games found</div>';
-      } else {
-        games.forEach(game => {
-          const item = document.createElement('div');
-          item.className = 'autocomplete-item';
-          item.innerHTML = '<div><div class="autocomplete-item-title">' + game.title + '</div></div>';
-          item.addEventListener('click', () => {
-            document.getElementById('gameSearch').value = game.title;
-            document.getElementById('gameId').value = game.id;
-            results.classList.remove('open');
-          });
-          results.appendChild(item);
-        });
-      }
-      results.classList.add('open');
+  async function searchGames(q) {
+    const res = await fetch('/api/games/search?q=' + encodeURIComponent(q))
+    const games = await res.json()
+    const results = document.getElementById('gameResults')
+    results.innerHTML = ''
+    if (!games.length) {
+      results.innerHTML = '<div class="autocomplete-item" style="color:var(--text-tertiary)">No games found</div>'
+    } else {
+      games.forEach(game => {
+        const item = document.createElement('div')
+        item.className = 'autocomplete-item'
+        item.innerHTML = '<div><div class="autocomplete-item-title">' + game.title + '</div></div>'
+        item.addEventListener('click', () => {
+          document.getElementById('gameSearch').value = game.title
+          document.getElementById('gameId').value = game.id
+          results.classList.remove('open')
+        })
+        results.appendChild(item)
+      })
     }
+    results.classList.add('open')
+  }
 
-    // Submit
-    document.getElementById('submitReview').addEventListener('click', async () => {
-      const gameId = document.getElementById('gameId').value;
-      const score = document.getElementById('scoreVal').value;
-      const title = document.getElementById('reviewTitle').value.trim();
-      const body = document.getElementById('reviewBody').value.trim();
-      const platformId = document.getElementById('platformSelect').value;
-      const hours = document.getElementById('hoursPlayed').value;
-      const spoilers = document.getElementById('spoilerCheck').checked;
-      const errorEl = document.getElementById('composerError');
+  // Submit review
+  document.getElementById('submitReview').addEventListener('click', async () => {
+    const gameId = document.getElementById('gameId').value
+    const score = document.getElementById('scoreVal').value
+    const title = document.getElementById('reviewTitle').value.trim()
+    const body = document.getElementById('reviewBody').value.trim()
+    const platformId = document.getElementById('platformSelect').value
+    const hours = document.getElementById('hoursPlayed').value
+    const spoilers = document.getElementById('spoilerCheck').checked
+    const errorEl = document.getElementById('composerError')
 
-      errorEl.textContent = '';
-      if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
-      if (!score) { errorEl.textContent = 'Please select a score.'; return; }
-      if (!title) { errorEl.textContent = 'Please add a title.'; return; }
-      if (!body) { errorEl.textContent = 'Please write a review.'; return; }
+    errorEl.textContent = ''
+    if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
+    if (!score) { errorEl.textContent = 'Please select a score.'; return; }
+    if (!title) { errorEl.textContent = 'Please add a title.'; return; }
+    if (!body) { errorEl.textContent = 'Please write a review.'; return; }
 
-      const btn = document.getElementById('submitReview');
-      btn.disabled = true;
-      btn.textContent = 'Posting...';
+    const btn = document.getElementById('submitReview')
+    btn.disabled = true
+    btn.textContent = 'Posting...'
 
-      const res = await fetch('/api/reviews/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          game_id: gameId,
-          score: parseInt(score),
-          title,
-          body,
-          platform_played_on: platformId || null,
-          play_time_hours: hours ? parseInt(hours) : null,
-          contains_spoilers: spoilers,
-        }),
-      });
+    const res = await fetch('/api/reviews/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        game_id: gameId,
+        score: parseInt(score),
+        title,
+        body,
+        platform_played_on: platformId || null,
+        play_time_hours: hours ? parseInt(hours) : null,
+        contains_spoilers: spoilers,
+      }),
+    })
 
-      const data = await res.json();
-      if (!res.ok) {
-        errorEl.textContent = data.error ?? 'Something went wrong.';
-        btn.disabled = false;
-        btn.textContent = 'Post review';
-      } else {
-        document.getElementById('composer').style.display = 'none';
-        resetComposer();
-        window.location.reload();
-      }
-    });
-  </script>
+    const data = await res.json()
+    if (!res.ok) {
+      errorEl.textContent = data.error ?? 'Something went wrong.'
+      btn.disabled = false
+      btn.textContent = 'Post review'
+    } else {
+      document.getElementById('composer').style.display = 'none'
+      resetComposer()
+      window.location.reload()
+    }
+  })
+</script>
 </body>
 </html>
