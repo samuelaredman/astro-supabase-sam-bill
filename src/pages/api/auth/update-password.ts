@@ -1,8 +1,9 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClient } from "../../../utils/database";
+import { createSupabaseServerClientFromContext } from "../../../utils/database";
 
-export const POST: APIRoute = async ({ request }) => {
-  const { password } = await request.json();
+export const POST: APIRoute = async (context) => {
+  const supabase = createSupabaseServerClientFromContext(context);
+  const { email } = await context.request.json();
 
   if (!password) {
     return new Response(JSON.stringify({ error: "Password is required." }), {
