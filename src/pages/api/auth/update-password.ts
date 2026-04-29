@@ -3,7 +3,7 @@ import { createSupabaseServerClientFromContext } from "../../../utils/database";
 
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
-  const { email } = await context.request.json();
+  const { password } = await context.request.json();
 
   if (!password) {
     return new Response(JSON.stringify({ error: "Password is required." }), {
@@ -11,9 +11,6 @@ export const POST: APIRoute = async (context) => {
       headers: { "Content-Type": "application/json" },
     });
   }
-
-  const response = new Response();
-  const supabase = createSupabaseServerClient(request, response);
 
   const { error } = await supabase.auth.updateUser({ password });
 
