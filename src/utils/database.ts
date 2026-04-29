@@ -32,3 +32,25 @@ export function createSupabaseServerClient(request: Request, response: Response)
     }
   );
 }
+
+export function createSupabaseServerClientFromContext(context: { request: Request; cookies: any }) {
+  return createServerClient(
+    import.meta.env.SUPABASE_DATABASE_URL,
+    import.meta.env.SUPABASE_ANON_KEY,
+    {
+      cookies: {
+        getAll() {
+          return parseCookieHeader(context.request.headers.get('Cookie') ?? '')
+            .filter((cookie): cookie is { name: string; value: string } =>
+              cookie.value !== undefined
+            );
+        },
+        setAll(cookiesToSet: { name: string; value: string; options: Record<string, any> }[]) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            context.cookies.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
+}
