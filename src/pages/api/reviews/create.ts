@@ -43,5 +43,5 @@ export const POST: APIRoute = async (context) => {
       score,
       title,
       body: reviewBody,
-      platform_played_on: pl
+      platform_played_on: platform
     }
