@@ -1,10 +1,9 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClient } from "../../../utils/database";
+import { createSupabaseServerClientFromContext } from "../../../utils/database";
 
-export const POST: APIRoute = async ({ request }) => {
-  const response = new Response();
-  const supabase = createSupabaseServerClient(request, response);
-  const { email } = await request.json();
+export const POST: APIRoute = async (context) => {
+  const supabase = createSupabaseServerClientFromContext(context);
+  const { email } = await context.request.json();
 
   if (!email) {
     return new Response(JSON.stringify({ error: "Email is required." }), {
@@ -13,11 +12,11 @@ export const POST: APIRoute = async ({ request }) => {
     });
   }
 
-const siteUrl = import.meta.env.SITE_URL ?? "https://greview.netlify.app";
-  
+  const siteUrl = import.meta.env.SITE_URL ?? "https://greview.netlify.app";
+
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
-  redirectTo: `${siteUrl}/reset-password-confirm`,
-});
+    redirectTo: `${siteUrl}/reset-password-confirm`,
+  });
 
   if (error) {
     return new Response(JSON.stringify({ error: error.message }), {
