@@ -43,5 +43,9 @@ export const POST: APIRoute = async (context) => {
       score,
       title,
       body: reviewBody,
-      platform_played_on: platform
+      platform_played_on: platform_played_on || null,
+      play_time_hours: play_time_hours || null,
+      contains_spoilers: contains_spoilers ?? false,
+      status: "published",
+      published_at: new Date().toISOString(),
     }
