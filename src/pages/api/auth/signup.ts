@@ -3,7 +3,7 @@ import { createSupabaseServerClientFromContext } from "../../../utils/database";
 
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
-  const { email } = await context.request.json();
+  const { email, password, username } = await context.request.json();
 
   if (!email || !password || !username) {
     return new Response(JSON.stringify({ error: "All fields are required." }), {
@@ -25,8 +25,8 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  const headers = new Headers({ "Content-Type": "application/json" });
-  response.headers.forEach((value, key) => { headers.append(key, value); });
-
-  return new Response(JSON.stringify({ success: true }), { status: 200, headers });
+  return new Response(JSON.stringify({ success: true }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
 };
