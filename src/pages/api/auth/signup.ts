@@ -1,10 +1,9 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClient } from "../../../utils/database";
+import { createSupabaseServerClientFromContext } from "../../../utils/database";
 
-export const POST: APIRoute = async ({ request }) => {
-  const response = new Response();
-  const supabase = createSupabaseServerClient(request, response);
-  const { email, password, username } = await request.json();
+export const POST: APIRoute = async (context) => {
+  const supabase = createSupabaseServerClientFromContext(context);
+  const { email } = await context.request.json();
 
   if (!email || !password || !username) {
     return new Response(JSON.stringify({ error: "All fields are required." }), {
