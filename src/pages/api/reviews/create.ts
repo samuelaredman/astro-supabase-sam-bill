@@ -35,7 +35,7 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  const { error: insertError } = await (supabase as any)
+const { error: insertError } = await (supabase as any)
     .from("reviews")
     .insert({
       profile_id: profile.id,
@@ -49,3 +49,16 @@ export const POST: APIRoute = async (context) => {
       status: "published",
       published_at: new Date().toISOString(),
     });
+
+  if (insertError) {
+    return new Response(JSON.stringify({ error: insertError.message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  return new Response(JSON.stringify({ success: true }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+};
