@@ -48,4 +48,4 @@ export const POST: APIRoute = async (context) => {
       contains_spoilers: contains_spoilers ?? false,
       status: "published",
       published_at: new Date().toISOString(),
-    }
+    });
