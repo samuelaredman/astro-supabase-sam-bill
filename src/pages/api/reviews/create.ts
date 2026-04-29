@@ -4,8 +4,8 @@ import { createSupabaseServerClientFromContext } from "../../../utils/database";
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
 
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
     return new Response(JSON.stringify({ error: "You must be signed in to post a review." }), {
       status: 401,
       headers: { "Content-Type": "application/json" },
@@ -15,7 +15,7 @@ export const POST: APIRoute = async (context) => {
   const { data: profile, error: profileError } = await (supabase as any)
     .from("profiles")
     .select("id")
-    .eq("auth_user_id", session.user.id)
+    .eq("auth_user_id", user.id)
     .single();
 
   if (profileError || !profile) {
