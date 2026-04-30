@@ -64,13 +64,11 @@ if (Astro.request.method === 'POST') {
       const { data: genreRow } = await supabase.from('genres').select('id').eq('igdb_id', genre.id).single()
       if (genreRow) await supabase.from('game_genres').upsert({ game_id: inserted.id, genre_id: genreRow.id }, { onConflict: 'game_id,genre_id' })
     }
-
     for (const platform of igdbGame.platforms ?? []) {
       await supabase.from('platforms').upsert({ igdb_id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'igdb_id' })
       const { data: platformRow } = await supabase.from('platforms').select('id').eq('igdb_id', platform.id).single()
       if (platformRow) await supabase.from('game_platforms').upsert({ game_id: inserted.id, platform_id: platformRow.id }, { onConflict: 'game_id,platform_id' })
     }
-
     for (const ic of igdbGame.involved_companies ?? []) {
       if (!ic.company) continue
       await supabase.from('developers').upsert({ igdb_id: ic.company.id, name: ic.company.name, slug: ic.company.slug }, { onConflict: 'igdb_id' })
@@ -88,82 +86,125 @@ if (Astro.request.method === 'POST') {
 const { data: genres } = await supabase.from('genres').select('id, name').order('name')
 const { data: platforms } = await supabase.from('platforms').select('id, name, slug').order('name')
 
-if (query.length > 1) {
-  // Use Postgres trigram + FTS search via RPC for accurate title-only matching
-  const rpcParams: any = {
-    search_query: query,
-    result_limit: 20
-  }
-  if (genreFilter) rpcParams.genre_id = genreFilter
-  if (platformFilter) rpcParams.platform_id = platformFilter
-
-  const [rpcRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
-    supabase.rpc('search_games', rpcParams),
-    supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
-    supabase.from('companies').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
-    igdbFetch('games', `fields id, name, slug, cover.url; search "${query}"; limit 8;`)
-  ])
-
-  let rawGameIds = (rpcRes.data ?? []).map((g: any) => g.id)
-
-  // if RPC returned results, fetch full game data with relationships
+if (tab === 'games') {
   let rawGames: any[] = []
-  if (rawGameIds.length > 0) {
-    const { data: fullGames } = await supabase
-      .from('games')
-      .select(`
-        id, title, slug, cover_img_url, date_released,
-        game_genres(genres(id, name)),
-        game_platforms(platforms(id, name)),
-        reviews!reviews_game_id_fkey(score, play_time_hours)
-      `)
-      .in('id', rawGameIds)
 
-    // preserve RPC score order
-    const orderMap = new Map<string, number>(rawGameIds.map((id: string, i: number) => [id, i]))
-    rawGames = (fullGames ?? []).sort((a: any, b: any) =>
-      (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
-    )
-  }
+  if (query.length > 1) {
+    // search mode — trigram + FTS via RPC
+    const rpcParams: any = { search_query: query, result_limit: 20 }
+    if (genreFilter) rpcParams.genre_id = genreFilter
+    if (platformFilter) rpcParams.platform_id = platformFilter
 
-  // if trigram/FTS found nothing, fall back to simple ilike on title
-  if (rawGames.length === 0) {
-    let fallbackQuery = supabase
-      .from('games')
-      .select(`
-        id, title, slug, cover_img_url, date_released,
-        game_genres(genres(id, name)),
-        game_platforms(platforms(id, name)),
-        reviews!reviews_game_id_fkey(score, play_time_hours)
-      `)
-      .ilike('title', `%${query}%`)
-      .limit(12)
+    const [rpcRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
+      supabase.rpc('search_games', rpcParams),
+      supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
+      supabase.from('companies').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
+      igdbFetch('games', `fields id, name, slug, cover.url; search "${query}"; limit 8;`)
+    ])
 
-    // apply filters manually for fallback
+    const rawGameIds = (rpcRes.data ?? []).map((g: any) => g.id)
+
+    if (rawGameIds.length > 0) {
+      const { data: fullGames } = await supabase
+        .from('games')
+        .select(`
+          id, title, slug, cover_img_url, date_released,
+          game_genres(genres(id, name)),
+          game_platforms(platforms(id, name)),
+          reviews!reviews_game_id_fkey(score, play_time_hours)
+        `)
+        .in('id', rawGameIds)
+
+      const orderMap = new Map<string, number>(rawGameIds.map((id: string, i: number) => [id, i]))
+      rawGames = (fullGames ?? []).sort((a: any, b: any) =>
+        (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
+      )
+    }
+
+    // ilike fallback
+    if (rawGames.length === 0) {
+      let fallbackQuery = supabase
+        .from('games')
+        .select(`
+          id, title, slug, cover_img_url, date_released,
+          game_genres(genres(id, name)),
+          game_platforms(platforms(id, name)),
+          reviews!reviews_game_id_fkey(score, play_time_hours)
+        `)
+        .ilike('title', `%${query}%`)
+        .limit(24)
+
+      if (genreFilter || platformFilter) {
+        const filterIds: string[] = []
+        if (genreFilter) {
+          const { data: gRows } = await supabase.from('game_genres').select('game_id').eq('genre_id', genreFilter)
+          filterIds.push(...(gRows ?? []).map((r: any) => r.game_id))
+        }
+        if (platformFilter) {
+          const { data: pRows } = await supabase.from('game_platforms').select('game_id').eq('platform_id', platformFilter)
+          const pIds = (pRows ?? []).map((r: any) => r.game_id)
+          if (filterIds.length > 0) {
+            const intersection = filterIds.filter(id => pIds.includes(id))
+            filterIds.length = 0
+            filterIds.push(...intersection)
+          } else {
+            filterIds.push(...pIds)
+          }
+        }
+        if (filterIds.length > 0) fallbackQuery = fallbackQuery.in('id', filterIds)
+      }
+
+      const { data: fallback } = await fallbackQuery
+      rawGames = fallback ?? []
+    }
+
+    profiles = profilesRes.data ?? []
+    companies = companiesRes.data ?? []
+    const existingIds = new Set(rawGames.map((g: any) => g.id))
+    igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.igdb_id) && !existingIds.has(g.id))
+
+  } else {
+    // browse mode — no query, filter by genre/platform and show most reviewed
+    let filteredIds: string[] | null = null
+
     if (genreFilter || platformFilter) {
-      const filterIds: string[] = []
+      let genreIds: string[] | null = null
+      let platformIds: string[] | null = null
+
       if (genreFilter) {
         const { data: gRows } = await supabase.from('game_genres').select('game_id').eq('genre_id', genreFilter)
-        filterIds.push(...(gRows ?? []).map((r: any) => r.game_id))
+        genreIds = (gRows ?? []).map((r: any) => r.game_id)
       }
       if (platformFilter) {
         const { data: pRows } = await supabase.from('game_platforms').select('game_id').eq('platform_id', platformFilter)
-        const pIds = (pRows ?? []).map((r: any) => r.game_id)
-        if (filterIds.length > 0) {
-          const intersection = filterIds.filter(id => pIds.includes(id))
-          filterIds.length = 0
-          filterIds.push(...intersection)
-        } else {
-          filterIds.push(...pIds)
-        }
+        platformIds = (pRows ?? []).map((r: any) => r.game_id)
       }
-      if (filterIds.length > 0) {
-        fallbackQuery = fallbackQuery.in('id', filterIds)
+
+      if (genreIds && platformIds) {
+        filteredIds = genreIds.filter(id => platformIds!.includes(id))
+      } else {
+        filteredIds = genreIds ?? platformIds ?? []
       }
     }
 
-    const { data: fallback } = await fallbackQuery
-    rawGames = fallback ?? []
+    let browseQuery = supabase
+      .from('games')
+      .select(`
+        id, title, slug, cover_img_url, date_released,
+        game_genres(genres(id, name)),
+        game_platforms(platforms(id, name)),
+        reviews!reviews_game_id_fkey(score, play_time_hours)
+      `)
+      .limit(48)
+
+    if (filteredIds !== null) {
+      browseQuery = browseQuery.in('id',
+        filteredIds.length > 0 ? filteredIds : ['00000000-0000-0000-0000-000000000000']
+      )
+    }
+
+    const { data: browseGames } = await browseQuery
+    rawGames = browseGames ?? []
   }
 
   let gamesRaw = rawGames.map((game: any) => {
@@ -184,13 +225,19 @@ if (query.length > 1) {
   else if (sortBy === 'most_played') gamesRaw.sort((a: any, b: any) => b.total_hours - a.total_hours)
   else if (sortBy === 'newest') gamesRaw.sort((a: any, b: any) => new Date(b.date_released ?? 0).getTime() - new Date(a.date_released ?? 0).getTime())
   else if (sortBy === 'oldest') gamesRaw.sort((a: any, b: any) => new Date(a.date_released ?? 0).getTime() - new Date(b.date_released ?? 0).getTime())
+  else gamesRaw.sort((a: any, b: any) => b.review_count - a.review_count) // default: most reviewed
 
   games = gamesRaw
-  profiles = profilesRes.data ?? []
-  companies = companiesRes.data ?? []
+}
 
-  const existingIds = new Set(games.map((g: any) => g.id))
-  igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.igdb_id) && !existingIds.has(g.id))
+if (tab === 'reviewers' && query.length > 1) {
+  const { data } = await supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6)
+  profiles = data ?? []
+}
+
+if (tab === 'studios' && query.length > 1) {
+  const { data } = await supabase.from('companies').select('id, name, slug').ilike('name', `%${query}%`).limit(6)
+  companies = data ?? []
 }
 
 function igdbImage(url: string | null, size = 't_cover_big') {
@@ -216,7 +263,6 @@ function scoreClass(score: number | null) {
   return 'score-low'
 }
 
-// sidebar genre list
 const genreOrder = [
   'Puzzle','Adventure','Shooter','Role-playing (RPG)','Simulator',
   'Sport','MOBA','Racing','Strategy','Real Time Strategy (RTS)',
@@ -232,23 +278,18 @@ const sidebarGenres = (genres ?? [])
     return ai - bi
   })
 
-// sidebar platform list
 const platformOrder = ['android','ios','win','switch','ps5','series-x-s','switch-2','ps4--1','linux','meta-quest-3']
 const platformLabels: { [key: string]: string } = {
-  'win': 'PC / Steam',
-  'linux': 'Steam Deck',
-  'meta-quest-3': 'Meta Quest 3',
-  'switch-2': 'Nintendo Switch 2',
-  'series-x-s': 'Xbox Series X|S',
-  'ps4--1': 'PlayStation 4',
-  'ps5': 'PlayStation 5',
-  'switch': 'Nintendo Switch',
-  'android': 'Android',
-  'ios': 'iOS',
+  'win': 'PC / Steam', 'linux': 'Steam Deck', 'meta-quest-3': 'Meta Quest 3',
+  'switch-2': 'Nintendo Switch 2', 'series-x-s': 'Xbox Series X|S',
+  'ps4--1': 'PlayStation 4', 'ps5': 'PlayStation 5',
+  'switch': 'Nintendo Switch', 'android': 'Android', 'ios': 'iOS',
 }
 const sidebarPlatforms = platformOrder
   .map(slug => (platforms ?? []).find((p: any) => p.slug === slug))
   .filter(Boolean)
+
+const isBrowseMode = tab === 'games' && !query
 ---
 
 <!DOCTYPE html>
@@ -256,7 +297,7 @@ const sidebarPlatforms = platformOrder
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>{query ? `Search: ${query}` : 'Search'} — Cartridge</title>
+  <title>{query ? `Search: ${query}` : 'Browse Games'} — Cartridge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
@@ -327,10 +368,11 @@ const sidebarPlatforms = platformOrder
     .clear-link:hover { color: var(--text-primary); }
 
     .results { padding: 20px; }
+    .results-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+    .results-title { font-family: 'DM Serif Display', serif; font-size: 20px; letter-spacing: -0.3px; }
+    .results-count { font-size: 12px; color: var(--text-tertiary); }
     .section-title { font-size: 13px; font-weight: 500; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; margin-top: 24px; }
     .section-title:first-child { margin-top: 0; }
-    .sort-indicator { font-size: 12px; color: var(--text-tertiary); margin-bottom: 12px; }
-    .sort-indicator strong { color: var(--text-secondary); }
 
     .game-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; margin-bottom: 8px; }
     .game-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; transition: box-shadow 0.15s, transform 0.15s; cursor: pointer; display: block; }
@@ -396,21 +438,9 @@ const sidebarPlatforms = platformOrder
       <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
       Home
     </a>
-    <a href="/explore" class="nav-item">
-      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="7"/><path d="M12 6L9.5 9.5L6 12L8.5 8.5L12 6Z"/></svg></span>
-      Explore
-    </a>
-    <a href="/games" class="nav-item">
-      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="2"/><path d="M6 9H8M7 8V10M11 9H11.01M12.5 9H12.51"/></svg></span>
-      Games
-    </a>
     <a href="/search" class="nav-item active">
       <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
       Search
-    </a>
-    <a href="/reviews" class="nav-item">
-      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h12M3 8h8M3 12h5"/></svg></span>
-      Reviews
     </a>
     <div class="nav-divider"></div>
     <a href="/profile" class="nav-item">
@@ -457,46 +487,28 @@ const sidebarPlatforms = platformOrder
         <form method="GET" class="filters">
           <input type="hidden" name="q" value={query} />
           <input type="hidden" name="tab" value="games" />
-          <select
-            name="genre"
-            class={`filter-select ${genreFilter ? 'active' : ''}`}
-            onchange="this.form.submit()"
-          >
+          <select name="genre" class={`filter-select ${genreFilter ? 'active' : ''}`} onchange="this.form.submit()">
             <option value="">All genres</option>
             {(genres ?? []).map((g: any) => (
-              <option value={g.id} selected={genreFilter === String(g.id)}>
-                {g.name}
-              </option>
+              <option value={g.id} selected={genreFilter === String(g.id)}>{g.name}</option>
             ))}
           </select>
-          <select
-            name="platform"
-            class={`filter-select ${platformFilter ? 'active' : ''}`}
-            onchange="this.form.submit()"
-          >
+          <select name="platform" class={`filter-select ${platformFilter ? 'active' : ''}`} onchange="this.form.submit()">
             <option value="">All platforms</option>
             {(platforms ?? []).map((p: any) => (
-              <option value={p.id} selected={platformFilter === String(p.id)}>
-                {p.name}
-              </option>
+              <option value={p.id} selected={platformFilter === String(p.id)}>{p.name}</option>
             ))}
           </select>
-          <select
-            name="sort"
-            class="filter-select"
-            onchange="this.form.submit()"
-          >
-            <option value="relevant" selected={sortBy === 'relevant'}>Most relevant</option>
-            <option value="newest" selected={sortBy === 'newest'}>Newest first</option>
-            <option value="oldest" selected={sortBy === 'oldest'}>Oldest first</option>
+          <select name="sort" class="filter-select" onchange="this.form.submit()">
+            <option value="relevant" selected={sortBy === 'relevant'}>Most reviewed</option>
             <option value="highest" selected={sortBy === 'highest'}>Highest rated</option>
             <option value="lowest" selected={sortBy === 'lowest'}>Lowest rated</option>
             <option value="most_played" selected={sortBy === 'most_played'}>Most played</option>
+            <option value="newest" selected={sortBy === 'newest'}>Newest first</option>
+            <option value="oldest" selected={sortBy === 'oldest'}>Oldest first</option>
           </select>
           {(genreFilter || platformFilter) && (
-            <a href={`/search?q=${encodeURIComponent(query)}&tab=games`} class="clear-link">
-              Clear filters ✕
-            </a>
+            <a href={`/search?q=${encodeURIComponent(query)}&tab=games`} class="clear-link">Clear filters ✕</a>
           )}
         </form>
       )}
@@ -527,69 +539,58 @@ const sidebarPlatforms = platformOrder
 
     <div class="results">
 
-      {!query && (
-        <div class="empty-state">
-          <div class="empty-title">Search Cartridge</div>
-          <div class="empty-sub">Find games, reviewers, and studios.</div>
-        </div>
-      )}
-
-      {query && tab === 'games' && (
+      {tab === 'games' && (
         <div>
-          {games.length > 0 && (
-            <div class="sort-indicator">
-              Showing <strong>{games.length} result{games.length !== 1 ? 's' : ''}</strong> sorted by <strong>
-                {sortBy === 'relevant' ? 'Most relevant' :
-                 sortBy === 'newest' ? 'Newest first' :
-                 sortBy === 'oldest' ? 'Oldest first' :
-                 sortBy === 'highest' ? 'Highest rated' :
-                 sortBy === 'lowest' ? 'Lowest rated' :
-                 'Most played'}
-              </strong>
-            </div>
-          )}
+          <div class="results-header">
+            <span class="results-title">
+              {query
+                ? `Results for "${query}"`
+                : genreFilter || platformFilter
+                ? 'Filtered games'
+                : 'All games'
+              }
+            </span>
+            <span class="results-count">{games.length} game{games.length !== 1 ? 's' : ''}</span>
+          </div>
 
           {games.length > 0 && (
-            <div>
-              <div class="section-title">Games</div>
-              <div class="game-grid">
-                {games.map((game: any) => (
-                  <a href={`/games/${game.slug}`} class="game-card">
-                    <div class="game-cover">
-                      {game.cover_img_url
-                        ? <img src={igdbImage(game.cover_img_url)} alt={game.title} loading="lazy" />
-                        : '🎮'
-                      }
-                    </div>
-                    <div class="game-card-info">
-                      <div class="game-card-title">{game.title}</div>
-                      <div class="game-card-meta">
-                        <span class="game-card-year">{getYear(game.date_released)}</span>
-                        {game.avg_score != null && (
-                          <span class={`score-pill ${scoreClass(game.avg_score)}`}>
-                            ★ {game.avg_score.toFixed(1)}
-                          </span>
-                        )}
-                      </div>
-                      {game.review_count > 0 && (
-                        <div class="game-card-stats">
-                          {game.review_count} review{game.review_count !== 1 ? 's' : ''}
-                          {game.total_hours > 0 ? ` · ${game.total_hours.toLocaleString()}h played` : ''}
-                        </div>
+            <div class="game-grid">
+              {games.map((game: any) => (
+                <a href={`/games/${game.slug}`} class="game-card">
+                  <div class="game-cover">
+                    {game.cover_img_url
+                      ? <img src={igdbImage(game.cover_img_url)} alt={game.title} loading="lazy" />
+                      : '🎮'
+                    }
+                  </div>
+                  <div class="game-card-info">
+                    <div class="game-card-title">{game.title}</div>
+                    <div class="game-card-meta">
+                      <span class="game-card-year">{getYear(game.date_released)}</span>
+                      {game.avg_score != null && (
+                        <span class={`score-pill ${scoreClass(game.avg_score)}`}>
+                          ★ {game.avg_score.toFixed(1)}
+                        </span>
                       )}
-                      <div class="game-card-tags">
-                        {(game.game_genres ?? []).slice(0, 2).map((gg: any) => (
-                          <span class="tag">{gg.genres?.name}</span>
-                        ))}
-                      </div>
                     </div>
-                  </a>
-                ))}
-              </div>
+                    {game.review_count > 0 && (
+                      <div class="game-card-stats">
+                        {game.review_count} review{game.review_count !== 1 ? 's' : ''}
+                        {game.total_hours > 0 ? ` · ${game.total_hours.toLocaleString()}h played` : ''}
+                      </div>
+                    )}
+                    <div class="game-card-tags">
+                      {(game.game_genres ?? []).slice(0, 2).map((gg: any) => (
+                        <span class="tag">{gg.genres?.name}</span>
+                      ))}
+                    </div>
+                  </div>
+                </a>
+              ))}
             </div>
           )}
 
-          {igdbGames.length > 0 && (
+          {query && igdbGames.length > 0 && (
             <div>
               <div class="section-title" style="margin-top:28px">More from IGDB</div>
               <span class="igdb-label">Not yet in Cartridge — click to add</span>
@@ -617,19 +618,24 @@ const sidebarPlatforms = platformOrder
             </div>
           )}
 
-          {games.length === 0 && igdbGames.length === 0 && (
+          {games.length === 0 && (genreFilter || platformFilter) && (
             <div class="empty-state">
               <div class="empty-title">No games found</div>
-              <div class="empty-sub">Try a different search term or adjust your filters.</div>
+              <div class="empty-sub">Try different filters.</div>
             </div>
           )}
         </div>
       )}
 
-      {query && tab === 'reviewers' && (
+      {tab === 'reviewers' && (
         <div>
           <div class="section-title">Reviewers</div>
-          {profiles.length === 0 ? (
+          {!query ? (
+            <div class="empty-state">
+              <div class="empty-title">Search for reviewers</div>
+              <div class="empty-sub">Enter a username above to find reviewers.</div>
+            </div>
+          ) : profiles.length === 0 ? (
             <div class="empty-state">
               <div class="empty-title">No reviewers found</div>
               <div class="empty-sub">Try a different search term.</div>
@@ -655,10 +661,15 @@ const sidebarPlatforms = platformOrder
         </div>
       )}
 
-      {query && tab === 'studios' && (
+      {tab === 'studios' && (
         <div>
           <div class="section-title">Studios</div>
-          {companies.length === 0 ? (
+          {!query ? (
+            <div class="empty-state">
+              <div class="empty-title">Search for studios</div>
+              <div class="empty-sub">Enter a studio name above to find developers and publishers.</div>
+            </div>
+          ) : companies.length === 0 ? (
             <div class="empty-state">
               <div class="empty-title">No studios found</div>
               <div class="empty-sub">Try a different search term.</div>
@@ -715,6 +726,7 @@ const sidebarPlatforms = platformOrder
       <div class="widget-title">Quick sort</div>
       <div class="genre-chip-list">
         {[
+          { val: 'relevant', label: '🔥 Most reviewed' },
           { val: 'highest', label: '⭐ Highest rated' },
           { val: 'lowest', label: '📉 Lowest rated' },
           { val: 'most_played', label: '🕹️ Most played' },
