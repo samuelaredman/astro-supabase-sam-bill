@@ -1,9 +1,12 @@
 ---
 export const prerender = false;
-import { getSupabase } from '../../utils/database';
-const supabase = getSupabase();
+import { createSupabaseServerClientFromContext } from '../../utils/database';
 
+const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
+
+// Get current session
+const { data: { user } } = await supabase.auth.getUser();
 
 const { data: reviewer } = await (supabase as any)
   .from('profiles')
@@ -13,9 +16,7 @@ const { data: reviewer } = await (supabase as any)
       id, score, title, body, published_at, created_at,
       contains_spoilers, play_time_hours, status,
       played_on:platform_played_on ( id, name, slug ),
-      games ( id, title, slug, cover_img_url,
-        developers:developer_id ( name )
-      )
+      games ( id, title, slug, cover_img_url )
     )
   `)
   .eq('username', username)
@@ -38,6 +39,45 @@ const memberSince = reviewer.created_at
   ? new Date(reviewer.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
   : null;
 
+// Follower/following counts
+const { count: followerCount } = await (supabase as any)
+  .from('follows')
+  .select('*', { count: 'exact', head: true })
+  .eq('following_id', reviewer.id);
+
+const { count: followingCount } = await (supabase as any)
+  .from('follows')
+  .select('*', { count: 'exact', head: true })
+  .eq('follower_id', reviewer.id);
+
+// Get logged-in user's profile so we can check follow state and hide button on own profile
+let currentProfile: any = null;
+let isFollowing = false;
+let isOwnProfile = false;
+
+if (user) {
+  const { data: cp } = await (supabase as any)
+    .from('profiles')
+    .select('id')
+    .eq('auth_user_id', user.id)
+    .single();
+  currentProfile = cp;
+
+  if (currentProfile) {
+    isOwnProfile = currentProfile.id === reviewer.id;
+
+    if (!isOwnProfile) {
+      const { data: followRow } = await (supabase as any)
+        .from('follows')
+        .select('id')
+        .eq('follower_id', currentProfile.id)
+        .eq('following_id', reviewer.id)
+        .single();
+      isFollowing = !!followRow;
+    }
+  }
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (diff < 60) return `${diff}s`;
@@ -56,16 +96,6 @@ function scoreColor(score: number): string {
 function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase();
 }
-
-const { count: followerCount } = await (supabase as any)
-  .from('follows')
-  .select('*', { count: 'exact', head: true })
-  .eq('following_id', reviewer.id);
-
-const { count: followingCount } = await (supabase as any)
-  .from('follows')
-  .select('*', { count: 'exact', head: true })
-  .eq('follower_id', reviewer.id);
 ---
 
 <!DOCTYPE html>
@@ -81,318 +111,90 @@ const { count: followingCount } = await (supabase as any)
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
   <style>
     :root[data-theme="light"] {
-      --bg: #f9f8f6;
-      --bg-card: #ffffff;
-      --bg-hover: #f4f3f0;
-      --border: #e8e6e1;
-      --border-subtle: #f0ede8;
-      --text-primary: #141412;
-      --text-secondary: #6b6860;
-      --text-tertiary: #a09d98;
-      --accent: #141412;
-      --accent-text: #ffffff;
+      --bg: #f9f8f6; --bg-card: #ffffff; --bg-hover: #f4f3f0;
+      --border: #e8e6e1; --border-subtle: #f0ede8;
+      --text-primary: #141412; --text-secondary: #6b6860; --text-tertiary: #a09d98;
+      --accent: #141412; --accent-text: #ffffff;
       --score-great: #1a6b3c; --score-great-bg: #eaf5ee;
-      --score-good: #1a4a6b;  --score-good-bg: #eaf0f5;
-      --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
-      --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
+      --score-good: #1a4a6b; --score-good-bg: #eaf0f5;
+      --score-mid: #6b5a1a; --score-mid-bg: #f5f0ea;
+      --score-low: #6b1a1a; --score-low-bg: #f5eaea;
       --tag-bg: #f0ede8; --tag-text: #6b6860;
-      --shadow: 0 1px 3px rgba(0,0,0,0.06);
-      --shadow-md: 0 4px 16px rgba(0,0,0,0.1);
+      --shadow: 0 1px 3px rgba(0,0,0,0.06); --shadow-md: 0 4px 16px rgba(0,0,0,0.1);
     }
     :root[data-theme="dark"] {
-      --bg: #0f0f0e;
-      --bg-card: #1a1a18;
-      --bg-hover: #222220;
-      --border: #2a2a27;
-      --border-subtle: #222220;
-      --text-primary: #f0ede8;
-      --text-secondary: #908d87;
-      --text-tertiary: #5a5855;
-      --accent: #f0ede8;
-      --accent-text: #141412;
+      --bg: #0f0f0e; --bg-card: #1a1a18; --bg-hover: #222220;
+      --border: #2a2a27; --border-subtle: #222220;
+      --text-primary: #f0ede8; --text-secondary: #908d87; --text-tertiary: #5a5855;
+      --accent: #f0ede8; --accent-text: #141412;
       --score-great: #4ade80; --score-great-bg: #0d2b1a;
-      --score-good: #60a5fa;  --score-good-bg: #0d1e2b;
-      --score-mid: #fbbf24;   --score-mid-bg: #2b1f0d;
-      --score-low: #f87171;   --score-low-bg: #2b0d0d;
+      --score-good: #60a5fa; --score-good-bg: #0d1e2b;
+      --score-mid: #fbbf24; --score-mid-bg: #2b1f0d;
+      --score-low: #f87171; --score-low-bg: #2b0d0d;
       --tag-bg: #2a2a27; --tag-text: #908d87;
-      --shadow: 0 1px 3px rgba(0,0,0,0.3);
-      --shadow-md: 0 4px 16px rgba(0,0,0,0.4);
+      --shadow: 0 1px 3px rgba(0,0,0,0.3); --shadow-md: 0 4px 16px rgba(0,0,0,0.4);
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      font-family: 'DM Sans', sans-serif;
-      background: var(--bg);
-      color: var(--text-primary);
-      min-height: 100vh;
-      -webkit-font-smoothing: antialiased;
-    }
-
+    body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text-primary); min-height: 100vh; -webkit-font-smoothing: antialiased; }
     a { color: inherit; text-decoration: none; }
 
-    /* ── Top nav ── */
-    .topnav {
-      position: sticky;
-      top: 0;
-      z-index: 20;
-      background: var(--bg-card);
-      border-bottom: 1px solid var(--border);
-      padding: 14px 24px;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      backdrop-filter: blur(8px);
-    }
-
-    .back-btn {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 14px;
-      color: var(--text-secondary);
-      transition: color 0.15s;
-    }
+    .topnav { position: sticky; top: 0; z-index: 20; background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: center; gap: 16px; backdrop-filter: blur(8px); }
+    .back-btn { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text-secondary); transition: color 0.15s; }
     .back-btn:hover { color: var(--text-primary); }
-
-    .logo {
-      font-family: 'DM Serif Display', serif;
-      font-size: 20px;
-      letter-spacing: -0.5px;
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      margin-left: auto;
-    }
+    .logo { font-family: 'DM Serif Display', serif; font-size: 20px; letter-spacing: -0.5px; display: flex; align-items: center; gap: 7px; margin-left: auto; }
     .logo-dot { width: 7px; height: 7px; background: var(--text-primary); border-radius: 50%; }
-
-    .theme-btn {
-      background: none; border: none; cursor: pointer;
-      color: var(--text-secondary); padding: 6px;
-      display: flex; align-items: center;
-      transition: color 0.15s;
-    }
+    .theme-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); padding: 6px; display: flex; align-items: center; transition: color 0.15s; }
     .theme-btn:hover { color: var(--text-primary); }
 
-    /* ── Page layout ── */
-    .page {
-      max-width: 860px;
-      margin: 0 auto;
-      padding: 40px 24px 80px;
-    }
+    .page { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; }
 
-    /* ── Profile hero ── */
-    .profile-hero {
-      display: flex;
-      gap: 28px;
-      align-items: flex-start;
-      margin-bottom: 40px;
-    }
-
+    .profile-hero { display: flex; gap: 28px; align-items: flex-start; margin-bottom: 40px; }
     .avatar-wrap { flex-shrink: 0; }
-
-    .avatar-lg {
-      width: 96px;
-      height: 96px;
-      border-radius: 50%;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: 'DM Serif Display', serif;
-      font-size: 32px;
-      color: var(--text-secondary);
-      overflow: hidden;
-      box-shadow: var(--shadow-md);
-    }
+    .avatar-lg { width: 96px; height: 96px; border-radius: 50%; background: var(--bg-card); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-family: 'DM Serif Display', serif; font-size: 32px; color: var(--text-secondary); overflow: hidden; box-shadow: var(--shadow-md); }
     .avatar-lg img { width: 100%; height: 100%; object-fit: cover; }
-
     .profile-meta { flex: 1; min-width: 0; padding-top: 6px; }
+    .profile-top-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+    .profile-username { font-family: 'DM Serif Display', serif; font-size: 30px; letter-spacing: -0.5px; }
+    .profile-bio { font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 14px; max-width: 500px; }
+    .profile-stats { display: flex; gap: 24px; flex-wrap: wrap; }
+    .stat-item { display: flex; flex-direction: column; gap: 2px; }
+    .stat-value { font-size: 20px; font-weight: 500; font-family: 'DM Serif Display', serif; letter-spacing: -0.3px; }
+    .stat-label { font-size: 12px; color: var(--text-tertiary); }
 
-    .profile-username {
-      font-family: 'DM Serif Display', serif;
-      font-size: 30px;
-      letter-spacing: -0.5px;
-      margin-bottom: 6px;
-    }
+    .follow-btn { flex-shrink: 0; padding: 8px 20px; border-radius: 20px; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: all 0.15s; border: 1px solid var(--accent); text-align: center; display: inline-block; }
+    .follow-btn.not-following { background: var(--accent); color: var(--accent-text); }
+    .follow-btn.not-following:hover { opacity: 0.85; }
+    .follow-btn.following { background: none; color: var(--text-secondary); border-color: var(--border); }
+    .follow-btn.following:hover { border-color: #c0392b; color: #c0392b; }
 
-    .profile-bio {
-      font-size: 14px;
-      color: var(--text-secondary);
-      line-height: 1.6;
-      margin-bottom: 14px;
-      max-width: 500px;
-    }
-
-    .profile-stats {
-      display: flex;
-      gap: 24px;
-      flex-wrap: wrap;
-    }
-
-    .stat-item {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-
-    .stat-value {
-      font-size: 20px;
-      font-weight: 500;
-      font-family: 'DM Serif Display', serif;
-      letter-spacing: -0.3px;
-    }
-
-    .stat-label {
-      font-size: 12px;
-      color: var(--text-tertiary);
-    }
-
-    /* ── Section header ── */
-    .section-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 16px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--border);
-    }
-
+    .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
     .section-title { font-size: 16px; font-weight: 500; }
     .section-count { font-size: 13px; color: var(--text-tertiary); }
 
-    /* ── Review cards ── */
     .reviews-list { display: flex; flex-direction: column; }
-
-    .review-card {
-      display: flex;
-      gap: 16px;
-      padding: 18px 0;
-      border-bottom: 1px solid var(--border-subtle);
-      transition: background 0.15s;
-    }
+    .review-card { display: flex; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--border-subtle); }
     .review-card:last-child { border-bottom: none; }
-
-    .game-cover {
-      flex-shrink: 0;
-      width: 44px;
-      height: 58px;
-      border-radius: 6px;
-      background: var(--tag-bg);
-      border: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 20px;
-      overflow: hidden;
-    }
+    .game-cover { flex-shrink: 0; width: 44px; height: 58px; border-radius: 6px; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 20px; overflow: hidden; }
     .game-cover img { width: 100%; height: 100%; object-fit: cover; }
-
     .review-content { flex: 1; min-width: 0; }
-
-    .review-game-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 6px;
-    }
-
-    .game-link {
-      font-size: 14px;
-      font-weight: 500;
-      transition: color 0.15s;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
+    .review-game-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+    .game-link { font-size: 14px; font-weight: 500; transition: color 0.15s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .game-link:hover { color: var(--text-secondary); }
-
-    .score-badge {
-      flex-shrink: 0;
-      width: 32px;
-      height: 32px;
-      border-radius: 7px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-      font-weight: 500;
-      font-family: 'DM Serif Display', serif;
-    }
-
+    .score-badge { flex-shrink: 0; width: 32px; height: 32px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 500; font-family: 'DM Serif Display', serif; }
     .score-great { color: var(--score-great); background: var(--score-great-bg); }
-    .score-good  { color: var(--score-good);  background: var(--score-good-bg);  }
-    .score-mid   { color: var(--score-mid);   background: var(--score-mid-bg);   }
-    .score-low   { color: var(--score-low);   background: var(--score-low-bg);   }
+    .score-good { color: var(--score-good); background: var(--score-good-bg); }
+    .score-mid { color: var(--score-mid); background: var(--score-mid-bg); }
+    .score-low { color: var(--score-low); background: var(--score-low-bg); }
+    .review-title-text { font-family: 'DM Serif Display', serif; font-size: 15px; line-height: 1.3; margin-bottom: 4px; letter-spacing: -0.1px; }
+    .review-body-text { font-size: 13px; line-height: 1.6; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .review-meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .meta-tag { font-size: 11px; background: var(--tag-bg); color: var(--tag-text); padding: 2px 8px; border-radius: 5px; }
+    .meta-time { font-size: 12px; color: var(--text-tertiary); margin-left: auto; }
+    .spoiler-pill { display: inline-flex; align-items: center; gap: 4px; background: var(--tag-bg); color: var(--tag-text); font-size: 10px; font-weight: 500; padding: 2px 7px; border-radius: 20px; letter-spacing: 0.3px; text-transform: uppercase; }
 
-    .review-title-text {
-      font-family: 'DM Serif Display', serif;
-      font-size: 15px;
-      line-height: 1.3;
-      margin-bottom: 4px;
-      letter-spacing: -0.1px;
-    }
-
-    .review-body-text {
-      font-size: 13px;
-      line-height: 1.6;
-      color: var(--text-secondary);
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
-
-    .review-meta {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 8px;
-      flex-wrap: wrap;
-    }
-
-    .meta-tag {
-      font-size: 11px;
-      background: var(--tag-bg);
-      color: var(--tag-text);
-      padding: 2px 8px;
-      border-radius: 5px;
-    }
-
-    .meta-time {
-      font-size: 12px;
-      color: var(--text-tertiary);
-      margin-left: auto;
-    }
-
-    .spoiler-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: var(--tag-bg);
-      color: var(--tag-text);
-      font-size: 10px;
-      font-weight: 500;
-      padding: 2px 7px;
-      border-radius: 20px;
-      letter-spacing: 0.3px;
-      text-transform: uppercase;
-    }
-
-    /* ── Empty state ── */
-    .empty-state {
-      padding: 60px 0;
-      text-align: center;
-      color: var(--text-tertiary);
-    }
-    .empty-title {
-      font-family: 'DM Serif Display', serif;
-      font-size: 20px;
-      color: var(--text-secondary);
-      margin-bottom: 8px;
-    }
+    .empty-state { padding: 60px 0; text-align: center; color: var(--text-tertiary); }
+    .empty-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
     .empty-sub { font-size: 14px; }
 
     @media (max-width: 600px) {
@@ -405,19 +207,13 @@ const { count: followingCount } = await (supabase as any)
 </head>
 
 <body>
-  <!-- Nav -->
   <nav class="topnav">
     <a href="/" class="back-btn">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M10 12L6 8L10 4"/>
-      </svg>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
       Back
     </a>
-    <a href="/" class="logo">
-      <span class="logo-dot"></span>
-      Cartridge
-    </a>
-    <button class="theme-btn" onclick="toggleTheme()">
+    <a href="/" class="logo"><span class="logo-dot"></span>Cartridge</a>
+    <button class="theme-btn" id="themeBtn">
       <svg id="themeIcon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="9" cy="9" r="3.5"/>
         <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
@@ -426,8 +222,6 @@ const { count: followingCount } = await (supabase as any)
   </nav>
 
   <div class="page">
-
-    <!-- Profile hero -->
     <div class="profile-hero">
       <div class="avatar-wrap">
         <div class="avatar-lg">
@@ -439,11 +233,24 @@ const { count: followingCount } = await (supabase as any)
       </div>
 
       <div class="profile-meta">
-        <h1 class="profile-username">@{reviewer.username}</h1>
+        <div class="profile-top-row">
+          <h1 class="profile-username">@{reviewer.username}</h1>
+          {!isOwnProfile && user && (
+            <button
+              class={`follow-btn ${isFollowing ? 'following' : 'not-following'}`}
+              id="followBtn"
+              data-reviewer-id={reviewer.id}
+              data-following={isFollowing ? 'true' : 'false'}
+            >
+              {isFollowing ? 'Following' : 'Follow'}
+            </button>
+          )}
+          {!isOwnProfile && !user && (
+            <a href="/signin" class="follow-btn not-following">Follow</a>
+          )}
+        </div>
 
-        {reviewer.bio && (
-          <p class="profile-bio">{reviewer.bio}</p>
-        )}
+        {reviewer.bio && <p class="profile-bio">{reviewer.bio}</p>}
 
         <div class="profile-stats">
           <div class="stat-item">
@@ -456,6 +263,14 @@ const { count: followingCount } = await (supabase as any)
               <span class="stat-label">Avg score</span>
             </div>
           )}
+          <div class="stat-item">
+            <span class="stat-value" id="followerCount">{followerCount ?? 0}</span>
+            <span class="stat-label">Followers</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value">{followingCount ?? 0}</span>
+            <span class="stat-label">Following</span>
+          </div>
           {memberSince && (
             <div class="stat-item">
               <span class="stat-value" style="font-size:14px;font-family:'DM Sans',sans-serif;font-weight:400">{memberSince}</span>
@@ -466,7 +281,6 @@ const { count: followingCount } = await (supabase as any)
       </div>
     </div>
 
-    <!-- Reviews section -->
     <div class="section-header">
       <span class="section-title">Reviews</span>
       <span class="section-count">{publishedReviews.length} {publishedReviews.length === 1 ? 'review' : 'reviews'}</span>
@@ -487,36 +301,17 @@ const { count: followingCount } = await (supabase as any)
                 : "🎮"
               }
             </a>
-
             <div class="review-content">
               <div class="review-game-row">
-                <a href={`/games/${review.games?.slug}`} class="game-link">
-                  {review.games?.title ?? "Unknown Game"}
-                </a>
-                <div class={`score-badge ${scoreColor(review.score)}`}>
-                  {review.score}
-                </div>
+                <a href={`/games/${review.games?.slug}`} class="game-link">{review.games?.title ?? "Unknown Game"}</a>
+                <div class={`score-badge ${scoreColor(review.score)}`}>{review.score}</div>
               </div>
-
-              {review.contains_spoilers && (
-                <div class="spoiler-pill">⚠ spoilers</div>
-              )}
-
-              {review.title && (
-                <div class="review-title-text">{review.title}</div>
-              )}
-
-              {review.body && (
-                <div class="review-body-text">{review.body}</div>
-              )}
-
+              {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
+              {review.title && <div class="review-title-text">{review.title}</div>}
+              {review.body && <div class="review-body-text">{review.body}</div>}
               <div class="review-meta">
-                {review.played_on && (
-                  <span class="meta-tag">{review.played_on.name}</span>
-                )}
-                {review.play_time_hours && (
-                  <span class="meta-tag">{review.play_time_hours}h played</span>
-                )}
+                {review.played_on && <span class="meta-tag">{review.played_on.name}</span>}
+                {review.play_time_hours && <span class="meta-tag">{review.play_time_hours}h played</span>}
                 <span class="meta-time">{timeAgo(review.published_at ?? review.created_at)}</span>
               </div>
             </div>
@@ -526,20 +321,20 @@ const { count: followingCount } = await (supabase as any)
     )}
   </div>
 
-  <script>
+  <script is:inline>
     const saved = localStorage.getItem('theme') ||
       (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     document.documentElement.setAttribute('data-theme', saved);
     updateThemeIcon(saved);
 
-    function toggleTheme() {
+    document.getElementById('themeBtn').addEventListener('click', () => {
       const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
       document.documentElement.setAttribute('data-theme', next);
       localStorage.setItem('theme', next);
       updateThemeIcon(next);
-    }
+    });
 
-    function updateThemeIcon(theme: string) {
+    function updateThemeIcon(theme) {
       const icon = document.getElementById('themeIcon');
       if (!icon) return;
       icon.innerHTML = theme === 'dark'
@@ -547,7 +342,34 @@ const { count: followingCount } = await (supabase as any)
         : '<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>';
     }
 
-    (window as any).toggleTheme = toggleTheme;
+    const followBtn = document.getElementById('followBtn');
+    if (followBtn) {
+      followBtn.addEventListener('click', async () => {
+        const reviewerId = followBtn.dataset.reviewerId;
+        const currentlyFollowing = followBtn.dataset.following === 'true';
+
+        followBtn.disabled = true;
+
+        const res = await fetch('/api/follows/toggle', {
+          method: currentlyFollowing ? 'DELETE' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ following_id: reviewerId }),
+        });
+
+        if (res.ok) {
+          const nowFollowing = !currentlyFollowing;
+          followBtn.dataset.following = nowFollowing ? 'true' : 'false';
+          followBtn.textContent = nowFollowing ? 'Following' : 'Follow';
+          followBtn.className = `follow-btn ${nowFollowing ? 'following' : 'not-following'}`;
+          const countEl = document.getElementById('followerCount');
+          if (countEl) {
+            countEl.textContent = String(parseInt(countEl.textContent) + (nowFollowing ? 1 : -1));
+          }
+        }
+
+        followBtn.disabled = false;
+      });
+    }
   </script>
 </body>
 </html>
