@@ -288,13 +288,61 @@ if (tab === 'games') {
 }
 
 if (tab === 'reviewers' && query.length > 1) {
-  const { data } = await supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6)
+  const { data } = await supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(12)
   profiles = data ?? []
 }
 
-if (tab === 'studios' && query.length > 1) {
-  const { data } = await supabase.from('companies').select('id, name, slug').ilike('name', `%${query}%`).limit(6)
-  companies = data ?? []
+if (tab === 'studios') {
+  if (query.length > 1) {
+    const { data } = await supabase.from('developers').select('id, name, slug').ilike('name', `%${query}%`).limit(12)
+    companies = data ?? []
+  } else {
+    // browse mode — get studios sorted by total reviews across all their games
+    const { data: allDevGames } = await supabase
+      .from('game_companies')
+      .select('company_id, game_id')
+      .eq('role', 'developer')
+
+    // get all published review game_ids
+    const { data: allReviewRows } = await supabase
+      .from('reviews')
+      .select('game_id')
+      .eq('status', 'published')
+      .limit(5000)
+
+    const reviewGameSet = new Set((allReviewRows ?? []).map((r: any) => r.game_id))
+
+    // count reviews per company
+    const companyReviewCount: Record<string, number> = {}
+    for (const row of allDevGames ?? []) {
+      if (reviewGameSet.has(row.game_id)) {
+        companyReviewCount[row.company_id] = (companyReviewCount[row.company_id] ?? 0) + 1
+      }
+    }
+
+    // sort by review count, take top 24
+    const topCompanyIds = Object.entries(companyReviewCount)
+      .sort((a, b) => b[1] - a[1])
+      .map(([id]) => id)
+      .slice(0, 24)
+
+    if (topCompanyIds.length > 0) {
+      const { data: topDevs } = await supabase
+        .from('developers')
+        .select('id, name, slug')
+        .in('id', topCompanyIds)
+
+      // preserve sort order
+      const orderMap = new Map(topCompanyIds.map((id, i) => [id, i]))
+      companies = (topDevs ?? []).sort((a: any, b: any) =>
+        (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
+      )
+    } else {
+      // no reviews yet — just show studios alphabetically
+      const { data } = await supabase.from('developers').select('id, name, slug').order('name').limit(24)
+      companies = data ?? []
+    }
+  }
 }
 
 function igdbImage(url: string | null, size = 't_cover_big') {
@@ -720,16 +768,21 @@ const isBrowseMode = tab === 'games' && !query
 
       {tab === 'studios' && (
         <div>
-          <div class="section-title">Studios</div>
-          {!query ? (
-            <div class="empty-state">
-              <div class="empty-title">Search for studios</div>
-              <div class="empty-sub">Enter a studio name above to find developers and publishers.</div>
-            </div>
-          ) : companies.length === 0 ? (
+          <div class="results-header">
+            <span class="results-title">
+              {query ? `Studios matching "${query}"` : 'Top Studios'}
+            </span>
+            {companies.length > 0 && <span class="results-count">{companies.length} studio{companies.length !== 1 ? 's' : ''}</span>}
+          </div>
+          {companies.length === 0 && query ? (
             <div class="empty-state">
               <div class="empty-title">No studios found</div>
               <div class="empty-sub">Try a different search term.</div>
+            </div>
+          ) : companies.length === 0 ? (
+            <div class="empty-state">
+              <div class="empty-title">No studios yet</div>
+              <div class="empty-sub">Studios appear here once games are added.</div>
             </div>
           ) : (
             <div class="company-list">
@@ -738,7 +791,7 @@ const isBrowseMode = tab === 'games' && !query
                   <div class="company-icon">🏢</div>
                   <div>
                     <div class="company-name">{company.name}</div>
-                    <div class="company-sub">Studio</div>
+                    <div class="company-sub">Studio / Developer</div>
                   </div>
                 </a>
               ))}
