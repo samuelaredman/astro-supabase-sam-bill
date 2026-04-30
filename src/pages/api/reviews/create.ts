@@ -35,6 +35,20 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
+  const { data: existing } = await (supabase as any)
+    .from('reviews')
+    .select('id')
+    .eq('profile_id', profile.id)
+    .eq('game_id', game_id)
+    .single();
+
+  if (existing) {
+    return new Response(JSON.stringify({ error: "You've already reviewed this game." }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
 const { error: insertError } = await (supabase as any)
     .from("reviews")
     .insert({
