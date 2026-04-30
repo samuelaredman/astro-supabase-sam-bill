@@ -24,7 +24,8 @@ const { data: rawReviews } = await (serverClient as any)
     id, score, title, body, play_time_hours,
     contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
-    games ( id, title, slug, cover_img_url )
+    games ( id, title, slug, cover_img_url ),
+    review_votes ( vote )
   `)
   .eq("profile_id", profile?.id)
   .eq("status", "published")
@@ -79,6 +80,12 @@ const { count: followingCount } = await (serverClient as any)
   .select('*', { count: 'exact', head: true })
   .eq('follower_id', user.id);
 
+//fetch review vote count
+function getVoteCounts(votes: any[]) {
+  const up = (votes ?? []).filter((v: any) => v.vote === 1).length;
+  const down = (votes ?? []).filter((v: any) => v.vote === -1).length;
+  return { up, down };
+}
 ---
 
 <!DOCTYPE html>
@@ -181,6 +188,11 @@ const { count: followingCount } = await (serverClient as any)
     .footer-tag { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; padding: 3px 9px; border-radius: 6px; }
     .read-more { margin-left: auto; font-size: 13px; color: var(--text-tertiary); transition: color 0.15s; }
     .review-card:hover .read-more { color: var(--text-primary); }
+    .vote-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+    .vote-btn { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); background: none; font-size: 12px; font-family: inherit; color: var(--text-tertiary); cursor: pointer; transition: all 0.15s; }
+    .vote-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+    .vote-btn.active-up { background: var(--score-great-bg); color: var(--score-great); border-color: var(--score-great); }
+    .vote-btn.active-down { background: var(--score-low-bg); color: var(--score-low); border-color: var(--score-low); }
 
     .empty-state { padding: 60px 20px; text-align: center; color: var(--text-tertiary); }
     .empty-state-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
@@ -291,6 +303,13 @@ const { count: followingCount } = await (serverClient as any)
               <div class="card-footer">
                 {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
                 {review.play_time_hours > 0 && <span class="footer-tag">{review.play_time_hours}h played</span>}
+                {(() => {const { up, down } = getVoteCounts(review.review_votes);return (
+                  <div class="vote-row">
+                    <button class="vote-btn" data-review-id={review.id} data-vote="1" > ▲ {up}</button>
+                    <button class="vote-btn" data-review-id={review.id} data-vote="-1" > ▼ {down}</button></div>
+                    );
+                  })
+                ()}
                 <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
               </div>
             </div>
@@ -352,6 +371,48 @@ const { count: followingCount } = await (serverClient as any)
     await fetch('/api/auth/signout', { method: 'POST' });
     window.location.href = '/signin';
   });
+
+  //review count button listener
+  document.querySelectorAll('.vote-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const reviewId = btn.dataset.reviewId;
+    const vote = parseInt(btn.dataset.vote);
+
+    const res = await fetch('/api/reviews/vote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ review_id: reviewId, vote }),
+    });
+
+    if (res.status === 401) { window.location.href = '/signin'; return; }
+    if (!res.ok) return;
+
+    const data = await res.json();
+
+    // Update both buttons for this review
+    const pair = document.querySelectorAll(`.vote-btn[data-review-id="${reviewId}"]`);
+    pair.forEach(b => {
+      const bVote = parseInt(b.dataset.vote);
+      const countEl = b.childNodes[b.childNodes.length - 1];
+      const currentCount = parseInt(b.textContent.trim().split(' ').pop());
+
+      if (data.vote === null) {
+        // Vote removed
+        b.classList.remove('active-up', 'active-down');
+        if (bVote === vote) b.textContent = b.textContent.replace(/\d+/, currentCount - 1);
+      } else if (data.vote === bVote) {
+        // This button is now active
+        b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
+        b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
+        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (currentCount + 1);
+      } else {
+        // This button lost its vote
+        b.classList.remove('active-up', 'active-down');
+        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + Math.max(0, currentCount - 1);
+      }
+    });
+  });
+});
 </script>
 </body>
 </html>
