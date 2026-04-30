@@ -164,9 +164,23 @@ if (tab === 'games') {
     igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.igdb_id) && !existingIds.has(g.id))
 
   } else {
-    // browse mode — no query, filter by genre/platform and show most reviewed
-    let filteredIds: string[] | null = null
+    // browse mode — count reviews per game first, then fetch top games in order
+    const { data: allReviews } = await supabase
+      .from('reviews')
+      .select('game_id')
+      .eq('status', 'published')
+      .limit(2000)
 
+    const reviewCountMap: Record<string, number> = {}
+    for (const r of allReviews ?? []) {
+      reviewCountMap[r.game_id] = (reviewCountMap[r.game_id] ?? 0) + 1
+    }
+
+    let topGameIds = Object.entries(reviewCountMap)
+      .sort((a, b) => b[1] - a[1])
+      .map(([id]) => id)
+
+    // apply genre/platform filters
     if (genreFilter || platformFilter) {
       let genreIds: string[] | null = null
       let platformIds: string[] | null = null
@@ -181,30 +195,73 @@ if (tab === 'games') {
       }
 
       if (genreIds && platformIds) {
-        filteredIds = genreIds.filter(id => platformIds!.includes(id))
-      } else {
-        filteredIds = genreIds ?? platformIds ?? []
+        const intersection = new Set(genreIds.filter(id => platformIds!.includes(id)))
+        topGameIds = topGameIds.filter(id => intersection.has(id))
+      } else if (genreIds) {
+        const set = new Set(genreIds)
+        topGameIds = topGameIds.filter(id => set.has(id))
+      } else if (platformIds) {
+        const set = new Set(platformIds)
+        topGameIds = topGameIds.filter(id => set.has(id))
       }
     }
 
-    let browseQuery = supabase
-      .from('games')
-      .select(`
-        id, title, slug, cover_img_url, date_released,
-        game_genres(genres(id, name)),
-        game_platforms(platforms(id, name)),
-        reviews!reviews_game_id_fkey(score, play_time_hours)
-      `)
-      .limit(48)
+    const pageIds = topGameIds.slice(0, 48)
 
-    if (filteredIds !== null) {
-      browseQuery = browseQuery.in('id',
-        filteredIds.length > 0 ? filteredIds : ['00000000-0000-0000-0000-000000000000']
+    if (pageIds.length > 0) {
+      const { data: browseGames } = await supabase
+        .from('games')
+        .select(`
+          id, title, slug, cover_img_url, date_released,
+          game_genres(genres(id, name)),
+          game_platforms(platforms(id, name)),
+          reviews!reviews_game_id_fkey(score, play_time_hours)
+        `)
+        .in('id', pageIds)
+
+      // re-sort to preserve review count order (.in() doesn't guarantee order)
+      const orderMap = new Map(pageIds.map((id, i) => [id, i]))
+      rawGames = (browseGames ?? []).sort((a: any, b: any) =>
+        (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
       )
     }
 
-    const { data: browseGames } = await browseQuery
-    rawGames = browseGames ?? []
+    // fallback: no reviews yet — show recently released games
+    if (rawGames.length === 0) {
+      let fallback = supabase
+        .from('games')
+        .select(`
+          id, title, slug, cover_img_url, date_released,
+          game_genres(genres(id, name)),
+          game_platforms(platforms(id, name)),
+          reviews!reviews_game_id_fkey(score, play_time_hours)
+        `)
+        .order('date_released', { ascending: false })
+        .limit(48)
+
+      if (genreFilter || platformFilter) {
+        const filterIds: string[] = []
+        if (genreFilter) {
+          const { data: gRows } = await supabase.from('game_genres').select('game_id').eq('genre_id', genreFilter)
+          filterIds.push(...(gRows ?? []).map((r: any) => r.game_id))
+        }
+        if (platformFilter) {
+          const { data: pRows } = await supabase.from('game_platforms').select('game_id').eq('platform_id', platformFilter)
+          const pIds = (pRows ?? []).map((r: any) => r.game_id)
+          if (filterIds.length > 0) {
+            const intersection = filterIds.filter(id => pIds.includes(id))
+            filterIds.length = 0
+            filterIds.push(...intersection)
+          } else {
+            filterIds.push(...pIds)
+          }
+        }
+        if (filterIds.length > 0) fallback = fallback.in('id', filterIds)
+      }
+
+      const { data: fallbackGames } = await fallback
+      rawGames = fallbackGames ?? []
+    }
   }
 
   let gamesRaw = rawGames.map((game: any) => {
