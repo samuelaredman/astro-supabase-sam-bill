@@ -11,7 +11,7 @@ const { data: { user } } = await supabase.auth.getUser();
 const { data: reviewer } = await (supabase as any)
   .from('profiles')
   .select(`
-    id, username, avatar_url, bio, created_at, is_active,
+    id, username, avatar_url, bio, banner_url, created_at, is_active,
     favorite_game_id,
     favorite_game:favorite_game_id (
       id, title, slug, cover_img_url,
@@ -206,6 +206,9 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     [data-theme="light"] .profile-banner{background:linear-gradient(135deg,#e8e4f8 0%,#dce8f5 40%,#daf0f0 100%)}
     .banner-glow{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,var(--accent) 0%,transparent 70%);opacity:.15;top:-120px;right:5%}
     .banner-glow2{position:absolute;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,#60a5fa 0%,transparent 70%);opacity:.1;top:-60px;left:20%}
+    .banner-edit-btn{position:absolute;bottom:12px;right:16px;display:flex;align-items:center;gap:7px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.2);color:white;font-size:12px;font-weight:500;font-family:'DM Sans',sans-serif;padding:7px 14px;border-radius:20px;cursor:pointer;transition:background .15s;z-index:2}
+    .banner-edit-btn:hover{background:rgba(0,0,0,.75)}
+    .banner-uploading{position:absolute;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;gap:10px;z-index:3}
 
     /* AVATAR */
     .profile-header{max-width:980px;margin:0 auto;padding:0 28px;position:relative}
@@ -396,9 +399,23 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
   </button>
 </nav>
 
-<div class="profile-banner">
-  <div class="banner-glow"></div>
-  <div class="banner-glow2"></div>
+{/* BANNER */}
+<div class="profile-banner" id="profileBanner" style={reviewer.banner_url ? `background-image:url(${reviewer.banner_url});background-size:cover;background-position:center` : ''}>
+  {!reviewer.banner_url && <div class="banner-glow"></div>}
+  {!reviewer.banner_url && <div class="banner-glow2"></div>}
+  {isOwnProfile && (
+    <div class="banner-edit-btn" id="bannerEditBtn" onclick="document.getElementById('bannerInput').click()" title="Change banner image">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      Change banner
+    </div>
+  )}
+  {isOwnProfile && (
+    <div class="banner-uploading" id="bannerUploading">
+      <div class="spinner" style="width:20px;height:20px;border-width:2px;border-color:rgba(255,255,255,.3);border-top-color:white"></div>
+      <span style="font-size:13px;color:white;font-weight:500">Uploading…</span>
+    </div>
+  )}
+  {isOwnProfile && <input type="file" id="bannerInput" accept="image/jpeg,image/png,image/webp" style="display:none" />}
 </div>
 
 <div class="profile-header">
@@ -771,6 +788,61 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     t.className = 'toast show ' + (type || '')
     clearTimeout(t._timer)
     t._timer = setTimeout(function() { t.className = 'toast' }, 2500)
+  }
+
+  // ── BANNER UPLOAD ──
+  var bannerInput = document.getElementById('bannerInput')
+  var bannerUploading = document.getElementById('bannerUploading')
+  if (bannerInput) {
+    bannerInput.addEventListener('change', async function() {
+      var file = bannerInput.files[0]
+      if (!file) return
+
+      // 6MB check
+      if (file.size > 6 * 1024 * 1024) {
+        showToast('Banner must be under 6MB', 'error'); return
+      }
+
+      // dimension check — min 2048x1152
+      var img = new Image()
+      var objectUrl = URL.createObjectURL(file)
+      img.onload = async function() {
+        URL.revokeObjectURL(objectUrl)
+        if (img.width < 2048 || img.height < 1152) {
+          showToast('Banner must be at least 2048 × 1152 px', 'error')
+          bannerInput.value = ''
+          return
+        }
+        bannerUploading.style.display = 'flex'
+        var form = new FormData()
+        form.append('banner', file)
+        try {
+          var res = await fetch('/api/profile/banner', { method: 'POST', body: form })
+          var data = await res.json()
+          if (!res.ok) { showToast(data.error || 'Upload failed', 'error'); return }
+          var banner = document.getElementById('profileBanner')
+          if (banner) {
+            banner.style.backgroundImage = 'url(' + data.url + ')'
+            banner.style.backgroundSize = 'cover'
+            banner.style.backgroundPosition = 'center'
+            // hide gradient glows since we now have a real image
+            banner.querySelectorAll('.banner-glow,.banner-glow2').forEach(function(el){ el.style.display='none' })
+          }
+          showToast('Banner updated', 'success')
+        } catch(e) {
+          showToast('Upload failed — try again', 'error')
+        } finally {
+          bannerUploading.style.display = 'none'
+          bannerInput.value = ''
+        }
+      }
+      img.onerror = function() {
+        URL.revokeObjectURL(objectUrl)
+        showToast('Could not read image', 'error')
+        bannerInput.value = ''
+      }
+      img.src = objectUrl
+    })
   }
 
   // ── AVATAR UPLOAD ──
