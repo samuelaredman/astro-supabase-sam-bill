@@ -168,22 +168,64 @@ if (primaryGenreId) {
     ? Math.round((genreScores.reduce((a, b) => a + b, 0) / genreScores.length) * 10) / 10 : 0
 }
 
-// monthly reviews — last 6 months
+// monthly reviews + avg scores — last 6 months
 const monthlyReviews: Record<string, number> = {}
+const monthlyScores: Record<string, number[]> = {}
 for (const r of reviewList) {
   const d = new Date((r as any).published_at ?? (r as any).created_at)
   const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
   monthlyReviews[key] = (monthlyReviews[key] ?? 0) + 1
+  if (!monthlyScores[key]) monthlyScores[key] = []
+  monthlyScores[key].push((r as any).score)
 }
 const monthLabels: string[] = []
 const monthCounts: number[] = []
+const monthAvgScores: (number | null)[] = []
 for (let i = 5; i >= 0; i--) {
   const d = new Date()
   d.setMonth(d.getMonth() - i)
   const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
   monthLabels.push(d.toLocaleDateString('en-US', { month: 'short' }))
-  monthCounts.push(monthlyReviews[key] ?? 0)
+  const cnt = monthlyReviews[key] ?? 0
+  monthCounts.push(cnt)
+  if (cnt > 0 && monthlyScores[key]) {
+    const avg = monthlyScores[key].reduce((a, b) => a + b, 0) / monthlyScores[key].length
+    monthAvgScores.push(Math.round(avg * 10) / 10)
+  } else {
+    monthAvgScores.push(null)
+  }
 }
+
+// hours played distribution
+const hoursBuckets = [
+  { label: '0-10h', min: 0, max: 10 },
+  { label: '10-25h', min: 10, max: 25 },
+  { label: '25-50h', min: 25, max: 50 },
+  { label: '50-100h', min: 50, max: 100 },
+  { label: '100h+', min: 100, max: Infinity },
+]
+const hoursDistribution = hoursBuckets.map(b => ({
+  label: b.label,
+  count: reviewList.filter((r: any) =>
+    r.play_time_hours != null && r.play_time_hours >= b.min && r.play_time_hours < b.max
+  ).length
+}))
+
+// score by platform
+const platScoreMap: Record<string, number[]> = {}
+for (const r of reviewList) {
+  const name = (r as any).played_on?.name ?? null
+  if (!name) continue
+  if (!platScoreMap[name]) platScoreMap[name] = []
+  platScoreMap[name].push((r as any).score)
+}
+const platformScores = Object.entries(platScoreMap)
+  .map(([name, scores]) => ({
+    name,
+    avg: Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10,
+    count: scores.length
+  }))
+  .sort((a, b) => b.count - a.count)
 
 function scoreClass(score: number): string {
   if (score >= 9) return 'score-great'
@@ -215,7 +257,8 @@ const statsJson = JSON.stringify({
   genreAvgScore,
   genreName: genres[0]?.name ?? 'Genre',
   releaseYear, reviewCount: reviewList.length,
-  scoreDistribution, monthLabels, monthCounts,
+  scoreDistribution, monthLabels, monthCounts, monthAvgScores,
+  hoursDistribution, platformScores,
 })
 ---
 
@@ -767,36 +810,44 @@ const statsJson = JSON.stringify({
       sub: 'font-size:11px;color:var(--text-tertiary);margin-top:2px',
     }
 
+    // score color helpers
+    function scoreCol(score) {
+      if (score >= 9) return '#4ade80'
+      if (score >= 7) return '#60a5fa'
+      if (score >= 5) return '#fbbf24'
+      return '#f87171'
+    }
+
     function buildStats() {
       var el = document.getElementById('statsContent')
       if (!el || !s.reviewCount) return
 
       var accent = 'var(--game-accent)'
       var accentSub = 'var(--game-accent-subtle)'
-      var pieColors = [accent, '#60a5fa', '#4ade80', '#fbbf24', '#f87171']
+      var pieColors = ['#6050c8','#60a5fa','#4ade80','#fbbf24','#f87171']
 
       var html = ''
 
-      // ── RANK CARDS ──
-      html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">'
+      // ── RANK CARDS — bold hero style ──
       var rankDefs = [
-        { scope: 'All time', rank: s.allTimeRank, total: s.allTimeTotal, pct: 100 - s.allTimePct, hasData: s.allTimeTotal > 0 },
-        { scope: s.genreName, rank: s.genreRank, total: s.genreTotal, pct: 100 - s.genrePct, hasData: s.genreTotal > 0 },
-        { scope: 'Released in ' + s.releaseYear, rank: s.yearRank, total: s.yearTotal, pct: 100 - s.yearPct, hasData: s.yearTotal > 0 },
+        { scope: 'All time', rank: s.allTimeRank, total: s.allTimeTotal, pct: 100 - s.allTimePct, hasData: s.allTimeTotal > 0, color: '#6050c8', glow: 'rgba(96,80,200,.3)' },
+        { scope: s.genreName, rank: s.genreRank, total: s.genreTotal, pct: 100 - s.genrePct, hasData: s.genreTotal > 0, color: '#60a5fa', glow: 'rgba(96,165,250,.3)' },
+        { scope: 'Released in ' + s.releaseYear, rank: s.yearRank, total: s.yearTotal, pct: 100 - s.yearPct, hasData: s.yearTotal > 0, color: '#4ade80', glow: 'rgba(74,222,128,.3)' },
       ]
+      html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px">'
       rankDefs.forEach(function(rc) {
-        html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;position:relative;overflow:hidden">'
-        html += '<div style="position:absolute;inset:0;background:linear-gradient(135deg,' + accentSub + ' 0%,transparent 60%);pointer-events:none"></div>'
-        html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:4px;position:relative">' + rc.scope + '</div>'
+        html += '<div style="background:var(--bg-card);border:1px solid ' + rc.color + '44;border-radius:12px;padding:14px;position:relative;overflow:hidden">'
+        html += '<div style="position:absolute;inset:0;background:linear-gradient(135deg,' + rc.color + '12 0%,transparent 65%);pointer-events:none"></div>'
+        html += '<div style="font-size:9px;font-weight:700;color:' + rc.color + ';text-transform:uppercase;letter-spacing:.14em;margin-bottom:6px;position:relative;opacity:.85">' + rc.scope + '</div>'
         if (rc.hasData) {
-          html += '<div style="display:flex;align-items:baseline;gap:1px;line-height:1;position:relative;margin-bottom:1px">'
-          html += '<span style="font-size:17px;font-weight:700;color:var(--text-tertiary);font-family:\'DM Serif Display\',serif;align-self:flex-start;padding-top:4px">#</span>'
-          html += '<span style="font-family:\'DM Serif Display\',serif;font-size:46px;line-height:1;letter-spacing:-2px;color:' + accent + '">' + rc.rank.toLocaleString() + '</span></div>'
-          html += '<div style="font-size:11px;color:var(--text-tertiary);position:relative;margin-bottom:5px">of ' + rc.total.toLocaleString() + ' games</div>'
-          html += '<div style="display:inline-flex;background:' + accentSub + ';color:' + accent + ';font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;border:1px solid rgba(96,80,200,.2);position:relative">Top ' + rc.pct + '%</div>'
+          html += '<div style="display:flex;align-items:flex-start;gap:0;line-height:1;position:relative;margin-bottom:4px">'
+          html += '<span style="font-size:16px;font-weight:800;color:' + rc.color + ';opacity:.6;margin-top:6px;margin-right:1px">#</span>'
+          html += '<span style="font-family:\'DM Serif Display\',serif;font-size:52px;line-height:1;letter-spacing:-3px;color:' + rc.color + ';text-shadow:0 0 40px ' + rc.glow + '">' + rc.rank.toLocaleString() + '</span></div>'
+          html += '<div style="font-size:11px;color:var(--text-tertiary);position:relative;margin-bottom:8px">of ' + rc.total.toLocaleString() + ' games</div>'
+          html += '<div style="display:inline-flex;background:' + rc.color + '1a;color:' + rc.color + ';font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;border:1px solid ' + rc.color + '44;position:relative">Top ' + rc.pct + '%</div>'
         } else {
-          html += '<div style="font-family:\'DM Serif Display\',serif;font-size:32px;line-height:1.2;color:var(--text-tertiary);opacity:.25;position:relative">—</div>'
-          html += '<div style="font-size:11px;color:var(--text-tertiary);position:relative">no data yet</div>'
+          html += '<div style="font-family:\'DM Serif Display\',serif;font-size:40px;line-height:1.1;color:var(--text-tertiary);opacity:.18;position:relative;margin-bottom:4px">—</div>'
+          html += '<div style="font-size:11px;color:var(--text-tertiary);position:relative;opacity:.5">no data yet</div>'
         }
         html += '</div>'
       })
@@ -806,53 +857,79 @@ const statsJson = JSON.stringify({
       html += '<div style="' + C.card + '">'
       html += '<div style="' + C.lbl + ';margin-bottom:10px">Percentile ranking</div>'
       var pctBars = [
-        { label: 'All games', val: s.allTimePct, color: accent },
-        { label: s.genreName + ' genre', val: s.genrePct, color: '#7c6ef0' },
-        { label: s.releaseYear + ' releases', val: s.yearPct, color: '#60a5fa' },
+        { label: 'All games', val: s.allTimePct, color: '#6050c8' },
+        { label: s.genreName + ' genre', val: s.genrePct, color: '#60a5fa' },
+        { label: s.releaseYear + ' releases', val: s.yearPct, color: '#4ade80' },
       ]
       pctBars.forEach(function(b, bi) {
-        html += '<div style="margin-bottom:' + (bi < 2 ? '12' : '0') + 'px">'
-        html += '<div style="display:flex;justify-content:space-between;margin-bottom:6px">'
+        html += '<div style="margin-bottom:' + (bi < 2 ? '11' : '0') + 'px">'
+        html += '<div style="display:flex;justify-content:space-between;margin-bottom:5px">'
         html += '<span style="font-size:12px;color:var(--text-secondary);font-weight:500">' + b.label + '</span>'
-        html += '<span style="font-size:12px;color:var(--text-tertiary)">' + b.val + 'th percentile</span></div>'
+        html += '<span style="font-size:12px;color:' + b.color + ';font-weight:600">' + b.val + 'th</span></div>'
         html += '<div style="height:6px;background:var(--tag-bg);border-radius:3px;overflow:hidden">'
-        html += '<div class="pct-anim" data-w="' + b.val + '" style="height:100%;border-radius:3px;width:0;transition:width 1s cubic-bezier(.4,0,.2,1);background:' + b.color + '"></div></div></div>'
+        html += '<div class="pct-anim" data-w="' + b.val + '" style="height:100%;border-radius:3px;width:0;transition:width 1.1s cubic-bezier(.4,0,.2,1);background:' + b.color + '"></div></div></div>'
       })
       html += '</div>'
 
       // ── STAT CARDS ──
       var topPlat = s.platformBreakdown && s.platformBreakdown[0]
       var statCards = [
-        { lbl: 'Total hours logged', val: (s.totalHours || 0) + 'h', sub: 'across all reviewers' },
-        { lbl: 'Avg hours played', val: (s.avgHours ? s.avgHours + 'h' : '—'), sub: 'per reviewer' },
-        { lbl: 'Most played on', val: topPlat ? topPlat.name.split(' ')[0] : '—', sub: topPlat ? topPlat.pct + '% of reviewers' : '', small: true },
-        { lbl: 'Recommended', val: s.recommendedRate + '%', sub: 'rated 7 or above' },
+        { lbl: 'Total hours logged', val: (s.totalHours || 0) + 'h', sub: 'across all reviewers', color: '#fbbf24' },
+        { lbl: 'Avg hours played', val: (s.avgHours ? s.avgHours + 'h' : '—'), sub: 'per reviewer', color: '#fb923c' },
+        { lbl: 'Most played on', val: topPlat ? topPlat.name.split(' ')[0] : '—', sub: topPlat ? topPlat.pct + '% of reviewers' : '', color: '#60a5fa', small: true },
+        { lbl: 'Recommended', val: s.recommendedRate + '%', sub: 'rated 7 or above', color: s.recommendedRate >= 70 ? '#4ade80' : s.recommendedRate >= 50 ? '#fbbf24' : '#f87171' },
       ]
       html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">'
       statCards.forEach(function(sc) {
-        html += '<div style="' + C.cardNoMb + '">'
-        html += '<div style="' + C.lbl + '">' + sc.lbl + '</div>'
-        html += '<div style="font-family:\'DM Serif Display\',serif;font-size:' + (sc.small ? '22' : '30') + 'px;letter-spacing:-.5px;line-height:1;margin-bottom:2px;color:var(--text-primary)">' + sc.val + '</div>'
-        html += '<div style="' + C.sub + '">' + sc.sub + '</div>'
+        html += '<div style="background:var(--bg-card);border:1px solid ' + sc.color + '33;border-radius:12px;padding:12px 14px;position:relative;overflow:hidden">'
+        html += '<div style="position:absolute;inset:0;background:linear-gradient(135deg,' + sc.color + '0d 0%,transparent 70%);pointer-events:none"></div>'
+        html += '<div style="' + C.lbl + ';color:' + sc.color + ';opacity:.8;position:relative">' + sc.lbl + '</div>'
+        html += '<div style="font-family:\'DM Serif Display\',serif;font-size:' + (sc.small ? '22' : '30') + 'px;letter-spacing:-.5px;line-height:1;margin-bottom:2px;color:' + sc.color + ';position:relative">' + sc.val + '</div>'
+        html += '<div style="font-size:11px;color:var(--text-tertiary);position:relative">' + sc.sub + '</div>'
         html += '</div>'
       })
       html += '</div>'
 
-      // ── PIE CHART ──
+      // ── SCORES OVER TIME — bar chart with hover ──
+      html += '<div style="' + C.card + '">'
+      html += '<div style="' + C.lbl + ';margin-bottom:10px">Avg score by month <span style="font-size:9px;font-weight:400;color:var(--text-tertiary);text-transform:none;letter-spacing:0"> — hover for review count</span></div>'
+      html += '<div id="scoreBarWrap" style="position:relative">'
+      html += '<svg id="scoreBarChart" height="90" style="width:100%;overflow:visible;display:block"></svg>'
+      html += '<div id="scoreBarTooltip" style="display:none;position:absolute;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--text-primary);pointer-events:none;z-index:10;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.4)"></div>'
+      html += '</div></div>'
+
+      // ── HOURS PLAYED DISTRIBUTION ──
+      html += '<div style="' + C.card + '">'
+      html += '<div style="' + C.lbl + ';margin-bottom:10px">Hours played distribution</div>'
+      html += '<svg id="hoursDistChart" height="80" style="width:100%;overflow:visible;display:block"></svg>'
+      html += '</div>'
+
+      // ── SCORE BY PLATFORM ──
+      if (s.platformBreakdown && s.platformBreakdown.length > 0 && s.platformScores) {
+        html += '<div style="' + C.card + '">'
+        html += '<div style="' + C.lbl + ';margin-bottom:10px">Score by platform</div>'
+        s.platformScores.forEach(function(p) {
+          var col = scoreCol(p.avg)
+          html += '<div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid var(--border-subtle)">'
+          html += '<span style="font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + p.name + '</span>'
+          html += '<div style="flex:0 0 120px;height:6px;background:var(--tag-bg);border-radius:3px;overflow:hidden;position:relative">'
+          html += '<div style="position:absolute;top:0;left:0;height:100%;border-radius:3px;background:' + col + ';width:' + (p.avg/10*100) + '%"></div></div>'
+          html += '<span style="font-size:13px;font-weight:700;color:' + col + ';width:28px;text-align:right;flex-shrink:0">' + p.avg.toFixed(1) + '</span>'
+          html += '<span style="font-size:10px;color:var(--text-tertiary);flex-shrink:0">(' + p.count + ')</span>'
+          html += '</div>'
+        })
+        html += '</div>'
+      }
+
+      // ── PIE CHART — platforms ──
       if (s.platformBreakdown && s.platformBreakdown.length > 0) {
         html += '<div style="' + C.card + '">'
         html += '<div style="' + C.lbl + ';margin-bottom:10px">Played on</div>'
         html += '<div style="display:flex;align-items:center;gap:20px">'
-        html += '<svg id="pieSvg" width="100" height="100" viewBox="0 0 100 100" style="flex-shrink:0"></svg>'
-        html += '<div id="pieLegend" style="display:flex;flex-direction:column;gap:7px;flex:1;min-width:0"></div>'
+        html += '<svg id="pieSvg" width="90" height="90" viewBox="0 0 90 90" style="flex-shrink:0"></svg>'
+        html += '<div id="pieLegend" style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:0"></div>'
         html += '</div></div>'
       }
-
-      // ── LINE GRAPH ──
-      html += '<div style="' + C.card + '">'
-      html += '<div style="' + C.lbl + ';margin-bottom:10px">Reviews by month</div>'
-      html += '<svg id="lineChart" height="100" style="width:100%;overflow:visible;display:block"></svg>'
-      html += '</div>'
 
       // ── GENRE COMPARISON ──
       if (s.genreAvgScore > 0) {
@@ -863,21 +940,20 @@ const statsJson = JSON.stringify({
         var delta2 = s.recommendedRate - 72
         html += '<div style="' + C.card + ';margin-bottom:0">'
         html += '<div style="' + C.lbl + ';margin-bottom:8px">vs. ' + s.genreName + ' average</div>'
-        html += '<div style="display:flex;gap:14px;margin-bottom:12px">'
-        html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary)"><div style="width:8px;height:8px;border-radius:2px;background:' + accent + '"></div>This game</div>'
-        html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary)"><div style="width:8px;height:8px;border-radius:2px;background:var(--text-tertiary);opacity:.5"></div>Genre avg</div>'
+        html += '<div style="display:flex;gap:14px;margin-bottom:10px">'
+        html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary)"><div style="width:8px;height:8px;border-radius:2px;background:#6050c8"></div>This game</div>'
+        html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary)"><div style="width:8px;height:8px;border-radius:2px;background:var(--text-tertiary);opacity:.4"></div>Genre avg</div>'
         html += '</div>'
-
         function cmpRow(label, gamePct, avgPct, display, delta, suffix) {
-          var dCls = parseFloat(delta) > 0 ? 'var(--score-great)' : parseFloat(delta) < 0 ? 'var(--score-low)' : 'var(--text-tertiary)'
+          var dCls = parseFloat(delta) > 0 ? '#4ade80' : parseFloat(delta) < 0 ? '#f87171' : 'var(--text-tertiary)'
           var dStr = (parseFloat(delta) > 0 ? '+' : '') + delta + (suffix || '')
-          return '<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-subtle)">'
-            + '<span style="font-size:12px;color:var(--text-secondary);width:120px;flex-shrink:0">' + label + '</span>'
-            + '<div style="flex:1;position:relative;height:8px"><div style="position:absolute;inset:0;background:var(--tag-bg);border-radius:4px"></div>'
-            + '<div style="position:absolute;top:0;left:0;height:100%;border-radius:4px;background:var(--text-tertiary);opacity:.4;width:' + avgPct + '%"></div>'
-            + '<div style="position:absolute;top:0;left:0;height:100%;border-radius:4px;background:' + accent + ';width:' + gamePct + '%"></div></div>'
+          return '<div style="display:flex;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid var(--border-subtle)">'
+            + '<span style="font-size:12px;color:var(--text-secondary);width:110px;flex-shrink:0">' + label + '</span>'
+            + '<div style="flex:1;position:relative;height:7px"><div style="position:absolute;inset:0;background:var(--tag-bg);border-radius:4px"></div>'
+            + '<div style="position:absolute;top:0;left:0;height:100%;border-radius:4px;background:var(--text-tertiary);opacity:.35;width:' + Math.min(100,avgPct) + '%"></div>'
+            + '<div style="position:absolute;top:0;left:0;height:100%;border-radius:4px;background:#6050c8;width:' + Math.min(100,gamePct) + '%"></div></div>'
             + '<span style="font-size:12px;font-weight:600;width:32px;text-align:right;flex-shrink:0;color:var(--text-primary)">' + display + '</span>'
-            + '<span style="font-size:11px;width:42px;text-align:right;font-weight:600;flex-shrink:0;color:' + dCls + '">' + dStr + '</span>'
+            + '<span style="font-size:11px;width:42px;text-align:right;font-weight:700;flex-shrink:0;color:' + dCls + '">' + dStr + '</span>'
             + '</div>'
         }
         html += cmpRow('Avg score', gameAvgNum/10*100, s.genreAvgScore/10*100, gameAvgNum, delta1, '')
@@ -892,13 +968,151 @@ const statsJson = JSON.stringify({
         document.querySelectorAll('.pct-anim').forEach(function(el) { el.style.width = el.dataset.w + '%' })
       }, 100)
 
-      // pie chart
+      // ── DRAW SCORES OVER TIME BAR CHART ──
+      var scoreBarEl = document.getElementById('scoreBarChart')
+      var tooltip = document.getElementById('scoreBarTooltip')
+      if (scoreBarEl && s.monthLabels && s.monthCounts && s.monthAvgScores) {
+        setTimeout(function() {
+          var w = scoreBarEl.getBoundingClientRect().width || 400
+          var chartH = 68, padL = 4, padR = 4
+          var n = s.monthLabels.length
+          var barW = Math.max(4, (w - padL - padR) / n - 4)
+          var step = (w - padL - padR) / n
+
+          // grid lines
+          for (var gi = 0; gi <= 4; gi++) {
+            var gy = chartH - (gi/4) * chartH
+            var gval = (gi/4) * 10
+            var gl = document.createElementNS('http://www.w3.org/2000/svg','line')
+            gl.setAttribute('x1', padL); gl.setAttribute('x2', w - padR)
+            gl.setAttribute('y1', gy); gl.setAttribute('y2', gy)
+            gl.setAttribute('stroke','var(--border)'); gl.setAttribute('stroke-width','1')
+            if (gi === 0 || gi === 4) gl.setAttribute('stroke-opacity','0.5')
+            else gl.setAttribute('stroke-opacity','0.25')
+            scoreBarEl.appendChild(gl)
+            if (gi > 0 && gi < 4) {
+              var gtxt = document.createElementNS('http://www.w3.org/2000/svg','text')
+              gtxt.setAttribute('x', padL - 2); gtxt.setAttribute('y', gy + 3)
+              gtxt.setAttribute('text-anchor','end'); gtxt.setAttribute('font-size','8')
+              gtxt.setAttribute('fill','var(--text-tertiary)'); gtxt.setAttribute('font-family','DM Sans,sans-serif')
+              gtxt.textContent = gval; scoreBarEl.appendChild(gtxt)
+            }
+          }
+
+          s.monthLabels.forEach(function(lbl, i) {
+            var avg = s.monthAvgScores[i]
+            var cnt = s.monthCounts[i]
+            if (!cnt || !avg) {
+              // empty month tick
+              var etxt = document.createElementNS('http://www.w3.org/2000/svg','text')
+              etxt.setAttribute('x', padL + i*step + step/2); etxt.setAttribute('y', chartH + 16)
+              etxt.setAttribute('text-anchor','middle'); etxt.setAttribute('font-size','9')
+              etxt.setAttribute('fill','var(--text-tertiary)'); etxt.setAttribute('font-family','DM Sans,sans-serif')
+              etxt.textContent = lbl; scoreBarEl.appendChild(etxt)
+              return
+            }
+            var col = scoreCol(avg)
+            var bh = Math.max(4, (avg / 10) * chartH)
+            var bx = padL + i*step + (step - barW)/2
+            var by = chartH - bh
+
+            // bar
+            var rect = document.createElementNS('http://www.w3.org/2000/svg','rect')
+            rect.setAttribute('x', bx); rect.setAttribute('y', by)
+            rect.setAttribute('width', barW); rect.setAttribute('height', bh)
+            rect.setAttribute('rx','3'); rect.setAttribute('fill', col); rect.setAttribute('opacity','0.8')
+            rect.style.cursor = 'pointer'
+            rect.style.transition = 'opacity .15s'
+            rect.addEventListener('mouseenter', (function(lbl, avg, cnt, bx, barW) {
+              return function() {
+                this.setAttribute('opacity','1')
+                tooltip.style.display = 'block'
+                tooltip.innerHTML = '<strong style="color:' + scoreCol(avg) + '">' + avg.toFixed(1) + '</strong>'
+                  + ' avg · <span style="color:var(--text-secondary)">' + cnt + ' review' + (cnt !== 1 ? 's' : '') + '</span>'
+                  + '<br><span style="color:var(--text-tertiary);font-size:10px">' + lbl + '</span>'
+                var wrap = document.getElementById('scoreBarWrap')
+                var wRect = wrap.getBoundingClientRect()
+                var tLeft = bx + barW/2 - 60
+                tLeft = Math.max(0, Math.min(tLeft, wRect.width - 140))
+                tooltip.style.left = tLeft + 'px'
+                tooltip.style.bottom = (90 - by + 8) + 'px'
+              }
+            })(lbl, avg, cnt, bx, barW))
+            rect.addEventListener('mouseleave', function() {
+              this.setAttribute('opacity','0.8')
+              tooltip.style.display = 'none'
+            })
+            scoreBarEl.appendChild(rect)
+
+            // score label above bar
+            var stxt = document.createElementNS('http://www.w3.org/2000/svg','text')
+            stxt.setAttribute('x', bx + barW/2); stxt.setAttribute('y', by - 4)
+            stxt.setAttribute('text-anchor','middle'); stxt.setAttribute('font-size','9')
+            stxt.setAttribute('fill', col); stxt.setAttribute('font-weight','600')
+            stxt.setAttribute('font-family','DM Sans,sans-serif')
+            stxt.textContent = avg.toFixed(1); scoreBarEl.appendChild(stxt)
+
+            // month label
+            var mtxt = document.createElementNS('http://www.w3.org/2000/svg','text')
+            mtxt.setAttribute('x', bx + barW/2); mtxt.setAttribute('y', chartH + 16)
+            mtxt.setAttribute('text-anchor','middle'); mtxt.setAttribute('font-size','9')
+            mtxt.setAttribute('fill','var(--text-tertiary)'); mtxt.setAttribute('font-family','DM Sans,sans-serif')
+            mtxt.textContent = lbl; scoreBarEl.appendChild(mtxt)
+          })
+        }, 60)
+      }
+
+      // ── DRAW HOURS DISTRIBUTION ──
+      var hoursEl = document.getElementById('hoursDistChart')
+      if (hoursEl && s.hoursDistribution) {
+        setTimeout(function() {
+          var w = hoursEl.getBoundingClientRect().width || 400
+          var chartH = 58, padL = 4, padR = 4
+          var buckets = s.hoursDistribution
+          var n = buckets.length
+          var barW = Math.max(4, (w - padL - padR) / n - 6)
+          var step = (w - padL - padR) / n
+          var maxVal = Math.max.apply(null, buckets.map(function(b){return b.count}).concat([1]))
+          var hColors = ['#60a5fa','#818cf8','#a78bfa','#c084fc','#e879f9']
+
+          buckets.forEach(function(b, i) {
+            var bh = Math.max(0, (b.count / maxVal) * chartH)
+            var bx = padL + i*step + (step - barW)/2
+            var by = chartH - bh
+
+            if (b.count > 0) {
+              var rect = document.createElementNS('http://www.w3.org/2000/svg','rect')
+              rect.setAttribute('x', bx); rect.setAttribute('y', by)
+              rect.setAttribute('width', barW); rect.setAttribute('height', bh)
+              rect.setAttribute('rx','3')
+              rect.setAttribute('fill', hColors[i % hColors.length])
+              rect.setAttribute('opacity','0.85')
+              hoursEl.appendChild(rect)
+
+              var cnt = document.createElementNS('http://www.w3.org/2000/svg','text')
+              cnt.setAttribute('x', bx + barW/2); cnt.setAttribute('y', by - 3)
+              cnt.setAttribute('text-anchor','middle'); cnt.setAttribute('font-size','9')
+              cnt.setAttribute('fill', hColors[i % hColors.length]); cnt.setAttribute('font-weight','600')
+              cnt.setAttribute('font-family','DM Sans,sans-serif')
+              cnt.textContent = b.count; hoursEl.appendChild(cnt)
+            }
+
+            var lbl = document.createElementNS('http://www.w3.org/2000/svg','text')
+            lbl.setAttribute('x', bx + barW/2); lbl.setAttribute('y', chartH + 14)
+            lbl.setAttribute('text-anchor','middle'); lbl.setAttribute('font-size','8')
+            lbl.setAttribute('fill','var(--text-tertiary)'); lbl.setAttribute('font-family','DM Sans,sans-serif')
+            lbl.textContent = b.label; hoursEl.appendChild(lbl)
+          })
+        }, 60)
+      }
+
+      // ── PIE CHART ──
       if (s.platformBreakdown && s.platformBreakdown.length > 0) {
         var pieSvg = document.getElementById('pieSvg')
         var pieLegend = document.getElementById('pieLegend')
         var total = s.platformBreakdown.reduce(function(a,b){return a+b.count},0)
         var startAngle = -Math.PI/2
-        var cx=50,cy=50,r=46
+        var cx=45, cy=45, r=42
 
         s.platformBreakdown.forEach(function(p, i) {
           var angle = (p.count/total)*Math.PI*2
@@ -909,16 +1123,17 @@ const statsJson = JSON.stringify({
           var path = document.createElementNS('http://www.w3.org/2000/svg','path')
           path.setAttribute('d','M'+cx+','+cy+' L'+x1+','+y1+' A'+r+','+r+' 0 '+large+',1 '+x2+','+y2+' Z')
           path.setAttribute('fill', pieColors[i%pieColors.length])
-          path.setAttribute('opacity','0.85')
-          path.style.transition = 'opacity .15s'
-          path.addEventListener('mouseenter',function(){this.setAttribute('opacity','1')})
-          path.addEventListener('mouseleave',function(){this.setAttribute('opacity','0.85')})
+          path.setAttribute('opacity','0.88')
+          path.style.transition = 'opacity .15s,transform .15s'
+          path.style.transformOrigin = cx+'px '+cy+'px'
+          path.addEventListener('mouseenter',function(){this.setAttribute('opacity','1');this.style.transform='scale(1.04)'})
+          path.addEventListener('mouseleave',function(){this.setAttribute('opacity','0.88');this.style.transform='scale(1)'})
           pieSvg.appendChild(path)
           startAngle = endAngle
 
           var item = document.createElement('div')
           item.style.cssText = 'display:flex;align-items:center;gap:8px;min-width:0'
-          item.innerHTML = '<div style="width:10px;height:10px;border-radius:2px;flex-shrink:0;background:' + pieColors[i%pieColors.length] + ';opacity:.85"></div>'
+          item.innerHTML = '<div style="width:10px;height:10px;border-radius:2px;flex-shrink:0;background:' + pieColors[i%pieColors.length] + '"></div>'
             + '<span style="font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + p.name + '</span>'
             + '<span style="font-size:12px;color:var(--text-tertiary);font-weight:600;flex-shrink:0">' + p.pct + '%</span>'
           pieLegend.appendChild(item)
@@ -929,67 +1144,9 @@ const statsJson = JSON.stringify({
         hole.setAttribute('fill','var(--bg-card)')
         pieSvg.appendChild(hole)
       }
-
-      // line graph
-      var lineEl = document.getElementById('lineChart')
-      if (lineEl && s.monthLabels && s.monthCounts) {
-        var chartH = 68, padL = 8, padR = 8
-        var pts = s.monthCounts
-        var n = pts.length
-        setTimeout(function() {
-          var w = lineEl.getBoundingClientRect().width || 400
-          var step = (w-padL-padR)/(n-1)
-          var maxM = Math.max.apply(null, pts.concat([1]))
-          var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.82-4]})
-
-          for (var gi=0;gi<=2;gi++) {
-            var gy = chartH-(gi/2)*chartH
-            var gl = document.createElementNS('http://www.w3.org/2000/svg','line')
-            gl.setAttribute('x1',padL);gl.setAttribute('x2',w-padR)
-            gl.setAttribute('y1',gy);gl.setAttribute('y2',gy)
-            gl.setAttribute('stroke','var(--border)');gl.setAttribute('stroke-width','1')
-            lineEl.appendChild(gl)
-          }
-
-          var aPath = 'M'+coords[0][0]+','+chartH+coords.map(function(c){return ' L'+c[0]+','+c[1]}).join('')+' L'+coords[n-1][0]+','+chartH+' Z'
-          var area = document.createElementNS('http://www.w3.org/2000/svg','path')
-          area.setAttribute('d',aPath);area.setAttribute('fill','var(--game-accent)');area.setAttribute('opacity','0.12')
-          lineEl.appendChild(area)
-
-          var lPath = 'M'+coords[0][0]+','+coords[0][1]+coords.slice(1).map(function(c){return ' L'+c[0]+','+c[1]}).join('')
-          var lineEl2 = document.createElementNS('http://www.w3.org/2000/svg','path')
-          lineEl2.setAttribute('d',lPath);lineEl2.setAttribute('fill','none')
-          lineEl2.setAttribute('stroke','var(--game-accent)');lineEl2.setAttribute('stroke-width','2')
-          lineEl2.setAttribute('stroke-linecap','round');lineEl2.setAttribute('stroke-linejoin','round')
-          lineEl.appendChild(lineEl2)
-
-          coords.forEach(function(c,i) {
-            var dot = document.createElementNS('http://www.w3.org/2000/svg','circle')
-            dot.setAttribute('cx',c[0]);dot.setAttribute('cy',c[1])
-            dot.setAttribute('r',pts[i]>0?'4':'2.5')
-            dot.setAttribute('fill',pts[i]>0?'var(--game-accent)':'var(--border)')
-            dot.setAttribute('stroke','var(--bg-card)');dot.setAttribute('stroke-width','2')
-            lineEl.appendChild(dot)
-
-            if (pts[i]>0) {
-              var txt = document.createElementNS('http://www.w3.org/2000/svg','text')
-              txt.setAttribute('x',c[0]);txt.setAttribute('y',c[1]-9)
-              txt.setAttribute('text-anchor','middle');txt.setAttribute('font-size','10')
-              txt.setAttribute('fill','var(--text-secondary)');txt.setAttribute('font-family','DM Sans,sans-serif')
-              txt.textContent = pts[i]; lineEl.appendChild(txt)
-            }
-
-            var mlbl = document.createElementNS('http://www.w3.org/2000/svg','text')
-            mlbl.setAttribute('x',c[0]);mlbl.setAttribute('y',chartH+18)
-            mlbl.setAttribute('text-anchor','middle');mlbl.setAttribute('font-size','10')
-            mlbl.setAttribute('fill','var(--text-tertiary)');mlbl.setAttribute('font-family','DM Sans,sans-serif')
-            mlbl.textContent = s.monthLabels[i]; lineEl.appendChild(mlbl)
-          })
-        }, 50)
-      }
     }
 
-    if (activeTab === 'stats') buildStats()
+        if (activeTab === 'stats') buildStats()
 
     function toggleTheme() {
       var html = document.documentElement
