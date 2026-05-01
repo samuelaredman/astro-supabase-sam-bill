@@ -3,6 +3,1129 @@ export const prerender = false;
 
 import { getSupabase } from '../../utils/database'
 const supabase = getSupabase();
+import { igdbFetch } from '../../utils/igdb'
+
+const { slug } = Astro.params;
+const activeTab = Astro.url.searchParams.get('tab') || 'overview'
+
+const { data: game } = await (supabase as any)
+  .from('games')
+  .select(`
+    id, title, slug, game_description, cover_img_url,
+    date_released, igdb_id,
+    game_genres(genres(id, name, slug)),
+    game_platforms(platforms(id, name, slug)),
+    game_companies(role, developers(id, name, slug))
+  `)
+  .eq('slug', slug)
+  .single()
+
+if (!game) return Astro.redirect('/404')
+
+const { data: reviews } = await (supabase as any)
+  .from('reviews')
+  .select(`
+    id, score, title, body, published_at, created_at,
+    contains_spoilers, play_time_hours,
+    played_on:platform_played_on ( id, name, slug ),
+    profiles ( id, username, avatar_url )
+  `)
+  .eq('game_id', game.id)
+  .eq('status', 'published')
+  .order('published_at', { ascending: false })
+
+const reviewList = reviews ?? []
+
+let igdbData: any = null
+if (game.igdb_id) {
+  const result = await igdbFetch('games',
+    `fields summary, rating,
+            artworks.url,
+            screenshots.url,
+            videos.video_id,
+            game_modes.name,
+            themes.name,
+            franchises.name,
+            game_engines.name,
+            alternative_names.name,
+            similar_games.id,
+            similar_games.name,
+            similar_games.slug,
+            similar_games.cover.url;
+     where id = ${game.igdb_id};`)
+  igdbData = result?.[0] ?? null
+}
+
+// hero image
+const heroArtwork = igdbData?.artworks?.[0]?.url ?? null
+const heroScreenshot = igdbData?.screenshots?.[0]?.url ?? null
+const showCoverBlur = !heroArtwork && !heroScreenshot
+
+function igdbImage(url: string | null, size = 't_cover_big') {
+  if (!url) return null
+  const clean = url.startsWith('//') ? `https:${url}` : url
+  return clean.replace(/t_[a-z0-9_]+/, size)
+}
+
+const heroImageUrl = heroArtwork
+  ? igdbImage(heroArtwork, 't_1080p_2x') ?? ''
+  : heroScreenshot
+  ? igdbImage(heroScreenshot, 't_1080p_2x') ?? ''
+  : ''
+
+const heroImageUrl1x = heroArtwork
+  ? igdbImage(heroArtwork, 't_1080p') ?? ''
+  : heroScreenshot
+  ? igdbImage(heroScreenshot, 't_1080p') ?? ''
+  : ''
+
+const avgScore = reviewList.length > 0
+  ? (reviewList.reduce((sum: number, r: any) => sum + r.score, 0) / reviewList.length).toFixed(1)
+  : null
+
+const scoreDistribution = Array.from({ length: 10 }, (_, i) =>
+  reviewList.filter((r: any) => r.score === i + 1).length
+)
+
+const totalHours = reviewList.reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0)
+const avgHours = reviewList.length > 0 ? Math.round(totalHours / reviewList.length) : null
+
+const developers = (game.game_companies ?? [])
+  .filter((c: any) => c.role === 'developer')
+  .map((c: any) => c.developers).filter(Boolean)
+
+const publishers = (game.game_companies ?? [])
+  .filter((c: any) => c.role === 'publisher')
+  .map((c: any) => c.developers).filter(Boolean)
+
+const genres = (game.game_genres ?? [])
+  .map((gg: any) => gg.genres).filter(Boolean)
+
+const platforms = (game.game_platforms ?? [])
+  .map((gp: any) => gp.platforms).filter(Boolean)
+
+const similarGames = (igdbData?.similar_games ?? []).slice(0, 8)
+
+const releaseYear = game.date_released ? new Date(game.date_released).getFullYear() : null
+const releaseDate = game.date_released
+  ? new Date(game.date_released).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+  : null
+
+const trailerVideoId = igdbData?.videos?.[0]?.video_id ?? null
+
+// ── STATS ──
+const releaseYearStr = releaseYear ? String(releaseYear) : null
+const primaryGenreId = genres[0]?.id ?? null
+
+const { data: allScoreRows } = await (supabase as any)
+  .from('reviews').select('game_id, score').eq('status', 'published')
+
+const gameScoreMap: Record<string, number[]> = {}
+for (const r of allScoreRows ?? []) {
+  if (!gameScoreMap[r.game_id]) gameScoreMap[r.game_id] = []
+  gameScoreMap[r.game_id].push(r.score)
+}
+const gameAvgs: Record<string, number> = {}
+for (const [gid, scores] of Object.entries(gameScoreMap)) {
+  gameAvgs[gid] = scores.reduce((a: number, b: number) => a + b, 0) / scores.length
+}
+
+const thisAvg = avgScore ? parseFloat(avgScore) : 0
+const allAvgs = Object.values(gameAvgs).sort((a, b) => b - a)
+const allTimeRank = allAvgs.findIndex(v => v <= thisAvg) + 1
+const allTimeTotal = allAvgs.length
+const allTimePct = allTimeTotal > 0 ? Math.round(((allTimeTotal - allTimeRank) / allTimeTotal) * 100) : 0
+
+let genreRank = 0, genreTotal = 0, genrePct = 0
+if (primaryGenreId) {
+  const { data: genreGameRows } = await (supabase as any)
+    .from('game_genres').select('game_id').eq('genre_id', primaryGenreId)
+  const genreGameIds = new Set((genreGameRows ?? []).map((r: any) => r.game_id))
+  const genreAvgs = allAvgs.filter((_, i) => {
+    const gid = Object.keys(gameAvgs).find(k => gameAvgs[k] === allAvgs[i])
+    return gid && genreGameIds.has(gid)
+  })
+  genreTotal = genreAvgs.length
+  genreRank = genreAvgs.filter(v => v > thisAvg).length + 1
+  genrePct = genreTotal > 0 ? Math.round(((genreTotal - genreRank) / genreTotal) * 100) : 0
+}
+
+let yearRank = 0, yearTotal = 0, yearPct = 0
+if (releaseYearStr) {
+  const { data: yearGameRows } = await (supabase as any)
+    .from('games').select('id')
+    .gte('date_released', `${releaseYearStr}-01-01`)
+    .lte('date_released', `${releaseYearStr}-12-31`)
+  const yearGameIds = new Set((yearGameRows ?? []).map((r: any) => r.id))
+  const yearAvgsArr = Object.entries(gameAvgs)
+    .filter(([gid]) => yearGameIds.has(gid))
+    .map(([, avg]) => avg)
+    .sort((a, b) => b - a)
+  yearTotal = yearAvgsArr.length
+  yearRank = yearAvgsArr.filter(v => v > thisAvg).length + 1
+  yearPct = yearTotal > 0 ? Math.round(((yearTotal - yearRank) / yearTotal) * 100) : 0
+}
+
+const platformCounts: Record<string, number> = {}
+for (const r of reviewList) {
+  const name = (r as any).played_on?.name ?? 'Unknown'
+  platformCounts[name] = (platformCounts[name] ?? 0) + 1
+}
+const platformBreakdown = Object.entries(platformCounts)
+  .sort((a, b) => b[1] - a[1]).slice(0, 5)
+  .map(([name, count]) => ({ name, count, pct: Math.round((count / reviewList.length) * 100) }))
+
+const recommendedCount = reviewList.filter((r: any) => r.score >= 7).length
+const recommendedRate = reviewList.length > 0 ? Math.round((recommendedCount / reviewList.length) * 100) : 0
+
+let genreAvgScore = 0
+if (primaryGenreId) {
+  const { data: genreGameRows2 } = await (supabase as any)
+    .from('game_genres').select('game_id').eq('genre_id', primaryGenreId)
+  const genreGameIds2 = new Set((genreGameRows2 ?? []).map((r: any) => r.game_id))
+  const genreScores: number[] = []
+  for (const [gid, scores] of Object.entries(gameScoreMap)) {
+    if (genreGameIds2.has(gid)) genreScores.push(...scores)
+  }
+  genreAvgScore = genreScores.length > 0
+    ? Math.round((genreScores.reduce((a, b) => a + b, 0) / genreScores.length) * 10) / 10
+    : 0
+}
+
+const allSiteScores = (allScoreRows ?? []).map((r: any) => r.score)
+const siteAvgScore = allSiteScores.length > 0
+  ? Math.round((allSiteScores.reduce((a: number, b: number) => a + b, 0) / allSiteScores.length) * 10) / 10
+  : 0
+
+// monthly reviews — last 6 months
+const monthlyReviews: Record<string, number> = {}
+for (const r of reviewList) {
+  const d = new Date((r as any).published_at ?? (r as any).created_at)
+  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  monthlyReviews[key] = (monthlyReviews[key] ?? 0) + 1
+}
+const monthLabels: string[] = []
+const monthCounts: number[] = []
+for (let i = 5; i >= 0; i--) {
+  const d = new Date()
+  d.setMonth(d.getMonth() - i)
+  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  monthLabels.push(d.toLocaleDateString('en-US', { month: 'short' }))
+  monthCounts.push(monthlyReviews[key] ?? 0)
+}
+
+function scoreClass(score: number): string {
+  if (score >= 9) return 'score-great'
+  if (score >= 7) return 'score-good'
+  if (score >= 5) return 'score-mid'
+  return 'score-low'
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
+  if (diff < 60) return `${diff}s`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`
+  return `${Math.floor(diff / 604800)}w`
+}
+
+function getInitials(username: string): string {
+  return username.slice(0, 2).toUpperCase()
+}
+
+const distJson = JSON.stringify(scoreDistribution)
+const coverBlurUrl = igdbImage(game.cover_img_url, 't_cover_big') ?? ''
+const trailerSrc = trailerVideoId ? `https://www.youtube.com/embed/${trailerVideoId}?autoplay=1&rel=0` : ''
+const statsJson = JSON.stringify({
+  allTimeRank, allTimeTotal, allTimePct,
+  genreRank, genreTotal, genrePct,
+  yearRank, yearTotal, yearPct,
+  platformBreakdown,
+  recommendedRate,
+  totalHours, avgHours,
+  genreAvgScore, siteAvgScore,
+  genreName: genres[0]?.name ?? 'Genre',
+  releaseYear,
+  reviewCount: reviewList.length,
+  scoreDistribution,
+  monthLabels,
+  monthCounts,
+})
+---
+
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{game.title} — Cartridge</title>
+  <meta name="description" content={game.game_description?.slice(0, 160)} />
+  <meta property="og:title" content={`${game.title} — Cartridge`} />
+  <meta property="og:description" content={game.game_description?.slice(0, 160)} />
+  {game.cover_img_url && <meta property="og:image" content={igdbImage(game.cover_img_url, 't_cover_big') ?? ''} />}
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <style>
+    :root[data-theme="light"] {
+      --bg:#f5f4f2;--bg-card:#ffffff;--bg-hover:#f4f3f0;
+      --border:#e8e6e1;--border-subtle:#f0ede8;
+      --text-primary:#141412;--text-secondary:#6b6860;--text-tertiary:#a09d98;
+      --tag-bg:#f0ede8;--tag-text:#6b6860;
+      --shadow:0 1px 3px rgba(0,0,0,.06);--shadow-md:0 4px 16px rgba(0,0,0,.1);
+      --score-great:#1a6b3c;--score-great-bg:#eaf5ee;
+      --score-good:#1a4a6b;--score-good-bg:#eaf0f5;
+      --score-mid:#6b5a1a;--score-mid-bg:#f5f0ea;
+      --score-low:#6b1a1a;--score-low-bg:#f5eaea;
+      --game-accent:#4a3a8a;--game-accent-subtle:rgba(74,58,138,.06);
+      --hero-overlay:linear-gradient(to bottom,rgba(245,244,242,.05)0%,rgba(245,244,242,.2)40%,rgba(245,244,242,.85)75%,rgba(245,244,242,1)100%);
+      --hero-side:linear-gradient(to right,rgba(245,244,242,.4)0%,transparent 40%);
+    }
+    :root[data-theme="dark"] {
+      --bg:#09090a;--bg-card:#131314;--bg-hover:#1c1c1e;
+      --border:#222224;--border-subtle:#191919;
+      --text-primary:#f0ede8;--text-secondary:#908d87;--text-tertiary:#484644;
+      --tag-bg:#1c1c1e;--tag-text:#6a6866;
+      --shadow:0 1px 3px rgba(0,0,0,.5);--shadow-md:0 4px 16px rgba(0,0,0,.7);
+      --score-great:#4ade80;--score-great-bg:#0b2016;
+      --score-good:#60a5fa;--score-good-bg:#0b1828;
+      --score-mid:#fbbf24;--score-mid-bg:#201808;
+      --score-low:#f87171;--score-low-bg:#200808;
+      --game-accent:#6050c8;--game-accent-subtle:rgba(96,80,200,.09);
+      --hero-overlay:linear-gradient(to bottom,rgba(9,9,10,.05)0%,rgba(9,9,10,.2)40%,rgba(9,9,10,.8)75%,rgba(9,9,10,1)100%);
+      --hero-side:linear-gradient(to right,rgba(9,9,10,.5)0%,transparent 40%);
+    }
+
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth}
+    body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text-primary);min-height:100vh;-webkit-font-smoothing:antialiased}
+    a{color:inherit;text-decoration:none}
+
+    .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.82);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;gap:16px;backdrop-filter:blur(20px)}
+    [data-theme="light"] .topnav{background:rgba(245,244,242,.82)}
+    .back-btn{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-tertiary);transition:color .15s}
+    .back-btn:hover{color:var(--text-primary)}
+    .logo{font-family:'DM Serif Display',serif;font-size:19px;letter-spacing:-.3px;display:flex;align-items:center;gap:7px;margin-left:auto}
+    .logo-dot{width:6px;height:6px;background:var(--game-accent);border-radius:50%;box-shadow:0 0 10px var(--game-accent)}
+    .theme-btn{background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:6px;display:flex;align-items:center;transition:color .15s;margin-left:8px}
+    .theme-btn:hover{color:var(--text-primary)}
+
+    /* UNDERLINE TAB NAV */
+    .tab-nav{position:sticky;top:53px;z-index:20;background:rgba(9,9,10,.72);border-bottom:1px solid var(--border);backdrop-filter:blur(16px);display:flex}
+    [data-theme="light"] .tab-nav{background:rgba(245,244,242,.82)}
+    .tab-link{font-size:15px;font-weight:500;color:var(--text-tertiary);padding:14px 28px;border-bottom:3px solid transparent;white-space:nowrap;transition:color .15s,border-color .15s;letter-spacing:-.1px;display:flex;align-items:center;gap:7px}
+    .tab-link:hover{color:var(--text-secondary)}
+    .tab-link.active{color:var(--text-primary);border-color:var(--game-accent);font-weight:600}
+    .tab-count{font-size:13px;color:var(--text-tertiary)}
+    .tab-link.active .tab-count{color:var(--game-accent)}
+
+    .hero{position:relative;width:100%;height:400px;overflow:hidden;background:#04040a}
+    .hero-artwork{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 30%}
+    .hero-cover-blur{position:absolute;inset:-40px;background-size:cover;background-position:center 20%;filter:blur(28px) saturate(1.6) brightness(.5);transform:scale(1.15);display:none}
+    .hero-cover-blur.visible{display:block}
+    .hero-side-fade{position:absolute;inset:0;background:var(--hero-side)}
+    .hero-overlay{position:absolute;inset:0;background:var(--hero-overlay)}
+
+    .page{max-width:980px;margin:0 auto;padding:0 28px 100px}
+
+    .game-header{display:flex;gap:24px;align-items:flex-end;margin-top:-100px;margin-bottom:28px;position:relative;z-index:2}
+    .cover-img{width:130px;height:173px;border-radius:12px;object-fit:cover;border:1px solid rgba(96,80,200,.4);box-shadow:0 12px 40px rgba(0,0,0,.8),0 0 32px rgba(96,80,200,.2);display:block;flex-shrink:0}
+    .cover-placeholder{width:130px;height:173px;border-radius:12px;background:var(--bg-card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0}
+    .game-info{flex:1;min-width:0;padding-bottom:4px}
+    .game-title{font-family:'Cinzel',serif;font-size:32px;line-height:1.1;letter-spacing:.04em;margin-bottom:8px;font-weight:600;text-shadow:0 2px 20px rgba(0,0,0,.6)}
+    .meta-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    .meta-tag{font-size:13px;color:var(--text-secondary)}
+    .meta-sep{color:var(--text-tertiary);font-size:10px}
+    .meta-link{font-size:13px;color:var(--text-secondary);transition:color .15s}
+    .meta-link:hover{color:var(--text-primary);text-decoration:underline;text-underline-offset:3px}
+    .platform-list{display:flex;flex-wrap:wrap;gap:5px}
+    .platform-tag{background:var(--tag-bg);color:var(--tag-text);font-size:11px;font-weight:500;padding:3px 10px;border-radius:6px;border:1px solid var(--border)}
+
+    .score-hero{display:flex;align-items:center;gap:24px;padding:20px 24px;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;margin-bottom:28px;position:relative;overflow:hidden}
+    .score-hero::before{content:'';position:absolute;inset:0;background:var(--game-accent-subtle);pointer-events:none}
+    .score-hero::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(to right,transparent,var(--game-accent),transparent);opacity:.6}
+    .avg-score-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:72px;line-height:1;font-weight:700;position:relative;z-index:1;letter-spacing:-3px}
+    .score-great-color{color:var(--score-great)}
+    .score-good-color{color:var(--score-good)}
+    .score-mid-color{color:var(--score-mid)}
+    .score-low-color{color:var(--score-low)}
+    .score-divider{width:1px;height:56px;background:var(--border);flex-shrink:0}
+    .score-meta{flex:1;position:relative;z-index:1}
+    .score-label{font-size:11px;font-weight:500;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:3px}
+    .review-count-label{font-size:13px;color:var(--text-secondary);margin-bottom:12px}
+    .score-dist{display:flex;gap:4px;align-items:flex-end;height:44px}
+    .dist-bar-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;flex:1;cursor:pointer}
+    .dist-bar{width:100%;border-radius:4px 4px 0 0;min-height:4px;transition:opacity .15s,transform .15s}
+    .dist-bar-wrap:hover .dist-bar{opacity:1!important;transform:scaleY(1.06);transform-origin:bottom}
+    .dist-label{font-size:9px;color:var(--text-tertiary);font-weight:500}
+    .write-review-btn{background:var(--game-accent);color:white;border:none;border-radius:22px;padding:10px 20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity .15s,transform .15s;white-space:nowrap;box-shadow:0 4px 24px rgba(96,80,200,.4);position:relative;z-index:1}
+    .write-review-btn:hover{opacity:.9;transform:translateY(-1px)}
+
+    /* TAB PANELS */
+    .tab-panel{display:none}
+    .tab-panel.active{display:block}
+
+    /* TWO COLUMN — OVERVIEW */
+    .two-col{display:grid;grid-template-columns:1fr 300px;gap:24px;align-items:start}
+    @media(max-width:720px){.two-col{grid-template-columns:1fr}}
+    .main-col{min-width:0}
+    .sidebar-col{position:sticky;top:110px;display:flex;flex-direction:column;gap:14px}
+
+    .section{margin-bottom:32px}
+    .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+    .section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--text-tertiary)}
+    .section-count{font-size:12px;color:var(--text-tertiary)}
+
+    .trailer-thumb{position:relative;width:100%;aspect-ratio:16/9;border-radius:14px;overflow:hidden;border:1px solid var(--border);cursor:pointer;background:#000}
+    .trailer-bg{width:100%;height:100%;background:var(--bg-card);display:flex;align-items:center;justify-content:center;font-size:80px;opacity:.15}
+    .trailer-play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px}
+    .play-circle{width:72px;height:72px;background:rgba(96,80,200,.18);backdrop-filter:blur(8px);border-radius:50%;display:flex;align-items:center;justify-content:center;border:1px solid rgba(96,80,200,.5);transition:all .2s}
+    .trailer-thumb:hover .play-circle{background:rgba(96,80,200,.32);transform:scale(1.08)}
+    .play-icon{width:0;height:0;border-top:12px solid transparent;border-bottom:12px solid transparent;border-left:18px solid white;margin-left:3px}
+    .trailer-label{font-size:13px;color:rgba(255,255,255,.65)}
+    .trailer-iframe-wrap{display:none;width:100%;aspect-ratio:16/9;border-radius:14px;overflow:hidden;border:1px solid var(--border)}
+    .trailer-iframe-wrap iframe{width:100%;height:100%;border:none}
+
+    .screenshots-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+    .screenshot{aspect-ratio:16/9;border-radius:10px;overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:transform .2s,border-color .2s}
+    .screenshot:hover{transform:scale(1.03);border-color:rgba(96,80,200,.4)}
+    .screenshot img{width:100%;height:100%;object-fit:cover}
+
+    .similar-scroll{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+    .similar-card{flex-shrink:0;width:100px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:transform .15s;display:block}
+    .similar-card:hover{transform:translateY(-3px)}
+    .similar-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:24px}
+    .similar-cover img{width:100%;height:100%;object-fit:cover}
+    .similar-info{padding:6px 8px 8px}
+    .similar-title{font-size:10px;font-weight:500;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--text-secondary)}
+
+    /* SIDEBAR CARDS */
+    .desc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px}
+    .desc-text{font-size:13px;line-height:1.75;color:var(--text-secondary);display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+    .desc-text.expanded{display:block}
+    .read-more-btn{background:none;border:none;font-family:inherit;font-size:12px;color:var(--game-accent);cursor:pointer;padding:8px 0 0;display:block;font-weight:500}
+    .details-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:4px 16px}
+    .detail-row{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-subtle);font-size:12px}
+    .detail-row:last-child{border-bottom:none}
+    .detail-label{flex-shrink:0;width:76px;color:var(--text-tertiary);padding-top:1px;text-transform:uppercase;letter-spacing:.06em;font-size:10px;font-weight:500}
+    .detail-value{color:var(--text-secondary);line-height:1.5;flex:1}
+    .tag-list{display:flex;flex-wrap:wrap;gap:4px}
+    .tag{background:var(--tag-bg);color:var(--tag-text);font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--border)}
+
+    /* REVIEWS TAB */
+    .reviews-toolbar{display:flex;gap:6px;margin-bottom:20px}
+    .sort-tab{background:var(--tag-bg);color:var(--text-tertiary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:.04em}
+    .sort-tab.active{background:var(--game-accent);color:white;border-color:transparent}
+    .review-card{padding:22px 0;border-bottom:1px solid var(--border-subtle)}
+    .review-card:last-child{border-bottom:none}
+    .review-top{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+    .avatar{width:34px;height:34px;border-radius:50%;background:var(--bg-hover);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--text-tertiary);overflow:hidden}
+    .avatar img{width:100%;height:100%;object-fit:cover}
+    .reviewer-info{flex:1;min-width:0}
+    .reviewer-name{font-size:13px;font-weight:500;transition:color .15s}
+    .reviewer-name:hover{color:var(--text-secondary)}
+    .reviewer-meta{font-size:11px;color:var(--text-tertiary);display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px}
+    .score-badge{flex-shrink:0;width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
+    .score-great{color:var(--score-great);background:var(--score-great-bg);border:1px solid rgba(74,222,128,.25)}
+    .score-good{color:var(--score-good);background:var(--score-good-bg);border:1px solid rgba(96,165,250,.25)}
+    .score-mid{color:var(--score-mid);background:var(--score-mid-bg);border:1px solid rgba(251,191,36,.25)}
+    .score-low{color:var(--score-low);background:var(--score-low-bg);border:1px solid rgba(248,113,113,.25)}
+    .review-title{font-family:'DM Serif Display',serif;font-size:18px;line-height:1.3;margin-bottom:8px;letter-spacing:-.2px}
+    .review-body{font-size:14px;line-height:1.75;color:var(--text-secondary);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+    .review-body.expanded{display:block}
+    .review-footer{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap}
+    .footer-tag{background:var(--tag-bg);color:var(--tag-text);font-size:10px;font-weight:500;padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:.04em;border:1px solid var(--border)}
+    .expand-btn{font-size:11px;color:var(--game-accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;padding:0;font-weight:500}
+    .spoiler-pill{display:inline-flex;align-items:center;gap:4px;background:rgba(251,191,36,.08);color:#fbbf24;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;border:1px solid rgba(251,191,36,.2)}
+
+    .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
+    .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
+    .write-btn-empty{display:inline-block;margin-top:16px;background:var(--game-accent);color:white;border-radius:20px;padding:9px 20px;font-size:14px;font-weight:500}
+
+    /* STATS TAB */
+    .stats-section{padding-top:4px}
+    .rank-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+    @media(max-width:580px){.rank-grid{grid-template-columns:1fr 1fr}}
+    .rank-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .2s}
+    .rank-card:hover{border-color:rgba(96,80,200,.4)}
+    .rank-card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,var(--game-accent-subtle)0%,transparent 60%);pointer-events:none}
+    .rank-scope{font-size:10px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
+    .rank-num-row{display:flex;align-items:baseline;gap:3px;margin-bottom:3px}
+    .rank-hash{font-size:16px;font-weight:600;color:var(--text-tertiary);font-family:'DM Serif Display',serif}
+    .rank-num{font-family:'DM Serif Display',serif;font-size:32px;line-height:1;letter-spacing:-1px;color:var(--game-accent)}
+    .rank-of{font-size:11px;color:var(--text-tertiary)}
+    .rank-pct{display:inline-flex;background:var(--game-accent-subtle);color:var(--game-accent);font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;border:1px solid rgba(96,80,200,.2);margin-top:6px}
+    .pct-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px}
+    .pct-card-title{font-size:10px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:14px}
+    .stats-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:12px}
+    .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+    .stat-lbl{font-size:10px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px}
+    .stat-val{font-family:'DM Serif Display',serif;font-size:28px;letter-spacing:-.5px;line-height:1;margin-bottom:3px}
+    .stat-sub{font-size:11px;color:var(--text-tertiary)}
+    .two-stats{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+    @media(max-width:580px){.two-stats{grid-template-columns:1fr}}
+    .rec-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;align-items:center;gap:18px}
+    .rec-donut{position:relative;width:72px;height:72px;flex-shrink:0}
+    .rec-donut svg{transform:rotate(-90deg)}
+    .rec-pct-label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'DM Serif Display',serif;font-size:18px;font-weight:600}
+    .rec-title{font-size:14px;font-weight:500;margin-bottom:4px}
+    .rec-sub{font-size:12px;color:var(--text-tertiary)}
+    .chart-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px}
+    .chart-card-title{font-size:10px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px}
+    .compare-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px}
+    .compare-title{font-size:10px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
+    .legend{display:flex;gap:14px;margin-bottom:12px}
+    .legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary)}
+    .legend-dot{width:8px;height:8px;border-radius:2px}
+    .cmp-row{display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border-subtle)}
+    .cmp-row:last-child{border-bottom:none}
+    .cmp-label{font-size:12px;color:var(--text-secondary);width:130px;flex-shrink:0}
+    .cmp-bar{flex:1;position:relative;height:8px}
+    .cmp-track{position:absolute;inset:0;background:var(--tag-bg);border-radius:4px}
+    .cmp-avg{position:absolute;top:0;left:0;height:100%;border-radius:4px;background:var(--text-tertiary);opacity:.4}
+    .cmp-game{position:absolute;top:0;left:0;height:100%;border-radius:4px;background:var(--game-accent)}
+    .cmp-score{font-size:12px;font-weight:600;width:32px;text-align:right;flex-shrink:0}
+    .cmp-delta{font-size:11px;width:42px;text-align:right;font-weight:600;flex-shrink:0}
+    .d-pos{color:var(--score-great)}
+    .d-neg{color:var(--score-low)}
+    .d-neu{color:var(--text-tertiary)}
+
+    .lightbox{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.94);align-items:center;justify-content:center;backdrop-filter:blur(12px);cursor:pointer}
+    .lightbox.open{display:flex}
+    .lightbox-inner{max-width:90vw;max-height:90vh;border-radius:12px;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,.9);cursor:default}
+    .lightbox-inner img{width:100%;height:100%;object-fit:contain}
+
+    @media(max-width:600px){
+      .game-header{flex-direction:column;align-items:flex-start;margin-top:-60px}
+      .game-title{font-size:26px}
+      .hero{height:260px}
+      .screenshots-grid{grid-template-columns:repeat(2,1fr)}
+      .score-hero{flex-wrap:wrap;gap:16px}
+      .avg-score-num{font-size:56px}
+      .write-review-btn{width:100%;text-align:center}
+      .tab-link{padding:12px 18px;font-size:14px}
+    }
+  </style>
+</head>
+<body>
+
+  <nav class="topnav">
+    <a href="/" class="back-btn">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
+      Back
+    </a>
+    <a href="/" class="logo"><span class="logo-dot"></span>Cartridge</a>
+    <button class="theme-btn" onclick="toggleTheme()">
+      <svg id="themeIcon" width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="9" cy="9" r="3.5"/>
+        <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
+      </svg>
+    </button>
+  </nav>
+
+  <nav class="tab-nav">
+    <a href={`/games/${game.slug}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`}>Overview</a>
+    <a href={`/games/${game.slug}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>
+      Reviews
+      {reviewList.length > 0 && <span class="tab-count">({reviewList.length})</span>}
+    </a>
+    <a href={`/games/${game.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`}>Stats</a>
+  </nav>
+
+  <div class="hero">
+    {!showCoverBlur && heroImageUrl ? (
+      <img
+        class="hero-artwork"
+        src={heroImageUrl1x}
+        srcset={`${heroImageUrl1x} 1920w, ${heroImageUrl} 3840w`}
+        sizes="100vw"
+        alt=""
+        loading="eager"
+        onerror="this.style.display='none';document.getElementById('heroCoverBlur').classList.add('visible')"
+      />
+    ) : null}
+    <div class="hero-cover-blur" id="heroCoverBlur" style={showCoverBlur ? 'display:block' : ''}></div>
+    <div class="hero-side-fade"></div>
+    <div class="hero-overlay"></div>
+  </div>
+
+  <div class="page">
+
+    <div class="game-header">
+      {game.cover_img_url
+        ? <img class="cover-img" src={igdbImage(game.cover_img_url, 't_cover_big') ?? ''} alt={game.title} loading="eager" />
+        : <div class="cover-placeholder">🎮</div>
+      }
+      <div class="game-info">
+        <h1 class="game-title">{game.title}</h1>
+        <div class="meta-row">
+          {releaseYear && <span class="meta-tag">{releaseYear}</span>}
+          {developers.length > 0 && (
+            <>
+              <span class="meta-sep">•</span>
+              {developers.map((d: any) => (
+                <a href={`/studios/${d.slug}`} class="meta-link">{d.name}</a>
+              ))}
+            </>
+          )}
+          {genres.length > 0 && (
+            <>
+              <span class="meta-sep">•</span>
+              <span class="meta-tag" style="color:var(--game-accent)">{genres[0].name}</span>
+            </>
+          )}
+        </div>
+        <div class="platform-list">
+          {platforms.map((p: any) => <span class="platform-tag">{p.name}</span>)}
+        </div>
+      </div>
+    </div>
+
+    {avgScore ? (
+      <div class="score-hero">
+        <div class={`avg-score-num ${scoreClass(parseFloat(avgScore))}-color`}>{avgScore}</div>
+        <div class="score-divider"></div>
+        <div class="score-meta">
+          <div class="score-label">Cartridge Score</div>
+          <div class="review-count-label">
+            from {reviewList.length} {reviewList.length === 1 ? 'review' : 'reviews'}
+            {avgHours ? ` · avg ${avgHours}h played` : ''}
+          </div>
+          <div class="score-dist" id="scoreDist"></div>
+        </div>
+        <a href={`/games/${game.slug}?tab=reviews`} class="write-review-btn">+ Write a review</a>
+      </div>
+    ) : (
+      <div class="score-hero">
+        <div class="score-meta">
+          <div class="score-label">No reviews yet</div>
+          <div class="review-count-label">Be the first to review {game.title}</div>
+        </div>
+        <a href={`/games/${game.slug}?tab=reviews`} class="write-review-btn">+ Write a review</a>
+      </div>
+    )}
+
+    <!-- ── OVERVIEW TAB ── -->
+    <div class={`tab-panel ${activeTab === 'overview' ? 'active' : ''}`}>
+      <div class="two-col">
+
+        <div class="main-col">
+          {trailerVideoId && (
+            <div class="section">
+              <div class="section-header"><span class="section-title">Trailer</span></div>
+              <div class="trailer-thumb" id="trailerThumb" onclick="loadTrailer()">
+                <div class="trailer-bg">🎮</div>
+                <div class="trailer-play">
+                  <div class="play-circle"><div class="play-icon"></div></div>
+                  <div class="trailer-label">{game.title} — Official Trailer</div>
+                </div>
+              </div>
+              <div class="trailer-iframe-wrap" id="trailerIframe">
+                <iframe id="trailerPlayer" src="" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+              </div>
+            </div>
+          )}
+
+          {igdbData?.screenshots?.length > 0 && (
+            <div class="section">
+              <div class="section-header">
+                <span class="section-title">Screenshots</span>
+                <span class="section-count">{igdbData.screenshots.length} screenshots</span>
+              </div>
+              <div class="screenshots-grid">
+                {igdbData.screenshots.slice(0, 6).map((s: any, i: number) => (
+                  <div class="screenshot" onclick={`openLightbox('${igdbImage(s.url, 't_1080p_2x')}')`}>
+                    <img
+                      src={igdbImage(s.url, 't_screenshot_big') ?? ''}
+                      srcset={`${igdbImage(s.url, 't_screenshot_big')} 889w, ${igdbImage(s.url, 't_screenshot_huge')} 1280w`}
+                      sizes="(max-width:600px) 50vw, 33vw"
+                      alt={`${game.title} screenshot ${i + 1}`}
+                      loading="lazy"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {similarGames.length > 0 && (
+            <div class="section">
+              <div class="section-header"><span class="section-title">Similar games</span></div>
+              <div class="similar-scroll">
+                {similarGames.map((g: any) => (
+                  <a href={g.slug ? `/games/${g.slug}` : '#'} class="similar-card">
+                    <div class="similar-cover">
+                      {g.cover?.url
+                        ? <img src={igdbImage(g.cover.url, 't_cover_big') ?? ''} alt={g.name} loading="lazy" />
+                        : '🎮'
+                      }
+                    </div>
+                    <div class="similar-info">
+                      <div class="similar-title">{g.name}</div>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div class="sidebar-col">
+          {game.game_description && (
+            <div class="desc-card">
+              <p class="desc-text" id="desc">{game.game_description}</p>
+              <button class="read-more-btn" id="readMoreBtn" onclick="toggleDesc()">Read more →</button>
+            </div>
+          )}
+
+          <div class="details-card">
+            {releaseDate && (
+              <div class="detail-row">
+                <span class="detail-label">Released</span>
+                <span class="detail-value">{releaseDate}</span>
+              </div>
+            )}
+            {developers.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Developer</span>
+                <span class="detail-value">{developers.map((d: any) => d.name).join(', ')}</span>
+              </div>
+            )}
+            {publishers.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Publisher</span>
+                <span class="detail-value">{publishers.map((p: any) => p.name).join(', ')}</span>
+              </div>
+            )}
+            {genres.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Genres</span>
+                <div class="tag-list">{genres.map((g: any) => <span class="tag">{g.name}</span>)}</div>
+              </div>
+            )}
+            {igdbData?.themes?.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Themes</span>
+                <div class="tag-list">{igdbData.themes.map((t: any) => <span class="tag">{t.name}</span>)}</div>
+              </div>
+            )}
+            {igdbData?.game_modes?.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Modes</span>
+                <div class="tag-list">{igdbData.game_modes.map((m: any) => <span class="tag">{m.name}</span>)}</div>
+              </div>
+            )}
+            {igdbData?.game_engines?.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Engine</span>
+                <span class="detail-value">{igdbData.game_engines.map((e: any) => e.name).join(', ')}</span>
+              </div>
+            )}
+            {igdbData?.franchises?.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Franchise</span>
+                <span class="detail-value">{igdbData.franchises.map((f: any) => f.name).join(', ')}</span>
+              </div>
+            )}
+            {igdbData?.alternative_names?.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Also known as</span>
+                <span class="detail-value">{igdbData.alternative_names.slice(0, 3).map((a: any) => a.name).join(', ')}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── REVIEWS TAB ── -->
+    <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`}>
+      {reviewList.length === 0 ? (
+        <div class="empty-state">
+          <div class="empty-title">No reviews yet</div>
+          <p style="font-size:14px;color:var(--text-tertiary)">Be the first to review {game.title}.</p>
+          <a href="/" class="write-btn-empty">+ Write a review</a>
+        </div>
+      ) : (
+        <>
+          <div class="reviews-toolbar">
+            <button class="sort-tab active" onclick="sortReviews('recent',this)">Recent</button>
+            <button class="sort-tab" onclick="sortReviews('highest',this)">Highest</button>
+            <button class="sort-tab" onclick="sortReviews('lowest',this)">Lowest</button>
+          </div>
+          <div id="reviewsList">
+            {reviewList.map((review: any) => (
+              <div class="review-card" data-score={review.score} data-date={review.published_at ?? review.created_at}>
+                <div class="review-top">
+                  <div class="avatar">
+                    {review.profiles?.avatar_url
+                      ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+                      : getInitials(review.profiles?.username ?? '??')
+                    }
+                  </div>
+                  <div class="reviewer-info">
+                    <a href={`/reviewers/${review.profiles?.username}`} class="reviewer-name">@{review.profiles?.username ?? 'unknown'}</a>
+                    <div class="reviewer-meta">
+                      <span>{timeAgo(review.published_at ?? review.created_at)}</span>
+                      {review.played_on && <><span>·</span><span>{review.played_on.name}</span></>}
+                      {review.play_time_hours && <><span>·</span><span>{review.play_time_hours}h</span></>}
+                    </div>
+                  </div>
+                  <div class={`score-badge ${scoreClass(review.score)}`}>{review.score}</div>
+                </div>
+                {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
+                {review.title && <div class="review-title">{review.title}</div>}
+                <div class="review-body" id={`body-${review.id}`}>{review.body}</div>
+                <div class="review-footer">
+                  {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
+                  {review.play_time_hours && <span class="footer-tag">{review.play_time_hours}h played</span>}
+                  <button class="expand-btn" onclick={`toggleReview('${review.id}',this)`}>Read more →</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+
+    <!-- ── STATS TAB ── -->
+    <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`}>
+      {reviewList.length === 0 ? (
+        <div class="empty-state">
+          <div class="empty-title">No stats yet</div>
+          <p style="font-size:14px;color:var(--text-tertiary)">Stats will appear once reviews are submitted.</p>
+        </div>
+      ) : (
+        <div class="stats-section" id="statsContent"></div>
+      )}
+    </div>
+
+  </div>
+
+  <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+    <div class="lightbox-inner" onclick="event.stopPropagation()">
+      <img id="lightboxImg" src="" alt="Screenshot" />
+    </div>
+  </div>
+
+  <script define:vars={{ distJson, coverBlurUrl, trailerSrc, showCoverBlur, statsJson, activeTab }}>
+
+    if (showCoverBlur) {
+      var blur = document.getElementById('heroCoverBlur')
+      if (blur) blur.style.backgroundImage = 'url(' + coverBlurUrl + ')'
+    }
+
+    // score dist bars
+    var dist = JSON.parse(distJson)
+    var maxVal = Math.max.apply(null, dist.concat([1]))
+    var colors = ['#f87171','#f87171','#fb923c','#fbbf24','#fbbf24','#60a5fa','#60a5fa','#4ade80','#4ade80','#4ade80']
+    var container = document.getElementById('scoreDist')
+    if (container) {
+      dist.forEach(function(count, i) {
+        var wrap = document.createElement('div'); wrap.className = 'dist-bar-wrap'
+        wrap.title = 'Score ' + (i+1) + ': ' + count + ' reviews'
+        var bar = document.createElement('div'); bar.className = 'dist-bar'
+        bar.style.height = Math.max(4,(count/maxVal)*40)+'px'
+        bar.style.background = colors[i]; bar.style.opacity = '0.65'
+        var label = document.createElement('div'); label.className = 'dist-label'
+        label.textContent = String(i+1)
+        wrap.appendChild(bar); wrap.appendChild(label); container.appendChild(wrap)
+      })
+    }
+
+    // trailer
+    function loadTrailer() {
+      var thumb = document.getElementById('trailerThumb')
+      var wrap = document.getElementById('trailerIframe')
+      var player = document.getElementById('trailerPlayer')
+      if (thumb) thumb.style.display = 'none'
+      if (wrap) wrap.style.display = 'block'
+      if (player) player.src = trailerSrc
+    }
+    window.loadTrailer = loadTrailer
+
+    // lightbox
+    function openLightbox(src) {
+      var lb = document.getElementById('lightbox')
+      var img = document.getElementById('lightboxImg')
+      if (lb && img) { img.src = src; lb.classList.add('open') }
+    }
+    function closeLightbox() {
+      var lb = document.getElementById('lightbox')
+      if (lb) lb.classList.remove('open')
+    }
+    document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox() })
+    window.openLightbox = openLightbox; window.closeLightbox = closeLightbox
+
+    function toggleReview(id, btn) {
+      var body = document.getElementById('body-' + id)
+      if (!body) return
+      body.classList.toggle('expanded')
+      btn.textContent = body.classList.contains('expanded') ? 'Read less ↑' : 'Read more →'
+    }
+    window.toggleReview = toggleReview
+
+    function toggleDesc() {
+      var desc = document.getElementById('desc')
+      var btn = document.getElementById('readMoreBtn')
+      if (!desc || !btn) return
+      desc.classList.toggle('expanded')
+      btn.textContent = desc.classList.contains('expanded') ? 'Read less ↑' : 'Read more →'
+    }
+    window.toggleDesc = toggleDesc
+
+    function sortReviews(type, btn) {
+      document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active') })
+      btn.classList.add('active')
+      var list = document.getElementById('reviewsList')
+      if (!list) return
+      var cards = Array.from(list.querySelectorAll('.review-card'))
+      cards.sort(function(a, b) {
+        if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score)
+        if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score)
+        return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime()
+      })
+      cards.forEach(function(card) { list.appendChild(card) })
+    }
+    window.sortReviews = sortReviews
+
+    // ── STATS ──
+    var s = JSON.parse(statsJson)
+
+    function buildStats() {
+      var el = document.getElementById('statsContent')
+      if (!el || !s.reviewCount) return
+
+      var html = ''
+
+      // rankings
+      html += '<div class="rank-grid">'
+      if (s.allTimeTotal > 0) {
+        html += '<div class="rank-card"><div class="rank-scope">All time</div>'
+        html += '<div class="rank-num-row"><span class="rank-hash">#</span><span class="rank-num">' + s.allTimeRank.toLocaleString() + '</span></div>'
+        html += '<div class="rank-of">of ' + s.allTimeTotal.toLocaleString() + ' games</div>'
+        html += '<div class="rank-pct">Top ' + (100 - s.allTimePct) + '%</div></div>'
+      }
+      if (s.genreTotal > 0) {
+        html += '<div class="rank-card"><div class="rank-scope">' + s.genreName + '</div>'
+        html += '<div class="rank-num-row"><span class="rank-hash">#</span><span class="rank-num">' + s.genreRank.toLocaleString() + '</span></div>'
+        html += '<div class="rank-of">of ' + s.genreTotal.toLocaleString() + ' games</div>'
+        html += '<div class="rank-pct">Top ' + (100 - s.genrePct) + '%</div></div>'
+      }
+      if (s.yearTotal > 0) {
+        html += '<div class="rank-card"><div class="rank-scope">Released in ' + s.releaseYear + '</div>'
+        html += '<div class="rank-num-row"><span class="rank-hash">#</span><span class="rank-num">' + s.yearRank.toLocaleString() + '</span></div>'
+        html += '<div class="rank-of">of ' + s.yearTotal.toLocaleString() + ' games</div>'
+        html += '<div class="rank-pct">Top ' + (100 - s.yearPct) + '%</div></div>'
+      }
+      html += '</div>'
+
+      // percentile bars
+      html += '<div class="pct-card"><div class="pct-card-title">Percentile ranking</div>'
+      var pctBars = [
+        { label: 'All games', val: s.allTimePct, color: 'var(--game-accent)' },
+        { label: s.genreName + ' genre', val: s.genrePct, color: '#7c6ef0' },
+        { label: s.releaseYear + ' releases', val: s.yearPct, color: '#60a5fa' },
+      ]
+      pctBars.forEach(function(b) {
+        html += '<div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;margin-bottom:6px">'
+        html += '<span style="font-size:12px;color:var(--text-secondary);font-weight:500">' + b.label + '</span>'
+        html += '<span style="font-size:12px;color:var(--text-tertiary)">' + b.val + 'th percentile</span></div>'
+        html += '<div style="height:6px;background:var(--tag-bg);border-radius:3px;overflow:hidden">'
+        html += '<div class="pct-fill-anim" data-w="' + b.val + '" style="height:100%;border-radius:3px;width:0;transition:width 1s cubic-bezier(.4,0,.2,1);background:' + b.color + '"></div></div></div>'
+      })
+      html += '</div>'
+
+      // engagement
+      html += '<div class="stats-grid">'
+      html += '<div class="stat-card"><div class="stat-lbl">Total hours logged</div><div class="stat-val">' + (s.totalHours || 0) + 'h</div><div class="stat-sub">across all reviewers</div></div>'
+      html += '<div class="stat-card"><div class="stat-lbl">Avg hours played</div><div class="stat-val">' + (s.avgHours || '—') + (s.avgHours ? 'h' : '') + '</div><div class="stat-sub">per reviewer</div></div>'
+      var topPlat = s.platformBreakdown && s.platformBreakdown[0]
+      html += '<div class="stat-card"><div class="stat-lbl">Most played on</div><div class="stat-val" style="font-size:18px;margin-top:4px">' + (topPlat ? topPlat.name.split(' ')[0] : '—') + '</div><div class="stat-sub">' + (topPlat ? topPlat.pct + '% of reviewers' : '') + '</div></div>'
+      html += '<div class="stat-card"><div class="stat-lbl">Recommended</div><div class="stat-val" style="font-size:28px">' + s.recommendedRate + '%</div><div class="stat-sub">rated 7 or above</div></div>'
+      html += '</div>'
+
+      // PIE CHART — platforms
+      if (s.platformBreakdown && s.platformBreakdown.length > 0) {
+        html += '<div class="chart-card"><div class="chart-card-title">Played on</div>'
+        html += '<div id="pieWrap" style="display:flex;align-items:center;gap:24px"><svg id="pieSvg" width="120" height="120" viewBox="0 0 120 120" style="flex-shrink:0"></svg>'
+        html += '<div id="pieLegend" style="display:flex;flex-direction:column;gap:7px;flex:1"></div></div></div>'
+      }
+
+      // LINE GRAPH — reviews by month
+      html += '<div class="chart-card"><div class="chart-card-title">Reviews by month</div>'
+      html += '<svg id="lineChart" height="108" style="width:100%;overflow:visible;display:block"></svg></div>'
+
+      // genre comparison
+      if (s.genreAvgScore > 0) {
+        var myScore = parseFloat(s.allTimeTotal > 0 ? String((s.totalHours > 0 && s.avgHours ? s.avgHours : 5)) : '5')
+        var recAvg = 72
+        html += '<div class="compare-card"><div class="compare-title">vs. ' + s.genreName + ' average</div>'
+        html += '<div class="legend"><div class="legend-item"><div class="legend-dot" style="background:var(--game-accent)"></div>This game</div>'
+        html += '<div class="legend-item"><div class="legend-dot" style="background:var(--text-tertiary);opacity:.5"></div>Genre avg</div></div>'
+        var genreAvg = s.genreAvgScore
+        var gameAvgNum = parseFloat(String(s.scoreDistribution ? (s.scoreDistribution.reduce(function(a,b,i){return a+(b*(i+1))},0)/Math.max(1,s.reviewCount)).toFixed(1) : genreAvg))
+        var delta1 = (gameAvgNum - genreAvg).toFixed(1)
+        html += '<div class="cmp-row"><span class="cmp-label">Avg score</span>'
+        html += '<div class="cmp-bar"><div class="cmp-track"></div><div class="cmp-avg" style="width:' + (genreAvg/10*100) + '%"></div><div class="cmp-game" style="width:' + (gameAvgNum/10*100) + '%"></div></div>'
+        html += '<span class="cmp-score">' + gameAvgNum + '</span>'
+        html += '<span class="cmp-delta ' + (parseFloat(delta1)>0?'d-pos':parseFloat(delta1)<0?'d-neg':'d-neu') + '">' + (parseFloat(delta1)>0?'+':'') + delta1 + '</span></div>'
+        var delta2 = s.recommendedRate - recAvg
+        html += '<div class="cmp-row"><span class="cmp-label">Recommended</span>'
+        html += '<div class="cmp-bar"><div class="cmp-track"></div><div class="cmp-avg" style="width:' + recAvg + '%"></div><div class="cmp-game" style="width:' + s.recommendedRate + '%"></div></div>'
+        html += '<span class="cmp-score">' + s.recommendedRate + '%</span>'
+        html += '<span class="cmp-delta ' + (delta2>0?'d-pos':delta2<0?'d-neg':'d-neu') + '">' + (delta2>0?'+':'') + delta2 + '%</span></div>'
+        html += '</div>'
+      }
+
+      el.innerHTML = html
+
+      // animate pct bars
+      setTimeout(function() {
+        document.querySelectorAll('.pct-fill-anim').forEach(function(el) {
+          el.style.width = el.dataset.w + '%'
+        })
+      }, 100)
+
+      // draw pie chart
+      if (s.platformBreakdown && s.platformBreakdown.length > 0) {
+        var svg = document.getElementById('pieSvg')
+        var legend = document.getElementById('pieLegend')
+        var pieColors = ['var(--game-accent)','#60a5fa','#4ade80','#fbbf24','#f87171']
+        var total = s.platformBreakdown.reduce(function(a,b){return a+b.count},0)
+        var startAngle = -Math.PI/2
+        var cx=60,cy=60,r=54
+
+        s.platformBreakdown.forEach(function(p, i) {
+          var angle = (p.count/total)*Math.PI*2
+          var endAngle = startAngle + angle
+          var x1=cx+r*Math.cos(startAngle), y1=cy+r*Math.sin(startAngle)
+          var x2=cx+r*Math.cos(endAngle), y2=cy+r*Math.sin(endAngle)
+          var large = angle>Math.PI?1:0
+          var path = document.createElementNS('http://www.w3.org/2000/svg','path')
+          path.setAttribute('d','M'+cx+','+cy+' L'+x1+','+y1+' A'+r+','+r+' 0 '+large+',1 '+x2+','+y2+' Z')
+          path.setAttribute('fill', pieColors[i%pieColors.length])
+          path.setAttribute('opacity','0.85')
+          path.style.transition='opacity .15s'
+          path.addEventListener('mouseenter',function(){this.setAttribute('opacity','1')})
+          path.addEventListener('mouseleave',function(){this.setAttribute('opacity','0.85')})
+          svg.appendChild(path)
+          startAngle = endAngle
+
+          var item = document.createElement('div')
+          item.style.cssText='display:flex;align-items:center;gap:8px'
+          item.innerHTML='<div style="width:10px;height:10px;border-radius:2px;flex-shrink:0;background:'+pieColors[i%pieColors.length]+';opacity:.85"></div>'
+            +'<span style="font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+p.name+'</span>'
+            +'<span style="font-size:12px;color:var(--text-tertiary);font-weight:600">'+p.pct+'%</span>'
+          legend.appendChild(item)
+        })
+
+        // donut hole
+        var hole = document.createElementNS('http://www.w3.org/2000/svg','circle')
+        hole.setAttribute('cx',cx);hole.setAttribute('cy',cy);hole.setAttribute('r',r*0.45)
+        hole.setAttribute('fill','var(--bg-card)')
+        svg.appendChild(hole)
+      }
+
+      // draw line graph
+      var lineEl = document.getElementById('lineChart')
+      if (lineEl && s.monthLabels && s.monthCounts) {
+        var chartH = 72, padL = 8, padR = 8
+        var pts = s.monthCounts
+        var n = pts.length
+        setTimeout(function() {
+          var w = lineEl.getBoundingClientRect().width || 400
+          var step = (w-padL-padR)/(n-1)
+          var maxM = Math.max.apply(null, pts.concat([1]))
+          var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.82-4]})
+
+          // grid
+          for (var gi=0;gi<=2;gi++) {
+            var gy=chartH-(gi/2)*chartH
+            var gl=document.createElementNS('http://www.w3.org/2000/svg','line')
+            gl.setAttribute('x1',padL);gl.setAttribute('x2',w-padR)
+            gl.setAttribute('y1',gy);gl.setAttribute('y2',gy)
+            gl.setAttribute('stroke','var(--border)');gl.setAttribute('stroke-width','1')
+            lineEl.appendChild(gl)
+          }
+
+          // area
+          var aPath='M'+coords[0][0]+','+chartH+coords.map(function(c){return ' L'+c[0]+','+c[1]}).join('')+' L'+coords[n-1][0]+','+chartH+' Z'
+          var area=document.createElementNS('http://www.w3.org/2000/svg','path')
+          area.setAttribute('d',aPath);area.setAttribute('fill','var(--game-accent)');area.setAttribute('opacity','0.1')
+          lineEl.appendChild(area)
+
+          // line
+          var lPath='M'+coords[0][0]+','+coords[0][1]+coords.slice(1).map(function(c){return ' L'+c[0]+','+c[1]}).join('')
+          var line=document.createElementNS('http://www.w3.org/2000/svg','path')
+          line.setAttribute('d',lPath);line.setAttribute('fill','none')
+          line.setAttribute('stroke','var(--game-accent)');line.setAttribute('stroke-width','2')
+          line.setAttribute('stroke-linecap','round');line.setAttribute('stroke-linejoin','round')
+          lineEl.appendChild(line)
+
+          // dots + labels
+          coords.forEach(function(c,i){
+            var dot=document.createElementNS('http://www.w3.org/2000/svg','circle')
+            dot.setAttribute('cx',c[0]);dot.setAttribute('cy',c[1])
+            dot.setAttribute('r',pts[i]>0?'4':'2.5')
+            dot.setAttribute('fill',pts[i]>0?'var(--game-accent)':'var(--border)')
+            dot.setAttribute('stroke','var(--bg-card)');dot.setAttribute('stroke-width','2')
+            lineEl.appendChild(dot)
+
+            if (pts[i]>0) {
+              var txt=document.createElementNS('http://www.w3.org/2000/svg','text')
+              txt.setAttribute('x',c[0]);txt.setAttribute('y',c[1]-9)
+              txt.setAttribute('text-anchor','middle');txt.setAttribute('font-size','10')
+              txt.setAttribute('fill','var(--text-secondary)');txt.setAttribute('font-family','DM Sans,sans-serif')
+              txt.textContent=pts[i];lineEl.appendChild(txt)
+            }
+
+            var mlbl=document.createElementNS('http://www.w3.org/2000/svg','text')
+            mlbl.setAttribute('x',c[0]);mlbl.setAttribute('y',chartH+18)
+            mlbl.setAttribute('text-anchor','middle');mlbl.setAttribute('font-size','10')
+            mlbl.setAttribute('fill','var(--text-tertiary)');mlbl.setAttribute('font-family','DM Sans,sans-serif')
+            mlbl.textContent=s.monthLabels[i];lineEl.appendChild(mlbl)
+          })
+        }, 50)
+      }
+    }
+
+    if (activeTab === 'stats') buildStats()
+
+    // theme
+    function toggleTheme() {
+      var html = document.documentElement
+      var next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light'
+      html.setAttribute('data-theme', next)
+      localStorage.setItem('theme', next)
+      updateIcon(next)
+      if (activeTab === 'stats') {
+        var el = document.getElementById('statsContent')
+        if (el) { el.innerHTML = ''; buildStats() }
+      }
+    }
+    function updateIcon(theme) {
+      var icon = document.getElementById('themeIcon')
+      if (!icon) return
+      icon.innerHTML = theme === 'dark'
+        ? '<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
+        : '<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>'
+    }
+    window.toggleTheme = toggleTheme
+
+    var saved = localStorage.getItem('theme') ||
+      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    document.documentElement.setAttribute('data-theme', saved)
+    updateIcon(saved)
+
+  </script>
+</body>
+</html>---
+export const prerender = false;
+
+import { getSupabase } from '../../utils/database'
+const supabase = getSupabase();
 
 import { igdbFetch } from '../../utils/igdb'
 
