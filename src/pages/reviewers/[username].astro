@@ -12,6 +12,11 @@ const { data: reviewer } = await (supabase as any)
   .from('profiles')
   .select(`
     id, username, avatar_url, bio, created_at, is_active,
+    favorite_game_id,
+    favorite_game:favorite_game_id (
+      id, title, slug, cover_img_url,
+      reviews ( score, body, profile_id )
+    ),
     reviews (
       id, score, title, body, published_at, created_at,
       contains_spoilers, play_time_hours, status,
@@ -67,12 +72,16 @@ if (user) {
   }
 }
 
-// ── STATS ──
+// favorite game — find reviewer's own review of it
+const favGame = reviewer.favorite_game ?? null
+const favReview = favGame
+  ? publishedReviews.find((r: any) => r.games?.id === favGame.id) ?? null
+  : null
+
+// stats
 const scoreDistribution = Array.from({ length: 10 }, (_, i) =>
   publishedReviews.filter((r: any) => r.score === i + 1).length
 )
-
-// platform breakdown
 const platCounts: Record<string, number> = {}
 for (const r of publishedReviews) {
   const name = (r as any).played_on?.name ?? 'Unknown'
@@ -82,7 +91,6 @@ const platformBreakdown = Object.entries(platCounts)
   .sort((a, b) => b[1] - a[1]).slice(0, 5)
   .map(([name, count]) => ({ name, count, pct: Math.round((count / publishedReviews.length) * 100) }))
 
-// genre breakdown from reviewed games
 const genreCounts: Record<string, number> = {}
 for (const r of publishedReviews) {
   const genres = (r as any).games?.game_genres ?? []
@@ -95,7 +103,6 @@ const genreBreakdown = Object.entries(genreCounts)
   .sort((a, b) => b[1] - a[1]).slice(0, 6)
   .map(([name, count]) => ({ name, count, pct: Math.round((count / publishedReviews.length) * 100) }))
 
-// monthly activity
 const monthlyActivity: Record<string, number> = {}
 for (const r of publishedReviews) {
   const d = new Date((r as any).published_at ?? (r as any).created_at)
@@ -112,21 +119,15 @@ for (let i = 11; i >= 0; i--) {
   monthCounts.push(monthlyActivity[key] ?? 0)
 }
 
-// score breakdown
 const recommendedCount = publishedReviews.filter((r: any) => r.score >= 7).length
 const recommendedRate = publishedReviews.length > 0 ? Math.round((recommendedCount / publishedReviews.length) * 100) : 0
-const highestScore = publishedReviews.length > 0 ? Math.max(...publishedReviews.map((r: any) => r.score)) : null
-const lowestScore = publishedReviews.length > 0 ? Math.min(...publishedReviews.map((r: any) => r.score)) : null
-
-// recent games (last 5 unique)
 const recentGames = publishedReviews.slice(0, 6).map((r: any) => r.games).filter(Boolean)
 
-function igdbCover(url: string | null) {
+function igdbCover(url: string | null, size = 't_cover_big') {
   if (!url) return null
   const clean = url.startsWith('//') ? `https:${url}` : url
-  return clean.replace(/t_[a-z0-9_]+/, 't_cover_big')
+  return clean.replace(/t_[a-z0-9_]+/, size)
 }
-
 function timeAgo(dateStr: string): string {
   const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (diff < 60) return `${diff}s`;
@@ -147,10 +148,10 @@ const distJson = JSON.stringify(scoreDistribution)
 const statsJson = JSON.stringify({
   reviewCount: publishedReviews.length,
   avgScore, avgHours, totalHours, recommendedRate,
-  highestScore, lowestScore,
   platformBreakdown, genreBreakdown,
   monthLabels, monthCounts, scoreDistribution,
 })
+const isOwnProfileJson = JSON.stringify(isOwnProfile)
 ---
 
 <!DOCTYPE html>
@@ -192,7 +193,6 @@ const statsJson = JSON.stringify({
     body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text-primary);min-height:100vh;-webkit-font-smoothing:antialiased}
     a{color:inherit;text-decoration:none}
 
-    /* NAV */
     .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.85);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;gap:16px;backdrop-filter:blur(20px)}
     [data-theme="light"] .topnav{background:rgba(245,244,242,.85)}
     .back-btn{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-tertiary);transition:color .15s}
@@ -201,36 +201,55 @@ const statsJson = JSON.stringify({
     .logo-dot{width:6px;height:6px;background:var(--accent);border-radius:50%;box-shadow:0 0 10px var(--accent)}
     .theme-btn{background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:6px;display:flex;margin-left:8px;transition:color .15s}
 
-    /* HERO BANNER */
+    /* BANNER */
     .profile-banner{width:100%;height:200px;background:linear-gradient(135deg,#1a1030 0%,#0d1a2e 40%,#0a1a1a 100%);position:relative;overflow:hidden}
     [data-theme="light"] .profile-banner{background:linear-gradient(135deg,#e8e4f8 0%,#dce8f5 40%,#daf0f0 100%)}
-    .banner-noise{position:absolute;inset:0;opacity:.4;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.4'/%3E%3C/svg%3E")}
-    .banner-glow{position:absolute;width:300px;height:300px;border-radius:50%;background:radial-gradient(circle,var(--accent) 0%,transparent 70%);opacity:.15;top:-80px;right:10%}
+    .banner-glow{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,var(--accent) 0%,transparent 70%);opacity:.15;top:-120px;right:5%}
+    .banner-glow2{position:absolute;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,#60a5fa 0%,transparent 70%);opacity:.1;top:-60px;left:20%}
 
-    /* PROFILE HEADER */
+    /* AVATAR */
     .profile-header{max-width:980px;margin:0 auto;padding:0 28px;position:relative}
     .avatar-wrap{position:absolute;top:-52px;left:28px}
+    .avatar-container{position:relative;width:104px;height:104px;border-radius:50%}
     .avatar-lg{width:104px;height:104px;border-radius:50%;background:var(--bg-card);border:4px solid var(--bg);display:flex;align-items:center;justify-content:center;font-family:'DM Serif Display',serif;font-size:36px;color:var(--text-secondary);overflow:hidden;box-shadow:0 0 0 2px var(--accent)}
     .avatar-lg img{width:100%;height:100%;object-fit:cover}
+    .avatar-edit-overlay{position:absolute;inset:0;border-radius:50%;background:rgba(0,0,0,.55);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;opacity:0;transition:opacity .2s;cursor:pointer;border:4px solid transparent}
+    .avatar-container:hover .avatar-edit-overlay{opacity:1}
+    .avatar-edit-overlay span{font-size:10px;font-weight:600;color:white;text-transform:uppercase;letter-spacing:.08em}
+    .avatar-uploading{position:absolute;inset:0;border-radius:50%;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;display:none}
+    .spinner{width:24px;height:24px;border:2px solid rgba(255,255,255,.3);border-top-color:white;border-radius:50%;animation:spin .7s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* PROFILE INFO */
     .profile-info-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-top:62px;padding-bottom:20px}
     .profile-left{flex:1;min-width:0}
     .profile-username{font-family:'Cinzel',serif;font-size:28px;font-weight:600;letter-spacing:.04em;margin-bottom:6px}
-    .profile-bio{font-size:14px;color:var(--text-secondary);line-height:1.6;max-width:480px;margin-bottom:10px}
-    .profile-since{font-size:12px;color:var(--text-tertiary)}
-    .profile-stats-row{display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-top:10px}
+    .profile-bio-wrap{margin-bottom:10px;max-width:480px}
+    .profile-bio{font-size:14px;color:var(--text-secondary);line-height:1.6;cursor:text;border-radius:6px;padding:4px 6px;transition:background .15s;margin:-4px -6px}
+    .profile-bio:hover{background:var(--tag-bg)}
+    .profile-bio.editing{display:none}
+    .bio-textarea{width:100%;font-family:'DM Sans',sans-serif;font-size:14px;line-height:1.6;color:var(--text-primary);background:var(--bg-hover);border:1px solid var(--accent);border-radius:8px;padding:8px 10px;resize:none;outline:none;display:none}
+    .bio-textarea.editing{display:block}
+    .bio-actions{display:none;gap:8px;margin-top:6px}
+    .bio-actions.editing{display:flex}
+    .bio-empty{font-size:14px;color:var(--text-tertiary);font-style:italic;cursor:text;padding:4px 6px;border-radius:6px;transition:background .15s;display:inline-block}
+    .bio-empty:hover{background:var(--tag-bg);color:var(--text-secondary)}
+    .btn-sm{padding:5px 12px;border-radius:8px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;border:none;transition:opacity .15s}
+    .btn-sm-primary{background:var(--accent);color:white}
+    .btn-sm-ghost{background:var(--tag-bg);color:var(--text-secondary)}
+    .profile-stats-row{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
     .profile-stat{display:flex;flex-direction:column;gap:2px}
     .pstat-val{font-family:'DM Serif Display',serif;font-size:20px;letter-spacing:-.3px;line-height:1}
     .pstat-lbl{font-size:10px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em}
-    .follow-btn{flex-shrink:0;padding:9px 22px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;border:none}
+    .profile-since{font-size:12px;color:var(--text-tertiary);align-self:center}
+    .follow-btn{padding:9px 22px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;border:none}
     .follow-btn.not-following{background:var(--accent);color:white;box-shadow:0 4px 16px rgba(96,80,200,.35)}
     .follow-btn.not-following:hover{opacity:.88;transform:translateY(-1px)}
     .follow-btn.following{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border)}
     .follow-btn.following:hover{border-color:#c0392b;color:#c0392b}
 
-
-
-    /* CARD TAB NAV */
-    .page{max-width:980px;margin:0 auto;padding:24px 28px 80px}
+    /* TABS */
+    .page{max-width:980px;margin:0 auto;padding:20px 28px 80px}
     .tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px}
     .tab-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:14px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;text-decoration:none}
     .tab-link::before{content:'';position:absolute;inset:0;background:var(--accent-sub);opacity:0;transition:opacity .2s}
@@ -253,28 +272,47 @@ const statsJson = JSON.stringify({
     .two-col{display:grid;grid-template-columns:1fr 280px;gap:20px;align-items:start}
     @media(max-width:700px){.two-col{grid-template-columns:1fr}}
     .sidebar{display:flex;flex-direction:column;gap:14px}
-    .card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px}
+    .card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px}
+    .card:last-child{margin-bottom:0}
     .card-title{font-size:10px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:12px}
+
+    /* FAVORITE GAME */
+    .fav-game-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;overflow:hidden;margin-bottom:14px;position:relative;min-height:140px}
+    .fav-game-bg{width:100%;height:150px;object-fit:cover;object-position:center 20%;display:block;opacity:.45}
+    .fav-game-overlay{position:absolute;inset:0;background:linear-gradient(to bottom,transparent 20%,rgba(13,13,15,.96) 75%)}
+    .fav-game-content{position:absolute;bottom:0;left:0;right:0;padding:16px;display:flex;gap:14px;align-items:flex-end}
+    .fav-cover{width:56px;height:75px;border-radius:8px;object-fit:cover;border:1px solid rgba(96,80,200,.4);box-shadow:0 4px 20px rgba(0,0,0,.8);flex-shrink:0}
+    .fav-info{flex:1;min-width:0}
+    .fav-label{font-size:9px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.14em;margin-bottom:4px;opacity:.85}
+    .fav-title{font-family:'Cinzel',serif;font-size:17px;font-weight:600;letter-spacing:.04em;margin-bottom:4px;line-height:1.1;color:#f0ede8}
+    .fav-review-blurb{font-size:12px;color:rgba(240,237,232,.6);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .fav-score{flex-shrink:0;width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
+    .fav-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center;gap:10px;cursor:pointer;transition:background .15s;border-radius:14px}
+    .fav-empty:hover{background:var(--bg-hover)}
+    .fav-empty-icon{width:44px;height:44px;border-radius:12px;background:var(--tag-bg);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;transition:border-color .15s}
+    .fav-empty:hover .fav-empty-icon{border-color:var(--accent)}
+
+    /* SHOWCASE */
+    .showcase-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+    .showcase-item{aspect-ratio:3/4;border-radius:10px;overflow:hidden;border:1px solid var(--border);position:relative;transition:transform .2s,border-color .2s}
+    .showcase-item:hover{transform:translateY(-3px);border-color:rgba(96,80,200,.5)}
+    .showcase-item img{width:100%;height:100%;object-fit:cover;display:block}
+    .showcase-remove{position:absolute;top:6px;right:6px;width:22px;height:22px;background:rgba(0,0,0,.7);border-radius:50%;display:none;align-items:center;justify-content:center;cursor:pointer;color:white;font-size:14px;line-height:1}
+    .showcase-item:hover .showcase-remove{display:flex}
+    .showcase-empty{background:var(--tag-bg);border:1px dashed var(--border);border-radius:10px;aspect-ratio:3/4;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:22px;cursor:pointer;transition:border-color .15s,background .15s;gap:6px}
+    .showcase-empty:hover{border-color:var(--accent);background:var(--bg-hover)}
+    .showcase-empty span{font-size:10px;color:var(--text-tertiary)}
+
+    /* RECENT */
     .recent-game{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border-subtle)}
     .recent-game:last-child{border-bottom:none}
     .mini-cover{width:34px;height:45px;border-radius:5px;background:var(--tag-bg);overflow:hidden;flex-shrink:0;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:14px}
     .mini-cover img{width:100%;height:100%;object-fit:cover}
-    .mini-title{font-size:12px;font-weight:500;line-height:1.3;flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-    .mini-score{flex-shrink:0;width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
-
-    /* score dist mini bars */
+    .mini-score{flex-shrink:0;width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
     .dist-mini{display:flex;gap:4px;align-items:flex-end;height:48px;margin-top:4px}
     .dist-col{display:flex;flex-direction:column;align-items:center;gap:2px;flex:1}
     .dist-bar{width:100%;border-radius:3px 3px 0 0;min-height:3px;opacity:.75}
     .dist-num{font-size:8px;color:var(--text-tertiary);margin-top:3px}
-
-    /* activity heatmap */
-    .heatmap-row{display:flex;gap:3px;flex-wrap:wrap}
-    .heat-cell{width:12px;height:12px;border-radius:2px;background:var(--tag-bg);flex-shrink:0}
-    .heat-1{background:#6050c855}
-    .heat-2{background:#6050c888}
-    .heat-3{background:#6050c8bb}
-    .heat-4{background:#6050c8}
 
     /* REVIEWS */
     .sort-tabs{display:flex;gap:6px;margin-bottom:16px}
@@ -302,15 +340,43 @@ const statsJson = JSON.stringify({
     .meta-time{font-size:11px;color:var(--text-tertiary);margin-left:auto}
     .spoiler-pill{display:inline-flex;align-items:center;gap:4px;background:rgba(251,191,36,.08);color:#fbbf24;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em;border:1px solid rgba(251,191,36,.2)}
     .expand-btn{font-size:11px;color:var(--accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;padding:0;font-weight:500}
-
     .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
     .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
+
+    /* GAME PICKER MODAL */
+    .modal-backdrop{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:20px}
+    .modal-backdrop.open{display:flex}
+    .modal{background:var(--bg-card);border:1px solid var(--border);border-radius:20px;width:100%;max-width:520px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.8)}
+    .modal-header{padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between}
+    .modal-title{font-family:'DM Serif Display',serif;font-size:20px;letter-spacing:-.2px}
+    .modal-close{background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:6px;display:flex;transition:color .15s;font-size:20px;line-height:1}
+    .modal-close:hover{color:var(--text-primary)}
+    .modal-search{padding:16px 20px}
+    .modal-search-input{width:100%;background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:14px;font-family:inherit;color:var(--text-primary);outline:none;transition:border-color .15s}
+    .modal-search-input:focus{border-color:var(--accent)}
+    .modal-search-input::placeholder{color:var(--text-tertiary)}
+    .modal-results{flex:1;overflow-y:auto;padding:0 20px 20px;scrollbar-width:thin}
+    .modal-result{display:flex;align-items:center;gap:12px;padding:10px;border-radius:10px;cursor:pointer;transition:background .15s}
+    .modal-result:hover{background:var(--bg-hover)}
+    .modal-result-cover{width:38px;height:50px;border-radius:6px;object-fit:cover;border:1px solid var(--border);flex-shrink:0;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:16px;overflow:hidden}
+    .modal-result-cover img{width:100%;height:100%;object-fit:cover}
+    .modal-result-title{font-size:14px;font-weight:500;margin-bottom:2px}
+    .modal-result-meta{font-size:12px;color:var(--text-tertiary)}
+    .modal-empty{padding:32px;text-align:center;color:var(--text-tertiary);font-size:14px}
+    .modal-loading{padding:32px;text-align:center;color:var(--text-tertiary);display:flex;align-items:center;justify-content:center;gap:10px}
+
+    /* TOAST */
+    .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:10px 18px;font-size:13px;font-weight:500;box-shadow:var(--shadow-md);z-index:200;opacity:0;transition:all .3s;pointer-events:none;white-space:nowrap}
+    .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+    .toast.success{border-color:rgba(74,222,128,.4);color:var(--score-great)}
+    .toast.error{border-color:rgba(248,113,113,.4);color:var(--score-low)}
 
     @media(max-width:600px){
       .profile-username{font-size:22px}
       .page{padding:16px 16px 60px}
       .profile-header{padding:0 16px}
       .avatar-wrap{left:16px}
+      .tab-nav{grid-template-columns:1fr}
     }
   </style>
 </head>
@@ -330,27 +396,64 @@ const statsJson = JSON.stringify({
   </button>
 </nav>
 
-<!-- BANNER -->
 <div class="profile-banner">
-  <div class="banner-noise"></div>
   <div class="banner-glow"></div>
+  <div class="banner-glow2"></div>
 </div>
 
-<!-- PROFILE HEADER -->
 <div class="profile-header">
   <div class="avatar-wrap">
-    <div class="avatar-lg">
-      {reviewer.avatar_url
-        ? <img src={reviewer.avatar_url} alt={reviewer.username} />
-        : getInitials(reviewer.username)
-      }
+    <div class="avatar-container" id="avatarContainer">
+      <div class="avatar-lg" id="avatarEl">
+        {reviewer.avatar_url
+          ? <img src={reviewer.avatar_url} alt={reviewer.username} id="avatarImg" />
+          : <span id="avatarInitials">{getInitials(reviewer.username)}</span>
+        }
+      </div>
+      {isOwnProfile && (
+        <>
+          <div class="avatar-edit-overlay" id="avatarOverlay" onclick="document.getElementById('avatarInput').click()">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <span>Change</span>
+          </div>
+          <div class="avatar-uploading" id="avatarUploading">
+            <div class="spinner"></div>
+          </div>
+          <input type="file" id="avatarInput" accept="image/*" style="display:none" />
+        </>
+      )}
     </div>
   </div>
 
   <div class="profile-info-row">
     <div class="profile-left">
-      <h1 class="profile-username">@{reviewer.username}</h1>
-      {reviewer.bio && <p class="profile-bio">{reviewer.bio}</p>}
+      <h1 class="profile-username">
+        <span style="font-family:'DM Sans',sans-serif;font-weight:300;opacity:.6;font-size:.8em;letter-spacing:0">@</span>{reviewer.username}
+      </h1>
+
+      <div class="profile-bio-wrap">
+        {isOwnProfile ? (
+          <>
+            <div class="profile-bio" id="bioDisplay" onclick="startEditBio()" title="Click to edit">
+              {reviewer.bio || <span class="bio-empty">Add a bio…</span>}
+            </div>
+            <textarea
+              class="bio-textarea"
+              id="bioTextarea"
+              rows={3}
+              maxlength={300}
+              placeholder="Tell people about yourself…"
+            >{reviewer.bio ?? ''}</textarea>
+            <div class="bio-actions" id="bioActions">
+              <button class="btn-sm btn-sm-primary" onclick="saveBio()">Save</button>
+              <button class="btn-sm btn-sm-ghost" onclick="cancelBio()">Cancel</button>
+            </div>
+          </>
+        ) : (
+          reviewer.bio && <p class="profile-bio">{reviewer.bio}</p>
+        )}
+      </div>
+
       <div class="profile-stats-row">
         <div class="profile-stat">
           <span class="pstat-val">{publishedReviews.length}</span>
@@ -376,9 +479,10 @@ const statsJson = JSON.stringify({
             <span class="pstat-lbl">Hours logged</span>
           </div>
         )}
-        {memberSince && <div class="profile-since" style="align-self:center">Since {memberSince}</div>}
+        {memberSince && <div class="profile-since">Since {memberSince}</div>}
       </div>
     </div>
+
     <div>
       {!isOwnProfile && user && (
         <button
@@ -399,7 +503,6 @@ const statsJson = JSON.stringify({
 
 <div class="page">
 
-  <!-- TAB NAV -->
   <nav class="tab-nav">
     <a href={`/reviewers/${reviewer.username}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`}>
       <div class="tab-icon">
@@ -434,46 +537,89 @@ const statsJson = JSON.stringify({
 
   <!-- ── OVERVIEW TAB ── -->
   <div class={`tab-panel ${activeTab === 'overview' ? 'active' : ''}`}>
-    {publishedReviews.length === 0 ? (
-      <div class="empty-state">
-        <div class="empty-title">No activity yet</div>
-        <p style="font-size:14px;color:var(--text-tertiary)">@{reviewer.username} hasn't posted any reviews yet.</p>
-      </div>
-    ) : (
-      <div class="two-col">
-        <div>
-          <!-- Score distribution -->
+    <div class="two-col">
+      <div>
+
+        <!-- FAVORITE GAME -->
+        {favGame ? (
+          <div class="fav-game-card" id="favGameCard">
+            <img class="fav-game-bg" src={igdbCover(favGame.cover_img_url, 't_screenshot_big') ?? ''} alt="" />
+            <div class="fav-game-overlay"></div>
+            <div class="fav-game-content">
+              <a href={`/games/${favGame.slug}`}>
+                <img class="fav-cover" src={igdbCover(favGame.cover_img_url) ?? ''} alt={favGame.title} />
+              </a>
+              <div class="fav-info">
+                <div class="fav-label">⭐ Favorite game</div>
+                <a href={`/games/${favGame.slug}`} class="fav-title">{favGame.title}</a>
+                {favReview?.body && <div class="fav-review-blurb">"{favReview.body}"</div>}
+              </div>
+              {favReview && (
+                <div class={`fav-score ${scoreClass(favReview.score)}`}>{favReview.score}</div>
+              )}
+            </div>
+            {isOwnProfile && (
+              <button
+                onclick="openGamePicker('favorite')"
+                style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,.6);border:none;color:white;font-size:11px;font-family:inherit;padding:4px 10px;border-radius:8px;cursor:pointer;backdrop-filter:blur(4px)"
+              >
+                Change
+              </button>
+            )}
+          </div>
+        ) : isOwnProfile ? (
+          <div class="fav-game-card">
+            <div class="fav-empty" onclick="openGamePicker('favorite')">
+              <div class="fav-empty-icon">⭐</div>
+              <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Set a favorite game</div>
+              <div style="font-size:12px;color:var(--text-tertiary)">The one game that defines you</div>
+            </div>
+          </div>
+        ) : null}
+
+        <!-- SHOWCASE -->
+        <div class="card">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Showcase</span>
+            {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
+          </div>
+          <div class="showcase-grid" id="showcaseGrid">
+            <!-- Filled by JS from localStorage/server -->
+            <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',0)" : ''}>
+              <span style="font-size:24px">+</span>
+              <span>Add game</span>
+            </div>
+            <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',1)" : ''}>
+              <span style="font-size:24px">+</span>
+              <span>Add game</span>
+            </div>
+            <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',2)" : ''}>
+              <span style="font-size:24px">+</span>
+              <span>Add game</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- SCORE DISTRIBUTION -->
+        {publishedReviews.length > 0 && (
           <div class="card" style="margin-bottom:14px">
             <div class="card-title">Score distribution</div>
             <div class="dist-mini" id="distMini"></div>
           </div>
+        )}
 
-          <!-- Activity chart (monthly) -->
-          <div class="card" style="margin-bottom:14px">
+        <!-- ACTIVITY CHART -->
+        {publishedReviews.length > 0 && (
+          <div class="card">
             <div class="card-title">Review activity — last 12 months</div>
             <svg id="activityChart" height="70" style="width:100%;overflow:visible;display:block"></svg>
           </div>
+        )}
+      </div>
 
-          <!-- Top genres -->
-          {genreBreakdown.length > 0 && (
-            <div class="card">
-              <div class="card-title">Genres reviewed</div>
-              {genreBreakdown.map((g) => (
-                <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">
-                  <span style="font-size:13px;color:var(--text-secondary);flex:1">{g.name}</span>
-                  <div style="flex:0 0 80px;height:5px;background:var(--tag-bg);border-radius:3px;overflow:hidden">
-                    <div style={`height:100%;width:${g.pct}%;background:var(--accent);border-radius:3px;opacity:.7`}></div>
-                  </div>
-                  <span style="font-size:12px;color:var(--text-tertiary);width:24px;text-align:right">{g.count}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <!-- Sidebar -->
-        <div class="sidebar">
-          <!-- Recent reviews -->
+      <!-- SIDEBAR -->
+      <div class="sidebar">
+        {recentGames.length > 0 && (
           <div class="card">
             <div class="card-title">Recent reviews</div>
             {recentGames.map((game: any, i: number) => {
@@ -486,31 +632,45 @@ const statsJson = JSON.stringify({
                       : '🎮'
                     }
                   </a>
-                  <a href={`/games/${game.slug}`} class="mini-title">{game.title}</a>
+                  <a href={`/games/${game.slug}`} style="font-size:12px;font-weight:500;flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">{game.title}</a>
                   <div class={`mini-score ${scoreClass(review.score)}`}>{review.score}</div>
                 </div>
               )
             })}
           </div>
+        )}
 
-          <!-- Platform breakdown -->
-          {platformBreakdown.length > 0 && (
-            <div class="card">
-              <div class="card-title">Platforms played on</div>
-              {platformBreakdown.map((p) => (
-                <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border-subtle)">
-                  <span style="font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{p.name}</span>
-                  <div style="flex:0 0 60px;height:5px;background:var(--tag-bg);border-radius:3px;overflow:hidden">
-                    <div style={`height:100%;width:${p.pct}%;background:#60a5fa;border-radius:3px;opacity:.8`}></div>
-                  </div>
-                  <span style="font-size:11px;color:var(--text-tertiary);flex-shrink:0">{p.pct}%</span>
+        {platformBreakdown.length > 0 && (
+          <div class="card">
+            <div class="card-title">Platforms played on</div>
+            {platformBreakdown.map((p) => (
+              <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border-subtle)">
+                <span style="font-size:12px;color:var(--text-secondary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{p.name}</span>
+                <div style="flex:0 0 60px;height:5px;background:var(--tag-bg);border-radius:3px;overflow:hidden">
+                  <div style={`height:100%;width:${p.pct}%;background:#60a5fa;border-radius:3px;opacity:.8`}></div>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+                <span style="font-size:11px;color:var(--text-tertiary);flex-shrink:0">{p.pct}%</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {genreBreakdown.length > 0 && (
+          <div class="card">
+            <div class="card-title">Genres reviewed</div>
+            {genreBreakdown.map((g) => (
+              <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">
+                <span style="font-size:13px;color:var(--text-secondary);flex:1">{g.name}</span>
+                <div style="flex:0 0 60px;height:5px;background:var(--tag-bg);border-radius:3px;overflow:hidden">
+                  <div style={`height:100%;width:${g.pct}%;background:var(--accent);border-radius:3px;opacity:.7`}></div>
+                </div>
+                <span style="font-size:12px;color:var(--text-tertiary);width:20px;text-align:right">{g.count}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-    )}
+    </div>
   </div>
 
   <!-- ── REVIEWS TAB ── -->
@@ -572,18 +732,297 @@ const statsJson = JSON.stringify({
 
 </div>
 
-<script define:vars={{ distJson, statsJson, activeTab }}>
+<!-- GAME PICKER MODAL -->
+<div class="modal-backdrop" id="gamePickerModal" onclick="closePickerOnBackdrop(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="pickerTitle">Pick a game</div>
+      <button class="modal-close" onclick="closePicker()">×</button>
+    </div>
+    <div class="modal-search">
+      <input
+        type="text"
+        class="modal-search-input"
+        id="pickerSearch"
+        placeholder="Search games…"
+        oninput="debouncedSearch(this.value)"
+        autocomplete="off"
+      />
+    </div>
+    <div class="modal-results" id="pickerResults">
+      <div class="modal-empty">Start typing to search games…</div>
+    </div>
+  </div>
+</div>
 
-  // score dist mini bars
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username }}>
+
+  var barColors = ['#f87171','#f87171','#fb923c','#fbbf24','#fbbf24','#60a5fa','#60a5fa','#4ade80','#4ade80','#4ade80']
+  var s = JSON.parse(statsJson)
+  var ownProfile = JSON.parse(isOwnProfile)
+
+  // ── TOAST ──
+  function showToast(msg, type) {
+    var t = document.getElementById('toast')
+    t.textContent = msg
+    t.className = 'toast show ' + (type || '')
+    clearTimeout(t._timer)
+    t._timer = setTimeout(function() { t.className = 'toast' }, 2500)
+  }
+
+  // ── AVATAR UPLOAD ──
+  var avatarInput = document.getElementById('avatarInput')
+  var avatarUploading = document.getElementById('avatarUploading')
+  if (avatarInput) {
+    avatarInput.addEventListener('change', async function() {
+      var file = avatarInput.files[0]
+      if (!file) return
+      if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB', 'error'); return }
+      avatarUploading.style.display = 'flex'
+      var form = new FormData()
+      form.append('avatar', file)
+      try {
+        var res = await fetch('/api/profile/avatar', { method: 'POST', body: form })
+        if (!res.ok) throw new Error('Upload failed')
+        var data = await res.json()
+        var img = document.getElementById('avatarImg')
+        var initials = document.getElementById('avatarInitials')
+        if (img) { img.src = data.url + '?t=' + Date.now() }
+        else {
+          var el = document.getElementById('avatarEl')
+          el.innerHTML = '<img id="avatarImg" src="' + data.url + '" alt="" style="width:100%;height:100%;object-fit:cover" />'
+          if (initials) initials.remove()
+        }
+        showToast('Photo updated', 'success')
+      } catch(e) {
+        showToast('Upload failed — try again', 'error')
+      } finally {
+        avatarUploading.style.display = 'none'
+        avatarInput.value = ''
+      }
+    })
+  }
+
+  // ── BIO EDIT ──
+  var _origBio = ''
+  function startEditBio() {
+    if (!ownProfile) return
+    var display = document.getElementById('bioDisplay')
+    var textarea = document.getElementById('bioTextarea')
+    var actions = document.getElementById('bioActions')
+    _origBio = textarea.value
+    display.classList.add('editing')
+    textarea.classList.add('editing')
+    actions.classList.add('editing')
+    textarea.focus()
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+  }
+  function cancelBio() {
+    var display = document.getElementById('bioDisplay')
+    var textarea = document.getElementById('bioTextarea')
+    var actions = document.getElementById('bioActions')
+    textarea.value = _origBio
+    display.classList.remove('editing')
+    textarea.classList.remove('editing')
+    actions.classList.remove('editing')
+  }
+  async function saveBio() {
+    var textarea = document.getElementById('bioTextarea')
+    var display = document.getElementById('bioDisplay')
+    var actions = document.getElementById('bioActions')
+    var newBio = textarea.value.trim()
+    try {
+      var res = await fetch('/api/profile/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bio: newBio })
+      })
+      if (!res.ok) throw new Error()
+      display.textContent = newBio || ''
+      if (!newBio) display.innerHTML = '<span class="bio-empty">Add a bio…</span>'
+      display.classList.remove('editing')
+      textarea.classList.remove('editing')
+      actions.classList.remove('editing')
+      showToast('Bio saved', 'success')
+    } catch(e) {
+      showToast('Failed to save bio', 'error')
+    }
+  }
+  window.startEditBio = startEditBio
+  window.cancelBio = cancelBio
+  window.saveBio = saveBio
+
+  // ── GAME PICKER MODAL ──
+  var _pickerMode = 'favorite'  // 'favorite' or 'showcase'
+  var _pickerSlot = 0
+  var _searchTimer = null
+
+  function openGamePicker(mode, slot) {
+    _pickerMode = mode
+    _pickerSlot = slot ?? 0
+    var title = document.getElementById('pickerTitle')
+    title.textContent = mode === 'favorite' ? 'Set favorite game' : 'Add to showcase'
+    document.getElementById('pickerSearch').value = ''
+    document.getElementById('pickerResults').innerHTML = '<div class="modal-empty">Start typing to search games…</div>'
+    document.getElementById('gamePickerModal').classList.add('open')
+    setTimeout(function() { document.getElementById('pickerSearch').focus() }, 100)
+  }
+  function closePicker() {
+    document.getElementById('gamePickerModal').classList.remove('open')
+  }
+  function closePickerOnBackdrop(e) {
+    if (e.target === document.getElementById('gamePickerModal')) closePicker()
+  }
+  window.openGamePicker = openGamePicker
+  window.closePicker = closePicker
+  window.closePickerOnBackdrop = closePickerOnBackdrop
+
+  function debouncedSearch(q) {
+    clearTimeout(_searchTimer)
+    if (!q.trim()) {
+      document.getElementById('pickerResults').innerHTML = '<div class="modal-empty">Start typing to search games…</div>'
+      return
+    }
+    _searchTimer = setTimeout(function() { searchGames(q) }, 300)
+  }
+  window.debouncedSearch = debouncedSearch
+
+  async function searchGames(q) {
+    var resultsEl = document.getElementById('pickerResults')
+    resultsEl.innerHTML = '<div class="modal-loading"><div class="spinner" style="width:18px;height:18px;border-width:2px"></div> Searching…</div>'
+    try {
+      var res = await fetch('/api/games/search?q=' + encodeURIComponent(q) + '&limit=10')
+      if (!res.ok) throw new Error()
+      var games = await res.json()
+      if (!games.length) {
+        resultsEl.innerHTML = '<div class="modal-empty">No games found for "' + q + '"</div>'
+        return
+      }
+      resultsEl.innerHTML = ''
+      games.forEach(function(game) {
+        var item = document.createElement('div')
+        item.className = 'modal-result'
+        var coverUrl = game.cover_img_url
+          ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big')
+          : null
+        item.innerHTML = '<div class="modal-result-cover">'
+          + (coverUrl ? '<img src="' + coverUrl + '" alt="" />' : '🎮')
+          + '</div><div><div class="modal-result-title">' + game.title + '</div>'
+          + '<div class="modal-result-meta">' + (game.date_released ? new Date(game.date_released).getFullYear() : '') + '</div></div>'
+        item.onclick = function() { selectGame(game) }
+        resultsEl.appendChild(item)
+      })
+    } catch(e) {
+      resultsEl.innerHTML = '<div class="modal-empty">Search failed — try again</div>'
+    }
+  }
+
+  async function selectGame(game) {
+    closePicker()
+    if (_pickerMode === 'favorite') {
+      try {
+        var res = await fetch('/api/profile/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ favorite_game_id: game.id })
+        })
+        if (!res.ok) throw new Error()
+        showToast('Favorite game updated — reload to see changes', 'success')
+        setTimeout(function() { location.reload() }, 1800)
+      } catch(e) {
+        showToast('Failed to update — try again', 'error')
+      }
+    } else {
+      // showcase — store in localStorage for now
+      var showcase = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || '[]')
+      while (showcase.length < 3) showcase.push(null)
+      showcase[_pickerSlot] = { id: game.id, title: game.title, cover_img_url: game.cover_img_url, slug: game.slug }
+      localStorage.setItem('showcase_' + reviewerUsername, JSON.stringify(showcase))
+      renderShowcase(showcase)
+      showToast('Added to showcase', 'success')
+    }
+  }
+
+  function renderShowcase(showcase) {
+    var grid = document.getElementById('showcaseGrid')
+    if (!grid) return
+    grid.innerHTML = ''
+    for (var i = 0; i < 3; i++) {
+      var game = showcase[i] ?? null
+      var slot = document.createElement('div')
+      if (game) {
+        var coverUrl = game.cover_img_url
+          ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big')
+          : null
+        slot.className = 'showcase-item'
+        slot.innerHTML = coverUrl
+          ? '<img src="' + coverUrl + '" alt="' + game.title + '" />'
+          : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px;background:var(--tag-bg)">🎮</div>'
+        if (ownProfile) {
+          var removeBtn = document.createElement('div')
+          removeBtn.className = 'showcase-remove'
+          removeBtn.innerHTML = '×'
+          removeBtn.title = 'Remove'
+            ; (function(idx) {
+            removeBtn.onclick = function(e) {
+              e.stopPropagation()
+              var sc = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || '[]')
+              while (sc.length < 3) sc.push(null)
+              sc[idx] = null
+              localStorage.setItem('showcase_' + reviewerUsername, JSON.stringify(sc))
+              renderShowcase(sc)
+            }
+          })(i)
+          slot.appendChild(removeBtn)
+          ; (function(idx) {
+            slot.onclick = function() { openGamePicker('showcase', idx) }
+          })(i)
+        } else {
+          slot.style.cursor = 'default'
+          var link = document.createElement('a')
+          link.href = '/games/' + game.slug
+          link.style.cssText = 'position:absolute;inset:0'
+          slot.appendChild(link)
+        }
+      } else {
+        slot.className = 'showcase-empty'
+        slot.innerHTML = '<span style="font-size:24px">+</span><span>Add game</span>'
+        if (ownProfile) {
+          ; (function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
+        } else {
+          slot.style.display = 'none'
+        }
+      }
+      grid.appendChild(slot)
+    }
+  }
+
+  // init showcase from localStorage
+  var savedShowcase = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || 'null')
+  if (savedShowcase) renderShowcase(savedShowcase)
+  else if (!ownProfile) {
+    // hide empty slots for non-owners if no showcase set
+    document.querySelectorAll('.showcase-empty').forEach(function(el) {
+      el.style.display = 'none'
+    })
+    var grid = document.getElementById('showcaseGrid')
+    if (grid && !grid.querySelector('.showcase-item')) {
+      grid.closest('.card').style.display = 'none'
+    }
+  }
+
+  // ── SCORE DIST MINI BARS (overview) ──
   var dist = JSON.parse(distJson)
   var maxD = Math.max.apply(null, dist.concat([1]))
-  var barColors = ['#f87171','#f87171','#fb923c','#fbbf24','#fbbf24','#60a5fa','#60a5fa','#4ade80','#4ade80','#4ade80']
   var distEl = document.getElementById('distMini')
   if (distEl) {
     dist.forEach(function(count, i) {
       var col = document.createElement('div'); col.className = 'dist-col'
       var bar = document.createElement('div'); bar.className = 'dist-bar'
-      bar.style.height = Math.max(3, (count/maxD)*36)+'px'
+      bar.style.height = Math.max(3, (count/maxD)*40)+'px'
       bar.style.background = barColors[i]
       var num = document.createElement('div'); num.className = 'dist-num'
       num.textContent = i+1
@@ -591,8 +1030,7 @@ const statsJson = JSON.stringify({
     })
   }
 
-  // activity line chart
-  var s = JSON.parse(statsJson)
+  // ── ACTIVITY LINE CHART ──
   var actEl = document.getElementById('activityChart')
   if (actEl && s.monthLabels && s.monthCounts) {
     setTimeout(function() {
@@ -602,7 +1040,6 @@ const statsJson = JSON.stringify({
       var n = pts.length
       var step = (w-padL-padR)/(n-1)
       var maxM = Math.max.apply(null, pts.concat([1]))
-
       var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.85-4]})
 
       var aPath = 'M'+coords[0][0]+','+chartH+coords.map(function(c){return ' L'+c[0]+','+c[1]}).join('')+' L'+coords[n-1][0]+','+chartH+' Z'
@@ -624,8 +1061,6 @@ const statsJson = JSON.stringify({
         dot.setAttribute('fill', pts[i]>0?'var(--accent)':'var(--border)')
         dot.setAttribute('stroke','var(--bg-card)'); dot.setAttribute('stroke-width','2')
         actEl.appendChild(dot)
-
-        // month label every 3
         if (i % 3 === 0 || i === n-1) {
           var lbl = document.createElementNS('http://www.w3.org/2000/svg','text')
           lbl.setAttribute('x',c[0]); lbl.setAttribute('y',chartH+14)
@@ -637,7 +1072,7 @@ const statsJson = JSON.stringify({
     }, 50)
   }
 
-  // sort reviews
+  // ── SORT REVIEWS ──
   function sortReviews(type, btn) {
     document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active') })
     btn.classList.add('active')
@@ -672,12 +1107,9 @@ const statsJson = JSON.stringify({
   function buildStats() {
     var el = document.getElementById('statsContent')
     if (!el || !s.reviewCount) return
-
-    var accent = 'var(--accent)'
     var pieColors = ['#6050c8','#60a5fa','#4ade80','#fbbf24','#f87171']
     var html = ''
 
-    // hero stats row
     var recColor = s.recommendedRate >= 70 ? '#4ade80' : s.recommendedRate >= 50 ? '#fbbf24' : '#f87171'
     html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">'
     var heroStats = [
@@ -695,21 +1127,17 @@ const statsJson = JSON.stringify({
     })
     html += '</div>'
 
-    // score distribution bar chart
     html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">'
     html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:12px">Score distribution</div>'
     html += '<div style="display:flex;gap:4px;align-items:flex-end;height:60px" id="statsDistRow"></div>'
     html += '</div>'
 
-    // score over time + platform side by side
     html += '<div style="display:grid;grid-template-columns:3fr 2fr;gap:10px;margin-bottom:10px">'
-
     html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px">'
     html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Reviews over time — last 12 months</div>'
-    html += '<div style="position:relative"><svg id="statsLineChart" height="90" style="width:100%;overflow:visible;display:block"></svg></div>'
+    html += '<svg id="statsLineChart" height="90" style="width:100%;overflow:visible;display:block"></svg>'
     html += '</div>'
 
-    // pie chart platforms
     if (s.platformBreakdown && s.platformBreakdown.length > 0) {
       html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column">'
       html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Platforms played</div>'
@@ -720,26 +1148,23 @@ const statsJson = JSON.stringify({
     }
     html += '</div>'
 
-    // genre breakdown
     if (s.genreBreakdown && s.genreBreakdown.length > 0) {
+      var gColors = ['#6050c8','#60a5fa','#4ade80','#fbbf24','#f87171','#fb923c']
       html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">'
       html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:12px">Genres reviewed</div>'
-      var gColors = ['#6050c8','#60a5fa','#4ade80','#fbbf24','#f87171','#fb923c']
       s.genreBreakdown.forEach(function(g, i) {
         var col = gColors[i % gColors.length]
         html += '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">'
-        html += '<span style="font-size:12px;color:var(--text-secondary);flex:1">' + g.name + '</span>'
-        html += '<div style="flex:0 0 120px;height:7px;background:var(--tag-bg);border-radius:4px;overflow:hidden">'
-        html += '<div style="height:100%;border-radius:4px;background:'+col+';width:'+g.pct+'%;opacity:.8"></div></div>'
-        html += '<span style="font-size:12px;font-weight:600;color:'+col+';width:20px;text-align:right">' + g.count + '</span>'
-        html += '</div>'
+        html += '<span style="font-size:12px;color:var(--text-secondary);flex:1">'+g.name+'</span>'
+        html += '<div style="flex:0 0 120px;height:7px;background:var(--tag-bg);border-radius:4px;overflow:hidden"><div style="height:100%;border-radius:4px;background:'+col+';width:'+g.pct+'%;opacity:.8"></div></div>'
+        html += '<span style="font-size:12px;font-weight:600;color:'+col+';width:20px;text-align:right">'+g.count+'</span></div>'
       })
       html += '</div>'
     }
 
     el.innerHTML = html
 
-    // draw score dist bars
+    // dist bars
     var distRow = document.getElementById('statsDistRow')
     if (distRow && s.scoreDistribution) {
       var maxVal = Math.max.apply(null, s.scoreDistribution.concat([1]))
@@ -747,19 +1172,18 @@ const statsJson = JSON.stringify({
         var col = document.createElement('div')
         col.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:3px;flex:1'
         var bar = document.createElement('div')
-        var bh = Math.max(3, (count/maxVal)*52)
-        bar.style.cssText = 'width:100%;border-radius:3px 3px 0 0;min-height:3px;opacity:.75;background:'+barColors[i]+';height:'+bh+'px;transition:opacity .15s'
+        bar.style.cssText = 'width:100%;border-radius:3px 3px 0 0;min-height:3px;opacity:.75;background:'+barColors[i]+';height:'+Math.max(3,(count/maxVal)*52)+'px;transition:opacity .15s;cursor:default'
+        bar.title = 'Score '+(i+1)+': '+count+' reviews'
         bar.onmouseenter = function(){this.style.opacity='1'}
         bar.onmouseleave = function(){this.style.opacity='.75'}
-        bar.title = 'Score '+(i+1)+': '+count+' reviews'
         var lbl = document.createElement('div')
-        lbl.style.cssText = 'font-size:9px;color:var(--text-tertiary)'
+        lbl.style.cssText = 'font-size:9px;color:var(--text-tertiary);margin-top:3px'
         lbl.textContent = i+1
         col.appendChild(bar); col.appendChild(lbl); distRow.appendChild(col)
       })
     }
 
-    // draw activity line chart
+    // line chart
     var lineEl = document.getElementById('statsLineChart')
     if (lineEl && s.monthLabels && s.monthCounts) {
       setTimeout(function() {
@@ -770,8 +1194,6 @@ const statsJson = JSON.stringify({
         var step = (w-padL-padR)/(n-1)
         var maxM = Math.max.apply(null, pts.concat([1]))
         var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.82-4]})
-
-        // grid
         for (var gi=0;gi<=2;gi++) {
           var gy = chartH-(gi/2)*chartH
           var gl = document.createElementNS('http://www.w3.org/2000/svg','line')
@@ -780,19 +1202,16 @@ const statsJson = JSON.stringify({
           gl.setAttribute('stroke','var(--border)');gl.setAttribute('stroke-width','1')
           lineEl.appendChild(gl)
         }
-
         var aPath = 'M'+coords[0][0]+','+chartH+coords.map(function(c){return ' L'+c[0]+','+c[1]}).join('')+' L'+coords[n-1][0]+','+chartH+' Z'
         var area = document.createElementNS('http://www.w3.org/2000/svg','path')
         area.setAttribute('d',aPath);area.setAttribute('fill','#6050c8');area.setAttribute('opacity','0.12')
         lineEl.appendChild(area)
-
         var lPath = 'M'+coords[0][0]+','+coords[0][1]+coords.slice(1).map(function(c){return ' L'+c[0]+','+c[1]}).join('')
         var line2 = document.createElementNS('http://www.w3.org/2000/svg','path')
         line2.setAttribute('d',lPath);line2.setAttribute('fill','none')
         line2.setAttribute('stroke','#6050c8');line2.setAttribute('stroke-width','2')
         line2.setAttribute('stroke-linecap','round');line2.setAttribute('stroke-linejoin','round')
         lineEl.appendChild(line2)
-
         coords.forEach(function(c,i) {
           var dot = document.createElementNS('http://www.w3.org/2000/svg','circle')
           dot.setAttribute('cx',c[0]);dot.setAttribute('cy',c[1])
@@ -800,7 +1219,6 @@ const statsJson = JSON.stringify({
           dot.setAttribute('fill',pts[i]>0?'#6050c8':'var(--border)')
           dot.setAttribute('stroke','var(--bg-card)');dot.setAttribute('stroke-width','2')
           lineEl.appendChild(dot)
-
           if (pts[i]>0) {
             var txt = document.createElementNS('http://www.w3.org/2000/svg','text')
             txt.setAttribute('x',c[0]);txt.setAttribute('y',c[1]-8)
@@ -808,7 +1226,6 @@ const statsJson = JSON.stringify({
             txt.setAttribute('fill','#6050c8');txt.setAttribute('font-family','DM Sans,sans-serif');txt.setAttribute('font-weight','600')
             txt.textContent = pts[i]; lineEl.appendChild(txt)
           }
-
           if (i % 2 === 0 || i === n-1) {
             var mlbl = document.createElementNS('http://www.w3.org/2000/svg','text')
             mlbl.setAttribute('x',c[0]);mlbl.setAttribute('y',chartH+16)
@@ -854,6 +1271,7 @@ const statsJson = JSON.stringify({
 
   if (activeTab === 'stats') buildStats()
 
+  // ── THEME ──
   function toggleTheme() {
     var html = document.documentElement
     var next = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light'
@@ -879,7 +1297,7 @@ const statsJson = JSON.stringify({
   document.documentElement.setAttribute('data-theme', saved)
   updateIcon(saved)
 
-  // follow button
+  // ── FOLLOW ──
   var followBtn = document.getElementById('followBtn')
   if (followBtn) {
     followBtn.addEventListener('click', async function() {
@@ -903,8 +1321,13 @@ const statsJson = JSON.stringify({
     })
   }
 
-  document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(function(el) {
+  document.querySelectorAll('.review-body').forEach(function(el) {
     el.addEventListener('click', function() { el.classList.remove('spoiler-hidden') })
+  })
+
+  // ESC to close modal
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closePicker()
   })
 </script>
 </body>
