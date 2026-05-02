@@ -12,9 +12,10 @@ export const GET: APIRoute = async ({ request }) => {
   }
 
   const supabase = getSupabase();
+
   const { data, error } = await (supabase as any)
     .from("games")
-    .select("id, title, slug")
+    .select("id, title, slug, cover_img_url, date_released")
     .ilike("title", `%${q}%`)
     .limit(8);
 
@@ -28,6 +29,8 @@ export const GET: APIRoute = async ({ request }) => {
     id: g.id,
     title: g.title,
     slug: g.slug,
+    cover_img_url: g.cover_img_url ?? null,
+    date_released: g.date_released ?? null,
   }));
 
   return new Response(JSON.stringify(results), {
