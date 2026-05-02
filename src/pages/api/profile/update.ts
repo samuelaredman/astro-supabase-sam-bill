@@ -10,7 +10,7 @@ export async function POST(context: any) {
   const body = await context.request.json();
 
   // Only allow these fields to be updated
-  const allowed = ['bio', 'favorite_game_id'];
+  const allowed = ['bio', 'favorite_game_id', 'showcase_games'];
   const update: Record<string, any> = {};
   for (const key of allowed) {
     if (key in body) update[key] = body[key];
