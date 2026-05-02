@@ -1,22 +1,14 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
-import { getSupabase } from '../../../utils/database';
+import { createSupabaseServerClientFromContext } from '../../../utils/database';
 
-export const POST: APIRoute = async ({ request }) => {
-  const supabase = getSupabase();
+export const POST: APIRoute = async (context) => {
+  const supabase = createSupabaseServerClientFromContext(context);
 
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader?.startsWith('Bearer ')) {
-    return new Response('Unauthorized', { status: 401 });
-  }
-  const token = authHeader.slice(7);
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return new Response('Unauthorized', { status: 401 });
 
-  const { data: { user }, error: userError } = await supabase.auth.getUser(token);
-  if (userError || !user) {
-    return new Response('Unauthorized', { status: 401 });
-  }
-
-  const form = await request.formData();
+  const form = await context.request.formData();
   const file = form.get('banner') as File;
   if (!file) return new Response('No file', { status: 400 });
 
