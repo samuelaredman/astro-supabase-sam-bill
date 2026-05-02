@@ -8,14 +8,13 @@ const activeTab = Astro.url.searchParams.get('tab') || 'overview'
 
 const { data: { user } } = await supabase.auth.getUser();
 
-const { data: reviewer } = await (supabase as any)
+const { data: reviewer, error: reviewerError } = await (supabase as any)
   .from('profiles')
   .select(`
-    id, username, avatar_url, bio, created_at, is_active,
+    id, username, avatar_url, bio, banner_url, created_at, is_active,
     favorite_game_id,
-    favorite_game:favorite_game_id (
-      id, title, slug, cover_img_url,
-      reviews ( score, body, profile_id )
+    favorite_game:games!favorite_game_id (
+      id, title, slug, cover_img_url
     ),
     reviews (
       id, score, title, body, published_at, created_at,
@@ -27,7 +26,7 @@ const { data: reviewer } = await (supabase as any)
   .eq('username', username)
   .single();
 
-if (!reviewer) return Astro.redirect('/404');
+if (reviewerError || !reviewer) return Astro.redirect('/404');
 
 const publishedReviews = (reviewer.reviews ?? [])
   .filter((r: any) => r.status === 'published')
@@ -144,6 +143,10 @@ function scoreClass(score: number): string {
 }
 function getInitials(u: string): string { return u.slice(0, 2).toUpperCase() }
 
+const bannerStyle = reviewer.banner_url
+  ? `background-image:url(${reviewer.banner_url});background-size:cover;background-position:center`
+  : ''
+
 const distJson = JSON.stringify(scoreDistribution)
 const statsJson = JSON.stringify({
   reviewCount: publishedReviews.length,
@@ -206,6 +209,9 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     [data-theme="light"] .profile-banner{background:linear-gradient(135deg,#e8e4f8 0%,#dce8f5 40%,#daf0f0 100%)}
     .banner-glow{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,var(--accent) 0%,transparent 70%);opacity:.15;top:-120px;right:5%}
     .banner-glow2{position:absolute;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,#60a5fa 0%,transparent 70%);opacity:.1;top:-60px;left:20%}
+    .banner-edit-btn{position:absolute;bottom:12px;right:16px;display:flex;align-items:center;gap:7px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.2);color:white;font-size:12px;font-weight:500;font-family:'DM Sans',sans-serif;padding:7px 14px;border-radius:20px;cursor:pointer;transition:background .15s;z-index:2}
+    .banner-edit-btn:hover{background:rgba(0,0,0,.75)}
+    .banner-uploading{position:absolute;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;gap:10px;z-index:3}
 
     /* AVATAR */
     .profile-header{max-width:980px;margin:0 auto;padding:0 28px;position:relative}
@@ -247,6 +253,31 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     .follow-btn.not-following:hover{opacity:.88;transform:translateY(-1px)}
     .follow-btn.following{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border)}
     .follow-btn.following:hover{border-color:#c0392b;color:#c0392b}
+
+    /* EDIT MODE */
+    .edit-profile-btn{padding:8px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);transition:all .15s;display:flex;align-items:center;gap:7px}
+    .edit-profile-btn:hover{border-color:var(--accent);color:var(--accent)}
+    .edit-mode-bar{display:none;position:sticky;top:54px;z-index:25;background:var(--bg-card);border-bottom:1px solid var(--border);padding:10px 28px;align-items:center;justify-content:space-between;gap:12px;backdrop-filter:blur(12px)}
+    .edit-mode-bar.visible{display:flex}
+    .edit-mode-label{font-size:13px;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:8px}
+    .edit-mode-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse2 1.5s infinite}
+    @keyframes pulse2{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}
+    .edit-save-btn{padding:7px 18px;border-radius:20px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;border:none;background:var(--accent);color:white;transition:opacity .15s}
+    .edit-save-btn:hover{opacity:.88}
+    .edit-save-btn:disabled{opacity:.5;cursor:not-allowed}
+    .edit-cancel-btn{padding:7px 14px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text-secondary);transition:all .15s}
+    .edit-cancel-btn:hover{border-color:var(--text-tertiary)}
+    /* avatar only clickable in edit mode */
+    .avatar-edit-overlay{display:none}
+    body.editing-profile .avatar-edit-overlay{display:flex}
+    body.editing-profile .avatar-container{cursor:pointer}
+    /* banner edit only in edit mode */
+    .banner-edit-btn{display:none}
+    body.editing-profile .banner-edit-btn{display:flex}
+    /* bio textarea only in edit mode */
+    .profile-bio{cursor:default}
+    body.editing-profile .profile-bio{display:none}
+    body.editing-profile .bio-textarea{display:block}
 
     /* TABS */
     .page{max-width:980px;margin:0 auto;padding:20px 28px 80px}
@@ -396,9 +427,22 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
   </button>
 </nav>
 
-<div class="profile-banner">
-  <div class="banner-glow"></div>
-  <div class="banner-glow2"></div>
+<div class="profile-banner" id="profileBanner" style={bannerStyle}>
+  {!reviewer.banner_url && <div class="banner-glow"></div>}
+  {!reviewer.banner_url && <div class="banner-glow2"></div>}
+  {isOwnProfile && (
+    <div class="banner-edit-btn" onclick="document.getElementById('bannerInput').click()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      Change banner
+    </div>
+  )}
+  {isOwnProfile && (
+    <div id="bannerUploading" style="display:none;position:absolute;inset:0;background:rgba(0,0,0,.5);align-items:center;justify-content:center;gap:10px;z-index:3">
+      <div class="spinner" style="width:20px;height:20px;border-width:2px;border-color:rgba(255,255,255,.3);border-top-color:white"></div>
+      <span style="font-size:13px;color:white;font-weight:500">Uploading…</span>
+    </div>
+  )}
+  {isOwnProfile && <input type="file" id="bannerInput" accept="image/jpeg,image/png,image/webp" style="display:none" />}
 </div>
 
 <div class="profile-header">
@@ -434,8 +478,8 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       <div class="profile-bio-wrap">
         {isOwnProfile ? (
           <>
-            <div class="profile-bio" id="bioDisplay" onclick="startEditBio()" title="Click to edit">
-              {reviewer.bio || <span class="bio-empty">Add a bio…</span>}
+            <div class="profile-bio" id="bioDisplay">
+              {reviewer.bio || <span class="bio-empty" style="font-size:14px;color:var(--text-tertiary);font-style:italic">Add a bio…</span>}
             </div>
             <textarea
               class="bio-textarea"
@@ -443,11 +487,8 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
               rows={3}
               maxlength={300}
               placeholder="Tell people about yourself…"
+              style="display:none;width:100%;font-family:'DM Sans',sans-serif;font-size:14px;line-height:1.6;color:var(--text-primary);background:var(--bg-hover);border:1px solid var(--accent);border-radius:8px;padding:8px 10px;resize:none;outline:none"
             >{reviewer.bio ?? ''}</textarea>
-            <div class="bio-actions" id="bioActions">
-              <button class="btn-sm btn-sm-primary" onclick="saveBio()">Save</button>
-              <button class="btn-sm btn-sm-ghost" onclick="cancelBio()">Cancel</button>
-            </div>
           </>
         ) : (
           reviewer.bio && <p class="profile-bio">{reviewer.bio}</p>
@@ -483,7 +524,13 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       </div>
     </div>
 
-    <div>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px">
+      {isOwnProfile && (
+        <button class="edit-profile-btn" id="editProfileBtn" onclick="enterEditMode()">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5a2.121 2.121 0 013 3L5 15l-4 1 1-4 9.5-9.5z"/></svg>
+          Edit profile
+        </button>
+      )}
       {!isOwnProfile && user && (
         <button
           class={`follow-btn ${isFollowing ? 'following' : 'not-following'}`}
@@ -498,6 +545,18 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
         <a href="/signin" class="follow-btn not-following">+ Follow</a>
       )}
     </div>
+  </div>
+</div>
+
+<!-- EDIT MODE BAR -->
+<div class="edit-mode-bar" id="editModeBar">
+  <div class="edit-mode-label">
+    <div class="edit-mode-dot"></div>
+    Editing profile
+  </div>
+  <div style="display:flex;gap:8px">
+    <button class="edit-cancel-btn" onclick="cancelEditMode()">Cancel</button>
+    <button class="edit-save-btn" id="saveProfileBtn" onclick="saveProfile()">Save changes</button>
   </div>
 </div>
 
@@ -773,119 +832,204 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     t._timer = setTimeout(function() { t.className = 'toast' }, 2500)
   }
 
-  // ── AVATAR UPLOAD ──
-  var avatarInput = document.getElementById('avatarInput')
-  var avatarUploading = document.getElementById('avatarUploading')
-  if (avatarInput) {
-    avatarInput.addEventListener('change', async function() {
-      var file = avatarInput.files[0]
-      if (!file) return
-      if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB', 'error'); return }
-      avatarUploading.style.display = 'flex'
+  // ── EDIT MODE ──
+  var _pendingAvatarFile = null
+  var _pendingBannerFile = null
+  var _origBioValue = ''
+
+  function enterEditMode() {
+    document.body.classList.add('editing-profile')
+    document.getElementById('editModeBar').classList.add('visible')
+    document.getElementById('editProfileBtn').style.display = 'none'
+    // show bio textarea
+    var bioDisplay = document.getElementById('bioDisplay')
+    var bioTextarea = document.getElementById('bioTextarea')
+    if (bioDisplay) bioDisplay.style.display = 'none'
+    if (bioTextarea) {
+      _origBioValue = bioTextarea.value
+      bioTextarea.style.display = 'block'
+      bioTextarea.focus()
+    }
+  }
+
+  function cancelEditMode() {
+    document.body.classList.remove('editing-profile')
+    document.getElementById('editModeBar').classList.remove('visible')
+    document.getElementById('editProfileBtn').style.display = ''
+    // restore bio
+    var bioDisplay = document.getElementById('bioDisplay')
+    var bioTextarea = document.getElementById('bioTextarea')
+    if (bioTextarea) { bioTextarea.value = _origBioValue; bioTextarea.style.display = 'none' }
+    if (bioDisplay) bioDisplay.style.display = ''
+    // clear pending files
+    _pendingAvatarFile = null
+    _pendingBannerFile = null
+    var avatarInput = document.getElementById('avatarInput')
+    var bannerInput = document.getElementById('bannerInput')
+    if (avatarInput) avatarInput.value = ''
+    if (bannerInput) bannerInput.value = ''
+  }
+  window.enterEditMode = enterEditMode
+  window.cancelEditMode = cancelEditMode
+
+  async function saveProfile() {
+    var saveBtn = document.getElementById('saveProfileBtn')
+    saveBtn.disabled = true
+    saveBtn.textContent = 'Saving…'
+    var errors = []
+
+    // 1. Upload avatar if pending
+    if (_pendingAvatarFile) {
       var form = new FormData()
-      form.append('avatar', file)
+      form.append('avatar', _pendingAvatarFile)
       try {
         var res = await fetch('/api/profile/avatar', { method: 'POST', body: form })
-        if (!res.ok) throw new Error('Upload failed')
+        if (!res.ok) throw new Error('Avatar upload failed')
         var data = await res.json()
         var img = document.getElementById('avatarImg')
-        var initials = document.getElementById('avatarInitials')
         if (img) { img.src = data.url + '?t=' + Date.now() }
         else {
           var el = document.getElementById('avatarEl')
-          el.innerHTML = '<img id="avatarImg" src="' + data.url + '" alt="" style="width:100%;height:100%;object-fit:cover" />'
-          if (initials) initials.remove()
+          if (el) el.innerHTML = '<img id="avatarImg" src="' + data.url + '?t=' + Date.now() + '" alt="" style="width:100%;height:100%;object-fit:cover" />'
         }
-        showToast('Photo updated', 'success')
-      } catch(e) {
-        showToast('Upload failed — try again', 'error')
-      } finally {
-        avatarUploading.style.display = 'none'
-        avatarInput.value = ''
+      } catch(e) { errors.push('Avatar upload failed') }
+    }
+
+    // 2. Upload banner if pending
+    if (_pendingBannerFile) {
+      var bform = new FormData()
+      bform.append('banner', _pendingBannerFile)
+      try {
+        var bres = await fetch('/api/profile/banner', { method: 'POST', body: bform })
+        var bdata = await bres.json()
+        if (!bres.ok) throw new Error(bdata.error || 'Banner upload failed')
+        var banner = document.getElementById('profileBanner')
+        if (banner) {
+          banner.style.backgroundImage = 'url(' + bdata.url + ')'
+          banner.style.backgroundSize = 'cover'
+          banner.style.backgroundPosition = 'center'
+          banner.querySelectorAll('.banner-glow,.banner-glow2').forEach(function(el){ el.style.display='none' })
+        }
+      } catch(e) { errors.push('Banner upload failed') }
+    }
+
+    // 3. Save bio
+    var bioTextarea = document.getElementById('bioTextarea')
+    if (bioTextarea) {
+      var newBio = bioTextarea.value.trim()
+      try {
+        var bres2 = await fetch('/api/profile/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bio: newBio })
+        })
+        if (!bres2.ok) throw new Error()
+        // update display
+        var bioDisplay = document.getElementById('bioDisplay')
+        if (bioDisplay) {
+          bioDisplay.textContent = newBio
+          if (!newBio) bioDisplay.innerHTML = '<span style="font-size:14px;color:var(--text-tertiary);font-style:italic">Add a bio…</span>'
+        }
+      } catch(e) { errors.push('Bio save failed') }
+    }
+
+    saveBtn.disabled = false
+    saveBtn.textContent = 'Save changes'
+
+    if (errors.length) {
+      showToast(errors.join(' · '), 'error')
+    } else {
+      showToast('Profile saved', 'success')
+      // exit edit mode
+      document.body.classList.remove('editing-profile')
+      document.getElementById('editModeBar').classList.remove('visible')
+      document.getElementById('editProfileBtn').style.display = ''
+      var bioTextarea2 = document.getElementById('bioTextarea')
+      var bioDisplay2 = document.getElementById('bioDisplay')
+      if (bioTextarea2) bioTextarea2.style.display = 'none'
+      if (bioDisplay2) bioDisplay2.style.display = ''
+      _pendingAvatarFile = null
+      _pendingBannerFile = null
+    }
+  }
+  window.saveProfile = saveProfile
+
+  // ── AVATAR — stage file, show preview ──
+  var avatarInput = document.getElementById('avatarInput')
+  if (avatarInput) {
+    avatarInput.addEventListener('change', function() {
+      var file = avatarInput.files[0]
+      if (!file) return
+      if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB', 'error'); avatarInput.value = ''; return }
+      _pendingAvatarFile = file
+      // show preview immediately
+      var reader = new FileReader()
+      reader.onload = function(e) {
+        var img = document.getElementById('avatarImg')
+        if (img) { img.src = e.target.result }
+        else {
+          var el = document.getElementById('avatarEl')
+          if (el) el.innerHTML = '<img id="avatarImg" src="' + e.target.result + '" alt="" style="width:100%;height:100%;object-fit:cover" />'
+        }
       }
+      reader.readAsDataURL(file)
+      showToast('Avatar ready — click Save to apply', 'success')
     })
   }
 
-  // ── BIO EDIT ──
-  var _origBio = ''
-  function startEditBio() {
-    if (!ownProfile) return
-    var display = document.getElementById('bioDisplay')
-    var textarea = document.getElementById('bioTextarea')
-    var actions = document.getElementById('bioActions')
-    _origBio = textarea.value
-    display.classList.add('editing')
-    textarea.classList.add('editing')
-    actions.classList.add('editing')
-    textarea.focus()
-    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+  // ── BANNER — validate dimensions, stage file, show preview ──
+  var bannerInput = document.getElementById('bannerInput')
+  if (bannerInput) {
+    bannerInput.addEventListener('change', function() {
+      var file = bannerInput.files[0]
+      if (!file) return
+      if (file.size > 6 * 1024 * 1024) { showToast('Banner must be under 6MB', 'error'); bannerInput.value = ''; return }
+      var img = new Image()
+      var objectUrl = URL.createObjectURL(file)
+      img.onload = function() {
+        URL.revokeObjectURL(objectUrl)
+        if (img.width < 2048 || img.height < 1152) {
+          showToast('Banner must be at least 2048 × 1152 px', 'error')
+          bannerInput.value = ''; return
+        }
+        _pendingBannerFile = file
+        // show preview immediately
+        var banner = document.getElementById('profileBanner')
+        if (banner) {
+          banner.style.backgroundImage = 'url(' + objectUrl + ')'
+          banner.style.backgroundSize = 'cover'
+          banner.style.backgroundPosition = 'center'
+        }
+        showToast('Banner ready — click Save to apply', 'success')
+      }
+      img.onerror = function() { URL.revokeObjectURL(objectUrl); showToast('Could not read image', 'error'); bannerInput.value = '' }
+      img.src = objectUrl
+    })
   }
-  function cancelBio() {
-    var display = document.getElementById('bioDisplay')
-    var textarea = document.getElementById('bioTextarea')
-    var actions = document.getElementById('bioActions')
-    textarea.value = _origBio
-    display.classList.remove('editing')
-    textarea.classList.remove('editing')
-    actions.classList.remove('editing')
-  }
-  async function saveBio() {
-    var textarea = document.getElementById('bioTextarea')
-    var display = document.getElementById('bioDisplay')
-    var actions = document.getElementById('bioActions')
-    var newBio = textarea.value.trim()
-    try {
-      var res = await fetch('/api/profile/update', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bio: newBio })
-      })
-      if (!res.ok) throw new Error()
-      display.textContent = newBio || ''
-      if (!newBio) display.innerHTML = '<span class="bio-empty">Add a bio…</span>'
-      display.classList.remove('editing')
-      textarea.classList.remove('editing')
-      actions.classList.remove('editing')
-      showToast('Bio saved', 'success')
-    } catch(e) {
-      showToast('Failed to save bio', 'error')
-    }
-  }
-  window.startEditBio = startEditBio
-  window.cancelBio = cancelBio
-  window.saveBio = saveBio
 
   // ── GAME PICKER MODAL ──
-  var _pickerMode = 'favorite'  // 'favorite' or 'showcase'
+  var _pickerMode = 'favorite'
   var _pickerSlot = 0
   var _searchTimer = null
 
   function openGamePicker(mode, slot) {
     _pickerMode = mode
     _pickerSlot = slot ?? 0
-    var title = document.getElementById('pickerTitle')
-    title.textContent = mode === 'favorite' ? 'Set favorite game' : 'Add to showcase'
+    document.getElementById('pickerTitle').textContent = mode === 'favorite' ? 'Set favorite game' : 'Add to showcase'
     document.getElementById('pickerSearch').value = ''
     document.getElementById('pickerResults').innerHTML = '<div class="modal-empty">Start typing to search games…</div>'
     document.getElementById('gamePickerModal').classList.add('open')
     setTimeout(function() { document.getElementById('pickerSearch').focus() }, 100)
   }
-  function closePicker() {
-    document.getElementById('gamePickerModal').classList.remove('open')
-  }
-  function closePickerOnBackdrop(e) {
-    if (e.target === document.getElementById('gamePickerModal')) closePicker()
-  }
+  function closePicker() { document.getElementById('gamePickerModal').classList.remove('open') }
+  function closePickerOnBackdrop(e) { if (e.target === document.getElementById('gamePickerModal')) closePicker() }
   window.openGamePicker = openGamePicker
   window.closePicker = closePicker
   window.closePickerOnBackdrop = closePickerOnBackdrop
 
   function debouncedSearch(q) {
     clearTimeout(_searchTimer)
-    if (!q.trim()) {
-      document.getElementById('pickerResults').innerHTML = '<div class="modal-empty">Start typing to search games…</div>'
-      return
-    }
+    if (!q.trim()) { document.getElementById('pickerResults').innerHTML = '<div class="modal-empty">Start typing to search games…</div>'; return }
     _searchTimer = setTimeout(function() { searchGames(q) }, 300)
   }
   window.debouncedSearch = debouncedSearch
@@ -897,27 +1041,19 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       var res = await fetch('/api/games/search?q=' + encodeURIComponent(q) + '&limit=10')
       if (!res.ok) throw new Error()
       var games = await res.json()
-      if (!games.length) {
-        resultsEl.innerHTML = '<div class="modal-empty">No games found for "' + q + '"</div>'
-        return
-      }
+      if (!games.length) { resultsEl.innerHTML = '<div class="modal-empty">No games found for "' + q + '"</div>'; return }
       resultsEl.innerHTML = ''
       games.forEach(function(game) {
         var item = document.createElement('div')
         item.className = 'modal-result'
-        var coverUrl = game.cover_img_url
-          ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big')
-          : null
-        item.innerHTML = '<div class="modal-result-cover">'
-          + (coverUrl ? '<img src="' + coverUrl + '" alt="" />' : '🎮')
-          + '</div><div><div class="modal-result-title">' + game.title + '</div>'
+        var coverUrl = game.cover_img_url ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big') : null
+        item.innerHTML = '<div class="modal-result-cover">' + (coverUrl ? '<img src="' + coverUrl + '" alt="" />' : '🎮') + '</div>'
+          + '<div><div class="modal-result-title">' + game.title + '</div>'
           + '<div class="modal-result-meta">' + (game.date_released ? new Date(game.date_released).getFullYear() : '') + '</div></div>'
         item.onclick = function() { selectGame(game) }
         resultsEl.appendChild(item)
       })
-    } catch(e) {
-      resultsEl.innerHTML = '<div class="modal-empty">Search failed — try again</div>'
-    }
+    } catch(e) { resultsEl.innerHTML = '<div class="modal-empty">Search failed — try again</div>' }
   }
 
   async function selectGame(game) {
@@ -930,13 +1066,10 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
           body: JSON.stringify({ favorite_game_id: game.id })
         })
         if (!res.ok) throw new Error()
-        showToast('Favorite game updated — reload to see changes', 'success')
-        setTimeout(function() { location.reload() }, 1800)
-      } catch(e) {
-        showToast('Failed to update — try again', 'error')
-      }
+        showToast('Favorite game saved', 'success')
+        setTimeout(function() { location.reload() }, 1200)
+      } catch(e) { showToast('Failed to update — try again', 'error') }
     } else {
-      // showcase — store in localStorage for now
       var showcase = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || '[]')
       while (showcase.length < 3) showcase.push(null)
       showcase[_pickerSlot] = { id: game.id, title: game.title, cover_img_url: game.cover_img_url, slug: game.slug }
@@ -954,9 +1087,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       var game = showcase[i] ?? null
       var slot = document.createElement('div')
       if (game) {
-        var coverUrl = game.cover_img_url
-          ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big')
-          : null
+        var coverUrl = game.cover_img_url ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big') : null
         slot.className = 'showcase-item'
         slot.innerHTML = coverUrl
           ? '<img src="' + coverUrl + '" alt="' + game.title + '" />'
@@ -966,7 +1097,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
           removeBtn.className = 'showcase-remove'
           removeBtn.innerHTML = '×'
           removeBtn.title = 'Remove'
-            ; (function(idx) {
+          ;(function(idx) {
             removeBtn.onclick = function(e) {
               e.stopPropagation()
               var sc = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || '[]')
@@ -977,9 +1108,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
             }
           })(i)
           slot.appendChild(removeBtn)
-          ; (function(idx) {
-            slot.onclick = function() { openGamePicker('showcase', idx) }
-          })(i)
+          ;(function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
         } else {
           slot.style.cursor = 'default'
           var link = document.createElement('a')
@@ -991,7 +1120,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
         slot.className = 'showcase-empty'
         slot.innerHTML = '<span style="font-size:24px">+</span><span>Add game</span>'
         if (ownProfile) {
-          ; (function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
+          ;(function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
         } else {
           slot.style.display = 'none'
         }
@@ -1000,21 +1129,15 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     }
   }
 
-  // init showcase from localStorage
   var savedShowcase = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || 'null')
   if (savedShowcase) renderShowcase(savedShowcase)
   else if (!ownProfile) {
-    // hide empty slots for non-owners if no showcase set
-    document.querySelectorAll('.showcase-empty').forEach(function(el) {
-      el.style.display = 'none'
-    })
+    document.querySelectorAll('.showcase-empty').forEach(function(el) { el.style.display = 'none' })
     var grid = document.getElementById('showcaseGrid')
-    if (grid && !grid.querySelector('.showcase-item')) {
-      grid.closest('.card').style.display = 'none'
-    }
+    if (grid && !grid.querySelector('.showcase-item')) { var card = grid.closest('.card'); if (card) card.style.display = 'none' }
   }
 
-  // ── SCORE DIST MINI BARS (overview) ──
+  // ── SCORE DIST MINI BARS ──
   var dist = JSON.parse(distJson)
   var maxD = Math.max.apply(null, dist.concat([1]))
   var distEl = document.getElementById('distMini')
@@ -1036,24 +1159,20 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     setTimeout(function() {
       var w = actEl.getBoundingClientRect().width || 500
       var chartH = 48, padL = 4, padR = 4
-      var pts = s.monthCounts
-      var n = pts.length
+      var pts = s.monthCounts, n = pts.length
       var step = (w-padL-padR)/(n-1)
       var maxM = Math.max.apply(null, pts.concat([1]))
       var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.85-4]})
-
       var aPath = 'M'+coords[0][0]+','+chartH+coords.map(function(c){return ' L'+c[0]+','+c[1]}).join('')+' L'+coords[n-1][0]+','+chartH+' Z'
       var area = document.createElementNS('http://www.w3.org/2000/svg','path')
       area.setAttribute('d',aPath); area.setAttribute('fill','var(--accent)'); area.setAttribute('opacity','0.1')
       actEl.appendChild(area)
-
       var lPath = 'M'+coords[0][0]+','+coords[0][1]+coords.slice(1).map(function(c){return ' L'+c[0]+','+c[1]}).join('')
       var line = document.createElementNS('http://www.w3.org/2000/svg','path')
       line.setAttribute('d',lPath); line.setAttribute('fill','none')
       line.setAttribute('stroke','var(--accent)'); line.setAttribute('stroke-width','2')
       line.setAttribute('stroke-linecap','round'); line.setAttribute('stroke-linejoin','round')
       actEl.appendChild(line)
-
       coords.forEach(function(c,i){
         var dot = document.createElementNS('http://www.w3.org/2000/svg','circle')
         dot.setAttribute('cx',c[0]); dot.setAttribute('cy',c[1])
@@ -1109,7 +1228,6 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     if (!el || !s.reviewCount) return
     var pieColors = ['#6050c8','#60a5fa','#4ade80','#fbbf24','#f87171']
     var html = ''
-
     var recColor = s.recommendedRate >= 70 ? '#4ade80' : s.recommendedRate >= 50 ? '#fbbf24' : '#f87171'
     html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">'
     var heroStats = [
@@ -1122,22 +1240,19 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       html += '<div style="background:var(--bg-card);border:1px solid '+hs.color+'33;border-radius:12px;padding:12px 14px;position:relative;overflow:hidden">'
       html += '<div style="position:absolute;inset:0;background:linear-gradient(135deg,'+hs.color+'0d 0%,transparent 70%);pointer-events:none"></div>'
       html += '<div style="font-size:9px;font-weight:700;color:'+hs.color+';text-transform:uppercase;letter-spacing:.12em;margin-bottom:6px;opacity:.85;position:relative">'+hs.lbl+'</div>'
-      html += '<div style="font-family:\'DM Serif Display\',serif;font-size:28px;letter-spacing:-.5px;line-height:1;color:'+hs.color+';position:relative">'+hs.val+'</div>'
+      html += '<div style="font-family:'DM Serif Display',serif;font-size:28px;letter-spacing:-.5px;line-height:1;color:'+hs.color+';position:relative">'+hs.val+'</div>'
       html += '</div>'
     })
     html += '</div>'
-
     html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">'
     html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:12px">Score distribution</div>'
     html += '<div style="display:flex;gap:4px;align-items:flex-end;height:60px" id="statsDistRow"></div>'
     html += '</div>'
-
     html += '<div style="display:grid;grid-template-columns:3fr 2fr;gap:10px;margin-bottom:10px">'
     html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px">'
     html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Reviews over time — last 12 months</div>'
     html += '<svg id="statsLineChart" height="90" style="width:100%;overflow:visible;display:block"></svg>'
     html += '</div>'
-
     if (s.platformBreakdown && s.platformBreakdown.length > 0) {
       html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column">'
       html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Platforms played</div>'
@@ -1147,7 +1262,6 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       html += '</div></div>'
     }
     html += '</div>'
-
     if (s.genreBreakdown && s.genreBreakdown.length > 0) {
       var gColors = ['#6050c8','#60a5fa','#4ade80','#fbbf24','#f87171','#fb923c']
       html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">'
@@ -1161,10 +1275,8 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       })
       html += '</div>'
     }
-
     el.innerHTML = html
 
-    // dist bars
     var distRow = document.getElementById('statsDistRow')
     if (distRow && s.scoreDistribution) {
       var maxVal = Math.max.apply(null, s.scoreDistribution.concat([1]))
@@ -1183,22 +1295,19 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       })
     }
 
-    // line chart
     var lineEl = document.getElementById('statsLineChart')
     if (lineEl && s.monthLabels && s.monthCounts) {
       setTimeout(function() {
         var w = lineEl.getBoundingClientRect().width || 400
         var chartH = 72, padL = 4, padR = 4
-        var pts = s.monthCounts
-        var n = pts.length
+        var pts = s.monthCounts, n = pts.length
         var step = (w-padL-padR)/(n-1)
         var maxM = Math.max.apply(null, pts.concat([1]))
         var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.82-4]})
         for (var gi=0;gi<=2;gi++) {
           var gy = chartH-(gi/2)*chartH
           var gl = document.createElementNS('http://www.w3.org/2000/svg','line')
-          gl.setAttribute('x1',padL);gl.setAttribute('x2',w-padR)
-          gl.setAttribute('y1',gy);gl.setAttribute('y2',gy)
+          gl.setAttribute('x1',padL);gl.setAttribute('x2',w-padR);gl.setAttribute('y1',gy);gl.setAttribute('y2',gy)
           gl.setAttribute('stroke','var(--border)');gl.setAttribute('stroke-width','1')
           lineEl.appendChild(gl)
         }
@@ -1237,22 +1346,18 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       }, 60)
     }
 
-    // pie chart
     if (s.platformBreakdown && s.platformBreakdown.length > 0) {
       var pieSvg = document.getElementById('statsPieSvg')
       var pieLegend = document.getElementById('statsPieLegend')
       if (pieSvg && pieLegend) {
         var total = s.platformBreakdown.reduce(function(a,b){return a+b.count},0)
-        var startAngle = -Math.PI/2
-        var cx=40,cy=40,r=37
+        var startAngle = -Math.PI/2, cx=40, cy=40, r=37
         s.platformBreakdown.forEach(function(p,i) {
-          var angle = (p.count/total)*Math.PI*2
-          var endAngle = startAngle+angle
+          var angle=(p.count/total)*Math.PI*2, endAngle=startAngle+angle
           var x1=cx+r*Math.cos(startAngle),y1=cy+r*Math.sin(startAngle)
           var x2=cx+r*Math.cos(endAngle),y2=cy+r*Math.sin(endAngle)
-          var large=angle>Math.PI?1:0
           var path=document.createElementNS('http://www.w3.org/2000/svg','path')
-          path.setAttribute('d','M'+cx+','+cy+' L'+x1+','+y1+' A'+r+','+r+' 0 '+large+',1 '+x2+','+y2+' Z')
+          path.setAttribute('d','M'+cx+','+cy+' L'+x1+','+y1+' A'+r+','+r+' 0 '+(angle>Math.PI?1:0)+',1 '+x2+','+y2+' Z')
           path.setAttribute('fill',pieColors[i%pieColors.length]);path.setAttribute('opacity','0.85')
           pieSvg.appendChild(path); startAngle=endAngle
           var item=document.createElement('div')
@@ -1278,10 +1383,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     html.setAttribute('data-theme', next)
     localStorage.setItem('theme', next)
     updateIcon(next)
-    if (activeTab === 'stats') {
-      var el = document.getElementById('statsContent')
-      if (el) { el.innerHTML = ''; buildStats() }
-    }
+    if (activeTab === 'stats') { var el = document.getElementById('statsContent'); if (el) { el.innerHTML = ''; buildStats() } }
   }
   function updateIcon(theme) {
     var icon = document.getElementById('themeIcon')
@@ -1291,9 +1393,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       : '<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>'
   }
   window.toggleTheme = toggleTheme
-
-  var saved = localStorage.getItem('theme') ||
-    (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+  var saved = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
   document.documentElement.setAttribute('data-theme', saved)
   updateIcon(saved)
 
@@ -1325,10 +1425,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     el.addEventListener('click', function() { el.classList.remove('spoiler-hidden') })
   })
 
-  // ESC to close modal
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') closePicker()
-  })
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closePicker() })
 </script>
 </body>
 </html>
