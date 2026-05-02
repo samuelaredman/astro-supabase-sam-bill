@@ -12,7 +12,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
   .from('profiles')
   .select(`
     id, username, avatar_url, bio, banner_url, created_at, is_active,
-    favorite_game_id,
+    favorite_game_id, showcase_games,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
     ),
@@ -274,6 +274,9 @@ const statsJson = JSON.stringify({
   monthLabels, monthCounts, scoreDistribution,
 })
 const isOwnProfileJson = JSON.stringify(isOwnProfile)
+const showcaseJson = JSON.stringify(
+  Array.isArray(reviewer.showcase_games) ? reviewer.showcase_games : []
+)
 ---
 
 <!DOCTYPE html>
@@ -936,7 +939,7 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson }}>
 
   var barColors = ['#f87171','#f87171','#fb923c','#fbbf24','#fbbf24','#60a5fa','#60a5fa','#4ade80','#4ade80','#4ade80']
   var s = JSON.parse(statsJson)
@@ -1190,12 +1193,20 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
         showToast('Favorite game saved', 'success')
       } catch(e) { showToast('Failed to save — try again', 'error') }
     } else {
-      var showcase = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || '[]')
+      var showcase = currentShowcase.slice()
       while (showcase.length < 3) showcase.push(null)
       showcase[_pickerSlot] = { id: game.id, title: game.title, cover_img_url: game.cover_img_url, slug: game.slug }
-      localStorage.setItem('showcase_' + reviewerUsername, JSON.stringify(showcase))
-      renderShowcase(showcase)
-      showToast('Added to showcase', 'success')
+      try {
+        var sres = await fetch('/api/profile/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ showcase_games: showcase.filter(Boolean) })
+        })
+        if (!sres.ok) throw new Error()
+        currentShowcase = showcase
+        renderShowcase(currentShowcase)
+        showToast('Showcase updated', 'success')
+      } catch(e) { showToast('Failed to save showcase — try again', 'error') }
     }
   }
 
@@ -1279,12 +1290,20 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     }
   }
 
-  var savedShowcase = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || 'null')
-  if (savedShowcase) renderShowcase(savedShowcase)
-  else if (!ownProfile) {
-    document.querySelectorAll('.showcase-empty').forEach(function(el) { el.style.display = 'none' })
+  // init showcase from server DB data
+  var currentShowcase = JSON.parse(showcaseJson)
+  if (currentShowcase.length > 0) {
+    // pad to 3 slots for rendering
+    var padded = currentShowcase.slice()
+    while (padded.length < 3) padded.push(null)
+    renderShowcase(padded)
+  } else if (!ownProfile) {
+    // non-owner, no showcase set — hide the card entirely
     var grid = document.getElementById('showcaseGrid')
-    if (grid && !grid.querySelector('.showcase-item')) { var card = grid.closest('.card'); if (card) card.style.display = 'none' }
+    if (grid) { var card = grid.closest('.card'); if (card) card.style.display = 'none' }
+  } else {
+    // own profile, empty showcase — render 3 empty slots
+    renderShowcase([null, null, null])
   }
 
   // ── SCORE DIST MINI BARS ──
