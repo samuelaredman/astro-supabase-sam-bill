@@ -20,7 +20,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
       id, score, title, body, published_at, created_at,
       contains_spoilers, play_time_hours, status,
       played_on:platform_played_on ( id, name, slug ),
-      games ( id, title, slug, cover_img_url, game_genres(genres(id, name, slug)) )
+      games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) )
     )
   `)
   .eq('username', username)
@@ -120,7 +120,125 @@ for (let i = 11; i >= 0; i--) {
 
 const recommendedCount = publishedReviews.filter((r: any) => r.score >= 7).length
 const recommendedRate = publishedReviews.length > 0 ? Math.round((recommendedCount / publishedReviews.length) * 100) : 0
+
+// score delta vs community — fetch avg score for each reviewed game
+const reviewedGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))]
+let scoreDelta: number | null = null
+if (reviewedGameIds.length > 0) {
+  const { data: communityScores } = await (supabase as any)
+    .from('reviews')
+    .select('game_id, score')
+    .in('game_id', reviewedGameIds)
+    .eq('status', 'published')
+
+  if (communityScores && communityScores.length > 0) {
+    // build game avg map
+    const gameScoreMap: Record<string, number[]> = {}
+    for (const row of communityScores) {
+      if (!gameScoreMap[row.game_id]) gameScoreMap[row.game_id] = []
+      gameScoreMap[row.game_id].push(row.score)
+    }
+    const gameAvgMap: Record<string, number> = {}
+    for (const [gid, scores] of Object.entries(gameScoreMap)) {
+      gameAvgMap[gid] = (scores as number[]).reduce((a, b) => a + b, 0) / (scores as number[]).length
+    }
+    // compute delta per review
+    const deltas: number[] = []
+    for (const r of publishedReviews) {
+      const gid = (r as any).games?.id
+      if (gid && gameAvgMap[gid] !== undefined) {
+        deltas.push((r as any).score - gameAvgMap[gid])
+      }
+    }
+    if (deltas.length > 0) {
+      scoreDelta = Math.round((deltas.reduce((a, b) => a + b, 0) / deltas.length) * 10) / 10
+    }
+  }
+}
+
 const recentGames = publishedReviews.slice(0, 6).map((r: any) => r.games).filter(Boolean)
+
+// ── CHART DATA ──
+// We reuse communityScores fetched above — build gameAvgMap here for chart use too
+const _reviewedGameIds2 = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))]
+const _gameAvgMap2: Record<string, number> = {}
+if (_reviewedGameIds2.length > 0) {
+  const { data: _cs2 } = await (supabase as any)
+    .from('reviews').select('game_id, score').in('game_id', _reviewedGameIds2).eq('status', 'published')
+  if (_cs2) {
+    const _m: Record<string, number[]> = {}
+    for (const row of _cs2) { if (!_m[row.game_id]) _m[row.game_id] = []; _m[row.game_id].push(row.score) }
+    for (const [gid, sc] of Object.entries(_m)) {
+      _gameAvgMap2[gid] = (sc as number[]).reduce((a,b)=>a+b,0) / (sc as number[]).length
+    }
+  }
+}
+
+// 1. Games & Hours by Genre
+const _genreGameMap: Record<string, { games: number, hours: number }> = {}
+for (const r of publishedReviews) {
+  const genres = (r as any).games?.game_genres ?? []
+  for (const gg of genres) {
+    const name = gg.genres?.name; if (!name) continue
+    if (!_genreGameMap[name]) _genreGameMap[name] = { games: 0, hours: 0 }
+    _genreGameMap[name].games++
+    _genreGameMap[name].hours += (r as any).play_time_hours ?? 0
+  }
+}
+const genreActivityData = Object.entries(_genreGameMap)
+  .sort((a,b) => b[1].games - a[1].games).slice(0, 8)
+  .map(([name, d]) => ({ name, games: d.games, hours: d.hours }))
+
+// 2. Ratings by Genre (user avg vs community avg)
+const _genreUserScores: Record<string, number[]> = {}
+const _genreCommScores: Record<string, number[]> = {}
+for (const r of publishedReviews) {
+  const genres = (r as any).games?.game_genres ?? []
+  const gid = (r as any).games?.id
+  for (const gg of genres) {
+    const name = gg.genres?.name; if (!name) continue
+    if (!_genreUserScores[name]) _genreUserScores[name] = []
+    _genreUserScores[name].push((r as any).score)
+    if (gid && _gameAvgMap2[gid] !== undefined) {
+      if (!_genreCommScores[name]) _genreCommScores[name] = []
+      _genreCommScores[name].push(_gameAvgMap2[gid])
+    }
+  }
+}
+const genreRatingData = Object.entries(_genreUserScores)
+  .sort((a,b) => b[1].length - a[1].length).slice(0, 8)
+  .map(([name, scores]) => ({
+    name,
+    userAvg: Math.round((scores.reduce((a,b)=>a+b,0)/scores.length)*10)/10,
+    commAvg: _genreCommScores[name]?.length
+      ? Math.round((_genreCommScores[name].reduce((a,b)=>a+b,0)/_genreCommScores[name].length)*10)/10
+      : null
+  }))
+
+// 3. Ratings by Year (user avg vs community avg)
+const _yearUserScores: Record<string, number[]> = {}
+const _yearCommScores: Record<string, number[]> = {}
+for (const r of publishedReviews) {
+  const yr = (r as any).games?.date_released
+    ? String(new Date((r as any).games.date_released).getFullYear()) : null
+  const gid = (r as any).games?.id
+  if (!yr) continue
+  if (!_yearUserScores[yr]) _yearUserScores[yr] = []
+  _yearUserScores[yr].push((r as any).score)
+  if (gid && _gameAvgMap2[gid] !== undefined) {
+    if (!_yearCommScores[yr]) _yearCommScores[yr] = []
+    _yearCommScores[yr].push(_gameAvgMap2[gid])
+  }
+}
+const yearRatingData = Object.entries(_yearUserScores)
+  .sort((a,b) => parseInt(b[0]) - parseInt(a[0])).slice(0, 10)
+  .map(([year, scores]) => ({
+    year,
+    userAvg: Math.round((scores.reduce((a,b)=>a+b,0)/scores.length)*10)/10,
+    commAvg: _yearCommScores[year]?.length
+      ? Math.round((_yearCommScores[year].reduce((a,b)=>a+b,0)/_yearCommScores[year].length)*10)/10
+      : null
+  }))
 
 function igdbCover(url: string | null, size = 't_cover_big') {
   if (!url) return null
@@ -150,8 +268,9 @@ const bannerStyle = reviewer.banner_url
 const distJson = JSON.stringify(scoreDistribution)
 const statsJson = JSON.stringify({
   reviewCount: publishedReviews.length,
-  avgScore, avgHours, totalHours, recommendedRate,
+  avgScore, avgHours, totalHours, recommendedRate, scoreDelta,
   platformBreakdown, genreBreakdown,
+  genreActivityData, genreRatingData, yearRatingData,
   monthLabels, monthCounts, scoreDistribution,
 })
 const isOwnProfileJson = JSON.stringify(isOwnProfile)
@@ -1228,22 +1347,43 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
     if (!el || !s.reviewCount) return
     var pieColors = ['#6050c8','#60a5fa','#4ade80','#fbbf24','#f87171']
     var html = ''
-    var recColor = s.recommendedRate >= 70 ? '#4ade80' : s.recommendedRate >= 50 ? '#fbbf24' : '#f87171'
+    var deltaVal = s.scoreDelta !== null && s.scoreDelta !== undefined ? s.scoreDelta : null
+    var deltaColor = deltaVal === null ? '#908d87' : deltaVal > 0 ? '#4ade80' : deltaVal < 0 ? '#f87171' : '#908d87'
+    var deltaStr = deltaVal === null ? '—' : (deltaVal > 0 ? '+' : '') + deltaVal.toFixed(1)
     html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">'
     var heroStats = [
       { lbl: 'Reviews written', val: s.reviewCount, color: '#6050c8' },
       { lbl: 'Avg score given', val: s.avgScore || '—', color: scoreCol(parseFloat(s.avgScore||'0')) },
       { lbl: 'Avg hours played', val: s.avgHours ? s.avgHours+'h' : '—', color: '#fbbf24' },
-      { lbl: 'Recommended', val: s.recommendedRate+'%', color: recColor },
+      { lbl: 'vs. community', val: deltaStr, color: deltaColor, sub: deltaVal === null ? 'no data' : deltaVal > 0 ? 'rates higher than avg' : deltaVal < 0 ? 'rates lower than avg' : 'rates same as avg' },
     ]
     heroStats.forEach(function(hs) {
       html += '<div style="background:var(--bg-card);border:1px solid '+hs.color+'33;border-radius:12px;padding:12px 14px;position:relative;overflow:hidden">'
       html += '<div style="position:absolute;inset:0;background:linear-gradient(135deg,'+hs.color+'0d 0%,transparent 70%);pointer-events:none"></div>'
-      html += '<div style="font-size:9px;font-weight:700;color:'+hs.color+';text-transform:uppercase;letter-spacing:.12em;margin-bottom:6px;opacity:.85;position:relative">'+hs.lbl+'</div>'
-      html += '<div style="font-family:\'DM Serif Display\',serif;font-size:28px;letter-spacing:-.5px;line-height:1;color:'+hs.color+';position:relative">'+hs.val+'</div>'
+      html += '<div style="font-size:9px;font-weight:700;color:'+hs.color+';text-transform:uppercase;letter-spacing:.12em;margin-bottom:4px;opacity:.85;position:relative">'+hs.lbl+'</div>'
+      html += '<div style="font-family:\'DM Serif Display\',serif;font-size:28px;letter-spacing:-.5px;line-height:1;color:'+hs.color+';position:relative;margin-bottom:3px">'+hs.val+'</div>'
+      if (hs.sub) html += '<div style="font-size:9px;color:'+hs.color+';opacity:.6;position:relative">'+hs.sub+'</div>'
       html += '</div>'
     })
     html += '</div>'
+
+    // ── DOUBLE BAR CHART BLOCK ──
+    html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:10px">'
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:12px;flex-wrap:wrap">'
+    html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em">Breakdown</div>'
+    html += '<select id="chartViewSelect" onchange="renderDoubleBar(this.value)" style="background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-family:DM Sans,sans-serif;color:var(--text-primary);cursor:pointer;outline:none">'
+    html += '<option value="genreActivity">Games &amp; Hours by Genre</option>'
+    html += '<option value="genreRating">Ratings by Genre vs. Community</option>'
+    html += '<option value="yearRating">Ratings by Year vs. Community</option>'
+    html += '</select></div>'
+    // legend
+    html += '<div style="display:flex;gap:16px;margin-bottom:12px" id="chartLegend">'
+    html += '<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary)"><div style="width:10px;height:10px;border-radius:2px;background:#6050c8"></div><span id="legendA">Games reviewed</span></div>'
+    html += '<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary)"><div style="width:10px;height:10px;border-radius:2px;background:#60a5fa"></div><span id="legendB">Hours played</span></div>'
+    html += '</div>'
+    html += '<div id="doubleBarChart" style="width:100%;overflow-x:auto"></div>'
+    html += '</div>'
+
     html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">'
     html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:12px">Score distribution</div>'
     html += '<div style="display:flex;gap:4px;align-items:flex-end;height:60px" id="statsDistRow"></div>'
@@ -1276,6 +1416,167 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
       html += '</div>'
     }
     el.innerHTML = html
+
+    // ── RENDER DOUBLE BAR ──
+    function renderDoubleBar(view) {
+      var container = document.getElementById('doubleBarChart')
+      var legendA = document.getElementById('legendA')
+      var legendB = document.getElementById('legendB')
+      if (!container) return
+      container.innerHTML = ''
+
+      var data, labelKey, barAKey, barBKey, barAColor, barBColor, maxA, maxB, labelA, labelB, isCounts
+
+      if (view === 'genreActivity') {
+        data = s.genreActivityData || []
+        labelKey = 'name'; barAKey = 'games'; barBKey = 'hours'
+        barAColor = '#6050c8'; barBColor = '#60a5fa'
+        labelA = 'Games reviewed'; labelB = 'Hours played'
+        maxA = Math.max.apply(null, data.map(function(d){return d[barAKey]}).concat([1]))
+        maxB = Math.max.apply(null, data.map(function(d){return d[barBKey]}).concat([1]))
+        isCounts = true
+      } else if (view === 'genreRating') {
+        data = s.genreRatingData || []
+        labelKey = 'name'; barAKey = 'userAvg'; barBKey = 'commAvg'
+        barAColor = '#6050c8'; barBColor = '#484644'
+        labelA = 'Your avg'; labelB = 'Community avg'
+        maxA = 10; maxB = 10; isCounts = false
+      } else {
+        data = s.yearRatingData || []
+        labelKey = 'year'; barAKey = 'userAvg'; barBKey = 'commAvg'
+        barAColor = '#6050c8'; barBColor = '#484644'
+        labelA = 'Your avg'; labelB = 'Community avg'
+        maxA = 10; maxB = 10; isCounts = false
+      }
+
+      if (legendA) legendA.textContent = labelA
+      if (legendB) legendB.textContent = labelB
+
+      if (!data || data.length === 0) {
+        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-tertiary);font-size:13px">No data yet</div>'
+        return
+      }
+
+      var barGroupW = 44
+      var barW = 16
+      var gap = 4
+      var chartH = 120
+      var padL = 32
+      var padBottom = 52
+      var totalW = Math.max(padL + data.length * (barGroupW + 8) + 16, 400)
+
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      svg.setAttribute('width', totalW)
+      svg.setAttribute('height', chartH + padBottom)
+      svg.style.display = 'block'
+      svg.style.minWidth = totalW + 'px'
+
+      // y-axis gridlines + labels
+      var ySteps = isCounts ? 4 : 5
+      for (var yi = 0; yi <= ySteps; yi++) {
+        var yVal = isCounts ? Math.round((yi/ySteps) * maxA) : (yi/ySteps) * 10
+        var yPos = chartH - (yVal / (isCounts ? maxA : 10)) * chartH
+        var gl = document.createElementNS('http://www.w3.org/2000/svg', 'line')
+        gl.setAttribute('x1', padL); gl.setAttribute('x2', totalW - 8)
+        gl.setAttribute('y1', yPos); gl.setAttribute('y2', yPos)
+        gl.setAttribute('stroke', 'var(--border)'); gl.setAttribute('stroke-width', '1')
+        gl.setAttribute('opacity', yi === 0 ? '0.6' : '0.25')
+        svg.appendChild(gl)
+        var yt = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+        yt.setAttribute('x', padL - 4); yt.setAttribute('y', yPos + 4)
+        yt.setAttribute('text-anchor', 'end'); yt.setAttribute('font-size', '9')
+        yt.setAttribute('fill', 'var(--text-tertiary)'); yt.setAttribute('font-family', 'DM Sans,sans-serif')
+        yt.textContent = isCounts ? yVal : yVal.toFixed(1)
+        svg.appendChild(yt)
+      }
+
+      data.forEach(function(d, i) {
+        var x = padL + i * (barGroupW + 8)
+
+        var valA = d[barAKey] != null ? d[barAKey] : 0
+        var valB = d[barBKey] != null ? d[barBKey] : 0
+        var hA = Math.max(2, (valA / (isCounts ? maxA : 10)) * chartH)
+        var hB = Math.max(2, (valB / (isCounts ? maxB : 10)) * chartH)
+
+        // bar A
+        var rA = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+        rA.setAttribute('x', x); rA.setAttribute('y', chartH - hA)
+        rA.setAttribute('width', barW); rA.setAttribute('height', hA)
+        rA.setAttribute('rx', '3'); rA.setAttribute('fill', barAColor); rA.setAttribute('opacity', '0.85')
+        rA.style.transition = 'opacity .15s'; rA.style.cursor = 'default'
+        rA.addEventListener('mouseenter', function() { this.setAttribute('opacity','1') })
+        rA.addEventListener('mouseleave', function() { this.setAttribute('opacity','0.85') })
+        svg.appendChild(rA)
+
+        // value label A
+        var tA = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+        tA.setAttribute('x', x + barW/2); tA.setAttribute('y', chartH - hA - 4)
+        tA.setAttribute('text-anchor', 'middle'); tA.setAttribute('font-size', '9')
+        tA.setAttribute('fill', barAColor); tA.setAttribute('font-weight', '600')
+        tA.setAttribute('font-family', 'DM Sans,sans-serif')
+        tA.textContent = isCounts ? valA : valA.toFixed(1)
+        svg.appendChild(tA)
+
+        // bar B (only if has data)
+        if (d[barBKey] != null) {
+          var rB = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+          rB.setAttribute('x', x + barW + gap); rB.setAttribute('y', chartH - hB)
+          rB.setAttribute('width', barW); rB.setAttribute('height', hB)
+          rB.setAttribute('rx', '3'); rB.setAttribute('fill', barBColor); rB.setAttribute('opacity', '0.6')
+          rB.style.transition = 'opacity .15s'; rB.style.cursor = 'default'
+          rB.addEventListener('mouseenter', function() { this.setAttribute('opacity','0.9') })
+          rB.addEventListener('mouseleave', function() { this.setAttribute('opacity','0.6') })
+          svg.appendChild(rB)
+
+          var tB = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+          tB.setAttribute('x', x + barW + gap + barW/2); tB.setAttribute('y', chartH - hB - 4)
+          tB.setAttribute('text-anchor', 'middle'); tB.setAttribute('font-size', '9')
+          tB.setAttribute('fill', 'var(--text-tertiary)'); tB.setAttribute('font-weight', '600')
+          tB.setAttribute('font-family', 'DM Sans,sans-serif')
+          tB.textContent = isCounts ? valB : valB.toFixed(1)
+          svg.appendChild(tB)
+        }
+
+        // x label (wrap long names)
+        var labelText = String(d[labelKey])
+        var words = labelText.split(' ')
+        var line1 = words.slice(0, Math.ceil(words.length/2)).join(' ')
+        var line2 = words.slice(Math.ceil(words.length/2)).join(' ')
+        var xl = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+        xl.setAttribute('x', x + barW + gap/2); xl.setAttribute('y', chartH + 14)
+        xl.setAttribute('text-anchor', 'middle'); xl.setAttribute('font-size', '9')
+        xl.setAttribute('fill', 'var(--text-tertiary)'); xl.setAttribute('font-family', 'DM Sans,sans-serif')
+        if (line2) {
+          var t1 = document.createElementNS('http://www.w3.org/2000/svg', 'tspan')
+          t1.setAttribute('x', x + barW + gap/2); t1.setAttribute('dy', '0'); t1.textContent = line1
+          var t2 = document.createElementNS('http://www.w3.org/2000/svg', 'tspan')
+          t2.setAttribute('x', x + barW + gap/2); t2.setAttribute('dy', '12'); t2.textContent = line2
+          xl.appendChild(t1); xl.appendChild(t2)
+        } else {
+          xl.textContent = line1
+        }
+        svg.appendChild(xl)
+
+        // delta indicator for rating views
+        if (!isCounts && d[barBKey] != null) {
+          var delta = valA - valB
+          var dCol = delta > 0.05 ? '#4ade80' : delta < -0.05 ? '#f87171' : 'var(--text-tertiary)'
+          var dStr = (delta > 0 ? '+' : '') + delta.toFixed(1)
+          var dt = document.createElementNS('http://www.w3.org/2000/svg', 'text')
+          dt.setAttribute('x', x + barW + gap/2); dt.setAttribute('y', chartH + (line2 ? 42 : 30))
+          dt.setAttribute('text-anchor', 'middle'); dt.setAttribute('font-size', '9')
+          dt.setAttribute('fill', dCol); dt.setAttribute('font-weight', '700')
+          dt.setAttribute('font-family', 'DM Sans,sans-serif')
+          dt.textContent = dStr; svg.appendChild(dt)
+        }
+      })
+
+      container.appendChild(svg)
+    }
+
+    // initial render
+    renderDoubleBar('genreActivity')
+    window.renderDoubleBar = renderDoubleBar
 
     var distRow = document.getElementById('statsDistRow')
     if (distRow && s.scoreDistribution) {
