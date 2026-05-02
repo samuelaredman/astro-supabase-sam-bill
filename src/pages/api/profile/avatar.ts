@@ -3,12 +3,19 @@ import { createSupabaseServerClientFromContext } from '../../../utils/database';
 
 export async function POST(context: any) {
   const supabase = createSupabaseServerClientFromContext(context);
+
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return new Response('Unauthorized', { status: 401 });
 
   const form = await context.request.formData();
   const file = form.get('avatar') as File;
   if (!file) return new Response('No file', { status: 400 });
+
+  if (file.size > 5 * 1024 * 1024) {
+    return new Response(JSON.stringify({ error: 'File must be under 5MB' }), {
+      status: 400, headers: { 'Content-Type': 'application/json' }
+    });
+  }
 
   const ext = file.name.split('.').pop()?.toLowerCase() ?? 'jpg';
   const path = `${user.id}/avatar.${ext}`;
@@ -41,7 +48,6 @@ export async function POST(context: any) {
   if (updateError) return new Response(updateError.message, { status: 500 });
 
   return new Response(JSON.stringify({ url: publicUrl }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' }
+    status: 200, headers: { 'Content-Type': 'application/json' }
   });
 }
