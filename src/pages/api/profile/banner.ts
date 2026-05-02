@@ -3,6 +3,7 @@ import { createSupabaseServerClientFromContext } from '../../../utils/database';
 
 export async function POST(context: any) {
   const supabase = createSupabaseServerClientFromContext(context);
+
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return new Response('Unauthorized', { status: 401 });
 
@@ -10,19 +11,16 @@ export async function POST(context: any) {
   const file = form.get('banner') as File;
   if (!file) return new Response('No file', { status: 400 });
 
-  // 6MB max
   if (file.size > 6 * 1024 * 1024) {
     return new Response(JSON.stringify({ error: 'File must be under 6MB' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
+      status: 400, headers: { 'Content-Type': 'application/json' }
     });
   }
 
   const allowed = ['image/jpeg', 'image/png', 'image/webp'];
   if (!allowed.includes(file.type)) {
     return new Response(JSON.stringify({ error: 'Only JPEG, PNG, or WebP allowed' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' }
+      status: 400, headers: { 'Content-Type': 'application/json' }
     });
   }
 
@@ -38,9 +36,6 @@ export async function POST(context: any) {
   const { data: { publicUrl } } = supabase.storage
     .from('banners')
     .getPublicUrl(path);
-
-  // bust cache
-  const publicUrlWithBust = publicUrl + '?t=' + Date.now();
 
   const { data: profile, error: profileError } = await (supabase as any)
     .from('profiles')
@@ -59,8 +54,8 @@ export async function POST(context: any) {
 
   if (updateError) return new Response(updateError.message, { status: 500 });
 
-  return new Response(JSON.stringify({ url: publicUrlWithBust }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' }
+  // append cache-bust to returned URL so client updates immediately
+  return new Response(JSON.stringify({ url: publicUrl + '?t=' + Date.now() }), {
+    status: 200, headers: { 'Content-Type': 'application/json' }
   });
 }
