@@ -1,24 +1,14 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
-import { getSupabase } from '../../../utils/database';
+import { createSupabaseServerClientFromContext } from '../../../utils/database';
 
-export const POST: APIRoute = async ({ request }) => {
-  const supabase = getSupabase();
+export const POST: APIRoute = async (context) => {
+  const supabase = createSupabaseServerClientFromContext(context);
 
-  // Get session from Authorization header sent by the client
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader?.startsWith('Bearer ')) {
-    return new Response('Unauthorized', { status: 401 });
-  }
-  const token = authHeader.slice(7);
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return new Response('Unauthorized', { status: 401 });
 
-  // Verify the token and get the user
-  const { data: { user }, error: userError } = await supabase.auth.getUser(token);
-  if (userError || !user) {
-    return new Response('Unauthorized', { status: 401 });
-  }
-
-  const body = await request.json();
+  const body = await context.request.json();
   const allowed = ['bio', 'favorite_game_id', 'showcase_games'];
   const update: Record<string, any> = {};
   for (const key of allowed) {
