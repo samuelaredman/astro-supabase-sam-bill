@@ -1205,8 +1205,7 @@ const showcaseJson = JSON.stringify(
           body: JSON.stringify({ showcase_games: showcase.filter(Boolean) })
         })
         if (!sres.ok) throw new Error()
-        currentShowcase = showcase
-        renderShowcase(currentShowcase)
+        renderShowcase(showcase)
         showToast('Showcase updated', 'success')
       } catch(e) { showToast('Failed to save showcase — try again', 'error') }
     }
@@ -1251,6 +1250,8 @@ const showcaseJson = JSON.stringify(
   function renderShowcase(showcase) {
     var grid = document.getElementById('showcaseGrid')
     if (!grid) return
+    // keep currentShowcase in sync
+    currentShowcase = showcase.slice()
     grid.innerHTML = ''
     for (var i = 0; i < 3; i++) {
       var game = showcase[i] ?? null
@@ -1258,38 +1259,59 @@ const showcaseJson = JSON.stringify(
       if (game) {
         var coverUrl = game.cover_img_url ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big') : null
         slot.className = 'showcase-item'
+        slot.style.position = 'relative'
+        slot.style.overflow = 'hidden'
         slot.innerHTML = coverUrl
           ? '<img src="' + coverUrl + '" alt="' + game.title + '" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0" />'
           : '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:28px;background:var(--tag-bg)">🎮</div>'
-        slot.style.position = 'relative'
+        // title tooltip overlay
+        var titleTag = document.createElement('div')
+        titleTag.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:6px 8px;background:linear-gradient(transparent,rgba(0,0,0,.75));font-size:10px;font-weight:600;color:white;opacity:0;transition:opacity .2s;pointer-events:none;line-height:1.3;text-shadow:0 1px 3px rgba(0,0,0,.8)'
+        titleTag.textContent = game.title
+        slot.appendChild(titleTag)
+        slot.addEventListener('mouseenter', function() { this.querySelector('div') && (this.querySelector('div').style.opacity='1') })
+        slot.addEventListener('mouseleave', function() { this.querySelector('div') && (this.querySelector('div').style.opacity='0') })
         if (ownProfile) {
+          // remove button (×)
           var removeBtn = document.createElement('div')
           removeBtn.className = 'showcase-remove'
           removeBtn.innerHTML = '×'
           removeBtn.title = 'Remove'
           ;(function(idx) {
-            removeBtn.onclick = function(e) {
+            removeBtn.onclick = async function(e) {
               e.stopPropagation()
-              var sc = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || '[]')
+              var sc = currentShowcase.slice()
               while (sc.length < 3) sc.push(null)
               sc[idx] = null
-              localStorage.setItem('showcase_' + reviewerUsername, JSON.stringify(sc))
-              renderShowcase(sc)
+              try {
+                var rres = await fetch('/api/profile/update', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ showcase_games: sc.filter(Boolean) })
+                })
+                if (!rres.ok) throw new Error()
+                renderShowcase(sc)
+              } catch(e) { showToast('Failed to remove — try again', 'error') }
             }
           })(i)
           slot.appendChild(removeBtn)
-          ;(function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
+          // click slot to replace
+          ;(function(idx) {
+            slot.onclick = function(e) {
+              if (e.target.className === 'showcase-remove') return
+              openGamePicker('showcase', idx)
+            }
+          })(i)
         } else {
-          slot.style.cursor = 'default'
-          var link = document.createElement('a')
-          link.href = '/games/' + game.slug
-          link.style.cssText = 'position:absolute;inset:0'
-          slot.appendChild(link)
+          // non-owner: click goes to game page
+          slot.style.cursor = 'pointer'
+          slot.onclick = function() { window.location.href = '/games/' + game.slug }
         }
       } else {
+        // empty slot
         slot.className = 'showcase-empty'
-        slot.innerHTML = '<span style="font-size:24px">+</span><span>Add game</span>'
         if (ownProfile) {
+          slot.innerHTML = '<span style="font-size:28px;opacity:.4">+</span><span style="font-size:11px;color:var(--text-tertiary);font-weight:500">Add game</span>'
           ;(function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
         } else {
           slot.style.display = 'none'
