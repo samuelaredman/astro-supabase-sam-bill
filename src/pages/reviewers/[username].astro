@@ -447,12 +447,12 @@ const showcaseJson = JSON.stringify(
 
     /* SHOWCASE */
     .showcase-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-    .showcase-item{aspect-ratio:3/4;border-radius:10px;overflow:hidden;border:1px solid var(--border);position:relative;transition:transform .2s,border-color .2s}
+    .showcase-item{aspect-ratio:3/4;border-radius:10px;overflow:hidden;border:1px solid var(--border);position:relative;transition:transform .2s,border-color .2s;cursor:pointer}
     .showcase-item:hover{transform:translateY(-3px);border-color:rgba(96,80,200,.5)}
     .showcase-item img{width:100%;height:100%;object-fit:cover;display:block}
     .showcase-remove{position:absolute;top:6px;right:6px;width:22px;height:22px;background:rgba(0,0,0,.7);border-radius:50%;display:none;align-items:center;justify-content:center;cursor:pointer;color:white;font-size:14px;line-height:1}
     .showcase-item:hover .showcase-remove{display:flex}
-    .showcase-empty{background:var(--tag-bg);border:1px dashed var(--border);border-radius:10px;aspect-ratio:3/4;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:22px;cursor:pointer;transition:border-color .15s,background .15s;gap:6px}
+    .showcase-empty{background:var(--tag-bg);border:1px dashed var(--border);border-radius:10px;aspect-ratio:3/4;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;transition:border-color .15s,background .15s;gap:8px;position:relative}
     .showcase-empty:hover{border-color:var(--accent);background:var(--bg-hover)}
     .showcase-empty span{font-size:10px;color:var(--text-tertiary)}
 
@@ -1205,7 +1205,7 @@ const showcaseJson = JSON.stringify(
           body: JSON.stringify({ showcase_games: showcase.filter(Boolean) })
         })
         if (!sres.ok) throw new Error()
-        currentShowcase = showcase
+        currentShowcase = showcase.slice()
         renderShowcase(currentShowcase)
         showToast('Showcase updated', 'success')
       } catch(e) { showToast('Failed to save showcase — try again', 'error') }
@@ -1226,8 +1226,10 @@ const showcaseJson = JSON.stringify(
       ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_screenshot_big') : null
 
     container.id = 'favGameCard'
-    // ensure card has correct position context
-    container.style.cssText = 'position:relative;overflow:hidden;min-height:140px'
+    container.style.position = 'relative'
+    container.style.overflow = 'hidden'
+    container.style.minHeight = '140px'
+    container.className = 'fav-game-card'
     var html = ''
     if (bgUrl) html += '<img class="fav-game-bg" src="' + bgUrl + '" alt="" style="width:100%;height:150px;object-fit:cover;object-position:center 20%;display:block;opacity:.45" />'
     html += '<div class="fav-game-overlay"></div>'
@@ -1257,42 +1259,90 @@ const showcaseJson = JSON.stringify(
       var slot = document.createElement('div')
       if (game) {
         var coverUrl = game.cover_img_url ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big') : null
+        // always use showcase-item so dimensions never change
         slot.className = 'showcase-item'
-        slot.innerHTML = coverUrl
-          ? '<img src="' + coverUrl + '" alt="' + game.title + '" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;inset:0" />'
-          : '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:28px;background:var(--tag-bg)">🎮</div>'
-        slot.style.position = 'relative'
+        // cover image fills slot
+        var img = document.createElement('img')
+        if (coverUrl) {
+          img.src = coverUrl
+          img.alt = game.title
+          img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block'
+          slot.appendChild(img)
+        } else {
+          var placeholder = document.createElement('div')
+          placeholder.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:28px;background:var(--tag-bg)'
+          placeholder.textContent = '🎮'
+          slot.appendChild(placeholder)
+        }
+        // title tooltip
+        var titleTag = document.createElement('div')
+        titleTag.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:8px;background:linear-gradient(transparent,rgba(0,0,0,.8));font-size:10px;font-weight:600;color:white;opacity:0;transition:opacity .2s;pointer-events:none;line-height:1.3'
+        titleTag.textContent = game.title
+        slot.appendChild(titleTag)
+        slot.addEventListener('mouseenter', function() {
+          var t = this.querySelector('div:last-child'); if (t) t.style.opacity = '1'
+        })
+        slot.addEventListener('mouseleave', function() {
+          var t = this.querySelector('div:last-child'); if (t) t.style.opacity = '0'
+        })
         if (ownProfile) {
           var removeBtn = document.createElement('div')
           removeBtn.className = 'showcase-remove'
           removeBtn.innerHTML = '×'
           removeBtn.title = 'Remove'
           ;(function(idx) {
-            removeBtn.onclick = function(e) {
+            removeBtn.onclick = async function(e) {
               e.stopPropagation()
-              var sc = JSON.parse(localStorage.getItem('showcase_' + reviewerUsername) || '[]')
+              e.preventDefault()
+              this.style.pointerEvents = 'none'
+              this.innerHTML = '…'
+              var sc = currentShowcase.slice()
               while (sc.length < 3) sc.push(null)
               sc[idx] = null
-              localStorage.setItem('showcase_' + reviewerUsername, JSON.stringify(sc))
-              renderShowcase(sc)
+              var toSave = sc.filter(Boolean)
+              try {
+                var rres = await fetch('/api/profile/update', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ showcase_games: toSave })
+                })
+                var rbody = await rres.json()
+                if (!rres.ok) throw new Error(rbody.error || 'Failed')
+                currentShowcase = sc.slice()
+                renderShowcase(currentShowcase)
+                showToast('Game removed', 'success')
+              } catch(err) {
+                showToast('Failed to remove: ' + (err.message || 'try again'), 'error')
+                this.style.pointerEvents = ''
+                this.innerHTML = '×'
+              }
             }
           })(i)
           slot.appendChild(removeBtn)
-          ;(function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
+          ;(function(idx) {
+            slot.onclick = function(e) {
+              if (e.target.closest('.showcase-remove')) return
+              openGamePicker('showcase', idx)
+            }
+          })(i)
         } else {
-          slot.style.cursor = 'default'
-          var link = document.createElement('a')
-          link.href = '/games/' + game.slug
-          link.style.cssText = 'position:absolute;inset:0'
-          slot.appendChild(link)
+          slot.onclick = (function(g) { return function() { window.location.href = '/games/' + g.slug } })(game)
         }
       } else {
+        // empty slot — same class and size as filled, just different interior
         slot.className = 'showcase-empty'
-        slot.innerHTML = '<span style="font-size:24px">+</span><span>Add game</span>'
+        var plus = document.createElement('span')
+        plus.style.cssText = 'font-size:26px;opacity:.35;line-height:1'
+        plus.textContent = '+'
+        var label = document.createElement('span')
+        label.style.cssText = 'font-size:11px;color:var(--text-tertiary);font-weight:500'
+        label.textContent = 'Add game'
+        slot.appendChild(plus)
+        slot.appendChild(label)
         if (ownProfile) {
           ;(function(idx) { slot.onclick = function() { openGamePicker('showcase', idx) } })(i)
         } else {
-          slot.style.display = 'none'
+          slot.style.visibility = 'hidden'  // hide but keep space so grid stays stable
         }
       }
       grid.appendChild(slot)
@@ -1302,17 +1352,18 @@ const showcaseJson = JSON.stringify(
   // init showcase from server DB data
   var currentShowcase = JSON.parse(showcaseJson)
   if (currentShowcase.length > 0) {
-    // pad to 3 slots for rendering
     var padded = currentShowcase.slice()
     while (padded.length < 3) padded.push(null)
-    renderShowcase(padded)
+    currentShowcase = padded
+    renderShowcase(currentShowcase)
   } else if (!ownProfile) {
     // non-owner, no showcase set — hide the card entirely
     var grid = document.getElementById('showcaseGrid')
     if (grid) { var card = grid.closest('.card'); if (card) card.style.display = 'none' }
   } else {
     // own profile, empty showcase — render 3 empty slots
-    renderShowcase([null, null, null])
+    currentShowcase = [null, null, null]
+    renderShowcase(currentShowcase)
   }
 
   // ── SCORE DIST MINI BARS ──
