@@ -21,7 +21,7 @@ export const POST: APIRoute = async (context) => {
     .select('id, vote')
     .eq('profile_id', profile.id)
     .eq('review_id', review_id)
-    .single();
+    .maybeSingle();
 
   if (existing) {
     if (existing.vote === vote) {
