@@ -20,7 +20,8 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
       id, score, title, body, published_at, created_at,
       contains_spoilers, play_time_hours, status,
       played_on:platform_played_on ( id, name, slug ),
-      games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) )
+      games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) ),
+      review_votes ( vote )
     )
   `)
   .eq('username', username)
@@ -277,6 +278,15 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
 const showcaseJson = JSON.stringify(
   Array.isArray(reviewer.showcase_games) ? reviewer.showcase_games : []
 )
+
+// vote counting logic for reviews
+function getVoteCounts(votes: any) {
+  const arr = Array.isArray(votes) ? votes : votes ? [votes] : [];
+  const up = arr.filter((v: any) => v.vote === 1).length;
+  const down = arr.filter((v: any) => v.vote === -1).length;
+  return { up, down };
+}
+
 ---
 
 <!DOCTYPE html>
@@ -495,6 +505,15 @@ const showcaseJson = JSON.stringify(
     .expand-btn{font-size:11px;color:var(--accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;padding:0;font-weight:500}
     .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
     .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
+
+    /* VOTES FOR REVIEWS */
+    .vote-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+    .vote-btn { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); background: none; font-size: 12px; font-family: inherit; color: var(--text-secondary); cursor: pointer; transition: all 0.15s; }
+    .vote-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+    .vote-btn.active-up { background: var(--score-great-bg); color: var(--score-great); border-color: var(--score-great); }
+    .vote-btn.active-down { background: var(--score-low-bg); color: var(--score-low); border-color: var(--score-low); }
+    .review-body.spoiler-hidden { filter: blur(4px); user-select: none; cursor: pointer; transition: filter 0.2s; }
+    .review-body.spoiler-hidden:hover { filter: blur(3px); }
 
     /* GAME PICKER MODAL */
     .modal-backdrop{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:20px}
@@ -856,21 +875,29 @@ const showcaseJson = JSON.stringify(
 
   <!-- ── REVIEWS TAB ── -->
   <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`}>
-    {publishedReviews.length === 0 ? (
-      <div class="empty-state">
-        <div class="empty-title">No reviews yet</div>
-        <p style="font-size:14px;color:var(--text-tertiary)">@{reviewer.username} hasn't posted any reviews.</p>
+  {publishedReviews.length === 0 ? (
+    <div class="empty-state">
+      <div class="empty-title">No reviews yet</div>
+      <p style="font-size:14px;color:var(--text-tertiary)">@{reviewer.username} hasn't posted any reviews.</p>
+    </div>
+  ) : (
+    <>
+      <div class="sort-tabs">
+        <button class="sort-tab active" onclick="sortReviews('recent',this)">Recent</button>
+        <button class="sort-tab" onclick="sortReviews('highest',this)">Highest</button>
+        <button class="sort-tab" onclick="sortReviews('lowest',this)">Lowest</button>
+        <button class="sort-tab" onclick="sortReviews('most_upvoted',this)">Most upvoted</button>
+        <button class="sort-tab" onclick="sortReviews('least_upvoted',this)">Least upvoted</button>
       </div>
-    ) : (
-      <>
-        <div class="sort-tabs">
-          <button class="sort-tab active" onclick="sortReviews('recent',this)">Recent</button>
-          <button class="sort-tab" onclick="sortReviews('highest',this)">Highest</button>
-          <button class="sort-tab" onclick="sortReviews('lowest',this)">Lowest</button>
-        </div>
-        <div id="reviewsList">
-          {publishedReviews.map((review: any) => (
-            <div class="review-card" data-score={review.score} data-date={review.published_at ?? review.created_at}>
+      <div id="reviewsList">
+        {publishedReviews.map((review: any) => {
+          const { up, down } = getVoteCounts(review.review_votes);
+          return (
+            <div class="review-card"
+              data-score={review.score}
+              data-date={review.published_at ?? review.created_at}
+              data-upvotes={up}
+            >
               <a href={`/games/${review.games?.slug}`} class="game-cover">
                 {review.games?.cover_img_url
                   ? <img src={igdbCover(review.games.cover_img_url) ?? ''} alt={review.games.title} loading="lazy" />
@@ -884,20 +911,31 @@ const showcaseJson = JSON.stringify(
                 </div>
                 {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
                 {review.title && <div class="review-title-text">{review.title}</div>}
-                <div class="review-body" id={`body-${review.id}`}>{review.body}</div>
+                <div
+                  class={`review-body ${review.contains_spoilers ? 'spoiler-hidden' : ''}`}
+                  data-spoiler={review.contains_spoilers ? 'true' : 'false'}
+                  id={`body-${review.id}`}
+                >
+                  {review.body}
+                </div>
                 <div class="review-meta">
                   {review.played_on && <span class="meta-chip">{review.played_on.name}</span>}
                   {review.play_time_hours && <span class="meta-chip">{review.play_time_hours}h played</span>}
                   <span class="meta-time">{timeAgo(review.published_at ?? review.created_at)}</span>
                   <button class="expand-btn" onclick={`toggleReview('${review.id}',this)`}>Read more →</button>
                 </div>
+                <div class="vote-row">
+                  <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
+                  <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
+                </div>
               </div>
             </div>
-          ))}
-        </div>
-      </>
-    )}
-  </div>
+          );
+        })}
+      </div>
+    </>
+  )}
+</div>
 
   <!-- ── STATS TAB ── -->
   <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`}>
@@ -1429,18 +1467,20 @@ const showcaseJson = JSON.stringify(
 
   // ── SORT REVIEWS ──
   function sortReviews(type, btn) {
-    document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active') })
-    btn.classList.add('active')
-    var list = document.getElementById('reviewsList')
-    if (!list) return
-    var cards = Array.from(list.querySelectorAll('.review-card'))
-    cards.sort(function(a, b) {
-      if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score)
-      if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score)
-      return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime()
-    })
-    cards.forEach(function(card) { list.appendChild(card) })
-  }
+  document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active') })
+  btn.classList.add('active')
+  var list = document.getElementById('reviewsList')
+  if (!list) return
+  var cards = Array.from(list.querySelectorAll('.review-card'))
+  cards.sort(function(a, b) {
+    if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score)
+    if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score)
+    if (type === 'most_upvoted') return parseInt(b.dataset.upvotes) - parseInt(a.dataset.upvotes)
+    if (type === 'least_upvoted') return parseInt(a.dataset.upvotes) - parseInt(b.dataset.upvotes)
+    return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime()
+  })
+  cards.forEach(function(card) { list.appendChild(card) })
+}
   window.sortReviews = sortReviews
 
   function toggleReview(id, btn) {
@@ -1868,6 +1908,40 @@ const showcaseJson = JSON.stringify(
   })
 
   document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closePicker() })
+
+// vote handler
+document.querySelectorAll('.vote-btn').forEach(function(btn) {
+  btn.addEventListener('click', async function() {
+    var reviewId = btn.dataset.reviewId;
+    var vote = parseInt(btn.dataset.vote);
+    var res = await fetch('/api/reviews/vote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ review_id: reviewId, vote }),
+    });
+    if (res.status === 401) { window.location.href = '/signin'; return; }
+    if (!res.ok) return;
+    var data = await res.json();
+    var pair = document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]');
+    pair.forEach(function(b) {
+      var bVote = parseInt(b.dataset.vote);
+      var count = parseInt(b.dataset.count) || 0;
+      if (data.vote === null) {
+        b.classList.remove('active-up', 'active-down');
+        if (bVote === vote) count = Math.max(0, count - 1);
+      } else if (data.vote === bVote) {
+        b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
+        b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
+        count = count + 1;
+      } else {
+        b.classList.remove('active-up', 'active-down');
+        count = Math.max(0, count - 1);
+      }
+      b.dataset.count = count;
+      b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
+    });
+  });
+});
 </script>
 </body>
 </html>
