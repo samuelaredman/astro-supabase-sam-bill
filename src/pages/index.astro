@@ -1,20 +1,10 @@
 ---
-import { getSupabase, createSupabaseServerClientFromContext } from "../utils/database";
+import { getSupabase, createSupabaseServerClient } from "../utils/database";
 const supabase = getSupabase();
 
-const serverClient = createSupabaseServerClientFromContext(Astro);
-const { data: { user } } = await serverClient.auth.getUser();
-const isLoggedIn = !!user;
-
-let currentProfile: { username: string; avatar_url: string | null } | null = null;
-if (user) {
-  const { data: profileData } = await (supabase as any)
-    .from('profiles')
-    .select('username, avatar_url')
-    .eq('auth_user_id', user.id)
-    .single();
-  currentProfile = profileData;
-}
+const serverClient = createSupabaseServerClient(Astro.request, new Response());
+const { data: { session } } = await serverClient.auth.getSession();
+const isLoggedIn = !!session;
 
 const { data: platforms } = await (supabase as any)
   .from("platforms")
@@ -36,7 +26,6 @@ type Review = {
   played_on: Platform | null;
   games: { id: string; title: string; slug: string; cover_img_url: string | null; } | null;
   profiles: { id: string; username: string; avatar_url: string | null; } | null;
-  review_votes: { vote: number }[] | { vote: number } | null;
 }
 
 // recent reviews feed
@@ -47,8 +36,7 @@ const { data: rawReviews } = await (supabase as any)
     contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
     games ( id, title, slug, cover_img_url ),
-    profiles ( id, username, avatar_url ),
-    review_votes( vote )
+    profiles ( id, username, avatar_url )
   `)
   .eq("status", "published")
   .order("published_at", { ascending: false })
@@ -74,7 +62,6 @@ for (const r of todayRaw ?? []) {
   if (!todayMap[g.id]) todayMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
   todayMap[g.id].count++
 }
-
 const mostReviewedToday = Object.values(todayMap).sort((a, b) => b.count - a.count)[0] ?? null
 
 // trending this week — most reviewed games
@@ -119,6 +106,36 @@ const topRated = Object.entries(weekGameMap)
   .filter(Boolean)
   .sort((a: any, b: any) => b.avg_score - a.avg_score)
   .slice(0, 12)
+
+// following feed — reviews from people the current user follows
+let followingReviews: any[] = []
+if (user) {
+  // get IDs of profiles the user follows
+  const { data: cpData } = await (supabase as any)
+    .from('profiles').select('id').eq('auth_user_id', user.id).single()
+  if (cpData) {
+    const { data: followRows } = await (supabase as any)
+      .from('follows').select('following_id').eq('follower_id', cpData.id)
+    const followingIds = (followRows ?? []).map((r: any) => r.following_id)
+    if (followingIds.length > 0) {
+      const { data: fRevs } = await (supabase as any)
+        .from('reviews')
+        .select(`
+          id, score, title, body, play_time_hours,
+          contains_spoilers, status, published_at, created_at,
+          played_on:platform_played_on ( id, name, slug ),
+          games ( id, title, slug, cover_img_url ),
+          profiles ( id, username, avatar_url ),
+          review_votes( vote )
+        `)
+        .eq('status', 'published')
+        .in('profile_id', followingIds)
+        .order('published_at', { ascending: false })
+        .limit(20)
+      followingReviews = (fRevs ?? []) as any[]
+    }
+  }
+}
 
 // site stats
 const [reviewCountRes, gameCountRes, profileCountRes] = await Promise.all([
@@ -170,13 +187,6 @@ function formatCount(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
   return String(n)
 }
-
-function getVoteCounts(votes: any) {
-  const arr = Array.isArray(votes) ? votes : votes ? [votes] : [];
-  const up = arr.filter((v: any) => v.vote === 1).length;
-  const down = arr.filter((v: any) => v.vote === -1).length;
-  return { up, down };
-}
 ---
 
 <!DOCTYPE html>
@@ -185,10 +195,11 @@ function getVoteCounts(votes: any) {
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-  <title>Cartridge — Game Reviews</title>
+  <title>Checkpoint — Game Reviews</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
   <style>
     :root[data-theme="light"] {
       --bg: #f9f8f6; --bg-card: #ffffff; --bg-hover: #f4f3f0; --bg-sidebar: #ffffff;
@@ -225,7 +236,7 @@ function getVoteCounts(votes: any) {
 
     /* SIDEBAR LEFT */
     .sidebar-left { position: sticky; top: 0; height: 100vh; padding: 28px 20px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid var(--border); background: var(--bg-sidebar); }
-    .logo { font-family: 'DM Serif Display', serif; font-size: 22px; color: var(--logo-color); padding: 8px 12px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .logo { font-family: 'Press Start 2P', monospace; font-size: 13px; color: var(--logo-color); padding: 8px 12px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
     .logo-dot { width: 8px; height: 8px; background: var(--text-primary); border-radius: 50%; }
     .nav-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; font-size: 15px; color: var(--text-secondary); transition: background 0.15s, color 0.15s; }
     .nav-item:hover, .nav-item.active { background: var(--bg-hover); color: var(--text-primary); }
@@ -239,6 +250,14 @@ function getVoteCounts(votes: any) {
     /* MAIN FEED */
     .feed { border-right: 1px solid var(--border); min-height: 100vh; }
     .feed-header { position: sticky; top: 0; background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; z-index: 10; backdrop-filter: blur(8px); }
+    .feed-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); padding: 0 20px; background: var(--bg-card); position: sticky; top: 73px; z-index: 9; }
+    .feed-tab { padding: 10px 16px; font-size: 14px; font-weight: 500; color: var(--text-tertiary); border: none; background: none; cursor: pointer; font-family: inherit; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color 0.15s, border-color 0.15s; }
+    .feed-tab:hover { color: var(--text-primary); }
+    .feed-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+    .feed-panel { display: none; }
+    .feed-panel.active { display: block; }
+    .following-empty { padding: 60px 20px; text-align: center; color: var(--text-tertiary); }
+    .following-empty-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
     .feed-title { font-size: 17px; font-weight: 500; letter-spacing: -0.2px; }
     .feed-subtitle { font-size: 13px; color: var(--text-tertiary); margin-top: 1px; }
     .new-review-btn { background: var(--accent); color: var(--accent-text); border: none; border-radius: 20px; padding: 8px 18px; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; white-space: nowrap; }
@@ -293,7 +312,7 @@ function getVoteCounts(votes: any) {
     .avatar img { width: 100%; height: 100%; object-fit: cover; }
     .card-body { flex: 1; min-width: 0; }
     .card-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
-    .username { font-size: 14px; font-weight: 500; }
+    .username { font-family: 'Cinzel', serif; font-size: 13px; font-weight: 600; letter-spacing: .04em; }
     .meta-dot { color: var(--text-tertiary); font-size: 12px; }
     .timestamp { font-size: 13px; color: var(--text-tertiary); }
     .game-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
@@ -308,17 +327,10 @@ function getVoteCounts(votes: any) {
     .review-title { font-family: 'DM Serif Display', serif; font-size: 16px; line-height: 1.35; margin-bottom: 5px; letter-spacing: -0.2px; }
     .review-body { font-size: 14px; line-height: 1.6; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
     .spoiler-pill { display: inline-flex; align-items: center; gap: 4px; background: var(--tag-bg); color: var(--tag-text); font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 20px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px; }
-    .review-body.spoiler-hidden {filter: blur(4px); user-select: none; cursor: pointer; transition: filter 0.2s;}
-    .review-body.spoiler-hidden:hover {filter: blur(3px);}
     .card-footer { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
     .footer-tag { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; padding: 3px 9px; border-radius: 6px; }
     .read-more { margin-left: auto; font-size: 13px; color: var(--text-tertiary); transition: color 0.15s; }
     .review-card:hover .read-more { color: var(--text-primary); }
-    .vote-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
-    .vote-btn { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); background: none; font-size: 12px; font-family: inherit; color: var(--text-tertiary); cursor: pointer; transition: all 0.15s; }
-    .vote-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
-    .vote-btn.active-up { background: var(--score-great-bg); color: var(--score-great); border-color: var(--score-great); }
-    .vote-btn.active-down { background: var(--score-low-bg); color: var(--score-low); border-color: var(--score-low); }
 
     .empty-state { padding: 60px 20px; text-align: center; color: var(--text-tertiary); }
     .empty-state-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
@@ -345,6 +357,8 @@ function getVoteCounts(votes: any) {
     .widget-genre-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
 
     /* COMPOSER */
+    .composer { border-bottom: 1px solid var(--border); background: var(--bg-card); }
+    .composer-inner { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
     .composer-field { display: flex; flex-direction: column; gap: 6px; }
     .composer-row { display: flex; gap: 12px; align-items: flex-end; }
     .composer-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -370,70 +384,36 @@ function getVoteCounts(votes: any) {
     .composer-submit:hover { opacity: 0.85; }
     .composer-submit:disabled { opacity: 0.45; cursor: not-allowed; }
     .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; }
-    
-    input[type="number"]::-webkit-outer-spin-button,
-    input[type="number"]::-webkit-inner-spin-button {-webkit-appearance: none; margin: 0;}
-    input[type="number"] {-moz-appearance: textfield;}
-    
-    /* User Avatar on left sidebar */
-    .sidebar-avatar {
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      background: var(--tag-bg);
-      border: 1px solid var(--border);
-      flex-shrink: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 9px;
-      font-weight: 500;
-      color: var(--text-secondary);
-      overflow: hidden;
-    }
-    .sidebar-avatar img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-
   </style>
 </head>
 
 <body>
 <div class="layout">
 
- <aside class="sidebar-left">
-  <div class="logo"><span class="logo-dot"></span>Cartridge</div>
-  <a href="/" class="nav-item active">
-    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
-    Home
-  </a>
-  <a href="/search" class="nav-item">
-    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
-    Search
-  </a>
-
-  <div class="sidebar-bottom">
-    <div class="nav-divider"></div>
-    <a href="/profile" class="nav-item">
-      <div class="sidebar-avatar">
-        {currentProfile?.avatar_url
-          ? <img src={currentProfile.avatar_url} alt={currentProfile.username} />
-          : <span>{getInitials(currentProfile?.username ?? user?.email ?? '?')}</span>
-        }
-      </div>
-      My Profile
+  <aside class="sidebar-left">
+    <div class="logo"><span class="logo-dot"></span>Checkpoint</div>
+    <a href="/" class="nav-item active">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
+      Home
+    </a>
+    <a href="/search" class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
+      Search
     </a>
     <div class="nav-divider"></div>
-    <button class="theme-toggle" id="themeToggle">
-      <span class="nav-icon" id="themeIcon">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>
-      </span>
-      <span id="themeLabel">Light mode</span>
-    </button>
-  </div>
-</aside>
+    <a href="/profile" class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="3"/><path d="M3 16c0-3.314 2.686-6 6-6s6 2.686 6 6"/></svg></span>
+      Profile
+    </a>
+    <div class="sidebar-bottom">
+      <button class="theme-toggle" id="themeToggle">
+        <span class="nav-icon" id="themeIcon">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>
+        </span>
+        <span id="themeLabel">Light mode</span>
+      </button>
+    </div>
+  </aside>
 
   <main class="feed">
     <div class="feed-header">
@@ -443,6 +423,15 @@ function getVoteCounts(votes: any) {
       </div>
       <button class="new-review-btn" id="openComposer">+ Write a review</button>
     </div>
+
+    <!-- FEED TABS -->
+    <div class="feed-tabs">
+      <button class="feed-tab active" id="tabRecent" onclick="switchTab('recent')">Recent</button>
+      <button class="feed-tab" id="tabFollowing" onclick="switchTab('following')">{isLoggedIn ? 'Following' : 'Following'}</button>
+    </div>
+
+    <!-- RECENT PANEL -->
+    <div class="feed-panel active" id="panelRecent">
 
     <!-- HERO — featured top rated game -->
     {featuredGame && (
@@ -511,24 +500,79 @@ function getVoteCounts(votes: any) {
       </div>
     )}
 
+    <!-- COMPOSER -->
+    <div class="composer" id="composer" style="display:none">
+      <div class="composer-inner">
+        <div class="composer-field">
+          <label class="composer-label">Game</label>
+          <div class="autocomplete-wrap">
+            <input type="text" id="gameSearch" class="composer-input" placeholder="Search for a game..." autocomplete="off" />
+            <div class="autocomplete-results" id="gameResults"></div>
+          </div>
+          <input type="hidden" id="gameId" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Score</label>
+          <div class="score-picker" id="scorePicker">
+            {[1,2,3,4,5,6,7,8,9,10].map(n => (
+              <button class="score-btn" data-score={n}>{n}</button>
+            ))}
+          </div>
+          <input type="hidden" id="scoreVal" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Title</label>
+          <input type="text" id="reviewTitle" class="composer-input" placeholder="Sum it up in a line..." maxlength="120" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Review</label>
+          <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4"></textarea>
+        </div>
+        <div class="composer-row">
+          <div class="composer-field" style="flex:1">
+            <label class="composer-label">Platform played on</label>
+            <select id="platformSelect" class="composer-select">
+              <option value="">Select platform...</option>
+              {(platforms ?? []).map((p: any) => (
+                <option value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </div>
+          <div class="composer-field" style="width:120px">
+            <label class="composer-label">Hours played</label>
+            <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
+          </div>
+        </div>
+        <div class="composer-actions">
+          <label class="spoiler-toggle">
+            <input type="checkbox" id="spoilerCheck" />
+            <span>Contains spoilers</span>
+          </label>
+          <div style="display:flex;gap:8px;margin-left:auto">
+            <button class="composer-cancel" id="cancelComposer">Cancel</button>
+            <button class="composer-submit" id="submitReview">Post review</button>
+          </div>
+        </div>
+        <div class="composer-error" id="composerError"></div>
+      </div>
+    </div>
+
     <!-- REVIEW FEED -->
     {reviews.length === 0 ? (
       <div class="empty-state">
         <div class="empty-state-title">No reviews yet</div>
-        <p class="empty-state-sub">Head to the <a href="/" style="text-decoration:underline">home page</a> to write your first review.</p>
+        <p>Be the first to review a game.</p>
       </div>
     ) : (
-      reviews.map((review: any) => {
-  const { up, down } = getVoteCounts(review.review_votes);
-  return (
-    <article class="review-card">
+      reviews.map((review) => (
+        <article class="review-card">
           <div class="card-top">
-            <a href={`/reviewers/${review.profiles?.username}`} class="avatar">
+            <div class="avatar">
               {review.profiles?.avatar_url
                 ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
-                : getInitials(review.profiles?.username ?? "?")
+                : getInitials(review.profiles?.username ?? "??")
               }
-            </a>
+            </div>
             <div class="card-body">
               <div class="card-meta">
                 <a href={`/reviewers/${review.profiles?.username}`} class="username">@{review.profiles?.username ?? "unknown"}</a>
@@ -539,33 +583,94 @@ function getVoteCounts(votes: any) {
                 <a href={`/games/${review.games?.slug}`} class="game-cover-sm">
                   {review.games?.cover_img_url
                     ? <img src={igdbImage(review.games.cover_img_url, 't_thumb') ?? ''} alt={review.games.title} />
-                    : '🎮'
+                    : "🎮"
                   }
                 </a>
-                <a href={`/games/${review.games?.slug}`} class="game-title-text">{review.games?.title ?? 'Unknown Game'}</a>
+                <a href={`/games/${review.games?.slug}`} class="game-title-text">{review.games?.title ?? "Unknown Game"}</a>
                 <div class={`score-badge ${scoreColor(review.score)}`}>{review.score}</div>
               </div>
               {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
               {review.title && <div class="review-title">{review.title}</div>}
-              <div
-                class={`review-body ${review.contains_spoilers ? 'spoiler-hidden' : ''}`}
-                data-spoiler={review.contains_spoilers ? 'true' : 'false'}
-              >
-                {review.body}
-              </div>
+              <div class="review-body">{review.body}</div>
               <div class="card-footer">
-              {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
-              {review.play_time_hours > 0 && <span class="footer-tag">{review.play_time_hours}h played</span>}
-              <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
+                {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
+                {review.play_time_hours > 0 && <span class="footer-tag">{review.play_time_hours}h played</span>}
+                <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
               </div>
-              <div class="vote-row">
-              <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
-              <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
             </div>
           </div>
+        </article>
+      ))
+    )}
+  
+    </div><!-- end panelRecent -->
+
+    <!-- FOLLOWING PANEL -->
+    <div class="feed-panel" id="panelFollowing">
+      {!isLoggedIn ? (
+        <div class="following-empty">
+          <div class="following-empty-title">Sign in to see your feed</div>
+          <p style="font-size:14px;margin-bottom:16px">Follow reviewers to see their reviews here.</p>
+          <a href="/signin" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:9px 22px;border-radius:20px;font-size:14px;font-weight:500">Sign in</a>
         </div>
-      </article>
-    );}))}
+      ) : followingReviews.length === 0 ? (
+        <div class="following-empty">
+          <div class="following-empty-title">Your feed is empty</div>
+          <p style="font-size:14px;margin-bottom:16px">Follow some reviewers to see their reviews here.</p>
+          <a href="/search?tab=reviewers" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:9px 22px;border-radius:20px;font-size:14px;font-weight:500">Find reviewers</a>
+        </div>
+      ) : (
+        followingReviews.map((review: any) => {
+          const { up, down } = getVoteCounts(review.review_votes);
+          return (
+            <article class="review-card">
+              <div class="card-top">
+                <a href={`/reviewers/${review.profiles?.username}`}>
+                  <div class="avatar">
+                    {review.profiles?.avatar_url
+                      ? <img src={review.profiles.avatar_url} alt={review.profiles?.username} />
+                      : <span>{getInitials(review.profiles?.username ?? '?')}</span>
+                    }
+                  </div>
+                </a>
+                <div class="card-body">
+                  <div class="card-meta">
+                    <a href={`/reviewers/${review.profiles?.username}`} class="username">@{review.profiles?.username}</a>
+                    <span class="meta-dot">·</span>
+                    <span class="timestamp">{timeAgo(review.published_at ?? review.created_at)}</span>
+                  </div>
+                  <div class="game-row">
+                    <a href={`/games/${review.games?.slug}`} class="game-cover-sm">
+                      {review.games?.cover_img_url
+                        ? <img src={igdbImage(review.games.cover_img_url, 't_thumb') ?? ''} alt={review.games.title} />
+                        : '🎮'
+                      }
+                    </a>
+                    <a href={`/games/${review.games?.slug}`} class="game-title-text">{review.games?.title ?? 'Unknown Game'}</a>
+                    <div class={`score-badge ${scoreColor(review.score)}`}>{review.score}</div>
+                  </div>
+                  {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
+                  {review.title && <div class="review-title">{review.title}</div>}
+                  <div class={`review-body ${review.contains_spoilers ? 'spoiler-hidden' : ''}`} data-spoiler={review.contains_spoilers ? 'true' : 'false'}>
+                    {review.body}
+                  </div>
+                  <div class="card-footer">
+                    {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
+                    {review.play_time_hours > 0 && <span class="footer-tag">{review.play_time_hours}h played</span>}
+                    <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
+                  </div>
+                  <div class="vote-row">
+                    <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
+                    <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          )
+        })
+      )}
+    </div><!-- end panelFollowing -->
+
 </main>
 
   <aside class="sidebar-right">
@@ -616,81 +721,7 @@ function getVoteCounts(votes: any) {
 
 </div>
 
-<div id="composerOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:40"></div>
-
-<div id="composer" style="display:none;position:fixed;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:calc(100vw - 32px);background:var(--bg-card);border:1px solid var(--border);border-radius:16px;z-index:50;padding:24px">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-    <div style="font-size:17px;font-weight:500;letter-spacing:-0.2px">Write a review</div>
-    <button id="cancelComposer" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-tertiary);line-height:1;padding:4px">×</button>
-  </div>
-
-  <div class="composer-field">
-    <label class="composer-label">Game</label>
-    <div class="autocomplete-wrap">
-      <input type="text" id="gameSearch" class="composer-input" placeholder="Search for a game..." autocomplete="off" />
-      <div class="autocomplete-results" id="gameResults"></div>
-    </div>
-    <input type="hidden" id="gameId" />
-  </div>
-
-  <div class="composer-field" style="margin-top:12px">
-    <label class="composer-label">Score</label>
-    <div style="display:flex;align-items:center;gap:8px">
-      <input
-        type="number"
-        id="scoreVal"
-        class="composer-input"
-        placeholder="0.0"
-        min="0.1"
-        max="10"
-        step="0.1"
-        style="width:90px"
-      />
-      <span style="font-size:15px;color:var(--text-tertiary);font-family:'DM Serif Display',serif">/ 10</span>
-    </div>
-  </div>
-
-  <div class="composer-field" style="margin-top:12px">
-    <label class="composer-label">Title</label>
-    <input type="text" id="reviewTitle" class="composer-input" placeholder="Sum it up in a line..." maxlength="120" />
-  </div>
-
-  <div class="composer-field" style="margin-top:12px">
-    <label class="composer-label">Review</label>
-    <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4" maxlength="5000"></textarea>
-    <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 5000</div>
-  </div>
-
-  <div class="composer-row" style="margin-top:12px">
-    <div class="composer-field" style="flex:1">
-      <label class="composer-label">Platform played on</label>
-      <select id="platformSelect" class="composer-select">
-        <option value="">Select platform...</option>
-        {(platforms ?? []).map((p: any) => (
-          <option value={p.id}>{p.name}</option>
-        ))}
-      </select>
-    </div>
-    <div class="composer-field" style="width:120px">
-      <label class="composer-label">Hours played</label>
-      <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
-    </div>
-  </div>
-
-  <div class="composer-actions" style="margin-top:14px">
-    <label class="spoiler-toggle">
-      <input type="checkbox" id="spoilerCheck" />
-      <span>Contains spoilers</span>
-    </label>
-    <div style="display:flex;gap:8px;margin-left:auto">
-      <button class="composer-submit" id="submitReview">Post review</button>
-    </div>
-  </div>
-
-  <div class="composer-error" id="composerError"></div>
-</div>
-
-<script is:inline define:vars={{ isLoggedIn }}>
+<script define:vars={{ isLoggedIn }}>
   // Theme
   function updateThemeUI(theme) {
     const label = document.getElementById('themeLabel')
@@ -717,47 +748,40 @@ function getVoteCounts(votes: any) {
     updateThemeUI(next)
   })
 
-//listener for review body count
-document.getElementById('reviewBody').addEventListener('input', function() {
-  const count = this.value.length;
-  const el = document.getElementById('charCount');
-  el.textContent = count + ' / 5000';
-  el.style.color = count > 4500 ? (count >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)';
-});
+  // Composer
+  document.getElementById('openComposer').addEventListener('click', () => {
+    if (!isLoggedIn) { window.location.href = '/signin'; return; }
+    document.getElementById('composer').style.display = 'block'
+    document.getElementById('gameSearch').focus()
+  })
 
-// Composer
-// Opening the composer
-document.getElementById('openComposer').addEventListener('click', () => {
-  if (!isLoggedIn) { window.location.href = '/signin'; return; }
-  document.getElementById('composer').style.display = 'block';
-  document.getElementById('composerOverlay').style.display = 'block';
-  document.getElementById('gameSearch').focus();
-});
+  document.getElementById('cancelComposer').addEventListener('click', () => {
+    document.getElementById('composer').style.display = 'none'
+    resetComposer()
+  })
 
-function resetComposer() {
-  document.getElementById('gameSearch').value = '';
-  document.getElementById('gameId').value = '';
-  document.getElementById('reviewTitle').value = '';
-  document.getElementById('reviewBody').value = '';
-  document.getElementById('hoursPlayed').value = '';
-  document.getElementById('scoreVal').value = '';
-  document.getElementById('platformSelect').value = '';
-  document.getElementById('spoilerCheck').checked = false;
-  document.getElementById('composerError').textContent = '';
-  document.getElementById('gameResults').classList.remove('open');
-}
+  function resetComposer() {
+    document.getElementById('gameSearch').value = ''
+    document.getElementById('gameId').value = ''
+    document.getElementById('reviewTitle').value = ''
+    document.getElementById('reviewBody').value = ''
+    document.getElementById('hoursPlayed').value = ''
+    document.getElementById('scoreVal').value = ''
+    document.getElementById('platformSelect').value = ''
+    document.getElementById('spoilerCheck').checked = false
+    document.getElementById('composerError').textContent = ''
+    document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'))
+    document.getElementById('gameResults').classList.remove('open')
+  }
 
-function closeComposer() {
-  document.getElementById('composer').style.display = 'none';
-  document.getElementById('composerOverlay').style.display = 'none';
-  resetComposer();
-}
-
-
-
-// Closing — update cancelComposer and add overlay click
-document.getElementById('cancelComposer').addEventListener('click', closeComposer);
-document.getElementById('composerOverlay').addEventListener('click', closeComposer);
+  // Score picker
+  document.querySelectorAll('.score-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'))
+      btn.classList.add('selected')
+      document.getElementById('scoreVal').value = btn.dataset.score
+    })
+  })
 
   // Game autocomplete
   let searchTimeout
@@ -791,42 +815,11 @@ document.getElementById('composerOverlay').addEventListener('click', closeCompos
           document.getElementById('gameId').value = game.id
           results.classList.remove('open')
         })
-        // event listener to shorten and populate available platforms for this specific game
-        item.addEventListener('click', () => {
-        document.getElementById('gameSearch').value = game.title;
-        document.getElementById('gameId').value = game.id;
-        results.classList.remove('open');
-      
-        // Fetch and repopulate platforms for this game
-        fetchGamePlatforms(game.id);
-      });
         results.appendChild(item)
       })
     }
     results.classList.add('open')
   }
-
-  async function fetchGamePlatforms(gameId) {
-    const select = document.getElementById('platformSelect');
-    select.innerHTML = '<option value="">Loading...</option>';
-  
-    const res = await fetch('/api/games/platforms?id=' + gameId);
-    const platforms = await res.json();
-  
-    if (platforms.length === 0) {
-      select.innerHTML = '<option value="">Any platform</option>';
-    } else {
-      select.innerHTML = '<option value="">Select platform...</option>' +
-        platforms.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-    }
-  }
-
-  //click handler for spoilers
-  document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(el => {
-    el.addEventListener('click', () => {
-      el.classList.remove('spoiler-hidden');
-    });
-  });
 
   // Submit review
   document.getElementById('submitReview').addEventListener('click', async () => {
@@ -839,14 +832,11 @@ document.getElementById('composerOverlay').addEventListener('click', closeCompos
     const spoilers = document.getElementById('spoilerCheck').checked
     const errorEl = document.getElementById('composerError')
 
-
     errorEl.textContent = ''
     if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
-    if (!score || parseFloat(score) < 0.1 || parseFloat(score) > 10) { errorEl.textContent = 'Please enter a score between 0.1 and 10.'; return;}
+    if (!score) { errorEl.textContent = 'Please select a score.'; return; }
     if (!title) { errorEl.textContent = 'Please add a title.'; return; }
     if (!body) { errorEl.textContent = 'Please write a review.'; return; }
-    if (body.lenth > 5000) { errorEl.textContent = 'Review must be <= 5000 characters.'; return; }
-    if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) {errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return;}
 
     const btn = document.getElementById('submitReview')
     btn.disabled = true
@@ -857,7 +847,7 @@ document.getElementById('composerOverlay').addEventListener('click', closeCompos
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         game_id: gameId,
-        score: parseFloat(score),
+        score: parseInt(score),
         title,
         body,
         platform_played_on: platformId || null,
@@ -877,50 +867,6 @@ document.getElementById('composerOverlay').addEventListener('click', closeCompos
       window.location.reload()
     }
   })
-
-
-
-    //Listener for upvote and downvote
-    document.querySelectorAll('.vote-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-    const reviewId = btn.dataset.reviewId;
-    const vote = parseInt(btn.dataset.vote);
-
-    const res = await fetch('/api/reviews/vote', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ review_id: reviewId, vote }),
-    });
-
-    if (res.status === 401) { window.location.href = '/signin'; return; }
-    if (!res.ok) return;
-
-    const data = await res.json();
-
-    const pair = document.querySelectorAll(`.vote-btn[data-review-id="${reviewId}"]`);
-    pair.forEach(b => {
-      const bVote = parseInt(b.dataset.vote);
-      let count = parseInt(b.dataset.count) || 0;
-
-      if (data.vote === null) {
-        b.classList.remove('active-up', 'active-down');
-        if (bVote === vote) {
-          count = Math.max(0, count - 1);
-        }
-      } else if (data.vote === bVote) {
-        b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
-        b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
-        count = count + 1;
-      } else {
-        b.classList.remove('active-up', 'active-down');
-        if (data.vote !== null) count = Math.max(0, count - 1);
-      }
-
-      b.dataset.count = count;
-      b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
-    });
-  });
-});
 </script>
 </body>
 </html>
