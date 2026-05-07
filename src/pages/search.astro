@@ -1,10 +1,22 @@
 ---
-import { getSupabase } from '../utils/database'
+import { getSupabase, createSupabaseServerClient } from '../utils/database'
 import { igdbFetch } from '../utils/igdb'
 
 export const prerender = false
 
 const supabase = getSupabase()
+const serverClient = createSupabaseServerClient(Astro.request, new Response())
+const { data: { session } } = await serverClient.auth.getSession()
+const isLoggedIn = !!session
+
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null
+if (session?.user) {
+  const { data: cp } = await (supabase as any)
+    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', session.user.id).single()
+  currentProfile = cp
+}
+
+function getInitials(u: string): string { return u.slice(0, 2).toUpperCase() }
 
 const query = Astro.url.searchParams.get('q') || ''
 const genreFilter = Astro.url.searchParams.get('genre') || ''
@@ -402,10 +414,11 @@ const isBrowseMode = tab === 'games' && !query
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>{query ? `Search: ${query}` : 'Browse Games'} — Cartridge</title>
+  <title>{query ? `Search: ${query}` : 'Browse Games'} — Chekpoint</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
   <style>
     :root[data-theme="light"] {
       --bg: #f9f8f6; --bg-card: #ffffff; --bg-hover: #f4f3f0; --bg-sidebar: #ffffff;
@@ -441,7 +454,7 @@ const isBrowseMode = tab === 'games' && !query
     @media (max-width: 680px) { .layout { grid-template-columns: 1fr; } .sidebar-left { display: none; } }
 
     .sidebar-left { position: sticky; top: 0; height: 100vh; padding: 28px 20px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid var(--border); background: var(--bg-sidebar); }
-    .logo { font-family: 'DM Serif Display', serif; font-size: 22px; color: var(--logo-color); padding: 8px 12px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .logo { font-family: 'Press Start 2P', monospace; font-size: 13px; color: var(--logo-color); padding: 8px 12px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
     .logo-dot { width: 8px; height: 8px; background: var(--text-primary); border-radius: 50%; }
     .nav-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; font-size: 15px; color: var(--text-secondary); transition: background 0.15s, color 0.15s; }
     .nav-item:hover, .nav-item.active { background: var(--bg-hover); color: var(--text-primary); }
@@ -531,6 +544,8 @@ const isBrowseMode = tab === 'games' && !query
     .active-filter-pill { display: inline-flex; align-items: center; gap: 6px; background: var(--accent); color: var(--accent-text); font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 20px; }
     .active-filter-pill a { color: inherit; opacity: 0.7; font-size: 14px; line-height: 1; }
     .active-filter-pill a:hover { opacity: 1; }
+    .sidebar-avatar { width: 24px; height: 24px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 500; color: var(--text-secondary); overflow: hidden; }
+    .sidebar-avatar img { width: 100%; height: 100%; object-fit: cover; }
   </style>
 </head>
 
@@ -538,20 +553,36 @@ const isBrowseMode = tab === 'games' && !query
 <div class="layout">
 
   <aside class="sidebar-left">
-    <div class="logo"><span class="logo-dot"></span>Cartridge</div>
+    <div class="logo"><span class="logo-dot"></span>Chekpoint</div>
     <a href="/" class="nav-item">
       <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
       Home
+    </a>
+    <a href="/following" class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 14c0-2.21-1.79-4-4-4s-4 1.79-4 4"/><circle cx="9" cy="6" r="3"/><path d="M16 14c0-1.86-1.28-3.41-3-3.83"/><path d="M15 4a3 3 0 010 4"/></svg></span>
+      Following
     </a>
     <a href="/search" class="nav-item active">
       <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
       Search
     </a>
     <div class="nav-divider"></div>
-    <a href="/profile" class="nav-item">
-      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="3"/><path d="M3 16c0-3.314 2.686-6 6-6s6 2.686 6 6"/></svg></span>
-      Profile
-    </a>
+    {isLoggedIn ? (
+      <a href={currentProfile ? `/reviewers/${currentProfile.username}` : '/profile'} class="nav-item">
+        <div class="sidebar-avatar">
+          {currentProfile?.avatar_url
+            ? <img src={currentProfile.avatar_url} alt={currentProfile.username} />
+            : <span>{getInitials(currentProfile?.username ?? '?')}</span>
+          }
+        </div>
+        Profile
+      </a>
+    ) : (
+      <a href="/signin" class="nav-item">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11v4M9 3v4M5 7h8M3 15h12"/></svg></span>
+        Sign in / Sign up
+      </a>
+    )}
     <div class="sidebar-bottom">
       <button class="theme-toggle" onclick="toggleTheme()">
         <span class="nav-icon" id="themeIcon">
@@ -698,7 +729,7 @@ const isBrowseMode = tab === 'games' && !query
           {query && igdbGames.length > 0 && (
             <div>
               <div class="section-title" style="margin-top:28px">More from IGDB</div>
-              <span class="igdb-label">Not yet in Cartridge — click to add</span>
+              <span class="igdb-label">Not yet in Chekpoint — click to add</span>
               <div class="game-grid">
                 {igdbGames.map((game: any) => (
                   <form method="POST">
