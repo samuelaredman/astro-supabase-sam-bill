@@ -1,10 +1,20 @@
 ---
-import { getSupabase, createSupabaseServerClient } from "../utils/database";
+import { getSupabase, createSupabaseServerClientFromContext } from "../utils/database";
 const supabase = getSupabase();
 
-const serverClient = createSupabaseServerClient(Astro.request, new Response());
-const { data: { session } } = await serverClient.auth.getSession();
-const isLoggedIn = !!session;
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
+
+let currentProfile: { username: string; avatar_url: string | null } | null = null;
+if (user) {
+  const { data: profileData } = await (supabase as any)
+    .from('profiles')
+    .select('username, avatar_url')
+    .eq('auth_user_id', user.id)
+    .single();
+  currentProfile = profileData;
+}
 
 const { data: platforms } = await (supabase as any)
   .from("platforms")
@@ -26,6 +36,7 @@ type Review = {
   played_on: Platform | null;
   games: { id: string; title: string; slug: string; cover_img_url: string | null; } | null;
   profiles: { id: string; username: string; avatar_url: string | null; } | null;
+  review_votes: { vote: number }[] | { vote: number } | null;
 }
 
 // recent reviews feed
@@ -36,7 +47,8 @@ const { data: rawReviews } = await (supabase as any)
     contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
     games ( id, title, slug, cover_img_url ),
-    profiles ( id, username, avatar_url )
+    profiles ( id, username, avatar_url ),
+    review_votes( vote )
   `)
   .eq("status", "published")
   .order("published_at", { ascending: false })
@@ -398,8 +410,6 @@ function getVoteCounts(votes: any) {
     .widget-genre-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
 
     /* COMPOSER */
-    .composer { border-bottom: 1px solid var(--border); background: var(--bg-card); }
-    .composer-inner { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
     .composer-field { display: flex; flex-direction: column; gap: 6px; }
     .composer-row { display: flex; gap: 12px; align-items: flex-end; }
     .composer-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
@@ -579,7 +589,8 @@ function getVoteCounts(votes: any) {
         </div>
         <div class="composer-field">
           <label class="composer-label">Review</label>
-          <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4"></textarea>
+              <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4" maxlength="5000"></textarea>
+              <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 5000</div>
         </div>
         <div class="composer-row">
           <div class="composer-field" style="flex:1">
@@ -783,14 +794,13 @@ function getVoteCounts(votes: any) {
     document.getElementById('gameResults').classList.remove('open')
   }
 
-  // Score picker
-  document.querySelectorAll('.score-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'))
-      btn.classList.add('selected')
-      document.getElementById('scoreVal').value = btn.dataset.score
-    })
-  })
+  //listener for review body count
+document.getElementById('reviewBody').addEventListener('input', function() {
+  const count = this.value.length;
+  const el = document.getElementById('charCount');
+  el.textContent = count + ' / 5000';
+  el.style.color = count > 4500 ? (count >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)';
+});
 
   // Game autocomplete
   item.addEventListener('click', () => {
@@ -862,6 +872,8 @@ function getVoteCounts(votes: any) {
     if (!score) { errorEl.textContent = 'Please select a score.'; return; }
     if (!title) { errorEl.textContent = 'Please add a title.'; return; }
     if (!body) { errorEl.textContent = 'Please write a review.'; return; }
+    if (body.lenth > 5000) { errorEl.textContent = 'Review must be <= 5000 characters.'; return; }
+    if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) {errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return;}
 
     const btn = document.getElementById('submitReview')
     btn.disabled = true
