@@ -1,1 +1,816 @@
+---
+export const prerender = false;
+import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/database';
+import Layout from '../../components/Layout.astro';
+import ReportModal from '../../components/ReportModal.astro';
 
+const supabase = getSupabase();
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
+
+const { id } = Astro.params;
+
+const { data: review, error } = await (supabase as any)
+  .from('reviews')
+  .select(`
+    id, score, title, body, play_time_hours,
+    contains_spoilers, status, published_at, created_at,
+    played_on:platform_played_on ( id, name, slug ),
+    games ( id, title, slug, cover_img_url ),
+    profiles ( id, username, avatar_url ),
+    review_votes ( vote )
+  `)
+  .eq('id', id)
+  .eq('status', 'published')
+  .single();
+
+if (error || !review) return Astro.redirect('/404');
+
+const { data: commentsRaw } = await (supabase as any)
+  .from('review_comments')
+  .select('id, body, created_at, profiles ( id, username, avatar_url )')
+  .eq('review_id', id)
+  .order('created_at', { ascending: true });
+
+const comments = commentsRaw ?? [];
+
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
+if (user) {
+  const { data: cp } = await (supabase as any)
+    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = cp;
+}
+
+function igdbImage(url: string | null, size = 't_cover_big') {
+  if (!url) return null;
+  const clean = url.startsWith('//') ? `https:${url}` : url;
+  return clean.replace(/t_[a-z_]+/, size);
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function scoreColor(score: number): string {
+  if (score === 10) return 'score-perfect';
+  if (score >= 9) return 'score-great';
+  if (score >= 8) return 'score-teal';
+  if (score >= 7) return 'score-good';
+  if (score >= 5) return 'score-mid';
+  if (score >= 3) return 'score-orange';
+  return 'score-low';
+}
+
+function getInitials(username: string): string {
+  return username.slice(0, 2).toUpperCase();
+}
+
+function getVoteCounts(votes: any) {
+  const arr = Array.isArray(votes) ? votes : votes ? [votes] : [];
+  const up = arr.filter((v: any) => v.vote === 1).length;
+  const down = arr.filter((v: any) => v.vote === -1).length;
+  return { up, down };
+}
+
+const { up, down } = getVoteCounts(review.review_votes);
+const coverBig = igdbImage(review.games?.cover_img_url, 't_cover_big');
+const coverThumb = igdbImage(review.games?.cover_img_url, 't_thumb');
+---
+
+<Layout
+  title={`${review.title} — ${review.games?.title ?? 'Review'} — Chekpoint`}
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+>
+  <main class="review-detail">
+
+    <!-- REVIEW CARD -->
+    <article class="review-full">
+      <div class="review-game-bar">
+        <a href={`/games/${review.games?.slug}`} class="game-cover-link">
+          {coverThumb
+            ? <img src={coverThumb} alt={review.games?.title} class="game-cover-thumb" />
+            : <div class="game-cover-placeholder">🎮</div>
+          }
+        </a>
+        <div class="game-bar-info">
+          <a href={`/games/${review.games?.slug}`} class="game-bar-title">{review.games?.title ?? 'Unknown Game'}</a>
+          <div class="game-bar-meta">
+            {review.played_on && <span class="meta-tag">{review.played_on.name}</span>}
+            {review.play_time_hours > 0 && <span class="meta-tag">{review.play_time_hours}h played</span>}
+            {review.contains_spoilers && <span class="meta-tag spoiler-tag">⚠ spoilers</span>}
+          </div>
+        </div>
+        <div class={`score-hero ${scoreColor(review.score)}`}>{review.score}</div>
+      </div>
+
+      <div class="review-author-row">
+        <a href={`/reviewers/${review.profiles?.username}`} class="author-link">
+          <div class="author-avatar">
+            {review.profiles?.avatar_url
+              ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+              : <span>{getInitials(review.profiles?.username ?? '?')}</span>
+            }
+          </div>
+          <span class="author-username">@{review.profiles?.username}</span>
+        </a>
+        <span class="review-timestamp">{timeAgo(review.published_at ?? review.created_at)}</span>
+      </div>
+
+      {review.title && <h1 class="review-title">{review.title}</h1>}
+
+      <div class={`review-body-full ${review.contains_spoilers ? 'spoiler-hidden' : ''}`} data-spoiler={review.contains_spoilers ? 'true' : 'false'}>
+        {review.contains_spoilers && (
+          <div class="spoiler-overlay">
+            <span>⚠ This review contains spoilers</span>
+            <button class="reveal-btn">Reveal anyway</button>
+          </div>
+        )}
+        <div class="review-text">{review.body}</div>
+      </div>
+
+      <div class="review-actions">
+        <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
+        <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
+        {isLoggedIn && (
+          <button class="report-trigger" onclick={`openReport('review','${review.id}')`} title="Report this review">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 2h10l-2 4 2 4H3V2z"/><path d="M3 14v-4"/>
+            </svg>
+            Report
+          </button>
+        )}
+      </div>
+    </article>
+
+    <!-- COMMENTS -->
+    <section class="comments-section">
+      <h2 class="comments-heading">
+        Comments
+        {comments.length > 0 && <span class="comment-count">{comments.length}</span>}
+      </h2>
+
+      {comments.length === 0 && (
+        <div class="no-comments">No comments yet. {isLoggedIn ? 'Be the first!' : ''}</div>
+      )}
+
+      <div class="comment-list" id="commentList">
+        {comments.map((c: any) => (
+          <div class="comment">
+            <a href={`/reviewers/${c.profiles?.username}`} class="comment-avatar" style="flex-shrink:0">
+              {c.profiles?.avatar_url
+                ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
+                : <span>{getInitials(c.profiles?.username ?? '?')}</span>
+              }
+            </a>
+            <div class="comment-body">
+              <div class="comment-meta">
+                <a href={`/reviewers/${c.profiles?.username}`} class="comment-username">@{c.profiles?.username}</a>
+                <span class="comment-time">{timeAgo(c.created_at)}</span>
+              </div>
+              <div class="comment-text">{c.body}</div>
+              {isLoggedIn && (
+                <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`} title="Report comment">Report</button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {isLoggedIn ? (
+        <form class="comment-form" id="commentForm">
+          <div class="comment-input-row">
+            <div class="comment-form-avatar">
+              {currentProfile?.avatar_url
+                ? <img src={currentProfile.avatar_url} alt={currentProfile.username} />
+                : <span>{getInitials(currentProfile?.username ?? '?')}</span>
+              }
+            </div>
+            <div class="comment-input-wrap">
+              <textarea
+                id="commentBody"
+                placeholder="Write a comment…"
+                maxlength="2000"
+                rows={3}
+              ></textarea>
+              <div class="comment-form-footer">
+                <span class="comment-char-count"><span id="commentCharCount">0</span> / 2000</span>
+                <button type="submit" class="comment-submit" id="commentSubmit">Post comment</button>
+              </div>
+            </div>
+          </div>
+          <div class="comment-error" id="commentError" style="display:none"></div>
+        </form>
+      ) : (
+        <div class="comment-signin-prompt">
+          <a href="/signin">Sign in</a> to leave a comment.
+        </div>
+      )}
+    </section>
+  </main>
+
+  <div slot="sidebar-right">
+    <div class="widget">
+      <div class="widget-title">About this game</div>
+      <a href={`/games/${review.games?.slug}`} style="display:flex;gap:12px;align-items:flex-start;text-decoration:none">
+        <div style="flex-shrink:0;width:52px;height:70px;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border)">
+          {coverBig
+            ? <img src={coverBig} alt={review.games?.title} style="width:100%;height:100%;object-fit:cover" />
+            : <span style="display:flex;align-items:center;justify-content:center;height:100%;font-size:22px">🎮</span>
+          }
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:500;line-height:1.3;margin-bottom:6px">{review.games?.title}</div>
+          <div style="font-size:12px;color:var(--text-tertiary)">View all reviews →</div>
+        </div>
+      </a>
+    </div>
+
+    <div class="widget">
+      <div class="widget-title">Reviewer</div>
+      <a href={`/reviewers/${review.profiles?.username}`} style="display:flex;gap:12px;align-items:center;text-decoration:none">
+        <div class="sidebar-reviewer-avatar">
+          {review.profiles?.avatar_url
+            ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+            : <span>{getInitials(review.profiles?.username ?? '?')}</span>
+          }
+        </div>
+        <div>
+          <div style="font-size:13px;font-weight:500">@{review.profiles?.username}</div>
+          <div style="font-size:12px;color:var(--text-tertiary)">View profile →</div>
+        </div>
+      </a>
+    </div>
+  </div>
+
+  <ReportModal />
+
+  <script is:inline>
+    // Spoiler reveal
+    const spoilerEl = document.querySelector('.review-body-full[data-spoiler="true"]');
+    if (spoilerEl) {
+      const revealBtn = spoilerEl.querySelector('.reveal-btn');
+      if (revealBtn) {
+        revealBtn.addEventListener('click', function () {
+          spoilerEl.classList.remove('spoiler-hidden');
+        });
+      }
+    }
+
+    // Votes
+    document.querySelectorAll('.vote-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const reviewId = btn.dataset.reviewId;
+        const vote = parseInt(btn.dataset.vote);
+        const res = await fetch('/api/reviews/vote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: reviewId, vote }),
+        });
+        if (res.status === 401) { window.location.href = '/signin'; return; }
+        if (!res.ok) return;
+        const data = await res.json();
+        const pair = document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]');
+        pair.forEach(function (b) {
+          const bVote = parseInt(b.dataset.vote);
+          let count = parseInt(b.dataset.count) || 0;
+          if (data.vote === null) {
+            b.classList.remove('active-up', 'active-down');
+            if (bVote === vote) count = Math.max(0, count - 1);
+          } else if (data.vote === bVote) {
+            b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
+            b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
+            count = count + 1;
+          } else {
+            b.classList.remove('active-up', 'active-down');
+            if (data.vote !== null) count = Math.max(0, count - 1);
+          }
+          b.dataset.count = count;
+          b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
+        });
+      });
+    });
+
+    // Comments
+    const commentForm = document.getElementById('commentForm');
+    const commentBody = document.getElementById('commentBody');
+    const commentSubmit = document.getElementById('commentSubmit');
+    const commentError = document.getElementById('commentError');
+    const commentList = document.getElementById('commentList');
+    const commentCharCount = document.getElementById('commentCharCount');
+
+    if (commentBody && commentCharCount) {
+      commentBody.addEventListener('input', function () {
+        commentCharCount.textContent = this.value.length;
+      });
+    }
+
+    if (commentForm) {
+      commentForm.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        commentError.style.display = 'none';
+        const body = commentBody.value.trim();
+        if (!body) return;
+
+        commentSubmit.disabled = true;
+        commentSubmit.textContent = 'Posting…';
+
+        const res = await fetch('/api/comments/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: location.pathname.split('/').pop(), body }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          commentError.textContent = data.error || 'Failed to post comment.';
+          commentError.style.display = 'block';
+          commentSubmit.disabled = false;
+          commentSubmit.textContent = 'Post comment';
+          return;
+        }
+
+        // Append new comment to list
+        const c = data.comment;
+        const p = c.profiles;
+        const initials = p?.username ? p.username.slice(0, 2).toUpperCase() : '?';
+        const avatarHtml = p?.avatar_url
+          ? '<img src="' + p.avatar_url + '" alt="' + (p.username ?? '') + '" />'
+          : '<span>' + initials + '</span>';
+
+        const div = document.createElement('div');
+        div.className = 'comment';
+        div.innerHTML =
+          '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-avatar" style="flex-shrink:0">' + avatarHtml + '</a>' +
+          '<div class="comment-body">' +
+            '<div class="comment-meta">' +
+              '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-username">@' + (p?.username ?? '') + '</a>' +
+              '<span class="comment-time">just now</span>' +
+            '</div>' +
+            '<div class="comment-text">' + c.body.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+          '</div>';
+        commentList.appendChild(div);
+
+        // Remove "no comments" message if it was there
+        const noComments = document.querySelector('.no-comments');
+        if (noComments) noComments.remove();
+
+        commentBody.value = '';
+        if (commentCharCount) commentCharCount.textContent = '0';
+        commentSubmit.disabled = false;
+        commentSubmit.textContent = 'Post comment';
+      });
+    }
+  </script>
+</Layout>
+
+<style>
+  .review-detail {
+    max-width: 680px;
+    padding: 24px 20px 60px;
+  }
+
+  /* ── REVIEW FULL ── */
+  .review-full {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+
+  .review-game-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .game-cover-link { flex-shrink: 0; }
+
+  .game-cover-thumb {
+    width: 48px;
+    height: 64px;
+    border-radius: 8px;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    display: block;
+  }
+
+  .game-cover-placeholder {
+    width: 48px;
+    height: 64px;
+    border-radius: 8px;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+
+  .game-bar-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .game-bar-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: block;
+    margin-bottom: 6px;
+    line-height: 1.3;
+  }
+  .game-bar-title:hover { text-decoration: underline; }
+
+  .game-bar-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .meta-tag {
+    font-size: 11px;
+    background: var(--tag-bg);
+    color: var(--tag-text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 2px 8px;
+  }
+
+  .spoiler-tag {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.25);
+    background: rgba(245, 158, 11, 0.06);
+  }
+
+  .score-hero {
+    flex-shrink: 0;
+    width: 52px;
+    height: 52px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'DM Serif Display', serif;
+    font-size: 22px;
+    font-weight: 700;
+  }
+
+  .review-author-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .author-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .author-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--tag-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    flex-shrink: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .author-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+  .author-username {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  .author-link:hover .author-username { text-decoration: underline; }
+
+  .review-timestamp {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+
+  .review-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 22px;
+    font-weight: 400;
+    line-height: 1.35;
+    margin-bottom: 14px;
+    color: var(--text-primary);
+  }
+
+  .review-body-full {
+    position: relative;
+    margin-bottom: 20px;
+  }
+
+  .review-body-full.spoiler-hidden .review-text {
+    filter: blur(6px);
+    user-select: none;
+    pointer-events: none;
+  }
+
+  .spoiler-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    z-index: 2;
+    background: rgba(0,0,0,0.02);
+  }
+
+  .spoiler-overlay span {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .reveal-btn {
+    padding: 6px 16px;
+    border-radius: 16px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    background: var(--accent);
+    color: white;
+    border: none;
+    transition: opacity 0.15s;
+  }
+  .reveal-btn:hover { opacity: 0.85; }
+
+  .review-text {
+    font-size: 15px;
+    line-height: 1.75;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+  }
+
+  .review-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  /* ── COMMENTS ── */
+  .comments-section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+  }
+
+  .comments-heading {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .comment-count {
+    background: var(--tag-bg);
+    color: var(--text-tertiary);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 10px;
+  }
+
+  .no-comments {
+    font-size: 14px;
+    color: var(--text-tertiary);
+    margin-bottom: 20px;
+  }
+
+  .comment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    margin-bottom: 24px;
+  }
+
+  .comment {
+    display: flex;
+    gap: 12px;
+  }
+
+  .comment-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .comment-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+  .comment-body { flex: 1; min-width: 0; }
+
+  .comment-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+
+  .comment-username {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  .comment-username:hover { text-decoration: underline; }
+
+  .comment-time {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .comment-text {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* Comment form */
+  .comment-form { }
+
+  .comment-input-row {
+    display: flex;
+    gap: 12px;
+  }
+
+  .comment-form-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .comment-form-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+  .comment-input-wrap {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .comment-input-wrap textarea {
+    width: 100%;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    resize: none;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    box-sizing: border-box;
+    line-height: 1.6;
+  }
+  .comment-input-wrap textarea::placeholder { color: var(--text-tertiary); }
+  .comment-input-wrap textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(96, 80, 200, 0.1);
+  }
+
+  .comment-form-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
+  }
+
+  .comment-char-count {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .comment-submit {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 16px;
+    padding: 7px 18px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .comment-submit:hover { opacity: 0.88; }
+  .comment-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .comment-error {
+    font-size: 13px;
+    color: #f87171;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: rgba(248, 113, 113, 0.08);
+    border: 1px solid rgba(248, 113, 113, 0.2);
+    border-radius: 8px;
+  }
+
+  .comment-signin-prompt {
+    font-size: 14px;
+    color: var(--text-secondary);
+    padding: 16px;
+    background: var(--bg-hover);
+    border-radius: 10px;
+    text-align: center;
+  }
+  .comment-signin-prompt a { color: var(--accent); font-weight: 500; }
+  .comment-signin-prompt a:hover { text-decoration: underline; }
+
+  /* Sidebar widgets */
+  .sidebar-reviewer-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .sidebar-reviewer-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+  .report-trigger {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 4px 8px;
+    border-radius: 8px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .report-trigger:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+
+  .comment-report-btn {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .comment-report-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+</style>
