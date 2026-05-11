@@ -1,41 +1,59 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { "Content-Type": "application/json" } });
+  // Auth verification uses user JWT
+  const userClient = createSupabaseServerClientFromContext(context);
+  const { data: { user } } = await userClient.auth.getUser();
+  if (!user) return json({ error: "Unauthorized" }, 401);
 
   const { review_id, vote } = await context.request.json();
-  if (!review_id || ![1, -1].includes(vote)) {
-    return new Response(JSON.stringify({ error: "Invalid request." }), { status: 400, headers: { "Content-Type": "application/json" } });
-  }
+  if (!review_id || ![1, -1].includes(vote)) return json({ error: "Invalid request." }, 400);
 
-  const { data: profile } = await (supabase as any)
+  // All DB ops use admin client to bypass RLS
+  const db = getSupabaseAdmin() as any;
+
+  const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return new Response(JSON.stringify({ error: "Profile not found." }), { status: 404, headers: { "Content-Type": "application/json" } });
+  if (!profile) return json({ error: "Profile not found." }, 404);
 
   // Check for existing vote
-  const { data: existing } = await (supabase as any)
+  const { data: existing } = await db
     .from('review_votes')
     .select('id, vote')
     .eq('profile_id', profile.id)
     .eq('review_id', review_id)
     .maybeSingle();
 
+  let newVote: number | null;
+
   if (existing) {
     if (existing.vote === vote) {
-      // Same vote — remove it (toggle off)
-      await (supabase as any).from('review_votes').delete().eq('id', existing.id);
-      return new Response(JSON.stringify({ vote: null }), { status: 200, headers: { "Content-Type": "application/json" } });
+      // Same vote — toggle off (delete)
+      const { error } = await db.from('review_votes').delete().eq('id', existing.id);
+      if (error) return json({ error: "Failed to remove vote." }, 500);
+      newVote = null;
     } else {
       // Different vote — switch it
-      await (supabase as any).from('review_votes').update({ vote }).eq('id', existing.id);
-      return new Response(JSON.stringify({ vote }), { status: 200, headers: { "Content-Type": "application/json" } });
+      const { error } = await db.from('review_votes').update({ vote }).eq('id', existing.id);
+      if (error) return json({ error: "Failed to update vote." }, 500);
+      newVote = vote;
     }
+  } else {
+    // No existing vote — insert
+    const { error } = await db.from('review_votes').insert({ profile_id: profile.id, review_id, vote });
+    if (error) return json({ error: "Failed to save vote." }, 500);
+    newVote = vote;
   }
 
-  // No existing vote — insert
-  await (supabase as any).from('review_votes').insert({ profile_id: profile.id, review_id, vote });
-  return new Response(JSON.stringify({ vote }), { status: 200, headers: { "Content-Type": "application/json" } });
+  // Return the real counts from DB so the client never has to guess
+  const [{ count: upCount }, { count: downCount }] = await Promise.all([
+    db.from('review_votes').select('*', { count: 'exact', head: true }).eq('review_id', review_id).eq('vote', 1),
+    db.from('review_votes').select('*', { count: 'exact', head: true }).eq('review_id', review_id).eq('vote', -1),
+  ]);
+
+  return json({ vote: newVote, up: upCount ?? 0, down: downCount ?? 0 });
 };
