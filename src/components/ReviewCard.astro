@@ -1,0 +1,401 @@
+---
+interface Props {
+  review: {
+    id: string;
+    score: number;
+    title?: string | null;
+    body: string;
+    play_time_hours?: number | null;
+    contains_spoilers?: boolean;
+    published_at?: string | null;
+    created_at: string;
+    played_on?: { id: string; name: string; slug: string } | null;
+    games?: { id: string; title: string; slug: string; cover_img_url?: string | null } | null;
+    profiles?: { id: string; username: string; avatar_url?: string | null } | null;
+    review_votes?: { vote: number }[] | { vote: number } | null;
+  };
+  isLoggedIn?: boolean;
+  isOwnProfile?: boolean;
+  /** Show game cover + title. Pass false on game detail pages. */
+  showGame?: boolean;
+  /** Show reviewer avatar + username row. Pass true on feed and game pages. */
+  showReviewer?: boolean;
+  /** 'link' navigates to /reviews/[id]. 'toggle' expands body inline. */
+  expandMode?: 'link' | 'toggle';
+  showVotes?: boolean;
+}
+
+const {
+  review,
+  isLoggedIn = false,
+  isOwnProfile = false,
+  showGame = true,
+  showReviewer = false,
+  expandMode = 'link',
+  showVotes = true,
+} = Astro.props;
+
+function igdbCover(url: string | null | undefined, size = 't_cover_big') {
+  if (!url) return null;
+  const clean = url.startsWith('//') ? `https:${url}` : url;
+  return clean.replace(/t_[a-z0-9_]+/, size);
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (diff < 60) return `${diff}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+  return `${Math.floor(diff / 604800)}w`;
+}
+
+function scoreColor(score: number): string {
+  if (score === 10) return 'score-perfect';
+  if (score >= 9) return 'score-great';
+  if (score >= 8) return 'score-teal';
+  if (score >= 7) return 'score-good';
+  if (score >= 5) return 'score-mid';
+  if (score >= 3) return 'score-orange';
+  return 'score-low';
+}
+
+function getInitials(username: string): string {
+  return username.slice(0, 2).toUpperCase();
+}
+
+const votesArr = Array.isArray(review.review_votes)
+  ? review.review_votes
+  : review.review_votes ? [review.review_votes] : [];
+const up = votesArr.filter((v: any) => v.vote === 1).length;
+const down = votesArr.filter((v: any) => v.vote === -1).length;
+const coverThumb = igdbCover(review.games?.cover_img_url, 't_thumb');
+const ts = review.published_at ?? review.created_at;
+---
+
+<article
+  class="rc"
+  data-score={review.score}
+  data-date={ts}
+  data-upvotes={up}
+>
+  {showReviewer && (
+    <div class="rc-reviewer">
+      <a href={`/reviewers/${review.profiles?.username}`} class="rc-avatar">
+        {review.profiles?.avatar_url
+          ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+          : <span>{getInitials(review.profiles?.username ?? '?')}</span>
+        }
+      </a>
+      <a href={`/reviewers/${review.profiles?.username}`} class="rc-reviewer-name">
+        @{review.profiles?.username}
+      </a>
+      <span class="rc-dot">·</span>
+      <span class="rc-ts">{timeAgo(ts)}</span>
+      {!showGame && (
+        <div class={`score-badge ${scoreColor(review.score)}`} style="margin-left:auto">{review.score}</div>
+      )}
+    </div>
+  )}
+
+  <div class="rc-main">
+    {showGame && (
+      <a href={`/games/${review.games?.slug}`} class="rc-cover">
+        {coverThumb
+          ? <img src={coverThumb} alt={review.games?.title ?? ''} loading="lazy" />
+          : <span>🎮</span>
+        }
+      </a>
+    )}
+
+    <div class="rc-content">
+      {showGame && (
+        <div class="rc-game-row">
+          <a href={`/games/${review.games?.slug}`} class="rc-game-link">
+            {review.games?.title ?? 'Unknown Game'}
+          </a>
+          <div class={`score-badge ${scoreColor(review.score)}`}>{review.score}</div>
+        </div>
+      )}
+
+      {review.contains_spoilers && <div class="rc-spoiler-pill">⚠ spoilers</div>}
+      {review.title && <div class="rc-title">{review.title}</div>}
+
+      <div
+        class={`rc-body${review.contains_spoilers ? ' spoiler-hidden' : ''}`}
+        data-spoiler={review.contains_spoilers ? 'true' : 'false'}
+        id={`rcb-${review.id}`}
+      >
+        {review.body}
+      </div>
+
+      <div class="rc-footer">
+        <div class="rc-chips">
+          {review.played_on && <span class="rc-chip">{review.played_on.name}</span>}
+          {(review.play_time_hours ?? 0) > 0 && <span class="rc-chip">{review.play_time_hours}h</span>}
+        </div>
+        {expandMode === 'link'
+          ? <a href={`/reviews/${review.id}`} class="rc-expand-link">Read more →</a>
+          : <button class="rc-expand-btn" data-body={`rcb-${review.id}`}>Read more →</button>
+        }
+      </div>
+
+      {showVotes && (
+        <div class="rc-votes">
+          <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
+          <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
+          {!showReviewer && <span class="rc-vote-ts">{timeAgo(ts)}</span>}
+          {isLoggedIn && !isOwnProfile && (
+            <button class="rc-report" onclick={`openReport('review','${review.id}')`}>Report</button>
+          )}
+        </div>
+      )}
+    </div>
+  </div>
+</article>
+
+<script is:inline>
+  if (!window.__rcInit) {
+    window.__rcInit = true;
+
+    document.addEventListener('click', function(e) {
+      // Spoiler reveal
+      var spoiler = e.target.closest('.rc-body[data-spoiler="true"]');
+      if (spoiler) { spoiler.classList.remove('spoiler-hidden'); return; }
+
+      // Expand toggle
+      var expandBtn = e.target.closest('.rc-expand-btn');
+      if (expandBtn) {
+        var bodyEl = document.getElementById(expandBtn.dataset.body);
+        if (!bodyEl) return;
+        var expanded = bodyEl.classList.toggle('rc-body-expanded');
+        expandBtn.textContent = expanded ? 'Show less ↑' : 'Read more →';
+        return;
+      }
+    });
+
+    // Vote buttons
+    document.addEventListener('click', async function(e) {
+      var btn = e.target.closest('.vote-btn');
+      if (!btn) return;
+      var reviewId = btn.dataset.reviewId;
+      var vote = parseInt(btn.dataset.vote);
+      var res = await fetch('/api/reviews/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ review_id: reviewId, vote }),
+      });
+      if (res.status === 401) { window.location.href = '/signin'; return; }
+      if (!res.ok) return;
+      var data = await res.json();
+      document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]').forEach(function(b) {
+        var bVote = parseInt(b.dataset.vote);
+        var count = parseInt(b.dataset.count) || 0;
+        if (data.vote === null) {
+          b.classList.remove('active-up', 'active-down');
+          if (bVote === vote) count = Math.max(0, count - 1);
+        } else if (data.vote === bVote) {
+          b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
+          b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
+          count++;
+        } else {
+          b.classList.remove('active-up', 'active-down');
+          if (data.vote !== null) count = Math.max(0, count - 1);
+        }
+        b.dataset.count = count;
+        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
+      });
+    });
+  }
+</script>
+
+<style>
+  .rc {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 18px 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .rc:last-child { border-bottom: none; }
+
+  /* ── Reviewer row ── */
+  .rc-reviewer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .rc-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    flex-shrink: 0;
+    color: var(--text-secondary);
+  }
+  .rc-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .rc-reviewer-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  .rc-reviewer-name:hover { text-decoration: underline; }
+  .rc-dot { font-size: 11px; color: var(--text-tertiary); }
+  .rc-ts { font-size: 12px; color: var(--text-tertiary); }
+
+  /* ── Main row ── */
+  .rc-main { display: flex; gap: 14px; }
+
+  /* ── Game cover ── */
+  .rc-cover {
+    flex-shrink: 0;
+    width: 48px;
+    height: 64px;
+    border-radius: 8px;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    transition: transform 0.15s;
+  }
+  .rc-cover:hover { transform: scale(1.06); }
+  .rc-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  /* ── Content ── */
+  .rc-content { flex: 1; min-width: 0; }
+
+  .rc-game-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .rc-game-link {
+    font-size: 14px;
+    font-weight: 500;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+  .rc-game-link:hover { color: var(--text-secondary); }
+
+  .rc-spoiler-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(251, 191, 36, 0.08);
+    color: #fbbf24;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border: 1px solid rgba(251, 191, 36, 0.2);
+  }
+
+  .rc-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 16px;
+    line-height: 1.3;
+    margin-bottom: 5px;
+    color: var(--text-primary);
+  }
+
+  .rc-body {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    opacity: 0.8;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .rc-body.rc-body-expanded {
+    display: block;
+    overflow: visible;
+    -webkit-line-clamp: unset;
+  }
+  .rc-body.spoiler-hidden {
+    filter: blur(4px);
+    user-select: none;
+    cursor: pointer;
+    transition: filter 0.2s;
+  }
+  .rc-body.spoiler-hidden:hover { filter: blur(3px); }
+
+  /* ── Footer: chips + read more ── */
+  .rc-footer {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .rc-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .rc-chip {
+    font-size: 11px;
+    background: var(--tag-bg);
+    color: var(--text-secondary);
+    padding: 2px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+  .rc-expand-btn, .rc-expand-link {
+    font-size: 11px;
+    color: var(--accent);
+    margin-left: auto;
+    cursor: pointer;
+    background: none;
+    border: none;
+    font-family: inherit;
+    padding: 0;
+    font-weight: 500;
+    transition: opacity 0.15s;
+  }
+  .rc-expand-btn:hover, .rc-expand-link:hover { opacity: 0.7; }
+
+  /* ── Votes ── */
+  .rc-votes {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .rc-vote-ts {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-left: auto;
+  }
+  .rc-report {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .rc-report:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+</style>

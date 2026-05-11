@@ -3,6 +3,7 @@ export const prerender = false;
 import { createSupabaseServerClientFromContext } from '../../utils/database';
 import Layout from '../../components/Layout.astro';
 import ReportModal from '../../components/ReportModal.astro';
+import ReviewCard from '../../components/ReviewCard.astro';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
@@ -885,51 +886,16 @@ function getVoteCounts(votes: any) {
         <button class="sort-tab" onclick="sortReviews('least_upvoted',this)">Least upvoted</button>
       </div>
       <div id="reviewsList">
-        {publishedReviews.map((review: any) => {
-          const { up, down } = getVoteCounts(review.review_votes);
-          return (
-            <div class="review-card"
-              data-score={review.score}
-              data-date={review.published_at ?? review.created_at}
-              data-upvotes={up}
-            >
-              <a href={`/games/${review.games?.slug}`} class="game-cover">
-                {review.games?.cover_img_url
-                  ? <img src={igdbCover(review.games.cover_img_url) ?? ''} alt={review.games.title} loading="lazy" />
-                  : '🎮'
-                }
-              </a>
-              <div class="review-content">
-                <div class="review-game-row">
-                  <a href={`/games/${review.games?.slug}`} class="game-link">{review.games?.title ?? 'Unknown Game'}</a>
-                  <div class={`score-badge ${scoreClass(review.score)}`}>{review.score}</div>
-                </div>
-                {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
-                {review.title && <div class="review-title-text">{review.title}</div>}
-                <div
-                  class={`review-body ${review.contains_spoilers ? 'spoiler-hidden' : ''}`}
-                  data-spoiler={review.contains_spoilers ? 'true' : 'false'}
-                  id={`body-${review.id}`}
-                >
-                  {review.body}
-                </div>
-                <div class="review-meta">
-                  {review.played_on && <span class="meta-chip">{review.played_on.name}</span>}
-                  {review.play_time_hours && <span class="meta-chip">{review.play_time_hours}h played</span>}
-                  <button class="expand-btn" onclick={`toggleReview('${review.id}',this)`}>Read more →</button>
-                </div>
-                <div class="vote-row">
-                  <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
-                  <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
-                  <span class="meta-time">{timeAgo(review.published_at ?? review.created_at)}</span>
-                  {!isOwnProfile && currentProfile && (
-                    <button class="rev-report-btn" onclick={`openReport('review','${review.id}')`} title="Report">Report</button>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+        {publishedReviews.map((review: any) => (
+          <ReviewCard
+            review={review}
+            isLoggedIn={!!currentProfile}
+            isOwnProfile={isOwnProfile}
+            showGame={true}
+            showReviewer={false}
+            expandMode="toggle"
+          />
+        ))}
       </div>
     </>
   )}
@@ -1469,7 +1435,7 @@ function getVoteCounts(votes: any) {
   btn.classList.add('active')
   var list = document.getElementById('reviewsList')
   if (!list) return
-  var cards = Array.from(list.querySelectorAll('.review-card'))
+  var cards = Array.from(list.querySelectorAll('.rc'))
   cards.sort(function(a, b) {
     if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score)
     if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score)
@@ -1480,14 +1446,6 @@ function getVoteCounts(votes: any) {
   cards.forEach(function(card) { list.appendChild(card) })
 }
   window.sortReviews = sortReviews
-
-  function toggleReview(id, btn) {
-    var body = document.getElementById('body-' + id)
-    if (!body) return
-    body.classList.toggle('expanded')
-    btn.textContent = body.classList.contains('expanded') ? 'Read less ↑' : 'Read more →'
-  }
-  window.toggleReview = toggleReview
 
   // ── STATS TAB ──
   function scoreCol(score) {
@@ -1903,45 +1861,7 @@ function getVoteCounts(votes: any) {
     })
   }
 
-  document.querySelectorAll('.review-body').forEach(function(el) {
-    el.addEventListener('click', function() { el.classList.remove('spoiler-hidden') })
-  })
-
   document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closePicker() })
-
-// vote handler
-document.querySelectorAll('.vote-btn').forEach(function(btn) {
-  btn.addEventListener('click', async function() {
-    var reviewId = btn.dataset.reviewId;
-    var vote = parseInt(btn.dataset.vote);
-    var res = await fetch('/api/reviews/vote', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ review_id: reviewId, vote }),
-    });
-    if (res.status === 401) { window.location.href = '/signin'; return; }
-    if (!res.ok) return;
-    var data = await res.json();
-    var pair = document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]');
-    pair.forEach(function(b) {
-      var bVote = parseInt(b.dataset.vote);
-      var count = parseInt(b.dataset.count) || 0;
-      if (data.vote === null) {
-        b.classList.remove('active-up', 'active-down');
-        if (bVote === vote) count = Math.max(0, count - 1);
-      } else if (data.vote === bVote) {
-        b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
-        b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
-        count = count + 1;
-      } else {
-        b.classList.remove('active-up', 'active-down');
-        count = Math.max(0, count - 1);
-      }
-      b.dataset.count = count;
-      b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
-    });
-  });
-});
 </script>
 <ReportModal />
 </Layout>

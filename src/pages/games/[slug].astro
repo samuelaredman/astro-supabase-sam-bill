@@ -1,10 +1,16 @@
 ---
 export const prerender = false;
 
-import { getSupabase } from '../../utils/database'
+import { getSupabase, createSupabaseServerClient } from '../../utils/database'
 const supabase = getSupabase();
 import { igdbFetch } from '../../utils/igdb'
 import Layout from '../../components/Layout.astro'
+import ReviewCard from '../../components/ReviewCard.astro'
+import ReportModal from '../../components/ReportModal.astro'
+
+const serverClient = createSupabaseServerClient(Astro.request, new Response());
+const { data: { session } } = await serverClient.auth.getSession();
+const isLoggedIn = !!session;
 
 const { slug } = Astro.params;
 const activeTab = Astro.url.searchParams.get('tab') || 'overview'
@@ -245,10 +251,6 @@ function timeAgo(dateStr: string): string {
   if (diff < 604800) return `${Math.floor(diff / 86400)}d`
   return `${Math.floor(diff / 604800)}w`
 }
-function getInitials(username: string): string {
-  return username.slice(0, 2).toUpperCase()
-}
-
 const distJson = JSON.stringify(scoreDistribution)
 const coverBlurUrl = igdbImage(game.cover_img_url, 't_cover_big') ?? ''
 const trailerSrc = trailerVideoId ? `https://www.youtube.com/embed/${trailerVideoId}?autoplay=1&rel=0` : ''
@@ -663,30 +665,13 @@ const statsJson = JSON.stringify({
           </div>
           <div id="reviewsList">
             {reviewList.map((review: any) => (
-              <div class="review-card" data-score={review.score} data-date={review.published_at ?? review.created_at}>
-                <div class="review-top">
-                  <div class="avatar">
-                    {review.profiles?.avatar_url ? <img src={review.profiles.avatar_url} alt={review.profiles.username} /> : getInitials(review.profiles?.username ?? '??')}
-                  </div>
-                  <div class="reviewer-info">
-                    <a href={`/reviewers/${review.profiles?.username}`} class="reviewer-name">@{review.profiles?.username ?? 'unknown'}</a>
-                    <div class="reviewer-meta">
-                      <span>{timeAgo(review.published_at ?? review.created_at)}</span>
-                      {review.played_on && <><span>·</span><span>{review.played_on.name}</span></>}
-                      {review.play_time_hours && <><span>·</span><span>{review.play_time_hours}h</span></>}
-                    </div>
-                  </div>
-                  <div class={`score-badge ${scoreClass(review.score)}`}>{review.score}</div>
-                </div>
-                {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
-                {review.title && <div class="review-title">{review.title}</div>}
-                <div class="review-body" id={`body-${review.id}`}>{review.body}</div>
-                <div class="review-footer">
-                  {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
-                  {review.play_time_hours && <span class="footer-tag">{review.play_time_hours}h played</span>}
-                  <button class="expand-btn" onclick={`toggleReview('${review.id}',this)`}>Read more →</button>
-                </div>
-              </div>
+              <ReviewCard
+                review={review}
+                isLoggedIn={isLoggedIn}
+                showGame={false}
+                showReviewer={true}
+                expandMode="toggle"
+              />
             ))}
           </div>
         </>
@@ -760,14 +745,6 @@ const statsJson = JSON.stringify({
     document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox() })
     window.openLightbox = openLightbox; window.closeLightbox = closeLightbox
 
-    function toggleReview(id, btn) {
-      var body = document.getElementById('body-' + id)
-      if (!body) return
-      body.classList.toggle('expanded')
-      btn.textContent = body.classList.contains('expanded') ? 'Read less ↑' : 'Read more →'
-    }
-    window.toggleReview = toggleReview
-
     function toggleDesc() {
       var desc = document.getElementById('desc')
       var btn = document.getElementById('readMoreBtn')
@@ -782,7 +759,7 @@ const statsJson = JSON.stringify({
       btn.classList.add('active')
       var list = document.getElementById('reviewsList')
       if (!list) return
-      var cards = Array.from(list.querySelectorAll('.review-card'))
+      var cards = Array.from(list.querySelectorAll('.rc'))
       cards.sort(function(a, b) {
         if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score)
         if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score)
@@ -1228,4 +1205,5 @@ const statsJson = JSON.stringify({
     updateIcon(saved)
 
   </script>
+<ReportModal />
 </Layout>

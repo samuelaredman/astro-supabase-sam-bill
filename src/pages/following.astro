@@ -3,6 +3,7 @@ export const prerender = false;
 import { getSupabase, createSupabaseServerClient } from '../utils/database';
 import Layout from '../components/Layout.astro';
 import ReportModal from '../components/ReportModal.astro';
+import ReviewCard from '../components/ReviewCard.astro';
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClient(Astro.request, new Response());
@@ -110,16 +111,6 @@ function scoreColor(score: number): string {
   return 'score-low';
 }
 
-function getInitials(username: string): string {
-  return username.slice(0, 2).toUpperCase();
-}
-
-function getVoteCounts(votes: any) {
-  const arr = Array.isArray(votes) ? votes : votes ? [votes] : [];
-  const up = arr.filter((v: any) => v.vote === 1).length;
-  const down = arr.filter((v: any) => v.vote === -1).length;
-  return { up, down };
-}
 ---
 
 <Layout
@@ -172,62 +163,15 @@ function getVoteCounts(votes: any) {
           <a href="/following?sort=lowest" class={`sort-btn ${sortBy === 'lowest' ? 'active' : ''}`}>Lowest score</a>
         </div>
 
-        {followingReviews.map((review: any) => {
-          const { up, down } = getVoteCounts(review.review_votes);
-          return (
-            <article class="review-card">
-              <div class="card-top">
-                <a href={`/reviewers/${review.profiles?.username}`} style="flex-shrink:0">
-                  <div class="avatar">
-                    {review.profiles?.avatar_url
-                      ? <img src={review.profiles.avatar_url} alt={review.profiles?.username} />
-                      : <span>{getInitials(review.profiles?.username ?? '?')}</span>
-                    }
-                  </div>
-                </a>
-                <div class="card-body">
-                  <div class="card-meta">
-                    <a href={`/reviewers/${review.profiles?.username}`} class="username">@{review.profiles?.username}</a>
-                    <span class="meta-dot">·</span>
-                    <span class="timestamp">{timeAgo(review.published_at ?? review.created_at)}</span>
-                  </div>
-                  <div class="game-row">
-                    <a href={`/games/${review.games?.slug}`} class="game-cover-sm">
-                      {review.games?.cover_img_url
-                        ? <img src={igdbImage(review.games.cover_img_url, 't_thumb') ?? ''} alt={review.games?.title} />
-                        : '🎮'
-                      }
-                    </a>
-                    <a href={`/games/${review.games?.slug}`} class="game-title-text">{review.games?.title ?? 'Unknown Game'}</a>
-                    <div class={`score-badge ${scoreColor(review.score)}`}>{review.score}</div>
-                  </div>
-                  {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
-                  {review.title && <div class="review-title">{review.title}</div>}
-                  <div
-                    class={`review-body ${review.contains_spoilers ? 'spoiler-hidden' : ''}`}
-                    data-spoiler={review.contains_spoilers ? 'true' : 'false'}
-                  >
-                    {review.body}
-                  </div>
-                  <div class="card-footer">
-                    {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
-                    {review.play_time_hours > 0 && <span class="footer-tag">{review.play_time_hours}h played</span>}
-                    <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
-                  </div>
-                  <div class="vote-row">
-                    <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
-                    <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
-                    {isLoggedIn && (
-                      <button class="report-trigger" onclick={`openReport('review','${review.id}')`} title="Report">
-                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h10l-2 4 2 4H3V2z"/><path d="M3 14v-4"/></svg>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </article>
-          );
-        })}
+        {followingReviews.map((review: any) => (
+          <ReviewCard
+            review={review}
+            isLoggedIn={isLoggedIn}
+            showReviewer={true}
+            showGame={true}
+            expandMode="link"
+          />
+        ))}
       </>
     )}
   </main>
@@ -278,45 +222,6 @@ function getVoteCounts(votes: any) {
     )}
   </div>
 
-  <script is:inline>
-    document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(el => {
-      el.addEventListener('click', () => el.classList.remove('spoiler-hidden'));
-    });
-
-    document.querySelectorAll('.vote-btn').forEach(function(btn) {
-      btn.addEventListener('click', async function() {
-        const reviewId = btn.dataset.reviewId;
-        const vote = parseInt(btn.dataset.vote);
-        const res = await fetch('/api/reviews/vote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ review_id: reviewId, vote }),
-        });
-        if (res.status === 401) { window.location.href = '/signin'; return; }
-        if (!res.ok) return;
-        const data = await res.json();
-        const pair = document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]');
-        pair.forEach(function(b) {
-          const bVote = parseInt(b.dataset.vote);
-          let count = parseInt(b.dataset.count) || 0;
-          if (data.vote === null) {
-            b.classList.remove('active-up', 'active-down');
-            if (bVote === vote) count = Math.max(0, count - 1);
-          } else if (data.vote === bVote) {
-            b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
-            b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
-            count = count + 1;
-          } else {
-            b.classList.remove('active-up', 'active-down');
-            if (data.vote !== null) count = Math.max(0, count - 1);
-          }
-          b.dataset.count = count;
-          b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
-        });
-      });
-    });
-  </script>
-
   <ReportModal />
 </Layout>
 
@@ -361,20 +266,4 @@ function getVoteCounts(votes: any) {
   }
   .empty-cta:hover { opacity: 0.85; }
 
-  .username { font-size: 14px; font-weight: 500; }
-  .username:hover { text-decoration: underline; }
-  .meta-dot { color: var(--text-tertiary); font-size: 12px; }
-  .report-trigger {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-tertiary);
-    padding: 4px 6px;
-    border-radius: 6px;
-    transition: color 0.15s, background 0.15s;
-  }
-  .report-trigger:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
 </style>
