@@ -34,12 +34,12 @@ export const POST: APIRoute = async (context) => {
   if (existing) {
     // Game row already exists — check whether platforms/genres were linked.
     // If not (e.g. imported before this fix), sync them now and return.
-    const { count } = await db
-      .from('game_platforms')
-      .select('*', { count: 'exact', head: true })
-      .eq('game_id', existing.id);
+    const [{ count: platformCount }, { count: genreCount }] = await Promise.all([
+      db.from('game_platforms').select('*', { count: 'exact', head: true }).eq('game_id', existing.id),
+      db.from('game_genres').select('*', { count: 'exact', head: true }).eq('game_id', existing.id),
+    ]);
 
-    if ((count ?? 0) === 0) {
+    if ((platformCount ?? 0) === 0 || (genreCount ?? 0) === 0) {
       // Re-fetch from IGDB to get platform/genre data and link it
       const refresh = await igdbFetch("games", `
         fields genres.id, genres.name, genres.slug,
