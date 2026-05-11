@@ -31,27 +31,55 @@ export const POST: APIRoute = async (context) => {
     .eq('igdb_id', igdb_id)
     .maybeSingle();
 
-  if (existing) return json(existing);
+  if (existing) {
+    // Game row already exists — check whether platforms/genres were linked.
+    // If not (e.g. imported before this fix), sync them now and return.
+    const { count } = await db
+      .from('game_platforms')
+      .select('*', { count: 'exact', head: true })
+      .eq('game_id', existing.id);
 
-  // Fetch full game data from IGDB
-  const [games, covers] = await Promise.all([
-    igdbFetch("games", `
-      fields name, slug, summary, first_release_date;
-      where id = ${igdb_id};
-      limit 1;
-    `),
-    igdbFetch("covers", `
-      fields url;
-      where game = ${igdb_id};
-      limit 1;
-    `),
-  ]);
+    if ((count ?? 0) === 0) {
+      // Re-fetch from IGDB to get platform/genre data and link it
+      const refresh = await igdbFetch("games", `
+        fields genres.id, genres.name, genres.slug,
+               platforms.id, platforms.name, platforms.slug;
+        where id = ${igdb_id};
+        limit 1;
+      `);
+      const g = refresh?.[0];
+      if (g) {
+        for (const genre of g.genres ?? []) {
+          await db.from('genres').upsert({ igdb_id: genre.id, name: genre.name, slug: genre.slug }, { onConflict: 'igdb_id' });
+          const { data: gr } = await db.from('genres').select('id').eq('igdb_id', genre.id).single();
+          if (gr) await db.from('game_genres').upsert({ game_id: existing.id, genre_id: gr.id }, { onConflict: 'game_id,genre_id' });
+        }
+        for (const platform of g.platforms ?? []) {
+          await db.from('platforms').upsert({ igdb_id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'igdb_id' });
+          const { data: pr } = await db.from('platforms').select('id').eq('igdb_id', platform.id).single();
+          if (pr) await db.from('game_platforms').upsert({ game_id: existing.id, platform_id: pr.id }, { onConflict: 'game_id,platform_id' });
+        }
+      }
+    }
+
+    return json(existing);
+  }
+
+  // Fetch full game data from IGDB — include platforms and genres so we can
+  // populate the junction tables (game_platforms, game_genres) on import
+  const games = await igdbFetch("games", `
+    fields name, slug, summary, first_release_date, cover.url,
+           genres.id, genres.name, genres.slug,
+           platforms.id, platforms.name, platforms.slug;
+    where id = ${igdb_id};
+    limit 1;
+  `);
 
   if (!games || games.length === 0) return json({ error: 'Game not found on IGDB' }, 404);
 
   const game = games[0];
-  const coverUrl = covers?.[0]?.url
-    ? `https:${covers[0].url.replace('t_thumb', 't_cover_big')}`
+  const coverUrl = game.cover?.url
+    ? `https:${game.cover.url.replace('t_thumb', 't_cover_big')}`
     : null;
 
   const slug = makeSlug(game.name, game.slug);
@@ -83,6 +111,36 @@ export const POST: APIRoute = async (context) => {
   if (insertError) {
     console.error('[import] DB insert error:', insertError);
     return json({ error: `Failed to import game: ${insertError.message}` }, 500);
+  }
+
+  // Populate genres — upsert genre rows then link via game_genres
+  for (const genre of game.genres ?? []) {
+    await db.from('genres').upsert(
+      { igdb_id: genre.id, name: genre.name, slug: genre.slug },
+      { onConflict: 'igdb_id' }
+    );
+    const { data: genreRow } = await db.from('genres').select('id').eq('igdb_id', genre.id).single();
+    if (genreRow) {
+      await db.from('game_genres').upsert(
+        { game_id: inserted.id, genre_id: genreRow.id },
+        { onConflict: 'game_id,genre_id' }
+      );
+    }
+  }
+
+  // Populate platforms — upsert platform rows then link via game_platforms
+  for (const platform of game.platforms ?? []) {
+    await db.from('platforms').upsert(
+      { igdb_id: platform.id, name: platform.name, slug: platform.slug },
+      { onConflict: 'igdb_id' }
+    );
+    const { data: platformRow } = await db.from('platforms').select('id').eq('igdb_id', platform.id).single();
+    if (platformRow) {
+      await db.from('game_platforms').upsert(
+        { game_id: inserted.id, platform_id: platformRow.id },
+        { onConflict: 'game_id,platform_id' }
+      );
+    }
   }
 
   return json(inserted);
