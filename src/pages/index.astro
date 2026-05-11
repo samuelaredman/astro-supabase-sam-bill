@@ -6,108 +6,87 @@ import ReviewCard from "../components/ReviewCard.astro";
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
+
+// ── Stage 1: auth (must come first) ─────────────────────────────────────────
 const { data: { user } } = await serverClient.auth.getUser();
 const isLoggedIn = !!user;
-
-let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
-if (user) {
-  const { data: profileData } = await (supabase as any)
-    .from('profiles')
-    .select('id, username, avatar_url')
-    .eq('auth_user_id', user.id)
-    .single();
-  currentProfile = profileData;
-}
-
-const { data: platforms } = await (supabase as any)
-  .from("platforms")
-  .select("id, name, slug")
-  .order("name", { ascending: true });
-
-type Platform = { id: string; name: string; slug: string; };
-
-type Review = {
-  id: string;
-  score: number;
-  title: string;
-  body: string;
-  play_time_hours: number;
-  contains_spoilers: boolean;
-  status: string;
-  published_at: string;
-  created_at: string;
-  played_on: Platform | null;
-  games: { id: string; title: string; slug: string; cover_img_url: string | null; } | null;
-  profiles: { id: string; username: string; avatar_url: string | null; } | null;
-  review_votes: { vote: number }[] | { vote: number } | null;
-}
-
-const { data: rawReviews } = await (supabase as any)
-  .from("reviews")
-  .select(`
-    id, score, title, body, play_time_hours,
-    contains_spoilers, status, published_at, created_at,
-    played_on:platform_played_on ( id, name, slug ),
-    games ( id, title, slug, cover_img_url ),
-    profiles ( id, username, avatar_url ),
-    review_votes( vote )
-  `)
-  .eq("status", "published")
-  .order("published_at", { ascending: false })
-  .limit(20)
-
-const reviews = (rawReviews ?? []) as Review[]
 
 const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-const { data: todayRaw } = await (supabase as any)
-  .from('reviews')
-  .select('game_id, games(id, title, slug, cover_img_url)')
-  .eq('status', 'published')
-  .gte('published_at', oneDayAgo)
-  .limit(100)
+// ── Stage 2: all independent queries fire in parallel ────────────────────────
+const REVIEW_FIELDS = `
+  id, score, title, body, play_time_hours,
+  contains_spoilers, status, published_at, created_at,
+  played_on:platform_played_on ( id, name, slug ),
+  games ( id, title, slug, cover_img_url ),
+  profiles ( id, username, avatar_url ),
+  review_votes( vote )
+`
+const db = supabase as any
+const [
+  profileRes,
+  platformsRes,
+  rawReviewsRes,
+  todayRawRes,
+  // weekReviews powers both "Trending this week" AND "Top rated" — one query, two uses
+  weekReviewsRes,
+  reviewCountRes,
+  gameCountRes,
+  profileCountRes,
+  genresRes,
+] = await Promise.all([
+  user
+    ? db.from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single()
+    : Promise.resolve({ data: null }),
+  db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
+  db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(20),
+  db.from('reviews').select('game_id, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneDayAgo).limit(100),
+  db.from('reviews').select('game_id, score, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
+  db.from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
+  db.from('games').select('*', { count: 'exact', head: true }),
+  db.from('profiles').select('*', { count: 'exact', head: true }),
+  db.from('genres').select('id, name').order('name'),
+])
 
+// Unpack results
+const currentProfile = profileRes.data ?? null
+const { data: platforms } = platformsRes
+
+type Platform = { id: string; name: string; slug: string; };
+type Review = {
+  id: string; score: number; title: string; body: string;
+  play_time_hours: number; contains_spoilers: boolean; status: string;
+  published_at: string; created_at: string; played_on: Platform | null;
+  games: { id: string; title: string; slug: string; cover_img_url: string | null } | null;
+  profiles: { id: string; username: string; avatar_url: string | null } | null;
+  review_votes: { vote: number }[] | { vote: number } | null;
+}
+const reviews = (rawReviewsRes.data ?? []) as Review[]
+
+// mostReviewedToday
 const todayMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
-for (const r of todayRaw ?? []) {
+for (const r of todayRawRes.data ?? []) {
   const g = (r as any).games
   if (!g) continue
   if (!todayMap[g.id]) todayMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
   todayMap[g.id].count++
 }
 const mostReviewedToday = Object.values(todayMap).sort((a, b) => b.count - a.count)[0] ?? null
+const featuredGame = mostReviewedToday
 
-const { data: trendingRaw } = await (supabase as any)
-  .from('reviews')
-  .select('game_id, games(id, title, slug, cover_img_url)')
-  .eq('status', 'published')
-  .gte('published_at', oneWeekAgo)
-  .limit(200)
-
+// Trending + topRated derived from the same week dataset (no second query)
 const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
-for (const r of trendingRaw ?? []) {
+const weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {}
+for (const r of weekReviewsRes.data ?? []) {
   const g = (r as any).games
   if (!g) continue
   if (!trendingMap[g.id]) trendingMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
   trendingMap[g.id].count++
-}
-const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
-
-const { data: weekReviewsRaw } = await (supabase as any)
-  .from('reviews')
-  .select('game_id, score, games(id, title, slug, cover_img_url)')
-  .eq('status', 'published')
-  .gte('published_at', oneWeekAgo)
-  .limit(500)
-
-const weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {}
-for (const r of weekReviewsRaw ?? []) {
-  const g = (r as any).games
-  if (!g) continue
   if (!weekGameMap[g.id]) weekGameMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, scores: [] }
   if (r.score != null) weekGameMap[g.id].scores.push(r.score)
 }
-
+const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
 const topRated = Object.entries(weekGameMap)
   .map(([id, g]) => {
     if (g.scores.length < 2) return null
@@ -118,33 +97,34 @@ const topRated = Object.entries(weekGameMap)
   .sort((a: any, b: any) => b.avg_score - a.avg_score)
   .slice(0, 12)
 
+// Site stats
+const totalReviews = reviewCountRes.count ?? 0
+const totalGames = gameCountRes.count ?? 0
+const totalReviewers = profileCountRes.count ?? 0
+
+const { data: genres } = genresRes
+
+// ── Stage 3: user-specific queries (depends on profile) ──────────────────────
 let followingReviews: any[] = []
 let lastReview: any = null
 if (user && currentProfile) {
-  const { data: lr } = await (supabase as any)
-    .from('reviews')
-    .select(`id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url )`)
-    .eq('profile_id', currentProfile.id)
-    .eq('status', 'published')
-    .order('published_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  lastReview = lr ?? null
-
-  const { data: followRows } = await (supabase as any)
-    .from('follows').select('following_id').eq('follower_id', currentProfile.id)
-  const followingIds = (followRows ?? []).map((r: any) => r.following_id)
+  // lastReview and follows are independent of each other — run in parallel
+  const [lastReviewRes, followRowsRes] = await Promise.all([
+    db.from('reviews')
+      .select('id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url )')
+      .eq('profile_id', currentProfile.id)
+      .eq('status', 'published')
+      .order('published_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    db.from('follows').select('following_id').eq('follower_id', currentProfile.id),
+  ])
+  lastReview = lastReviewRes.data ?? null
+  const followingIds = (followRowsRes.data ?? []).map((r: any) => r.following_id)
   if (followingIds.length > 0) {
-    const { data: fRevs } = await (supabase as any)
+    const { data: fRevs } = await db
       .from('reviews')
-      .select(`
-        id, score, title, body, play_time_hours,
-        contains_spoilers, status, published_at, created_at,
-        played_on:platform_played_on ( id, name, slug ),
-        games ( id, title, slug, cover_img_url ),
-        profiles ( id, username, avatar_url ),
-        review_votes( vote )
-      `)
+      .select(REVIEW_FIELDS)
       .eq('status', 'published')
       .in('profile_id', followingIds)
       .order('published_at', { ascending: false })
@@ -152,22 +132,6 @@ if (user && currentProfile) {
     followingReviews = (fRevs ?? []) as any[]
   }
 }
-
-const [reviewCountRes, gameCountRes, profileCountRes] = await Promise.all([
-  (supabase as any).from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
-  (supabase as any).from('games').select('*', { count: 'exact', head: true }),
-  (supabase as any).from('profiles').select('*', { count: 'exact', head: true }),
-])
-const totalReviews = reviewCountRes.count ?? 0
-const totalGames = gameCountRes.count ?? 0
-const totalReviewers = profileCountRes.count ?? 0
-
-const featuredGame = mostReviewedToday
-
-const { data: genres } = await (supabase as any)
-  .from('genres')
-  .select('id, name')
-  .order('name')
 
 const featuredGenres = ['Action','Adventure','Role-playing (RPG)','Shooter','Platform','Puzzle','Strategy','Indie','Fighting','Racing']
 
