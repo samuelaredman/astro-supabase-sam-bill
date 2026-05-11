@@ -40,7 +40,8 @@ export const POST: APIRoute = async (context) => {
     .select('id')
     .eq('profile_id', profile.id)
     .eq('game_id', game_id)
-    .single();
+    .eq('status', 'published')
+    .maybeSingle();
 
   if (existing) {
     return new Response(JSON.stringify({ error: "You've already reviewed this game." }), {

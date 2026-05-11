@@ -20,8 +20,6 @@ interface Props {
   showGame?: boolean;
   /** Show reviewer avatar + username row. Pass true on feed and game pages. */
   showReviewer?: boolean;
-  /** 'link' navigates to /reviews/[id]. 'toggle' expands body inline. */
-  expandMode?: 'link' | 'toggle';
   showVotes?: boolean;
 }
 
@@ -31,7 +29,6 @@ const {
   isOwnProfile = false,
   showGame = true,
   showReviewer = false,
-  expandMode = 'link',
   showVotes = true,
 } = Astro.props;
 
@@ -134,10 +131,7 @@ const ts = review.published_at ?? review.created_at;
           {review.played_on && <span class="rc-chip">{review.played_on.name}</span>}
           {(review.play_time_hours ?? 0) > 0 && <span class="rc-chip">{review.play_time_hours}h</span>}
         </div>
-        {expandMode === 'link'
-          ? <a href={`/reviews/${review.id}`} class="rc-expand-link">Read more →</a>
-          : <button class="rc-expand-btn" data-body={`rcb-${review.id}`}>Read more →</button>
-        }
+        <a href={`/reviews/${review.id}`} class="rc-expand-link">Read more →</a>
       </div>
 
       {showVotes && (
@@ -145,6 +139,15 @@ const ts = review.published_at ?? review.created_at;
           <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
           <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
           {!showReviewer && <span class="rc-vote-ts">{timeAgo(ts)}</span>}
+          {isLoggedIn && isOwnProfile && (
+            <span class="rc-owner-actions">
+              <button class="rc-delete-btn" data-review-id={review.id}>Delete</button>
+              <span class="rc-delete-confirm" data-review-id={review.id} style="display:none">
+                Sure? <button class="rc-delete-yes" data-review-id={review.id}>Yes, delete</button>
+                <button class="rc-delete-no" data-review-id={review.id}>Cancel</button>
+              </span>
+            </span>
+          )}
           {isLoggedIn && !isOwnProfile && (
             <button class="rc-report" onclick={`openReport('review','${review.id}')`}>Report</button>
           )}
@@ -162,16 +165,58 @@ const ts = review.published_at ?? review.created_at;
       // Spoiler reveal
       var spoiler = e.target.closest('.rc-body[data-spoiler="true"]');
       if (spoiler) { spoiler.classList.remove('spoiler-hidden'); return; }
+    });
 
-      // Expand toggle
-      var expandBtn = e.target.closest('.rc-expand-btn');
-      if (expandBtn) {
-        // Walk up to .rc-content and find the sibling .rc-body — more robust than getElementById
-        var content = expandBtn.closest('.rc-content');
-        var bodyEl = content ? content.querySelector('.rc-body') : null;
-        if (!bodyEl) return;
-        var expanded = bodyEl.classList.toggle('rc-body-expanded');
-        expandBtn.textContent = expanded ? 'Show less ↑' : 'Read more →';
+    // Delete flow
+    document.addEventListener('click', async function(e) {
+      // Step 1: "Delete" clicked → show confirm row, hide button
+      var deleteBtn = e.target.closest('.rc-delete-btn');
+      if (deleteBtn) {
+        var id = deleteBtn.dataset.reviewId;
+        deleteBtn.style.display = 'none';
+        var confirmEl = document.querySelector('.rc-delete-confirm[data-review-id="' + id + '"]');
+        if (confirmEl) confirmEl.style.display = '';
+        return;
+      }
+
+      // Step 2a: "Cancel" clicked → revert
+      var cancelBtn = e.target.closest('.rc-delete-no');
+      if (cancelBtn) {
+        var id = cancelBtn.dataset.reviewId;
+        var confirmEl = document.querySelector('.rc-delete-confirm[data-review-id="' + id + '"]');
+        if (confirmEl) confirmEl.style.display = 'none';
+        var origBtn = document.querySelector('.rc-delete-btn[data-review-id="' + id + '"]');
+        if (origBtn) origBtn.style.display = '';
+        return;
+      }
+
+      // Step 2b: "Yes, delete" clicked → call API then fade out card
+      var yesBtn = e.target.closest('.rc-delete-yes');
+      if (yesBtn) {
+        var id = yesBtn.dataset.reviewId;
+        yesBtn.disabled = true;
+        yesBtn.textContent = 'Deleting…';
+        var res = await fetch('/api/reviews/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: id }),
+        });
+        if (!res.ok) {
+          yesBtn.disabled = false;
+          yesBtn.textContent = 'Yes, delete';
+          alert('Could not delete review. Please try again.');
+          return;
+        }
+        // Animate card out
+        var card = yesBtn.closest('.rc');
+        if (card) {
+          card.style.transition = 'opacity 0.3s, max-height 0.4s';
+          card.style.overflow = 'hidden';
+          card.style.opacity = '0';
+          card.style.maxHeight = card.offsetHeight + 'px';
+          setTimeout(function() { card.style.maxHeight = '0'; card.style.padding = '0'; }, 50);
+          setTimeout(function() { card.remove(); }, 450);
+        }
         return;
       }
     });
@@ -329,11 +374,6 @@ const ts = review.published_at ?? review.created_at;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .rc-body.rc-body-expanded {
-    display: block;
-    overflow: visible;
-    -webkit-line-clamp: unset;
-  }
   .rc-body.spoiler-hidden {
     filter: blur(4px);
     user-select: none;
@@ -362,19 +402,14 @@ const ts = review.published_at ?? review.created_at;
     letter-spacing: 0.04em;
     font-weight: 500;
   }
-  .rc-expand-btn, .rc-expand-link {
+  .rc-expand-link {
     font-size: 11px;
     color: var(--accent);
     margin-left: auto;
-    cursor: pointer;
-    background: none;
-    border: none;
-    font-family: inherit;
-    padding: 0;
     font-weight: 500;
     transition: opacity 0.15s;
   }
-  .rc-expand-btn:hover, .rc-expand-link:hover { opacity: 0.7; }
+  .rc-expand-link:hover { opacity: 0.7; }
 
   /* ── Votes ── */
   .rc-votes {
@@ -400,4 +435,56 @@ const ts = review.published_at ?? review.created_at;
     transition: color 0.15s, background 0.15s;
   }
   .rc-report:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+
+  /* ── Owner actions (delete) ── */
+  .rc-owner-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .rc-delete-btn {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .rc-delete-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+  .rc-delete-confirm {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .rc-delete-yes {
+    font-size: 11px;
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid rgba(248, 113, 113, 0.25);
+    cursor: pointer;
+    font-family: inherit;
+    padding: 1px 7px;
+    border-radius: 5px;
+    font-weight: 600;
+    transition: background 0.15s;
+  }
+  .rc-delete-yes:hover { background: rgba(248, 113, 113, 0.2); }
+  .rc-delete-yes:disabled { opacity: 0.5; cursor: default; }
+  .rc-delete-no {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 1px 5px;
+    border-radius: 5px;
+    transition: color 0.15s;
+  }
+  .rc-delete-no:hover { color: var(--text-primary); }
 </style>
