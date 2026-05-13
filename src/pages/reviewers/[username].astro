@@ -61,6 +61,7 @@ const { count: followingCount } = await (supabase as any)
 
 let currentProfile: any = null;
 let isFollowing = false;
+let isNotifying = false;
 let isOwnProfile = false;
 
 if (user) {
@@ -71,9 +72,10 @@ if (user) {
     isOwnProfile = currentProfile.id === reviewer.id;
     if (!isOwnProfile) {
       const { data: followRow } = await (supabase as any)
-        .from('follows').select('id')
-        .eq('follower_id', currentProfile.id).eq('following_id', reviewer.id).single();
+        .from('follows').select('id, notify')
+        .eq('follower_id', currentProfile.id).eq('following_id', reviewer.id).maybeSingle();
       isFollowing = !!followRow;
+      isNotifying = followRow?.notify ?? false;
     }
   }
 }
@@ -381,6 +383,9 @@ function getVoteCounts(votes: any) {
     .follow-btn.not-following:hover{opacity:.88;transform:translateY(-1px)}
     .follow-btn.following{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border)}
     .follow-btn.following:hover{border-color:#c0392b;color:#c0392b}
+    .notify-btn{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;border:1.5px solid var(--border);background:var(--bg-card);color:var(--text-tertiary);cursor:pointer;transition:all .15s;flex-shrink:0}
+    .notify-btn:hover{border-color:var(--text-tertiary);color:var(--text-secondary)}
+    .notify-btn.notifying{border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,.08)}
 
     /* EDIT MODE */
     .edit-profile-btn{padding:8px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);transition:all .15s;display:flex;align-items:center;gap:7px}
@@ -673,14 +678,30 @@ function getVoteCounts(votes: any) {
         </button>
       )}
       {!isOwnProfile && user && (
-        <button
-          class={`follow-btn ${isFollowing ? 'following' : 'not-following'}`}
-          id="followBtn"
-          data-reviewer-id={reviewer.id}
-          data-following={isFollowing ? 'true' : 'false'}
-        >
-          {isFollowing ? 'Following' : '+ Follow'}
-        </button>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button
+            class={`follow-btn ${isFollowing ? 'following' : 'not-following'}`}
+            id="followBtn"
+            data-reviewer-id={reviewer.id}
+            data-following={isFollowing ? 'true' : 'false'}
+          >
+            {isFollowing ? 'Following' : '+ Follow'}
+          </button>
+          {isFollowing && (
+            <button
+              class={`notify-btn${isNotifying ? ' notifying' : ''}`}
+              id="notifyBtn"
+              data-reviewer-id={reviewer.id}
+              data-notifying={isNotifying ? 'true' : 'false'}
+              title={isNotifying ? 'Turn off notifications' : 'Get notified when they post'}
+            >
+              <svg width="15" height="15" viewBox="0 0 18 18" fill={isNotifying ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13.5 6a4.5 4.5 0 0 0-9 0c0 5-2 6.5-2 6.5h13s-2-1.5-2-6.5"/>
+                <path d="M10.3 15a1.5 1.5 0 0 1-2.6 0"/>
+              </svg>
+            </button>
+          )}
+        </div>
       )}
       {!isOwnProfile && !user && (
         <a href="/signin" class="follow-btn not-following">+ Follow</a>
@@ -1860,8 +1881,46 @@ function getVoteCounts(votes: any) {
         followBtn.className = 'follow-btn ' + (nowFollowing ? 'following' : 'not-following')
         var countEl = document.getElementById('followerCount')
         if (countEl) countEl.textContent = String(parseInt(countEl.textContent) + (nowFollowing ? 1 : -1))
+        // Show/hide notify button based on follow state
+        var notifyBtn = document.getElementById('notifyBtn')
+        if (notifyBtn) notifyBtn.style.display = nowFollowing ? '' : 'none'
       }
       followBtn.disabled = false
+    })
+  }
+
+  // ── NOTIFY BELL ──
+  var notifyBtn = document.getElementById('notifyBtn')
+  if (notifyBtn) {
+    notifyBtn.addEventListener('click', async function() {
+      var reviewerId = notifyBtn.dataset.reviewerId
+      var notifying  = notifyBtn.dataset.notifying === 'true'
+      var newNotifying = !notifying
+
+      // Optimistic
+      notifyBtn.dataset.notifying = newNotifying ? 'true' : 'false'
+      notifyBtn.classList.toggle('notifying', newNotifying)
+      notifyBtn.querySelector('svg').setAttribute('fill', newNotifying ? 'currentColor' : 'none')
+      notifyBtn.title = newNotifying ? 'Turn off notifications' : 'Get notified when they post'
+
+      try {
+        var res = await fetch('/api/follows/notify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ following_id: reviewerId }),
+        })
+        var data = await res.json()
+        if (!res.ok) throw new Error()
+        notifyBtn.dataset.notifying = data.notify ? 'true' : 'false'
+        notifyBtn.classList.toggle('notifying', data.notify)
+        notifyBtn.querySelector('svg').setAttribute('fill', data.notify ? 'currentColor' : 'none')
+        notifyBtn.title = data.notify ? 'Turn off notifications' : 'Get notified when they post'
+      } catch(e) {
+        // Revert
+        notifyBtn.dataset.notifying = notifying ? 'true' : 'false'
+        notifyBtn.classList.toggle('notifying', notifying)
+        notifyBtn.querySelector('svg').setAttribute('fill', notifying ? 'currentColor' : 'none')
+      }
     })
   }
 

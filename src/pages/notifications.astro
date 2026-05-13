@@ -1,0 +1,275 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../utils/database";
+import Layout from "../components/Layout.astro";
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+
+if (!user) return Astro.redirect('/signin');
+
+const db = getSupabaseAdmin() as any;
+
+const { data: profile } = await db
+  .from('profiles').select('id').eq('auth_user_id', user.id).single();
+
+if (!profile) return Astro.redirect('/signin');
+
+// Fetch last 50 notifications with joined data
+const { data: rawNotifs } = await db
+  .from('notifications')
+  .select(`
+    id, type, read, created_at,
+    reviews ( id, title, score, games ( id, title, slug, cover_img_url ) ),
+    actor:actor_profile_id ( id, username, avatar_url ),
+    games ( id, title, slug, cover_img_url )
+  `)
+  .eq('profile_id', profile.id)
+  .order('created_at', { ascending: false })
+  .limit(50);
+
+const notifications = rawNotifs ?? [];
+
+// Mark all unread as read now that the user is viewing the page
+await db.from('notifications')
+  .update({ read: true })
+  .eq('profile_id', profile.id)
+  .eq('read', false);
+
+function timeAgo(dateStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return `${Math.floor(diff / 604800)}w ago`;
+}
+
+function igdbThumb(url: string | null | undefined) {
+  if (!url) return null;
+  const clean = url.startsWith('//') ? `https:${url}` : url;
+  return clean.replace(/t_[a-z0-9_]+/, 't_thumb');
+}
+
+function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
+---
+
+<Layout
+  title="Notifications — Chekpoint"
+  isLoggedIn={true}
+  activeNav="notifications"
+  variant="two-col"
+>
+  <main class="notif-main">
+    <div class="notif-header">
+      <h1 class="notif-title">Notifications</h1>
+      {notifications.length > 0 && (
+        <span class="notif-count">{notifications.length}</span>
+      )}
+    </div>
+
+    {notifications.length === 0 ? (
+      <div class="notif-empty">
+        <div class="notif-empty-icon">🔔</div>
+        <div class="notif-empty-title">Nothing yet</div>
+        <p class="notif-empty-body">
+          Add games to your watchlist or turn on notifications for reviewers you follow —
+          you'll hear about it here when they post.
+        </p>
+      </div>
+    ) : (
+      <div class="notif-list">
+        {notifications.map((n: any) => {
+          const game = n.reviews?.games ?? n.games;
+          const actor = n.actor;
+          const review = n.reviews;
+          const thumb = igdbThumb(game?.cover_img_url);
+          const isWatchlist = n.type === 'watchlist_review';
+
+          return (
+            <a
+              href={review ? `/reviews/${review.id}` : (game ? `/games/${game.slug}` : '#')}
+              class={`notif-item${n.read ? '' : ' unread'}`}
+            >
+              {/* Cover thumbnail */}
+              <div class="notif-cover">
+                {thumb
+                  ? <img src={thumb} alt={game?.title ?? ''} />
+                  : <span>🎮</span>
+                }
+              </div>
+
+              {/* Text */}
+              <div class="notif-body">
+                <div class="notif-text">
+                  {isWatchlist ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> reviewed
+                      {' '}<strong>{game?.title ?? 'a game'}</strong> on your watchlist
+                      {review?.score != null && (
+                        <span class="notif-score"> — scored it {review.score}</span>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> you follow posted a new review
+                      {game && <> of <strong>{game.title}</strong></>}
+                      {review?.score != null && (
+                        <span class="notif-score"> — {review.score}/10</span>
+                      )}
+                    </>
+                  )}
+                </div>
+                <div class="notif-meta">
+                  <span class={`notif-type-badge ${isWatchlist ? 'badge-watchlist' : 'badge-follow'}`}>
+                    {isWatchlist ? 'Watchlist' : 'Following'}
+                  </span>
+                  <span class="notif-time">{timeAgo(n.created_at)}</span>
+                </div>
+              </div>
+
+              {!n.read && <div class="notif-dot"></div>}
+            </a>
+          );
+        })}
+      </div>
+    )}
+  </main>
+</Layout>
+
+<style>
+  .notif-main {
+    min-width: 0;
+    padding: 24px 24px 48px;
+  }
+
+  .notif-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .notif-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 26px;
+    font-weight: 400;
+    color: var(--text-primary);
+    margin: 0;
+  }
+  .notif-count {
+    background: var(--accent);
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 20px;
+    line-height: 1.5;
+  }
+
+  /* Empty */
+  .notif-empty {
+    text-align: center;
+    padding: 64px 24px;
+  }
+  .notif-empty-icon { font-size: 36px; margin-bottom: 14px; }
+  .notif-empty-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 20px;
+    color: var(--text-primary);
+    margin-bottom: 10px;
+  }
+  .notif-empty-body {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    max-width: 360px;
+    margin: 0 auto;
+  }
+
+  /* List */
+  .notif-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .notif-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    text-decoration: none;
+    color: inherit;
+    border-radius: 10px;
+    transition: background 0.12s;
+    position: relative;
+  }
+  .notif-item:last-child { border-bottom: none; }
+  .notif-item:hover { background: var(--bg-hover); }
+  .notif-item.unread { background: rgba(99, 102, 241, 0.04); }
+  .notif-item.unread:hover { background: rgba(99, 102, 241, 0.08); }
+
+  .notif-cover {
+    width: 40px;
+    height: 54px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .notif-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .notif-body { flex: 1; min-width: 0; }
+
+  .notif-text {
+    font-size: 13px;
+    color: var(--text-primary);
+    line-height: 1.5;
+    margin-bottom: 6px;
+  }
+  .notif-text strong { font-weight: 600; }
+  .notif-score { color: var(--text-secondary); }
+
+  .notif-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .notif-type-badge {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+  .badge-watchlist {
+    background: rgba(52, 211, 153, 0.1);
+    color: #34d399;
+    border: 1px solid rgba(52, 211, 153, 0.2);
+  }
+  .badge-follow {
+    background: rgba(99, 102, 241, 0.1);
+    color: var(--accent);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+  }
+  .notif-time {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .notif-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+</style>
