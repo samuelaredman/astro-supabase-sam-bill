@@ -13,6 +13,8 @@ interface Props {
     games?: { id: string; title: string; slug: string; cover_img_url?: string | null } | null;
     profiles?: { id: string; username: string; avatar_url?: string | null } | null;
     review_votes?: { vote: number }[] | { vote: number } | null;
+    review_reactions?: { reaction_type: string; profile_id: string }[] | null;
+    review_comments?: { id: string }[] | null;
   };
   isLoggedIn?: boolean;
   isOwnProfile?: boolean;
@@ -21,6 +23,8 @@ interface Props {
   /** Show reviewer avatar + username row. Pass true on feed and game pages. */
   showReviewer?: boolean;
   showVotes?: boolean;
+  /** Current user's profile id — used to determine if they've already reacted. */
+  currentProfileId?: string | null;
 }
 
 const {
@@ -30,6 +34,7 @@ const {
   showGame = true,
   showReviewer = false,
   showVotes = true,
+  currentProfileId = null,
 } = Astro.props;
 
 function igdbCover(url: string | null | undefined, size = 't_cover_big') {
@@ -66,8 +71,23 @@ const votesArr = Array.isArray(review.review_votes)
   : review.review_votes ? [review.review_votes] : [];
 const up = votesArr.filter((v: any) => v.vote === 1).length;
 const down = votesArr.filter((v: any) => v.vote === -1).length;
+
+const reactionsArr: { reaction_type: string; profile_id: string }[] =
+  Array.isArray(review.review_reactions) ? review.review_reactions : [];
+const soldCount = reactionsArr.filter(r => r.reaction_type === 'sold').length;
+const userSold = !!(currentProfileId && reactionsArr.some(
+  r => r.reaction_type === 'sold' && r.profile_id === currentProfileId
+));
+
+const commentCount = Array.isArray(review.review_comments)
+  ? review.review_comments.length
+  : 0;
+
 const coverThumb = igdbCover(review.games?.cover_img_url, 't_thumb');
 const ts = review.published_at ?? review.created_at;
+
+// Show ... menu for any card that isn't your own review
+const showMenu = !isOwnProfile;
 ---
 
 <article
@@ -76,6 +96,23 @@ const ts = review.published_at ?? review.created_at;
   data-date={ts}
   data-upvotes={up}
 >
+
+  {/* ── Three-dot menu (top-right, always visible on non-own reviews) ── */}
+  {showMenu && (
+    <div class="rc-menu-wrap">
+      <button class="rc-menu-btn" data-menu-id={review.id} aria-label="More options">⋯</button>
+      <div class="rc-menu-dropdown" id={`rcd-${review.id}`} style="display:none">
+        <button
+          class="rc-menu-report"
+          data-report-review-id={review.id}
+          data-is-logged-in={isLoggedIn ? 'true' : 'false'}
+        >
+          Report
+        </button>
+      </div>
+    </div>
+  )}
+
   {showReviewer && (
     <div class="rc-reviewer">
       <a href={`/reviewers/${review.profiles?.username}`} class="rc-avatar">
@@ -126,19 +163,61 @@ const ts = review.published_at ?? review.created_at;
         {review.body}
       </div>
 
+      {/* ── Footer: chips + comment count bubble ── */}
       <div class="rc-footer">
         <div class="rc-chips">
           {review.played_on && <span class="rc-chip">{review.played_on.name}</span>}
           {(review.play_time_hours ?? 0) > 0 && <span class="rc-chip">{review.play_time_hours}h</span>}
         </div>
-        <a href={`/reviews/${review.id}`} class="rc-expand-link">Read more →</a>
+        <a href={`/reviews/${review.id}`} class="rc-comment-bubble">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 10a2 2 0 0 1-2 2H5l-3 3V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6z"/>
+          </svg>
+          {commentCount}
+        </a>
       </div>
 
       {showVotes && (
         <div class="rc-votes">
           <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
           <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
+
+          <span class="rc-votes-sep"></span>
+
+          {/* ── SOLD pill + reaction panel toggle ── */}
+          <div class="rc-reaction-wrap">
+            <button
+              class={`rc-sold-pill${userSold ? ' sold-active' : ''}`}
+              data-review-id={review.id}
+              data-reaction="sold"
+              data-reacted={userSold ? 'true' : 'false'}
+              data-count={soldCount}
+              data-logged-in={isLoggedIn ? 'true' : 'false'}
+            >
+              SOLD {soldCount}
+            </button>
+            <button class="rc-reaction-toggle" data-panel-id={review.id} title="All reactions">›</button>
+
+            {/* Floating reaction panel */}
+            <div class="rc-reaction-panel" id={`rrp-${review.id}`} style="display:none">
+              <div class="rc-reaction-panel-title">Reactions</div>
+              <div class="rc-reaction-list">
+                <button
+                  class={`rc-sold-pill rc-sold-panel-btn${userSold ? ' sold-active' : ''}`}
+                  data-review-id={review.id}
+                  data-reaction="sold"
+                  data-reacted={userSold ? 'true' : 'false'}
+                  data-count={soldCount}
+                  data-logged-in={isLoggedIn ? 'true' : 'false'}
+                >
+                  SOLD {soldCount}
+                </button>
+              </div>
+            </div>
+          </div>
+
           {!showReviewer && <span class="rc-vote-ts">{timeAgo(ts)}</span>}
+
           {isLoggedIn && isOwnProfile && (
             <span class="rc-owner-actions">
               <button
@@ -165,9 +244,6 @@ const ts = review.published_at ?? review.created_at;
               </span>
             </span>
           )}
-          {isLoggedIn && !isOwnProfile && (
-            <button class="rc-report" onclick={`openReport('review','${review.id}')`}>Report</button>
-          )}
         </div>
       )}
     </div>
@@ -178,12 +254,102 @@ const ts = review.published_at ?? review.created_at;
   if (!window.__rcInit) {
     window.__rcInit = true;
 
+    // ── Close all floating panels/dropdowns ──────────────────────────────────
+    function closeAllRcPanels() {
+      document.querySelectorAll('.rc-reaction-panel').forEach(function(p) { p.style.display = 'none'; });
+      document.querySelectorAll('.rc-menu-dropdown').forEach(function(d) { d.style.display = 'none'; });
+    }
+
     document.addEventListener('click', function(e) {
       // Spoiler reveal
       var spoiler = e.target.closest('.rc-body[data-spoiler="true"]');
       if (spoiler) { spoiler.classList.remove('spoiler-hidden'); return; }
 
-      // Edit button — delegate to EditModal's openEditModal()
+      // ── Three-dot menu toggle ────────────────────────────────────────────
+      var menuBtn = e.target.closest('.rc-menu-btn');
+      if (menuBtn) {
+        var menuId = menuBtn.dataset.menuId;
+        var dropdown = document.getElementById('rcd-' + menuId);
+        if (!dropdown) return;
+        var isOpen = dropdown.style.display !== 'none';
+        closeAllRcPanels();
+        if (!isOpen) dropdown.style.display = 'block';
+        return;
+      }
+
+      // ── Report from dropdown ─────────────────────────────────────────────
+      var reportBtn = e.target.closest('.rc-menu-report');
+      if (reportBtn) {
+        closeAllRcPanels();
+        var loggedIn = reportBtn.dataset.isLoggedIn === 'true';
+        if (!loggedIn) { window.location.href = '/signin'; return; }
+        var rid = reportBtn.dataset.reportReviewId;
+        if (typeof openReport === 'function') openReport('review', rid);
+        return;
+      }
+
+      // ── Reaction panel toggle (› button) ────────────────────────────────
+      var panelToggle = e.target.closest('.rc-reaction-toggle');
+      if (panelToggle) {
+        var panelId = panelToggle.dataset.panelId;
+        var panel = document.getElementById('rrp-' + panelId);
+        if (!panel) return;
+        var isOpen = panel.style.display !== 'none';
+        closeAllRcPanels();
+        if (!isOpen) panel.style.display = 'block';
+        return;
+      }
+
+      // ── SOLD pill click (both inline and panel) ──────────────────────────
+      var soldBtn = e.target.closest('.rc-sold-pill');
+      if (soldBtn) {
+        var loggedIn = soldBtn.dataset.loggedIn === 'true';
+        if (!loggedIn) { window.location.href = '/signin'; return; }
+
+        var reviewId = soldBtn.dataset.reviewId;
+        var reaction = soldBtn.dataset.reaction;
+        var reacted  = soldBtn.dataset.reacted === 'true';
+        var count    = parseInt(soldBtn.dataset.count) || 0;
+
+        // Optimistic update on ALL sold pills for this review
+        var newReacted = !reacted;
+        var newCount   = newReacted ? count + 1 : Math.max(0, count - 1);
+        document.querySelectorAll('.rc-sold-pill[data-review-id="' + reviewId + '"]').forEach(function(btn) {
+          btn.dataset.reacted = newReacted ? 'true' : 'false';
+          btn.dataset.count   = String(newCount);
+          btn.textContent     = 'SOLD ' + newCount;
+          btn.classList.toggle('sold-active', newReacted);
+        });
+
+        fetch('/api/reviews/react', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: reviewId, reaction_type: reaction }),
+        }).then(function(res) {
+          if (res.status === 401) { window.location.href = '/signin'; return; }
+          return res.json();
+        }).then(function(data) {
+          if (!data) return;
+          // Confirm with server values
+          document.querySelectorAll('.rc-sold-pill[data-review-id="' + reviewId + '"]').forEach(function(btn) {
+            btn.dataset.reacted = data.reacted ? 'true' : 'false';
+            btn.dataset.count   = String(data.count);
+            btn.textContent     = 'SOLD ' + data.count;
+            btn.classList.toggle('sold-active', data.reacted);
+          });
+        }).catch(function() {
+          // Revert on error
+          document.querySelectorAll('.rc-sold-pill[data-review-id="' + reviewId + '"]').forEach(function(btn) {
+            btn.dataset.reacted = reacted ? 'true' : 'false';
+            btn.dataset.count   = String(count);
+            btn.textContent     = 'SOLD ' + count;
+            btn.classList.toggle('sold-active', reacted);
+          });
+        });
+        return;
+      }
+
+      // ── Edit button ──────────────────────────────────────────────────────
       var editBtn = e.target.closest('.rc-edit-btn');
       if (editBtn) {
         var d = editBtn.dataset;
@@ -202,11 +368,15 @@ const ts = review.published_at ?? review.created_at;
         }
         return;
       }
+
+      // Outside click: close all panels
+      if (!e.target.closest('.rc-reaction-wrap') && !e.target.closest('.rc-menu-wrap')) {
+        closeAllRcPanels();
+      }
     });
 
-    // Delete flow
+    // ── Delete flow ──────────────────────────────────────────────────────────
     document.addEventListener('click', async function(e) {
-      // Step 1: "Delete" clicked → show confirm row, hide button
       var deleteBtn = e.target.closest('.rc-delete-btn');
       if (deleteBtn) {
         var id = deleteBtn.dataset.reviewId;
@@ -216,7 +386,6 @@ const ts = review.published_at ?? review.created_at;
         return;
       }
 
-      // Step 2a: "Cancel" clicked → revert
       var cancelBtn = e.target.closest('.rc-delete-no');
       if (cancelBtn) {
         var id = cancelBtn.dataset.reviewId;
@@ -227,7 +396,6 @@ const ts = review.published_at ?? review.created_at;
         return;
       }
 
-      // Step 2b: "Yes, delete" clicked → call API then fade out card
       var yesBtn = e.target.closest('.rc-delete-yes');
       if (yesBtn) {
         var id = yesBtn.dataset.reviewId;
@@ -244,7 +412,6 @@ const ts = review.published_at ?? review.created_at;
           alert('Could not delete review. Please try again.');
           return;
         }
-        // Animate card out
         var card = yesBtn.closest('.rc');
         if (card) {
           card.style.transition = 'opacity 0.3s, max-height 0.4s';
@@ -258,7 +425,7 @@ const ts = review.published_at ?? review.created_at;
       }
     });
 
-    // Vote buttons
+    // ── Vote buttons ─────────────────────────────────────────────────────────
     document.addEventListener('click', async function(e) {
       var btn = e.target.closest('.vote-btn');
       if (!btn) return;
@@ -296,6 +463,7 @@ const ts = review.published_at ?? review.created_at;
 
 <style>
   .rc {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -304,11 +472,63 @@ const ts = review.published_at ?? review.created_at;
   }
   .rc:last-child { border-bottom: none; }
 
+  /* ── Three-dot menu ── */
+  .rc-menu-wrap {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    z-index: 5;
+  }
+  .rc-menu-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    font-size: 15px;
+    line-height: 1;
+    padding: 3px 5px;
+    border-radius: 5px;
+    opacity: 0.35;
+    transition: opacity 0.15s, color 0.15s, background 0.15s;
+    letter-spacing: 1px;
+    font-family: inherit;
+  }
+  .rc:hover .rc-menu-btn { opacity: 1; }
+  .rc-menu-btn:hover { color: var(--text-primary); background: var(--bg-hover); opacity: 1; }
+
+  .rc-menu-dropdown {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    min-width: 110px;
+    z-index: 20;
+    overflow: hidden;
+  }
+  .rc-menu-report {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 9px 14px;
+    font-size: 13px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    color: var(--text-secondary);
+    transition: background 0.1s, color 0.1s;
+  }
+  .rc-menu-report:hover { background: rgba(248,113,113,0.08); color: #f87171; }
+
   /* ── Reviewer row ── */
   .rc-reviewer {
     display: flex;
     align-items: center;
     gap: 8px;
+    padding-right: 28px; /* don't overlap menu btn */
   }
   .rc-avatar {
     width: 28px;
@@ -365,6 +585,7 @@ const ts = review.published_at ?? review.created_at;
     justify-content: space-between;
     gap: 10px;
     margin-bottom: 6px;
+    padding-right: 24px; /* room for menu btn when no reviewer row */
   }
   .rc-game-link {
     font-size: 14px;
@@ -420,7 +641,7 @@ const ts = review.published_at ?? review.created_at;
   }
   .rc-body.spoiler-hidden:hover { filter: blur(3px); }
 
-  /* ── Footer: chips + read more ── */
+  /* ── Footer: chips + comment bubble ── */
   .rc-footer {
     display: flex;
     align-items: center;
@@ -440,41 +661,135 @@ const ts = review.published_at ?? review.created_at;
     letter-spacing: 0.04em;
     font-weight: 500;
   }
-  .rc-expand-link {
+  .rc-comment-bubble {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: 11px;
-    color: var(--accent);
+    color: var(--text-tertiary);
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    padding: 3px 9px;
+    border-radius: 20px;
+    text-decoration: none;
+    transition: color 0.15s, border-color 0.15s;
     margin-left: auto;
     font-weight: 500;
-    transition: opacity 0.15s;
   }
-  .rc-expand-link:hover { opacity: 0.7; }
+  .rc-comment-bubble:hover {
+    color: var(--text-secondary);
+    border-color: var(--text-tertiary);
+  }
 
-  /* ── Votes ── */
+  /* ── Votes row ── */
   .rc-votes {
     display: flex;
     align-items: center;
     gap: 6px;
     margin-top: 8px;
+    flex-wrap: wrap;
+  }
+  .rc-votes-sep {
+    width: 1px;
+    height: 14px;
+    background: var(--border);
+    margin: 0 2px;
+    flex-shrink: 0;
   }
   .rc-vote-ts {
     font-size: 11px;
     color: var(--text-tertiary);
     margin-left: auto;
   }
-  .rc-report {
+
+  /* ── SOLD pill ── */
+  .rc-sold-pill {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 3px 11px;
+    border-radius: 20px;
+    border: 1.5px solid rgba(245, 158, 11, 0.28);
+    color: rgba(245, 158, 11, 0.5);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.18s;
+    white-space: nowrap;
+    line-height: 1.5;
+  }
+  .rc-sold-pill:hover:not(.sold-active) {
+    border-color: rgba(245, 158, 11, 0.6);
+    color: rgba(245, 158, 11, 0.8);
+    background: rgba(245, 158, 11, 0.05);
+  }
+  .rc-sold-pill.sold-active {
+    border-color: #f59e0b;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.12);
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.18), inset 0 0 6px rgba(245, 158, 11, 0.06);
+  }
+  /* Bigger version inside the panel */
+  .rc-sold-panel-btn {
     font-size: 11px;
-    color: var(--text-tertiary);
+    padding: 5px 14px;
+  }
+
+  /* ── Reaction toggle (›) ── */
+  .rc-reaction-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .rc-reaction-toggle {
     background: none;
     border: none;
     cursor: pointer;
+    color: var(--text-tertiary);
+    font-size: 13px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    line-height: 1;
     font-family: inherit;
-    padding: 2px 6px;
-    border-radius: 6px;
     transition: color 0.15s, background 0.15s;
   }
-  .rc-report:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+  .rc-reaction-toggle:hover {
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+  }
 
-  /* ── Owner actions (delete) ── */
+  /* ── Reaction panel ── */
+  .rc-reaction-panel {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.14);
+    min-width: 160px;
+    max-height: 220px;
+    overflow-y: auto;
+    z-index: 15;
+  }
+  .rc-reaction-panel-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+  .rc-reaction-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* ── Owner actions ── */
   .rc-owner-actions {
     display: inline-flex;
     align-items: center;
