@@ -55,7 +55,10 @@ ${urlEntries}
   return new Response(xml, {
     headers: {
       'Content-Type': 'application/xml; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+      // Browser/proxy: cache 1 hour
+      'Cache-Control': 'public, max-age=3600, s-maxage=86400',
+      // Netlify Edge CDN: cache 24 hours, serve stale for up to 7 days while revalidating
+      'Netlify-CDN-Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
     },
   });
 };
