@@ -3,6 +3,7 @@ import netlify from '@astrojs/netlify';
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
+  site: 'https://chekpoint.gg',
   output: 'server',
   markdown: {
     shikiConfig: {
