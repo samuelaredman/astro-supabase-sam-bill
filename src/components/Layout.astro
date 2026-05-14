@@ -4,6 +4,8 @@ import "../styles/shared.css";
 
 interface Props {
   title: string;
+  description?: string;
+  ogImage?: string;
   isLoggedIn?: boolean;
   currentProfile?: { id: string; username: string; avatar_url: string | null } | null;
   activeNav?: 'home' | 'following' | 'search' | 'profile' | 'hot-takes' | 'notifications' | 'settings';
@@ -13,11 +15,15 @@ interface Props {
 
 const {
   title,
+  description,
+  ogImage,
   isLoggedIn = false,
   currentProfile = null,
   activeNav,
   variant = 'three-col',
 } = Astro.props;
+
+const canonicalUrl = Astro.url.href;
 
 const hasSidebarRight = variant === 'three-col' && Astro.slots.has('sidebar-right');
 const layoutClass = variant === 'centered' ? 'layout no-sidebar' : variant === 'two-col' ? 'layout two-col' : hasSidebarRight ? 'layout' : 'layout two-col';
@@ -37,6 +43,20 @@ function getInitials(username: string): string {
   <meta name="theme-color" content="#141412" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#0f0f0e" media="(prefers-color-scheme: dark)" />
   <title>{title}</title>
+  {description && <meta name="description" content={description} />}
+  <link rel="canonical" href={canonicalUrl} />
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Chekpoint" />
+  <meta property="og:title" content={title} />
+  {description && <meta property="og:description" content={description} />}
+  {ogImage && <meta property="og:image" content={ogImage} />}
+  <meta property="og:url" content={canonicalUrl} />
+  <!-- Twitter / X card -->
+  <meta name="twitter:card" content={ogImage ? 'summary_large_image' : 'summary'} />
+  <meta name="twitter:title" content={title} />
+  {description && <meta name="twitter:description" content={description} />}
+  {ogImage && <meta name="twitter:image" content={ogImage} />}
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
@@ -44,13 +64,19 @@ function getInitials(username: string): string {
   <slot name="head" />
   <!-- Google Search Console verification -->
   <meta name="google-site-verification" content="l1TgpE7YMhgtwQDau-96h_eqePqIgzVJPx6cB95HDn4" />
-  <!-- Google Analytics 4 -->
+  <!-- Google Analytics 4 with Consent Mode v2 (analytics off by default) -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-TFBYE9G1QW" is:inline></script>
   <script is:inline>
     window.dataLayer = window.dataLayer || [];
     function gtag(){dataLayer.push(arguments);}
+    // Deny analytics by default — updated to 'granted' only if user accepts
+    gtag('consent', 'default', { analytics_storage: 'denied', wait_for_update: 500 });
     gtag('js', new Date());
     gtag('config', 'G-TFBYE9G1QW');
+    // If user has already accepted in a previous visit, grant immediately
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('cookie-consent') === 'accepted') {
+      gtag('consent', 'update', { analytics_storage: 'granted' });
+    }
   </script>
   <link rel="manifest" href="/manifest.json" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
@@ -267,6 +293,18 @@ function getInitials(username: string): string {
   </nav>
 )}
 
+<!-- Cookie consent banner — shown only on first visit, respects theme -->
+<div id="cookieBanner" role="dialog" aria-live="polite" aria-label="Cookie consent" style="display:none">
+  <p class="cookie-text">
+    We use analytics to understand how people use Chekpoint. No personal data is sold.
+    <a href="/privacy">Privacy policy</a>
+  </p>
+  <div class="cookie-actions">
+    <button id="cookieDecline" class="cookie-btn cookie-decline">Decline</button>
+    <button id="cookieAccept" class="cookie-btn cookie-accept">Accept analytics</button>
+  </div>
+</div>
+
 <Footer />
 
 <script is:inline>
@@ -314,6 +352,25 @@ function getInitials(username: string): string {
     document.body.style.overflow = '';
     window.scrollTo(0, __scrollLockY);
   };
+
+  // Cookie consent banner — only show if no decision has been recorded yet
+  (function() {
+    if (localStorage.getItem('cookie-consent')) return; // already decided
+    var banner = document.getElementById('cookieBanner');
+    if (!banner) return;
+    banner.style.display = 'flex';
+
+    document.getElementById('cookieAccept').addEventListener('click', function() {
+      localStorage.setItem('cookie-consent', 'accepted');
+      gtag('consent', 'update', { analytics_storage: 'granted' });
+      banner.style.display = 'none';
+    });
+
+    document.getElementById('cookieDecline').addEventListener('click', function() {
+      localStorage.setItem('cookie-consent', 'declined');
+      banner.style.display = 'none';
+    });
+  })();
 
   // Notification badge — fetch unread count client-side so it doesn't slow page renders
   (function() {
@@ -363,6 +420,51 @@ function getInitials(username: string): string {
     justify-content: center;
     padding: 24px;
   }
+
+  /* ── Cookie consent banner ── */
+  #cookieBanner {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  /* On mobile, sit above the bottom nav */
+  @media (max-width: 768px) {
+    #cookieBanner {
+      bottom: calc(56px + env(safe-area-inset-bottom));
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 14px 16px;
+    }
+  }
+  .cookie-text { flex: 1; line-height: 1.5; }
+  .cookie-text a { color: var(--text-primary); text-decoration: underline; text-underline-offset: 2px; }
+  .cookie-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .cookie-btn {
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    transition: opacity 0.15s;
+  }
+  .cookie-btn:hover { opacity: 0.8; }
+  .cookie-decline { background: transparent; color: var(--text-secondary); }
+  .cookie-accept { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 
   .notif-badge {
     position: absolute;
