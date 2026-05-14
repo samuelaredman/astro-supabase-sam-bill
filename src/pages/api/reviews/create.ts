@@ -111,7 +111,24 @@ export const POST: APIRoute = async (context) => {
     console.error('[create] notification error (non-fatal):', e);
   }
 
-  return new Response(JSON.stringify({ success: true }), {
+  // ── Fetch community context for the post-review reveal card ──
+  const [{ data: gameData }, { data: communityReviews }] = await Promise.all([
+    (supabase as any).from('games').select('slug, cover_img_url').eq('id', game_id).single(),
+    (supabase as any).from('reviews').select('score').eq('game_id', game_id).eq('status', 'published'),
+  ]);
+
+  const reviewCount = communityReviews?.length ?? 1;
+  const communityAvg = reviewCount > 0
+    ? Math.round((communityReviews.reduce((s: number, r: any) => s + r.score, 0) / reviewCount) * 10) / 10
+    : score;
+
+  return new Response(JSON.stringify({
+    success: true,
+    gameSlug: gameData?.slug ?? null,
+    gameCover: gameData?.cover_img_url ?? null,
+    communityAvg,
+    reviewCount,
+  }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
