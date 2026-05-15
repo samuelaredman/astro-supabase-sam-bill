@@ -1,14 +1,13 @@
 ---
 export const prerender = false;
-import { getSupabase, createSupabaseServerClient } from '../utils/database';
+import { createSupabaseServerClientFromContext } from '../utils/database';
 import Layout from '../components/Layout.astro';
 import ReportModal from '../components/ReportModal.astro';
 import ReviewCard from '../components/ReviewCard.astro';
 
-const supabase = getSupabase();
-const serverClient = createSupabaseServerClient(Astro.request, new Response());
-const { data: { session } } = await serverClient.auth.getSession();
-const isLoggedIn = !!session;
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
 
 const sortBy = Astro.url.searchParams.get('sort') || 'recent';
 
@@ -16,16 +15,16 @@ let currentProfile: { id: string; username: string; avatar_url: string | null } 
 let followingReviews: any[] = [];
 let followingCount = 0;
 
-if (session?.user) {
-  const { data: cpData } = await (supabase as any)
+if (user) {
+  const { data: cpData } = await serverClient
     .from('profiles')
     .select('id, username, avatar_url')
-    .eq('auth_user_id', session.user.id)
+    .eq('auth_user_id', user.id)
     .single();
   currentProfile = cpData;
 
   if (currentProfile) {
-    const { data: followRows } = await (supabase as any)
+    const { data: followRows } = await serverClient
       .from('follows')
       .select('following_id')
       .eq('follower_id', currentProfile.id);
@@ -34,7 +33,7 @@ if (session?.user) {
     followingCount = followingIds.length;
 
     if (followingIds.length > 0) {
-      let query = (supabase as any)
+      let query = serverClient
         .from('reviews')
         .select(`
           id, score, title, body, play_time_hours,
@@ -48,9 +47,8 @@ if (session?.user) {
         `)
         .eq('status', 'published')
         .in('profile_id', followingIds)
-        .limit(50);
-
-      query = query.order('published_at', { ascending: false });
+        .limit(50)
+        .order('published_at', { ascending: false });
 
       const { data: fRevs } = await query;
       followingReviews = (fRevs ?? []) as any[];
@@ -74,7 +72,7 @@ if (session?.user) {
 
 let lastReview: any = null;
 if (currentProfile) {
-  const { data: lr } = await (supabase as any)
+  const { data: lr } = await serverClient
     .from('reviews')
     .select(`
       id, score, published_at, created_at, title,
