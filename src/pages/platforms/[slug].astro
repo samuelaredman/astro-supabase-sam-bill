@@ -1,9 +1,11 @@
 ---
 export const prerender = false;
-import { getSupabase } from '../../utils/database'
+import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/database'
 import { igdbFetch } from '../../utils/igdb'
 
 const supabase = getSupabase();
+const { data: { user: _platformUser } } = await createSupabaseServerClientFromContext(Astro).auth.getUser();
+const isLoggedIn = !!_platformUser;
 const { slug } = Astro.params;
 
 const { data: platform } = await supabase
@@ -440,11 +442,28 @@ const byYearJson = JSON.stringify(
   }, {})
 )
 const yearsJson = JSON.stringify(years)
+
+// CDN cache — anonymous visitors share a cached response; auth users get a fresh render
+if (!isLoggedIn) {
+  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+  Astro.response.headers.set('Cache-Control', 'public, max-age=60');
+} else {
+  Astro.response.headers.set('Cache-Control', 'private, no-store');
+}
+Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 ---
 
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
+  <!-- Runs synchronously before CSS is applied — prevents dark mode flash -->
+  <script is:inline>
+    (function() {
+      var t = localStorage.getItem('theme') ||
+        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{platform.name} — Cartridge</title>
@@ -1067,8 +1086,7 @@ const yearsJson = JSON.stringify(years)
     }
     window.toggleTheme = toggleTheme;
 
-    var saved=localStorage.getItem('theme')||(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
-    document.documentElement.setAttribute('data-theme',saved);
+    var saved=document.documentElement.getAttribute('data-theme')||'light';
     updateIcon(saved);
 
   </script>

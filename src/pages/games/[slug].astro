@@ -1,16 +1,16 @@
 ---
 export const prerender = false;
 
-import { getSupabase, createSupabaseServerClient } from '../../utils/database'
+import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/database'
 const supabase = getSupabase();
 import { igdbFetch } from '../../utils/igdb'
 import Layout from '../../components/Layout.astro'
 import ReviewCard from '../../components/ReviewCard.astro'
 import ReportModal from '../../components/ReportModal.astro'
 
-const serverClient = createSupabaseServerClient(Astro.request, new Response());
-const { data: { session } } = await serverClient.auth.getSession();
-const isLoggedIn = !!session;
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
 
 const { slug } = Astro.params;
 const activeTab = Astro.url.searchParams.get('tab') || 'overview'
@@ -44,9 +44,9 @@ const { data: reviews } = await (supabase as any)
   .order('published_at', { ascending: false })
 
 let currentProfileId: string | null = null;
-if (session?.user) {
+if (user) {
   const { data: cp } = await (supabase as any)
-    .from('profiles').select('id').eq('auth_user_id', session.user.id).single();
+    .from('profiles').select('id').eq('auth_user_id', user.id).single();
   currentProfileId = cp?.id ?? null;
 }
 
@@ -316,6 +316,15 @@ const statsJson = JSON.stringify({
   scoreDistribution, monthLabels, monthCounts, monthAvgScores,
   hoursDistribution, platformScores,
 })
+
+// CDN cache — anonymous visitors share a cached response; auth users get a fresh render
+if (!isLoggedIn) {
+  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+  Astro.response.headers.set('Cache-Control', 'public, max-age=60');
+} else {
+  Astro.response.headers.set('Cache-Control', 'private, no-store');
+}
+Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 ---
 
 <Layout title={`${game.title} — Chekpoint`} description={gameDescription} ogImage={ogImageUrl} variant="fullwidth">
