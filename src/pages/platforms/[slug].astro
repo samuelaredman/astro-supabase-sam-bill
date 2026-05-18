@@ -78,9 +78,8 @@ const gameAvg = allGameScores.length > 0
 const totalGameReviews = allGameScores.length
 
 const topRated = allGames
-  .filter((g: any) => (reviewsByGame[g.id]?.length ?? 0) >= 1)
   .sort((a: any, b: any) =>
-    parseFloat(gameAvgScore(b.id) ?? '0') - parseFloat(gameAvgScore(a.id) ?? '0')
+    parseFloat(gameAvgScore(b.id) ?? '-1') - parseFloat(gameAvgScore(a.id) ?? '-1')
   )
   .slice(0, 100)
 
@@ -701,12 +700,18 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .row-arrow:disabled{opacity:.25;cursor:default;pointer-events:none}
 
     .year-histogram-wrap{margin-bottom:12px}
-    .year-hist-bars{display:flex;gap:2px;align-items:flex-end;height:60px;border-bottom:1px solid var(--border-subtle);padding-bottom:0;cursor:default}
-    .year-hist-bar{flex:1;min-width:2px;border-radius:2px 2px 0 0;opacity:.35;cursor:pointer;transition:opacity .15s,background .15s}
-    .year-hist-bar:hover,.year-hist-bar.active{opacity:1}
+    .hist-legend{display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap}
+    .hist-legend-item{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-tertiary)}
+    .hist-legend-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+    .year-hist-bars{display:flex;gap:2px;align-items:flex-end;height:80px;border-bottom:1px solid var(--border-subtle);padding-bottom:0;cursor:default}
+    .year-hist-bar{flex:1;min-width:2px;border-radius:2px 2px 0 0;opacity:.55;cursor:pointer;transition:opacity .15s,filter .15s}
+    .year-hist-bar:hover{opacity:.85}
+    .year-hist-bar.active{opacity:1;filter:brightness(1.15)}
     .year-hist-labels{display:flex;gap:2px;margin-top:3px;height:14px}
-    .year-hist-lbl{flex:1;min-width:2px;font-size:9px;font-weight:600;text-align:center;overflow:hidden;white-space:nowrap;color:transparent;transition:color .12s;line-height:14px}
-    .year-hist-lbl.active{color:var(--text-secondary)}
+    .year-hist-lbl{flex:1;min-width:2px;font-size:9px;font-weight:500;text-align:center;overflow:hidden;white-space:nowrap;color:transparent;transition:color .12s;line-height:14px}
+    .year-hist-lbl.milestone{color:var(--text-tertiary);opacity:.55}
+    .year-hist-lbl.active{color:var(--text-primary) !important;font-weight:700;opacity:1}
+    .rank-badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;line-height:1.4;letter-spacing:.01em;backdrop-filter:blur(4px)}
 
     .year-panel-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)}
     .year-panel-label{font-family:'DM Serif Display',serif;font-size:22px;letter-spacing:-.3px;color:var(--text-primary)}
@@ -982,7 +987,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         </div>
       )}
 
-      {topRated.length > 0 && (
+      {allGames.length > 0 && (
         <div class="section">
           <div class="section-header">
             <span class="section-title">Top Rated</span>
@@ -1122,13 +1127,14 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
     var scoreBorderColors = {'badge-great':'#4ade80','badge-good':'#60a5fa','badge-mid':'#fbbf24','badge-low':'#f87171'}
 
-    function makeCard(g, isExc) {
+    function makeCard(g, isExc, rank) {
       var cv = g.cover ? '<img src="'+g.cover+'" alt="" loading="lazy"/>' : '<div class="game-cover-placeholder">🎮</div>';
       var bd = g.score ? '<div class="game-score-badge '+g.badge+'">'+g.score+'</div>' : '';
       var ex = isExc ? '<div class="exclusive-badge">Exclusive</div>' : '';
+      var rk = rank ? '<div class="rank-badge">#'+rank+'</div>' : '';
       var borderBottom = g.badge && scoreBorderColors[g.badge] ? 'border-bottom:2px solid '+scoreBorderColors[g.badge]+';' : '';
       return '<a href="/games/'+g.slug+'" class="game-card" style="'+borderBottom+'">'
-        +'<div class="game-cover">'+cv+bd+ex+'</div>'
+        +'<div class="game-cover">'+cv+bd+ex+rk+'</div>'
         +'<div class="game-info">'
         +'<div class="game-title-text">'+g.title+'</div>'
         +(g.reviews?'<div class="game-review-count">'+g.reviews+'</div>':'')
@@ -1137,8 +1143,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
     var rows = {};
 
-    function initRow(key, data, rowId, prevId, nextId, infoId, isExc) {
-      rows[key] = {data:data,page:0,pageSize:5,rowId:rowId,prevId:prevId,nextId:nextId,infoId:infoId,isExc:isExc||false};
+    function initRow(key, data, rowId, prevId, nextId, infoId, isExc, showRank) {
+      rows[key] = {data:data,page:0,pageSize:5,rowId:rowId,prevId:prevId,nextId:nextId,infoId:infoId,isExc:isExc||false,showRank:showRank||false};
       renderRow(key);
     }
 
@@ -1147,7 +1153,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       var start = r.page * r.pageSize;
       var slice = r.data.slice(start, start+r.pageSize);
       var el = document.getElementById(r.rowId);
-      if (el) el.innerHTML = slice.map(function(g){return makeCard(g,r.isExc);}).join('');
+      if (el) el.innerHTML = slice.map(function(g,i){return makeCard(g,r.isExc,r.showRank?(start+i+1):null);}).join('');
       var tot = Math.ceil(r.data.length / r.pageSize);
       var prev = document.getElementById(r.prevId);
       var next = document.getElementById(r.nextId);
@@ -1167,7 +1173,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     window.pageRow = pageRow;
 
     if (topRated.length > 0) {
-      initRow('top', topRated, 'topRatedRow', 'topPrev', 'topNext', 'topInfo', false);
+      initRow('top', topRated, 'topRatedRow', 'topPrev', 'topNext', 'topInfo', false, true);
     }
 
     if (years.length > 0) {
@@ -1179,6 +1185,23 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       var wrap = document.getElementById('yearHistogramWrap');
       if (wrap) {
         var maxCount = Math.max.apply(null, years.map(function(y){return yearGameCounts[y]||0}).concat([1]));
+
+        // color legend
+        var legendEl = document.createElement('div');
+        legendEl.className = 'hist-legend';
+        [['#22c55e','Great (8+)'],['#3b82f6','Good (6–7)'],['#f59e0b','Mid (4–5)'],['#ef4444','Low (<4)'],['#71717a','Unscored']].forEach(function(pair) {
+          var item = document.createElement('div');
+          item.className = 'hist-legend-item';
+          var dot = document.createElement('span');
+          dot.className = 'hist-legend-dot';
+          dot.style.background = pair[0];
+          item.appendChild(dot);
+          item.appendChild(document.createTextNode(pair[1]));
+          legendEl.appendChild(item);
+        });
+        wrap.appendChild(legendEl);
+
+        // bars
         var barsEl = document.createElement('div');
         barsEl.className = 'year-hist-bars';
         var labelsEl = document.createElement('div');
@@ -1186,20 +1209,18 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         years.forEach(function(y) {
           var cnt = yearGameCounts[y] || 0;
           var avg = yearAvgScores[y];
-          var barH = Math.max(3, Math.round((cnt / maxCount) * 52));
-          var col = avg != null ? (avg >= 8 ? '#4ade80' : avg >= 6 ? '#60a5fa' : avg >= 4 ? '#fbbf24' : '#f87171') : 'var(--border)';
+          var barH = Math.max(3, Math.round((cnt / maxCount) * 68));
+          var col = avg != null ? (avg >= 8 ? '#22c55e' : avg >= 6 ? '#3b82f6' : avg >= 4 ? '#f59e0b' : '#ef4444') : '#71717a';
           var bar = document.createElement('div');
           bar.className = 'year-hist-bar';
           bar.style.height = barH + 'px';
           bar.style.background = col;
           bar.title = y + ' — ' + cnt + ' games' + (avg != null ? ' · avg ' + avg : '');
           bar.addEventListener('click', function(){selectYear(y)});
-          bar.addEventListener('mouseenter', function(){if(activeYear!==y)bar.style.opacity='0.75'});
-          bar.addEventListener('mouseleave', function(){if(activeYear!==y)bar.style.opacity=''});
           histBars[y] = bar;
           barsEl.appendChild(bar);
           var lbl = document.createElement('div');
-          lbl.className = 'year-hist-lbl';
+          lbl.className = 'year-hist-lbl' + (years.length <= 12 || y % 5 === 0 ? ' milestone' : '');
           lbl.setAttribute('data-year-lbl', y);
           lbl.textContent = y;
           labelsEl.appendChild(lbl);
