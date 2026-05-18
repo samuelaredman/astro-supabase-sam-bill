@@ -103,7 +103,7 @@ const years = Object.keys(byYearSorted)
   .filter(y => y > 0)
   .sort((a, b) => b - a)
 
-// related genres — genres that frequently appear alongside this one
+// related genres
 const { data: coGenreRows } = await supabase
   .from('game_genres')
   .select('genre_id')
@@ -129,15 +129,7 @@ if (topCoGenreIds.length > 0) {
   relatedGenres = relGenreRows ?? []
 }
 
-// fetch IGDB genre details for summary/description
-let igdbData: any = null
-if (genre.igdb_id) {
-  const result = await igdbFetch('genres',
-    `fields name, slug; where id = ${genre.igdb_id};`)
-  igdbData = result?.[0] ?? null
-}
-
-// genre descriptions — manually curated for top genres
+// genre descriptions
 const genreDescriptions: Record<string, string> = {
   'role-playing-rpg': 'Role-playing games let players assume the roles of characters in a fictional world, typically featuring character progression, stat systems, and story-driven gameplay. From classic JRPGs to open-world western RPGs, the genre spans a vast range of styles united by player agency and character development.',
   'shooter': 'Shooter games center on ranged combat, typically from a first or third-person perspective. The genre ranges from arcade-style run-and-guns to tactical military simulations, with player skill and precision at the core of the experience.',
@@ -159,6 +151,7 @@ function igdbImage(url: string | null, size = 't_cover_big') {
   return clean.replace(/t_[a-z_]+/, size)
 }
 
+// mosaic banner from top-rated covers
 const mosaicCovers = allGames
   .filter((g: any) => g.cover_img_url)
   .sort((a: any, b: any) =>
@@ -172,6 +165,7 @@ const mosaicTiles: string[] = mosaicCovers.length > 0
   : []
 const hasMosaic = mosaicTiles.length >= 6
 
+// per-year game counts + avg scores for pills
 const yearGameCountsMap: Record<number, number> = {}
 const yearAvgScoresMap: Record<number, number | null> = {}
 for (const year of years) {
@@ -187,7 +181,7 @@ for (const year of years) {
     : null
 }
 const yearGameCountsJson = JSON.stringify(yearGameCountsMap)
-const yearAvgScoresJson = JSON.stringify(yearAvgScoresMap)
+const yearAvgScoresJson  = JSON.stringify(yearAvgScoresMap)
 
 function scoreClass(score: number): string {
   if (score >= 9) return 'great'
@@ -205,24 +199,24 @@ const overallScoreClass = overallAvg ? scoreClass(parseFloat(overallAvg)) : null
 
 function serializeGames(games: any[]) {
   return games.map((g: any) => {
-    const avg = gameAvgScore(g.id)
+    const avg   = gameAvgScore(g.id)
     const count = gameReviewCount(g.id)
-    const sc = avg ? scoreClass(parseFloat(avg)) : null
+    const sc    = avg ? scoreClass(parseFloat(avg)) : null
     return {
-      title: g.title,
-      slug: g.slug,
-      cover: igdbImage(g.cover_img_url),
-      score: avg,
-      badge: sc ? `badge-${sc}` : null,
+      title:   g.title,
+      slug:    g.slug,
+      cover:   igdbImage(g.cover_img_url),
+      score:   avg,
+      badge:   sc ? `badge-${sc}` : null,
       reviews: count > 0 ? `${count} ${count === 1 ? 'review' : 'reviews'}` : null,
-      year: releaseYear(g.date_released),
+      year:    releaseYear(g.date_released),
     }
   })
 }
 
-const topRatedJson = JSON.stringify(serializeGames(topRated))
-const mostReviewedJson = JSON.stringify(serializeGames(mostReviewed))
-const byYearJson = JSON.stringify(
+const topRatedJson    = JSON.stringify(serializeGames(topRated))
+const mostReviewedJson= JSON.stringify(serializeGames(mostReviewed))
+const byYearJson      = JSON.stringify(
   years.reduce((acc: any, year: number) => {
     acc[year] = serializeGames(byYearSorted[year] ?? [])
     return acc
@@ -261,15 +255,20 @@ const topReviewedGames = allGames
   .sort((a: any, b: any) => (reviewsByGame[b.id]?.length ?? 0) - (reviewsByGame[a.id]?.length ?? 0))
   .slice(0, 5)
   .map((g: any) => {
-    const avg = gameAvgScore(g.id)
+    const avg   = gameAvgScore(g.id)
     const count = gameReviewCount(g.id)
-    const sc = avg ? scoreClass(parseFloat(avg)) : null
+    const sc    = avg ? scoreClass(parseFloat(avg)) : null
     return { title: g.title, slug: g.slug, cover: igdbImage(g.cover_img_url), reviews: count, avg, badge: sc ? `badge-${sc}` : null }
   })
 
-const genreStatsJson = JSON.stringify({ totalReviews, reviewedGameCount, gameAvg: overallAvg ? parseFloat(overallAvg) : null, gameCount: allGames.length, gameScoreDist, reviewsByYearData, topReviewedGames })
+const genreStatsJson = JSON.stringify({
+  totalReviews, reviewedGameCount,
+  gameAvg: overallAvg ? parseFloat(overallAvg) : null,
+  gameCount: allGames.length,
+  gameScoreDist, reviewsByYearData, topReviewedGames,
+})
 
-// Recent game reviews in this genre
+// Recent reviews
 const { data: recentReviewRows } = await supabase
   .from('reviews')
   .select(`id, score, title, body, created_at, game_id, games(id, title, slug, cover_img_url), profiles(id, username, avatar_url)`)
@@ -279,7 +278,6 @@ const { data: recentReviewRows } = await supabase
   .limit(30)
 
 const recentReviews = recentReviewRows ?? []
-
 const activeTab = Astro.url.searchParams.get('tab') || 'overview'
 
 function timeAgo(dateStr: string): string {
@@ -295,7 +293,11 @@ function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase()
 }
 
-// CDN cache — anonymous visitors share a cached response; auth users get a fresh render
+// accent colour — genres use purple (same as profile page)
+const accentLight = '#4a3a8a'
+const accentDark  = '#6050c8'
+const accentRgb   = '96,80,200'
+
 if (!isLoggedIn) {
   Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
   Astro.response.headers.set('Cache-Control', 'no-store');
@@ -308,7 +310,6 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Runs synchronously before CSS is applied — prevents dark mode flash -->
   <script is:inline>
     (function() {
       var t = localStorage.getItem('theme') ||
@@ -326,36 +327,43 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Serif+Display&family=Press+Start+2P&display=swap" rel="stylesheet" />
-  <style>
+  <!-- inject accent vars before paint, matching platform page pattern -->
+  <script is:inline define:vars={{ accentLight, accentDark, accentRgb }}>
+    (function() {
+      var t = document.documentElement.getAttribute('data-theme') || 'dark';
+      document.documentElement.style.setProperty('--game-accent', t === 'light' ? accentLight : accentDark);
+      document.documentElement.style.setProperty('--accent-rgb', accentRgb);
+    })();
+  </script>
+  <style is:global>
+    /* ── THEME TOKENS ── identical structure to platforms/[slug].astro ── */
     :root[data-theme="light"] {
-      --bg: #f5f4f2; --bg-card: #ffffff; --bg-hover: #f4f3f0;
-      --border: #e8e6e1; --border-subtle: #f0ede8;
-      --text-primary: #141412; --text-secondary: #6b6860; --text-tertiary: #a09d98;
-      --tag-bg: #f0ede8; --tag-text: #6b6860;
-      --shadow: 0 1px 3px rgba(0,0,0,0.06); --shadow-md: 0 4px 16px rgba(0,0,0,0.1);
-      --score-great: #1a6b3c; --score-great-bg: #eaf5ee;
-      --score-good: #1a4a6b;  --score-good-bg: #eaf0f5;
-      --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
-      --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
-      --game-accent: #4a3a8a; --game-accent-subtle: rgba(74,58,138,0.06);
-      --accent-rgb: 96,80,200;
-      --hero-overlay: linear-gradient(to bottom,rgba(245,244,242,0)0%,rgba(245,244,242,.6)65%,rgba(245,244,242,1)100%);
-      --hero-side: linear-gradient(to right,rgba(245,244,242,.3)0%,transparent 50%);
+      --bg:#f5f4f2;--bg-card:#ffffff;--bg-hover:#f4f3f0;
+      --border:#e8e6e1;--border-subtle:#f0ede8;
+      --text-primary:#141412;--text-secondary:#6b6860;--text-tertiary:#a09d98;
+      --tag-bg:#f0ede8;--tag-text:#6b6860;
+      --shadow:0 1px 3px rgba(0,0,0,.06);--shadow-md:0 4px 16px rgba(0,0,0,.1);
+      --score-great:#1a6b3c;--score-great-bg:#eaf5ee;
+      --score-good:#1a4a6b; --score-good-bg:#eaf0f5;
+      --score-mid:#6b5a1a;  --score-mid-bg:#f5f0ea;
+      --score-low:#6b1a1a;  --score-low-bg:#f5eaea;
+      --game-accent:#4a3a8a;
+      --hero-overlay:linear-gradient(to bottom,rgba(245,244,242,0)0%,rgba(245,244,242,.6)65%,rgba(245,244,242,1)100%);
+      --hero-side:linear-gradient(to right,rgba(245,244,242,.3)0%,transparent 50%);
     }
     :root[data-theme="dark"] {
-      --bg: #09090a; --bg-card: #131314; --bg-hover: #1c1c1e;
-      --border: #222224; --border-subtle: #191919;
-      --text-primary: #f0ede8; --text-secondary: #908d87; --text-tertiary: #484644;
-      --tag-bg: #1c1c1e; --tag-text: #6a6866;
-      --shadow: 0 1px 3px rgba(0,0,0,.5); --shadow-md: 0 4px 16px rgba(0,0,0,.7);
-      --score-great: #4ade80; --score-great-bg: #0b2016;
-      --score-good: #60a5fa;  --score-good-bg: #0b1828;
-      --score-mid: #fbbf24;   --score-mid-bg: #201808;
-      --score-low: #f87171;   --score-low-bg: #200808;
-      --game-accent: #6050c8; --game-accent-subtle: rgba(96,80,200,0.09);
-      --accent-rgb: 96,80,200;
-      --hero-overlay: linear-gradient(to bottom,rgba(9,9,10,0)0%,rgba(9,9,10,.65)65%,rgba(9,9,10,1)100%);
-      --hero-side: linear-gradient(to right,rgba(9,9,10,.35)0%,transparent 50%);
+      --bg:#09090a;--bg-card:#131314;--bg-hover:#1c1c1e;
+      --border:#222224;--border-subtle:#191919;
+      --text-primary:#f0ede8;--text-secondary:#908d87;--text-tertiary:#484644;
+      --tag-bg:#1c1c1e;--tag-text:#6a6866;
+      --shadow:0 1px 3px rgba(0,0,0,.5);--shadow-md:0 4px 16px rgba(0,0,0,.7);
+      --score-great:#4ade80;--score-great-bg:#0b2016;
+      --score-good:#60a5fa; --score-good-bg:#0b1828;
+      --score-mid:#fbbf24;  --score-mid-bg:#201808;
+      --score-low:#f87171;  --score-low-bg:#200808;
+      --game-accent:#6050c8;
+      --hero-overlay:linear-gradient(to bottom,rgba(9,9,10,0)0%,rgba(9,9,10,.65)65%,rgba(9,9,10,1)100%);
+      --hero-side:linear-gradient(to right,rgba(9,9,10,.35)0%,transparent 50%);
     }
 
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -363,6 +371,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text-primary);min-height:100vh;-webkit-font-smoothing:antialiased}
     a{color:inherit;text-decoration:none}
 
+    /* ── NAV ── */
     .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.88);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;gap:16px;backdrop-filter:blur(20px)}
     [data-theme="light"] .topnav{background:rgba(245,244,242,.88)}
     .back-btn{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-tertiary);transition:color .15s}
@@ -372,14 +381,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .theme-btn{background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:6px;display:flex;align-items:center;transition:color .15s;margin-left:8px}
     .theme-btn:hover{color:var(--text-primary)}
 
-    .jump-nav{position:sticky;top:53px;z-index:20;background:rgba(9,9,10,.72);border-bottom:1px solid var(--border);backdrop-filter:blur(16px);display:flex;overflow-x:auto;scrollbar-width:none}
-    .jump-nav::-webkit-scrollbar{display:none}
-    [data-theme="light"] .jump-nav{background:rgba(245,244,242,.82)}
-    .jump-link{font-size:11px;font-weight:500;color:var(--text-tertiary);padding:10px 20px;letter-spacing:.08em;text-transform:uppercase;transition:color .15s,border-color .15s;border-bottom:2px solid transparent;white-space:nowrap;flex-shrink:0}
-    .jump-link:hover{color:var(--text-primary)}
-    .jump-link.active{color:var(--text-primary);border-color:var(--game-accent)}
-
-    /* HERO — blurred mosaic of genre's top games */
+    /* ── HERO MOSAIC ── */
     .hero{position:relative;width:100%;height:200px;overflow:hidden;background:#0c0c10}
     .hero-mosaic{position:absolute;inset:-20px;display:none;flex-wrap:wrap;filter:blur(18px) saturate(1.5) brightness(.35);transform:scale(1.08)}
     .hero-mosaic.visible{display:flex}
@@ -387,12 +389,13 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .hero-side-fade{position:absolute;inset:0;background:var(--hero-side)}
     .hero-overlay{position:absolute;inset:0;background:var(--hero-overlay)}
 
+    /* ── PAGE & HEADER ── */
     .page{max-width:900px;margin:0 auto;padding:0 28px 100px}
 
-    /* GENRE HEADER */
     .genre-header{display:flex;gap:28px;align-items:flex-end;margin-bottom:32px;position:relative;z-index:2}
     .genre-header.has-banner{margin-top:-52px}
     .genre-header.no-banner{margin-top:32px}
+
     .genre-icon-wrap{flex-shrink:0;width:140px;height:140px;border-radius:22px;background:var(--bg-card);border:1px solid rgba(var(--accent-rgb),.3);box-shadow:0 14px 48px rgba(0,0,0,.8),0 0 36px rgba(var(--accent-rgb),.18);display:flex;align-items:center;justify-content:center;font-size:60px}
     .genre-info{flex:1;min-width:0;padding-bottom:4px}
     .genre-eyebrow{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--game-accent);margin-bottom:6px}
@@ -401,22 +404,22 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .genre-meta-item{font-size:13px;color:var(--text-secondary)}
     .genre-meta-sep{color:var(--text-tertiary);font-size:10px}
 
-    /* STATS */
+    /* ── STAT CARDS ── */
     .stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:28px}
-    .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:22px 20px 18px}
+    .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:20px 18px 16px}
     .stat-card.score-card-great{border-bottom:2px solid var(--score-great)}
-    .stat-card.score-card-good{border-bottom:2px solid var(--score-good)}
-    .stat-card.score-card-mid{border-bottom:2px solid var(--score-mid)}
-    .stat-card.score-card-low{border-bottom:2px solid var(--score-low)}
-    .stat-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:36px;font-weight:400;line-height:1;letter-spacing:-1px;margin-bottom:6px;color:var(--text-primary);background:none}
+    .stat-card.score-card-good {border-bottom:2px solid var(--score-good)}
+    .stat-card.score-card-mid  {border-bottom:2px solid var(--score-mid)}
+    .stat-card.score-card-low  {border-bottom:2px solid var(--score-low)}
+    .stat-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:32px;font-weight:400;line-height:1;letter-spacing:-1px;margin-bottom:5px;color:var(--text-primary)}
     .stat-num.great{color:var(--score-great)}
-    .stat-num.good{color:var(--score-good)}
-    .stat-num.mid{color:var(--score-mid)}
-    .stat-num.low{color:var(--score-low)}
-    .stat-label{font-size:11px;font-weight:500;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.08em}
-    .stat-sub{font-size:11px;color:var(--text-tertiary);margin-top:3px}
+    .stat-num.good {color:var(--score-good)}
+    .stat-num.mid  {color:var(--score-mid)}
+    .stat-num.low  {color:var(--score-low)}
+    .stat-label{font-size:10px;font-weight:500;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.08em}
+    .stat-sub{font-size:10px;color:var(--text-tertiary);margin-top:2px}
 
-    /* ABOUT */
+    /* ── ABOUT GRID ── */
     .about-grid{display:grid;grid-template-columns:1fr 260px;gap:24px;margin-bottom:40px}
     @media(max-width:720px){.about-grid{grid-template-columns:1fr}}
     .description{font-size:14px;line-height:1.8;color:var(--text-secondary)}
@@ -428,33 +431,32 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .detail-label{flex-shrink:0;width:80px;color:var(--text-tertiary);padding-top:2px;text-transform:uppercase;letter-spacing:.06em;font-size:10px;font-weight:500}
     .detail-value{color:var(--text-secondary);line-height:1.5}
 
-    /* related genres chips */
+    /* ── RELATED GENRES ── */
     .related-genres{display:flex;flex-wrap:wrap;gap:8px}
-    .genre-chip{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:12px;font-weight:500;transition:all .15s;cursor:pointer}
+    .genre-chip{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:12px;font-weight:500;transition:all .15s}
     .genre-chip:hover{border-color:var(--game-accent);color:var(--game-accent)}
 
-    /* SECTIONS */
+    /* ── SECTIONS ── */
     .section{margin-bottom:48px}
     .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
     .section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--text-tertiary)}
     .section-count{font-size:12px;color:var(--text-tertiary)}
 
-    /* YEAR PILL STRIP */
+    /* ── YEAR PILL STRIP — identical to platform page ── */
     .year-pill-strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:10px;margin-bottom:14px;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none}
     .year-pill-strip::-webkit-scrollbar{display:none}
-    .year-pill{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;white-space:nowrap;scroll-snap-align:start;transition:border-color .15s,background .15s;font-family:inherit}
+    .year-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;white-space:nowrap;scroll-snap-align:start;transition:border-color .15s,background .15s;font-family:inherit;flex-shrink:0}
     .year-pill:hover{border-color:rgba(var(--accent-rgb),.4)}
     .year-pill.active{border-color:var(--game-accent);background:rgba(var(--accent-rgb),.08)}
-    .year-pill-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-    .year-pill-label{font-size:12px;font-weight:600;color:var(--text-primary)}
-    .year-pill-count{font-size:11px;color:var(--text-tertiary)}
-    .rank-badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;line-height:1.4;letter-spacing:.01em;backdrop-filter:blur(4px)}
+    .year-pill-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block}
+    .year-pill-label{font-size:12px;font-weight:600;color:var(--text-primary);display:inline-block}
+    .year-pill-count{font-size:11px;color:var(--text-tertiary);display:inline-block}
 
     .year-panel-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)}
     .year-panel-label{font-family:'DM Serif Display',serif;font-size:22px;letter-spacing:-.3px;color:var(--text-primary)}
     .year-panel-count{font-size:12px;color:var(--text-tertiary)}
 
-    /* PAGINATED ROW */
+    /* ── PAGINATED GAME ROW — identical to platform page ── */
     .game-row{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
     @media(max-width:700px){.game-row{grid-template-columns:repeat(3,1fr)}}
     .row-nav{display:flex;align-items:center;gap:8px;margin-top:14px}
@@ -463,7 +465,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .row-arrow:hover{border-color:var(--game-accent);color:var(--game-accent)}
     .row-arrow:disabled{opacity:.25;cursor:default;pointer-events:none}
 
-    /* GAME CARDS */
+    /* ── GAME CARDS — identical to platform page ── */
     .game-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s;display:block;text-decoration:none}
     .game-card:hover{transform:translateY(-3px);box-shadow:var(--shadow-md);border-color:rgba(var(--accent-rgb),.3)}
     .game-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;position:relative;width:100%}
@@ -471,19 +473,15 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .game-cover-placeholder{width:100%;height:100%;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:32px}
     .game-score-badge{position:absolute;top:7px;right:7px;width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
     .badge-great{color:var(--score-great);background:var(--score-great-bg);border:1px solid rgba(74,222,128,.3)}
-    .badge-good{color:var(--score-good);background:var(--score-good-bg);border:1px solid rgba(96,165,250,.3)}
-    .badge-mid{color:var(--score-mid);background:var(--score-mid-bg);border:1px solid rgba(251,191,36,.3)}
-    .badge-low{color:var(--score-low);background:var(--score-low-bg);border:1px solid rgba(248,113,113,.3)}
+    .badge-good {color:var(--score-good); background:var(--score-good-bg); border:1px solid rgba(96,165,250,.3)}
+    .badge-mid  {color:var(--score-mid);  background:var(--score-mid-bg);  border:1px solid rgba(251,191,36,.3)}
+    .badge-low  {color:var(--score-low);  background:var(--score-low-bg);  border:1px solid rgba(248,113,113,.3)}
+    .rank-badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;line-height:1.4;letter-spacing:.01em;backdrop-filter:blur(4px)}
     .game-info{padding:9px 10px 11px}
     .game-title-text{font-size:11px;font-weight:500;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:2px}
     .game-review-count{font-size:10px;color:var(--text-tertiary);margin-top:1px}
 
-    .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
-    .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
-    .write-review-btn{display:inline-block;margin-top:16px;background:var(--game-accent);color:white;border-radius:20px;padding:9px 20px;font-size:14px;font-weight:500;border:none;cursor:pointer;font-family:inherit;transition:opacity .15s}
-    .write-review-btn:hover{opacity:.85}
-
-    /* TAB NAV */
+    /* ── TABS ── */
     .tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:28px}
     .tab-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;transition:all .2s;position:relative;overflow:hidden;text-decoration:none}
     .tab-link:hover{border-color:rgba(var(--accent-rgb),.35);transform:translateY(-2px);box-shadow:var(--shadow-md)}
@@ -499,7 +497,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .tab-panel{display:none}
     .tab-panel.active{display:block}
 
-    /* REVIEWS */
+    /* ── REVIEWS ── */
     .reviews-toolbar{display:flex;align-items:center;gap:6px;margin-bottom:20px}
     .sort-tab{background:var(--tag-bg);color:var(--text-tertiary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;letter-spacing:.04em;text-transform:uppercase}
     .sort-tab.active{background:var(--game-accent);color:white;border-color:transparent}
@@ -514,9 +512,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .reviewer-meta{font-size:11px;color:var(--text-tertiary);display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px}
     .score-badge{flex-shrink:0;width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
     .score-great{color:var(--score-great);background:var(--score-great-bg);border:1px solid rgba(74,222,128,.25)}
-    .score-good{color:var(--score-good);background:var(--score-good-bg);border:1px solid rgba(96,165,250,.25)}
-    .score-mid{color:var(--score-mid);background:var(--score-mid-bg);border:1px solid rgba(251,191,36,.25)}
-    .score-low{color:var(--score-low);background:var(--score-low-bg);border:1px solid rgba(248,113,113,.25)}
+    .score-good {color:var(--score-good); background:var(--score-good-bg); border:1px solid rgba(96,165,250,.25)}
+    .score-mid  {color:var(--score-mid);  background:var(--score-mid-bg);  border:1px solid rgba(251,191,36,.25)}
+    .score-low  {color:var(--score-low);  background:var(--score-low-bg);  border:1px solid rgba(248,113,113,.25)}
     .review-game-link{display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:7px 10px;background:var(--tag-bg);border-radius:8px;transition:opacity .15s}
     .review-game-link:hover{opacity:.7}
     .review-game-cover{width:26px;height:34px;border-radius:4px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)}
@@ -528,6 +526,10 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .expand-btn{font-size:11px;color:var(--game-accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;transition:opacity .15s;padding:0;font-weight:500}
     .expand-btn:hover{opacity:.7}
 
+    .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
+    .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
+
+    /* ── MOBILE ── */
     @media(max-width:600px){
       .genre-header{flex-direction:column;align-items:flex-start}
       .genre-header.has-banner{margin-top:-40px}
@@ -535,10 +537,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       .genre-name{font-size:26px}
       .hero{height:200px}
       .stats-row{gap:8px}
-      .stat-num{font-size:30px}
-      .jump-nav{display:none}
+      .stat-num{font-size:28px}
     }
-    /* ── Mobile bottom nav ── */
     .mobile-nav{display:none}
     @media(max-width:768px){
       body{padding-bottom:calc(56px + env(safe-area-inset-bottom,0px))}
@@ -579,20 +579,20 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     </div>
   )}
 
-  <div class="page" id="overview">
+  <div class="page">
 
     <div class={`genre-header ${hasMosaic ? 'has-banner' : 'no-banner'}`}>
       <div class="genre-icon-wrap">
         {genre.slug === 'role-playing-rpg' && '⚔️'}
-        {genre.slug === 'shooter' && '🔫'}
-        {genre.slug === 'adventure' && '🗺️'}
-        {genre.slug === 'platform' && '🕹️'}
-        {genre.slug === 'strategy' && '♟️'}
-        {genre.slug === 'fighting' && '🥊'}
-        {genre.slug === 'puzzle' && '🧩'}
-        {genre.slug === 'sport' && '⚽'}
-        {genre.slug === 'indie' && '✨'}
-        {genre.slug === 'arcade' && '🕹️'}
+        {genre.slug === 'shooter'          && '🔫'}
+        {genre.slug === 'adventure'        && '🗺️'}
+        {genre.slug === 'platform'         && '🕹️'}
+        {genre.slug === 'strategy'         && '♟️'}
+        {genre.slug === 'fighting'         && '🥊'}
+        {genre.slug === 'puzzle'           && '🧩'}
+        {genre.slug === 'sport'            && '⚽'}
+        {genre.slug === 'indie'            && '✨'}
+        {genre.slug === 'arcade'           && '🕹️'}
         {!['role-playing-rpg','shooter','adventure','platform','strategy','fighting','puzzle','sport','indie','arcade'].includes(genre.slug) && '🎮'}
       </div>
       <div class="genre-info">
@@ -609,9 +609,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
           {overallAvg && (
             <>
               <span class="genre-meta-sep">•</span>
-              <span class="genre-meta-item" style={`color:var(--score-${overallScoreClass})`}>
-                {overallAvg} avg
-              </span>
+              <span class="genre-meta-item" style={`color:var(--score-${overallScoreClass})`}>{overallAvg} avg</span>
             </>
           )}
         </div>
@@ -670,7 +668,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       </a>
     </nav>
 
-    <!-- OVERVIEW TAB -->
+    <!-- ── OVERVIEW TAB ── -->
     <div class={`tab-panel ${activeTab === 'overview' ? 'active' : ''}`}>
 
       {(genreDescription || relatedGenres.length > 0) && (
@@ -711,7 +709,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       )}
 
       {topRated.length > 0 && (
-        <div class="section" id="top-rated">
+        <div class="section">
           <div class="section-header">
             <span class="section-title">Top Rated</span>
             <span class="section-count">{topRated.length} games</span>
@@ -755,21 +753,19 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
             <span class="section-count" id="yearPanelCount"></span>
           </div>
           <div class="year-pill-strip" id="yearPillStrip"></div>
-          <div>
-            <div class="year-panel-header">
-              <span class="year-panel-label" id="yearPanelLabel"></span>
-              <span class="year-panel-count" id="yearPanelTotal"></span>
-            </div>
-            <div class="game-row" id="yearGamesRow"></div>
-            <div class="row-nav">
-              <button class="row-arrow" id="yearPrev" onclick="pageRow('year',-1)">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
-              </button>
-              <button class="row-arrow" id="yearNext" onclick="pageRow('year',1)">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
-              </button>
-              <span class="row-nav-info" id="yearInfo"></span>
-            </div>
+          <div class="year-panel-header">
+            <span class="year-panel-label" id="yearPanelLabel"></span>
+            <span class="year-panel-count" id="yearPanelTotal"></span>
+          </div>
+          <div class="game-row" id="yearGamesRow"></div>
+          <div class="row-nav">
+            <button class="row-arrow" id="yearPrev" onclick="pageRow('year',-1)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
+            </button>
+            <button class="row-arrow" id="yearNext" onclick="pageRow('year',1)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
+            </button>
+            <span class="row-nav-info" id="yearInfo"></span>
           </div>
         </div>
       )}
@@ -795,7 +791,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       )}
     </div>
 
-    <!-- REVIEWS TAB -->
+    <!-- ── REVIEWS TAB ── -->
     <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`}>
       <div class="section-header" style="margin-bottom:20px">
         <span class="section-title">Recent Reviews</span>
@@ -837,9 +833,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
                     <a href={`/reviewers/${review.profiles?.username}`} class="reviewer-name">
                       @{review.profiles?.username ?? 'unknown'}
                     </a>
-                    <div class="reviewer-meta">
-                      <span>{timeAgo(review.created_at)}</span>
-                    </div>
+                    <div class="reviewer-meta"><span>{timeAgo(review.created_at)}</span></div>
                   </div>
                   <div class={`score-badge score-${scoreClass(review.score)}`}>{review.score}</div>
                 </div>
@@ -859,7 +853,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       )}
     </div>
 
-    <!-- STATS TAB -->
+    <!-- ── STATS TAB ── -->
     <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`}>
       {totalReviews === 0 ? (
         <div class="empty-state">
@@ -873,80 +867,116 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
   </div>
 
-  <script is:inline define:vars={{ topRatedJson, mostReviewedJson, byYearJson, yearsJson, yearGameCountsJson, yearAvgScoresJson, genreStatsJson, activeTab }}>
+  <!-- ── SCRIPTS — identical pattern to platform page ── -->
+  <script is:inline define:vars={{ topRatedJson, mostReviewedJson, byYearJson, yearsJson, yearGameCountsJson, yearAvgScoresJson, genreStatsJson, activeTab, accentLight, accentDark, accentRgb }}>
 
-    var topRated = JSON.parse(topRatedJson);
+    var topRated     = JSON.parse(topRatedJson);
     var mostReviewed = JSON.parse(mostReviewedJson);
-    var byYear = JSON.parse(byYearJson);
-    var years = JSON.parse(yearsJson);
+    var byYear       = JSON.parse(byYearJson);
+    var years        = JSON.parse(yearsJson);
 
-    var scoreBorderColors = {'badge-great':'#4ade80','badge-good':'#60a5fa','badge-mid':'#fbbf24','badge-low':'#f87171'}
+    var scoreBorderColors = {
+      'badge-great': '#4ade80',
+      'badge-good':  '#60a5fa',
+      'badge-mid':   '#fbbf24',
+      'badge-low':   '#f87171',
+    };
 
+    // ── CARD RENDERER — same as platform page ──
     function makeCard(g, showRank, rank) {
-      var cv = g.cover ? '<img src="'+g.cover+'" alt="" loading="lazy"/>' : '<div class="game-cover-placeholder">🎮</div>';
-      var bd = g.score ? '<div class="game-score-badge '+g.badge+'">'+g.score+'</div>' : '';
-      var rk = (showRank && rank) ? '<div class="rank-badge">#'+rank+'</div>' : '';
-      var borderBottom = g.badge && scoreBorderColors[g.badge] ? 'border-bottom:2px solid '+scoreBorderColors[g.badge]+';' : '';
-      return '<a href="/games/'+g.slug+'" class="game-card" style="'+borderBottom+'">'
-        +'<div class="game-cover">'+cv+bd+rk+'</div>'
-        +'<div class="game-info">'
-        +'<div class="game-title-text">'+g.title+'</div>'
-        +(g.reviews?'<div class="game-review-count">'+g.reviews+'</div>':'')
-        +'</div></a>';
+      var cv = g.cover
+        ? '<img src="' + g.cover + '" alt="" loading="lazy"/>'
+        : '<div class="game-cover-placeholder">🎮</div>';
+      var bd = g.score
+        ? '<div class="game-score-badge ' + g.badge + '">' + g.score + '</div>'
+        : '';
+      var rk = (showRank && rank)
+        ? '<div class="rank-badge">#' + rank + '</div>'
+        : '';
+      var borderBottom = (g.badge && scoreBorderColors[g.badge])
+        ? 'border-bottom:2px solid ' + scoreBorderColors[g.badge] + ';'
+        : '';
+      return '<a href="/games/' + g.slug + '" class="game-card" style="' + borderBottom + '">'
+        + '<div class="game-cover">' + cv + bd + rk + '</div>'
+        + '<div class="game-info">'
+        + '<div class="game-title-text">' + g.title + '</div>'
+        + (g.reviews ? '<div class="game-review-count">' + g.reviews + '</div>' : '')
+        + '</div></a>';
     }
 
+    // ── PAGINATED ROWS — same as platform page ──
     var rows = {};
 
     function initRow(key, data, rowId, prevId, nextId, infoId, showRank) {
-      rows[key] = {data:data,page:0,pageSize:5,rowId:rowId,prevId:prevId,nextId:nextId,infoId:infoId,showRank:showRank||false};
+      rows[key] = { data: data, page: 0, pageSize: 5, rowId: rowId, prevId: prevId, nextId: nextId, infoId: infoId, showRank: showRank || false };
       renderRow(key);
     }
 
     function renderRow(key) {
-      var r = rows[key];
+      var r     = rows[key];
       var start = r.page * r.pageSize;
-      var slice = r.data.slice(start, start+r.pageSize);
-      var el = document.getElementById(r.rowId);
-      if (el) el.innerHTML = slice.map(function(g,i){return makeCard(g,r.showRank,r.showRank?(start+i+1):null);}).join('');
-      var tot = Math.ceil(r.data.length / r.pageSize);
+      var slice = r.data.slice(start, start + r.pageSize);
+      var el    = document.getElementById(r.rowId);
+      if (el) el.innerHTML = slice.map(function(g, i) {
+        return makeCard(g, r.showRank, r.showRank ? (start + i + 1) : null);
+      }).join('');
+      var tot  = Math.ceil(r.data.length / r.pageSize);
       var prev = document.getElementById(r.prevId);
       var next = document.getElementById(r.nextId);
       var info = document.getElementById(r.infoId);
       if (prev) prev.disabled = r.page === 0;
-      if (next) next.disabled = r.page >= tot-1;
-      if (info) info.textContent = (r.page+1)+' / '+tot;
+      if (next) next.disabled = r.page >= tot - 1;
+      if (info) info.textContent = (r.page + 1) + ' / ' + tot;
     }
 
     function pageRow(key, dir) {
-      var r = rows[key];
+      var r   = rows[key];
       if (!r) return;
-      var tot = Math.ceil(r.data.length/r.pageSize);
-      r.page = Math.max(0, Math.min(tot-1, r.page+dir));
+      var tot = Math.ceil(r.data.length / r.pageSize);
+      r.page  = Math.max(0, Math.min(tot - 1, r.page + dir));
       renderRow(key);
     }
     window.pageRow = pageRow;
 
-    if (topRated.length > 0) initRow('top', topRated, 'topRatedRow', 'topPrev', 'topNext', 'topInfo', true);
-    if (mostReviewed.length > 0) initRow('mr', mostReviewed, 'mostReviewedRow', 'mrPrev', 'mrNext', 'mrInfo', false);
+    if (topRated.length > 0)     initRow('top', topRated,     'topRatedRow',    'topPrev', 'topNext', 'topInfo', true);
+    if (mostReviewed.length > 0) initRow('mr',  mostReviewed, 'mostReviewedRow','mrPrev',  'mrNext',  'mrInfo',  false);
 
-    // year pill strip
+    // ── YEAR PILL STRIP — same as platform page ──
     if (years.length > 0) {
-      var activeYear = years[0];
+      var activeYear     = years[0];
       var yearGameCounts = JSON.parse(yearGameCountsJson);
-      var yearAvgScores = JSON.parse(yearAvgScoresJson);
-      var yearPills = {};
+      var yearAvgScores  = JSON.parse(yearAvgScoresJson);
+      var yearPills      = {};
 
       var strip = document.getElementById('yearPillStrip');
       if (strip) {
         years.forEach(function(y) {
           var avg = yearAvgScores[y];
-          var dot = avg != null ? (avg >= 8 ? '#22c55e' : avg >= 6 ? '#3b82f6' : avg >= 4 ? '#f59e0b' : '#ef4444') : '#71717a';
+          var dot = avg != null
+            ? (avg >= 8 ? '#22c55e' : avg >= 6 ? '#3b82f6' : avg >= 4 ? '#f59e0b' : '#ef4444')
+            : '#71717a';
+
           var pill = document.createElement('button');
           pill.className = 'year-pill';
-          pill.innerHTML = '<span class="year-pill-dot" style="background:' + dot + '"></span>'
-            + '<span class="year-pill-label">' + y + '</span>'
-            + '<span class="year-pill-count">' + (yearGameCounts[y] || 0) + '</span>';
-          pill.addEventListener('click', function(){ selectYear(y); });
+
+          // Build innerHTML via explicit child elements to avoid text-node concatenation bugs
+          var dotEl   = document.createElement('span');
+          dotEl.className = 'year-pill-dot';
+          dotEl.style.background = dot;
+
+          var labelEl = document.createElement('span');
+          labelEl.className = 'year-pill-label';
+          labelEl.textContent = String(y);
+
+          var countEl = document.createElement('span');
+          countEl.className = 'year-pill-count';
+          countEl.textContent = String(yearGameCounts[y] || 0);
+
+          pill.appendChild(dotEl);
+          pill.appendChild(labelEl);
+          pill.appendChild(countEl);
+
+          pill.addEventListener('click', function() { selectYear(y); });
           yearPills[y] = pill;
           strip.appendChild(pill);
         });
@@ -957,57 +987,60 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         Object.keys(yearPills).forEach(function(yr) {
           yearPills[yr].classList.toggle('active', parseInt(yr) === y);
         });
+        // scroll selected pill into centre
         if (strip && yearPills[y]) {
-          var pill = yearPills[y];
+          var pill   = yearPills[y];
           var target = pill.offsetLeft - (strip.clientWidth / 2) + (pill.offsetWidth / 2);
-          strip.scrollTo({left: Math.max(0, target), behavior: 'smooth'});
+          strip.scrollTo({ left: Math.max(0, target), behavior: 'smooth' });
         }
-        var games = byYear[y] || [];
+        var games      = byYear[y] || [];
         var totalCount = yearGameCounts[y] || games.length;
         var lbl = document.getElementById('yearPanelLabel');
         var tot = document.getElementById('yearPanelTotal');
         var cnt = document.getElementById('yearPanelCount');
-        if (lbl) lbl.textContent = y;
+        if (lbl) lbl.textContent = String(y);
         if (tot) tot.textContent = totalCount + ' games';
         if (cnt) cnt.textContent = totalCount + ' games';
-        rows['year'] = {data:games,page:0,pageSize:5,rowId:'yearGamesRow',prevId:'yearPrev',nextId:'yearNext',infoId:'yearInfo',showRank:false};
+        rows['year'] = { data: games, page: 0, pageSize: 5, rowId: 'yearGamesRow', prevId: 'yearPrev', nextId: 'yearNext', infoId: 'yearInfo', showRank: false };
         renderRow('year');
       }
       selectYear(activeYear);
     }
 
+    // ── HELPERS ──
     function toggleDesc() {
-      var d=document.getElementById('desc'), b=document.getElementById('readMoreBtn');
-      if (!d||!b) return;
+      var d = document.getElementById('desc');
+      var b = document.getElementById('readMoreBtn');
+      if (!d || !b) return;
       d.classList.toggle('collapsed');
       b.textContent = d.classList.contains('collapsed') ? 'Read more →' : 'Read less ↑';
     }
     window.toggleDesc = toggleDesc;
 
     function sortGenreReviews(type, btn) {
-      document.querySelectorAll('.sort-tab').forEach(function(b){b.classList.remove('active');});
+      document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active'); });
       btn.classList.add('active');
       var list = document.getElementById('genreReviewsList');
       if (!list) return;
       var cards = Array.from(list.querySelectorAll('.review-card'));
-      cards.sort(function(a,b) {
+      cards.sort(function(a, b) {
         if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score);
-        if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score);
+        if (type === 'lowest')  return parseInt(a.dataset.score) - parseInt(b.dataset.score);
         return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime();
       });
-      cards.forEach(function(card){list.appendChild(card);});
+      cards.forEach(function(card) { list.appendChild(card); });
     }
     window.sortGenreReviews = sortGenreReviews;
 
     function toggleGenreReview(id, btn) {
-      var b = document.getElementById('grb-'+id);
+      var b = document.getElementById('grb-' + id);
       if (!b) return;
       b.classList.toggle('collapsed');
       btn.textContent = b.classList.contains('collapsed') ? 'Read more →' : 'Read less ↑';
     }
     window.toggleGenreReview = toggleGenreReview;
 
-    // ── GENRE STATS ──
+    // ── STATS TAB — same buildStats pattern as platform page ──
     var gs = JSON.parse(genreStatsJson);
 
     function buildGenreStats() {
@@ -1026,9 +1059,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
       html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">';
       var mini = [
-        { lbl: 'Total reviews', val: gs.totalReviews.toLocaleString(), sub: 'across all games', color: '#6050c8' },
-        { lbl: 'Reviewed games', val: gs.reviewedGameCount.toLocaleString(), sub: 'of ' + gs.gameCount.toLocaleString() + ' total', color: '#60a5fa' },
-        { lbl: 'Avg score', val: gs.gameAvg ? gs.gameAvg.toFixed(1) : '—', sub: 'per-game average', color: gs.gameAvg ? (gs.gameAvg >= 9 ? '#4ade80' : gs.gameAvg >= 7 ? '#60a5fa' : gs.gameAvg >= 5 ? '#fbbf24' : '#f87171') : '#484644' },
+        { lbl: 'Total reviews',   val: gs.totalReviews.toLocaleString(),     sub: 'across all games',                color: '#6050c8' },
+        { lbl: 'Reviewed games',  val: gs.reviewedGameCount.toLocaleString(), sub: 'of ' + gs.gameCount.toLocaleString() + ' total', color: '#60a5fa' },
+        { lbl: 'Avg score',       val: gs.gameAvg ? gs.gameAvg.toFixed(1) : '—', sub: 'per-game average',           color: gs.gameAvg ? (gs.gameAvg >= 9 ? '#4ade80' : gs.gameAvg >= 7 ? '#60a5fa' : gs.gameAvg >= 5 ? '#fbbf24' : '#f87171') : '#484644' },
       ];
       mini.forEach(function(sc) {
         html += '<div style="background:var(--bg-card);border:1px solid ' + sc.color + '33;border-radius:12px;padding:12px 14px;position:relative;overflow:hidden">';
@@ -1045,7 +1078,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         var cols = (hasDist && hasYear) ? '3fr 2fr' : '1fr';
         html += '<div style="display:grid;grid-template-columns:' + cols + ';gap:8px;margin-bottom:10px">';
         if (hasDist) {
-          var maxDist = Math.max.apply(null, gs.gameScoreDist.concat([1]));
+          var maxDist  = Math.max.apply(null, gs.gameScoreDist.concat([1]));
           var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#4ade80'];
           html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px">';
           html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Score distribution — per-game avg</div>';
@@ -1100,20 +1133,26 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
     if (activeTab === 'stats') buildGenreStats();
 
+    // ── THEME — same as platform page ──
     function toggleTheme() {
-      var h=document.documentElement,n=h.getAttribute('data-theme')==='light'?'dark':'light';
-      h.setAttribute('data-theme',n);localStorage.setItem('theme',n);updateIcon(n);
+      var h = document.documentElement;
+      var n = h.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      h.setAttribute('data-theme', n);
+      localStorage.setItem('theme', n);
+      h.style.setProperty('--game-accent', n === 'light' ? accentLight : accentDark);
+      h.style.setProperty('--accent-rgb', accentRgb);
+      updateIcon(n);
       if (activeTab === 'stats') {
         var el = document.getElementById('genreStatsContent');
         if (el) { el.innerHTML = ''; buildGenreStats(); }
       }
     }
     function updateIcon(t) {
-      var i=document.getElementById('themeIcon');
+      var i = document.getElementById('themeIcon');
       if (!i) return;
-      i.innerHTML=t==='dark'
-        ?'<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
-        :'<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>';
+      i.innerHTML = t === 'dark'
+        ? '<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
+        : '<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>';
     }
     window.toggleTheme = function() {
       toggleTheme();
@@ -1122,41 +1161,41 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       if (m) m.content = n === 'dark' ? '#0f0f0e' : '#f9f8f6';
     };
 
-    var saved=document.documentElement.getAttribute('data-theme')||'light';
+    var saved = document.documentElement.getAttribute('data-theme') || 'dark';
     updateIcon(saved);
 
   </script>
 
-<nav class="mobile-nav" aria-label="Mobile navigation">
-  <a href="/" class="mn-item">
-    <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
-    <span class="mn-label">Home</span>
-  </a>
-  <a href="/search" class="mn-item">
-    <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
-    <span class="mn-label">Search</span>
-  </a>
-  <a href="/hot-takes" class="mn-item">
-    <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2c0 3-2 4-2 7h4c0-3-2-4-2-7z"/><path d="M7 9c-1.5 1-2 2.5-2 4a4 4 0 008 0c0-1.5-.5-3-2-4"/><path d="M9 16v-3"/></svg></span>
-    <span class="mn-label">Hot Takes</span>
-  </a>
-  {isLoggedIn ? (
-    <>
-      <a href="/notifications" class="mn-item">
-        <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6a4.5 4.5 0 0 0-9 0c0 5-2 6.5-2 6.5h13s-2-1.5-2-6.5"/><path d="M10.3 15a1.5 1.5 0 0 1-2.6 0"/></svg></span>
-        <span class="mn-label">Notifs</span>
-      </a>
-      <a href="/profile" class="mn-item">
-        <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3.5"/><path d="M3 16c0-3.31 2.69-6 6-6s6 2.69 6 6"/></svg></span>
-        <span class="mn-label">Profile</span>
-      </a>
-    </>
-  ) : (
-    <a href="/signin" class="mn-item">
-      <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3.5"/><path d="M3 16c0-3.31 2.69-6 6-6s6 2.69 6 6"/></svg></span>
-      <span class="mn-label">Sign In</span>
+  <nav class="mobile-nav" aria-label="Mobile navigation">
+    <a href="/" class="mn-item">
+      <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
+      <span class="mn-label">Home</span>
     </a>
-  )}
-</nav>
+    <a href="/search" class="mn-item">
+      <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
+      <span class="mn-label">Search</span>
+    </a>
+    <a href="/hot-takes" class="mn-item">
+      <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2c0 3-2 4-2 7h4c0-3-2-4-2-7z"/><path d="M7 9c-1.5 1-2 2.5-2 4a4 4 0 008 0c0-1.5-.5-3-2-4"/><path d="M9 16v-3"/></svg></span>
+      <span class="mn-label">Hot Takes</span>
+    </a>
+    {isLoggedIn ? (
+      <>
+        <a href="/notifications" class="mn-item">
+          <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6a4.5 4.5 0 0 0-9 0c0 5-2 6.5-2 6.5h13s-2-1.5-2-6.5"/><path d="M10.3 15a1.5 1.5 0 0 1-2.6 0"/></svg></span>
+          <span class="mn-label">Notifs</span>
+        </a>
+        <a href="/profile" class="mn-item">
+          <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3.5"/><path d="M3 16c0-3.31 2.69-6 6-6s6 2.69 6 6"/></svg></span>
+          <span class="mn-label">Profile</span>
+        </a>
+      </>
+    ) : (
+      <a href="/signin" class="mn-item">
+        <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3.5"/><path d="M3 16c0-3.31 2.69-6 6-6s6 2.69 6 6"/></svg></span>
+        <span class="mn-label">Sign In</span>
+      </a>
+    )}
+  </nav>
 </body>
 </html>
