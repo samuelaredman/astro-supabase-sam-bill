@@ -155,8 +155,39 @@ const genreDescription = genreDescriptions[genre.slug] ?? null
 
 function igdbImage(url: string | null, size = 't_cover_big') {
   if (!url) return null
-  return `https:${url.replace('t_thumb', size)}`
+  const clean = url.startsWith('//') ? `https:${url}` : url
+  return clean.replace(/t_[a-z_]+/, size)
 }
+
+const mosaicCovers = allGames
+  .filter((g: any) => g.cover_img_url)
+  .sort((a: any, b: any) =>
+    parseFloat(gameAvgScore(b.id) ?? '-1') - parseFloat(gameAvgScore(a.id) ?? '-1')
+  )
+  .slice(0, 20)
+  .map((g: any) => igdbImage(g.cover_img_url, 't_cover_big'))
+  .filter(Boolean) as string[]
+const mosaicTiles: string[] = mosaicCovers.length > 0
+  ? [...mosaicCovers, ...mosaicCovers, ...mosaicCovers].slice(0, 24)
+  : []
+const hasMosaic = mosaicTiles.length >= 6
+
+const yearGameCountsMap: Record<number, number> = {}
+const yearAvgScoresMap: Record<number, number | null> = {}
+for (const year of years) {
+  const gamesInYear = byYear[year] ?? []
+  yearGameCountsMap[year] = gamesInYear.length
+  const allYearScores: number[] = []
+  for (const g of gamesInYear) {
+    const scores = reviewsByGame[g.id]
+    if (scores?.length > 0) allYearScores.push(...scores)
+  }
+  yearAvgScoresMap[year] = allYearScores.length > 0
+    ? Math.round((allYearScores.reduce((a, b) => a + b, 0) / allYearScores.length) * 10) / 10
+    : null
+}
+const yearGameCountsJson = JSON.stringify(yearGameCountsMap)
+const yearAvgScoresJson = JSON.stringify(yearAvgScoresMap)
 
 function scoreClass(score: number): string {
   if (score >= 9) return 'great'
@@ -229,7 +260,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   <meta name="description" content={genreDescription?.slice(0, 160) ?? `Browse the best ${genre.name} games and reviews on Chekpoint.`} />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=Press+Start+2P&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Serif+Display&family=Press+Start+2P&display=swap" rel="stylesheet" />
   <style>
     :root[data-theme="light"] {
       --bg: #f5f4f2; --bg-card: #ffffff; --bg-hover: #f4f3f0;
@@ -242,7 +273,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
       --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
       --game-accent: #4a3a8a; --game-accent-subtle: rgba(74,58,138,0.06);
+      --accent-rgb: 96,80,200;
       --hero-overlay: linear-gradient(to bottom,rgba(245,244,242,0)0%,rgba(245,244,242,.6)65%,rgba(245,244,242,1)100%);
+      --hero-side: linear-gradient(to right,rgba(245,244,242,.3)0%,transparent 50%);
     }
     :root[data-theme="dark"] {
       --bg: #09090a; --bg-card: #131314; --bg-hover: #1c1c1e;
@@ -255,7 +288,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       --score-mid: #fbbf24;   --score-mid-bg: #201808;
       --score-low: #f87171;   --score-low-bg: #200808;
       --game-accent: #6050c8; --game-accent-subtle: rgba(96,80,200,0.09);
+      --accent-rgb: 96,80,200;
       --hero-overlay: linear-gradient(to bottom,rgba(9,9,10,0)0%,rgba(9,9,10,.65)65%,rgba(9,9,10,1)100%);
+      --hero-side: linear-gradient(to right,rgba(9,9,10,.35)0%,transparent 50%);
     }
 
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -280,16 +315,20 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .jump-link.active{color:var(--text-primary);border-color:var(--game-accent)}
 
     /* HERO — blurred mosaic of genre's top games */
-    .hero{position:relative;width:100%;height:320px;overflow:hidden;background:#04040a}
-    .hero-mosaic{position:absolute;inset:-20px;display:flex;flex-wrap:wrap;filter:blur(18px) saturate(1.5) brightness(.38);transform:scale(1.08)}
-    .hero-mosaic-tile{flex:1 1 90px;min-width:90px;min-height:160px;background-size:cover;background-position:center}
+    .hero{position:relative;width:100%;height:200px;overflow:hidden;background:#0c0c10}
+    .hero-mosaic{position:absolute;inset:-20px;display:none;flex-wrap:wrap;filter:blur(18px) saturate(1.5) brightness(.35);transform:scale(1.08)}
+    .hero-mosaic.visible{display:flex}
+    .hero-mosaic-tile{flex:1 1 90px;min-width:90px;min-height:180px;background-size:cover;background-position:center}
+    .hero-side-fade{position:absolute;inset:0;background:var(--hero-side)}
     .hero-overlay{position:absolute;inset:0;background:var(--hero-overlay)}
 
     .page{max-width:900px;margin:0 auto;padding:0 28px 100px}
 
     /* GENRE HEADER */
-    .genre-header{display:flex;gap:24px;align-items:flex-end;margin-top:-70px;margin-bottom:32px;position:relative;z-index:2}
-    .genre-icon-wrap{flex-shrink:0;width:120px;height:120px;border-radius:20px;background:var(--bg-card);border:1px solid rgba(96,80,200,.3);box-shadow:0 12px 40px rgba(0,0,0,.7),0 0 30px rgba(96,80,200,.15);display:flex;align-items:center;justify-content:center;font-size:52px}
+    .genre-header{display:flex;gap:28px;align-items:flex-end;margin-bottom:32px;position:relative;z-index:2}
+    .genre-header.has-banner{margin-top:-52px}
+    .genre-header.no-banner{margin-top:32px}
+    .genre-icon-wrap{flex-shrink:0;width:140px;height:140px;border-radius:22px;background:var(--bg-card);border:1px solid rgba(var(--accent-rgb),.3);box-shadow:0 14px 48px rgba(0,0,0,.8),0 0 36px rgba(var(--accent-rgb),.18);display:flex;align-items:center;justify-content:center;font-size:60px}
     .genre-info{flex:1;min-width:0;padding-bottom:4px}
     .genre-eyebrow{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--game-accent);margin-bottom:6px}
     .genre-name{font-family:'Cinzel',serif;font-size:34px;line-height:1.1;letter-spacing:.04em;font-weight:600;text-shadow:0 2px 24px rgba(0,0,0,.6);margin-bottom:10px}
@@ -335,11 +374,16 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--text-tertiary)}
     .section-count{font-size:12px;color:var(--text-tertiary)}
 
-    /* YEAR PICKER */
-    .year-picker{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}
-    .year-btn{background:var(--tag-bg);color:var(--text-tertiary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;letter-spacing:.02em}
-    .year-btn:hover{color:var(--text-primary)}
-    .year-btn.active{background:var(--game-accent);color:white;border-color:transparent}
+    /* YEAR PILL STRIP */
+    .year-pill-strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:10px;margin-bottom:14px;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+    .year-pill-strip::-webkit-scrollbar{display:none}
+    .year-pill{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;white-space:nowrap;scroll-snap-align:start;transition:border-color .15s,background .15s;font-family:inherit}
+    .year-pill:hover{border-color:rgba(var(--accent-rgb),.4)}
+    .year-pill.active{border-color:var(--game-accent);background:rgba(var(--accent-rgb),.08)}
+    .year-pill-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+    .year-pill-label{font-size:12px;font-weight:600;color:var(--text-primary)}
+    .year-pill-count{font-size:11px;color:var(--text-tertiary)}
+    .rank-badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;line-height:1.4;letter-spacing:.01em;backdrop-filter:blur(4px)}
 
     .year-panel-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)}
     .year-panel-label{font-family:'DM Serif Display',serif;font-size:22px;letter-spacing:-.3px;color:var(--text-primary)}
@@ -355,12 +399,12 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .row-arrow:disabled{opacity:.25;cursor:default;pointer-events:none}
 
     /* GAME CARDS */
-    .game-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s;display:block}
-    .game-card:hover{transform:translateY(-3px);box-shadow:var(--shadow-md);border-color:rgba(96,80,200,.3)}
-    .game-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;position:relative}
+    .game-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s;display:block;text-decoration:none}
+    .game-card:hover{transform:translateY(-3px);box-shadow:var(--shadow-md);border-color:rgba(var(--accent-rgb),.3)}
+    .game-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;position:relative;width:100%}
     .game-cover img{width:100%;height:100%;object-fit:cover;display:block}
-    .game-cover-placeholder{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:32px}
-    .game-score-badge{position:absolute;top:7px;right:7px;width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
+    .game-cover-placeholder{width:100%;height:100%;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:32px}
+    .game-score-badge{position:absolute;top:7px;right:7px;width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
     .badge-great{color:var(--score-great);background:var(--score-great-bg);border:1px solid rgba(74,222,128,.3)}
     .badge-good{color:var(--score-good);background:var(--score-good-bg);border:1px solid rgba(96,165,250,.3)}
     .badge-mid{color:var(--score-mid);background:var(--score-mid-bg);border:1px solid rgba(251,191,36,.3)}
@@ -373,9 +417,11 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
 
     @media(max-width:600px){
-      .genre-header{flex-direction:column;align-items:flex-start;margin-top:-40px}
+      .genre-header{flex-direction:column;align-items:flex-start}
+      .genre-header.has-banner{margin-top:-40px}
+      .genre-header.no-banner{margin-top:20px}
       .genre-name{font-size:26px}
-      .hero{height:220px}
+      .hero{height:200px}
       .stats-row{gap:8px}
       .stat-num{font-size:30px}
       .jump-nav{display:none}
@@ -416,15 +462,21 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     {relatedGenres.length > 0 && <a href="#related" class="jump-link">Related</a>}
   </nav>
 
-  <!-- HERO — blurred mosaic from top genre games -->
-  <div class="hero" id="overview">
-    <div class="hero-mosaic" id="heroMosaic"></div>
-    <div class="hero-overlay"></div>
-  </div>
+  {hasMosaic && (
+    <div class="hero" id="overview">
+      <div class="hero-mosaic visible">
+        {mosaicTiles.map((url: string) => (
+          <div class="hero-mosaic-tile" style={`background-image:url('${url}')`}></div>
+        ))}
+      </div>
+      <div class="hero-side-fade"></div>
+      <div class="hero-overlay"></div>
+    </div>
+  )}
 
   <div class="page">
 
-    <div class="genre-header">
+    <div class={`genre-header ${hasMosaic ? 'has-banner' : 'no-banner'}`}>
       <div class="genre-icon-wrap">
         {genre.slug === 'role-playing-rpg' && '⚔️'}
         {genre.slug === 'shooter' && '🔫'}
@@ -564,7 +616,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
           <span class="section-title">By Year</span>
           <span class="section-count" id="yearPanelCount"></span>
         </div>
-        <div class="year-picker" id="yearPicker"></div>
+        <div class="year-pill-strip" id="yearPillStrip"></div>
         <div>
           <div class="year-panel-header">
             <span class="year-panel-label" id="yearPanelLabel"></span>
@@ -607,33 +659,22 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
   </div>
 
-  <script is:inline define:vars={{ topRatedJson, mostReviewedJson, byYearJson, yearsJson }}>
+  <script is:inline define:vars={{ topRatedJson, mostReviewedJson, byYearJson, yearsJson, yearGameCountsJson, yearAvgScoresJson }}>
 
     var topRated = JSON.parse(topRatedJson);
     var mostReviewed = JSON.parse(mostReviewedJson);
     var byYear = JSON.parse(byYearJson);
     var years = JSON.parse(yearsJson);
 
-    // hero mosaic from top game covers
-    var mosaic = document.getElementById('heroMosaic');
-    if (mosaic) {
-      var coverUrls = topRated.slice(0,12).map(function(g){return g.cover;}).filter(Boolean);
-      if (coverUrls.length > 0) {
-        var tiles = coverUrls.concat(coverUrls).concat(coverUrls).slice(0,24);
-        tiles.forEach(function(url){
-          var tile = document.createElement('div');
-          tile.className = 'hero-mosaic-tile';
-          tile.style.backgroundImage = 'url('+url+')';
-          mosaic.appendChild(tile);
-        });
-      }
-    }
+    var scoreBorderColors = {'badge-great':'#4ade80','badge-good':'#60a5fa','badge-mid':'#fbbf24','badge-low':'#f87171'}
 
-    function makeCard(g) {
+    function makeCard(g, showRank, rank) {
       var cv = g.cover ? '<img src="'+g.cover+'" alt="" loading="lazy"/>' : '<div class="game-cover-placeholder">🎮</div>';
       var bd = g.score ? '<div class="game-score-badge '+g.badge+'">'+g.score+'</div>' : '';
-      return '<a href="/games/'+g.slug+'" class="game-card">'
-        +'<div class="game-cover">'+cv+bd+'</div>'
+      var rk = (showRank && rank) ? '<div class="rank-badge">#'+rank+'</div>' : '';
+      var borderBottom = g.badge && scoreBorderColors[g.badge] ? 'border-bottom:2px solid '+scoreBorderColors[g.badge]+';' : '';
+      return '<a href="/games/'+g.slug+'" class="game-card" style="'+borderBottom+'">'
+        +'<div class="game-cover">'+cv+bd+rk+'</div>'
         +'<div class="game-info">'
         +'<div class="game-title-text">'+g.title+'</div>'
         +(g.reviews?'<div class="game-review-count">'+g.reviews+'</div>':'')
@@ -642,8 +683,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
     var rows = {};
 
-    function initRow(key, data, rowId, prevId, nextId, infoId) {
-      rows[key] = {data:data,page:0,pageSize:5,rowId:rowId,prevId:prevId,nextId:nextId,infoId:infoId};
+    function initRow(key, data, rowId, prevId, nextId, infoId, showRank) {
+      rows[key] = {data:data,page:0,pageSize:5,rowId:rowId,prevId:prevId,nextId:nextId,infoId:infoId,showRank:showRank||false};
       renderRow(key);
     }
 
@@ -652,7 +693,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       var start = r.page * r.pageSize;
       var slice = r.data.slice(start, start+r.pageSize);
       var el = document.getElementById(r.rowId);
-      if (el) el.innerHTML = slice.map(function(g){return makeCard(g);}).join('');
+      if (el) el.innerHTML = slice.map(function(g,i){return makeCard(g,r.showRank,r.showRank?(start+i+1):null);}).join('');
       var tot = Math.ceil(r.data.length / r.pageSize);
       var prev = document.getElementById(r.prevId);
       var next = document.getElementById(r.nextId);
@@ -671,36 +712,51 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     }
     window.pageRow = pageRow;
 
-    if (topRated.length > 0) initRow('top', topRated, 'topRatedRow', 'topPrev', 'topNext', 'topInfo');
-    if (mostReviewed.length > 0) initRow('mr', mostReviewed, 'mostReviewedRow', 'mrPrev', 'mrNext', 'mrInfo');
+    if (topRated.length > 0) initRow('top', topRated, 'topRatedRow', 'topPrev', 'topNext', 'topInfo', true);
+    if (mostReviewed.length > 0) initRow('mr', mostReviewed, 'mostReviewedRow', 'mrPrev', 'mrNext', 'mrInfo', false);
 
-    // year picker
+    // year pill strip
     if (years.length > 0) {
       var activeYear = years[0];
-      var picker = document.getElementById('yearPicker');
-      if (picker) {
+      var yearGameCounts = JSON.parse(yearGameCountsJson);
+      var yearAvgScores = JSON.parse(yearAvgScoresJson);
+      var yearPills = {};
+
+      var strip = document.getElementById('yearPillStrip');
+      if (strip) {
         years.forEach(function(y) {
-          var btn = document.createElement('button');
-          btn.className = 'year-btn' + (y === activeYear ? ' active' : '');
-          btn.textContent = y;
-          btn.onclick = function(){ selectYear(y); };
-          picker.appendChild(btn);
+          var avg = yearAvgScores[y];
+          var dot = avg != null ? (avg >= 8 ? '#22c55e' : avg >= 6 ? '#3b82f6' : avg >= 4 ? '#f59e0b' : '#ef4444') : '#71717a';
+          var pill = document.createElement('button');
+          pill.className = 'year-pill';
+          pill.innerHTML = '<span class="year-pill-dot" style="background:' + dot + '"></span>'
+            + '<span class="year-pill-label">' + y + '</span>'
+            + '<span class="year-pill-count">' + (yearGameCounts[y] || 0) + '</span>';
+          pill.addEventListener('click', function(){ selectYear(y); });
+          yearPills[y] = pill;
+          strip.appendChild(pill);
         });
       }
 
       function selectYear(y) {
         activeYear = y;
-        document.querySelectorAll('.year-btn').forEach(function(b){
-          b.classList.toggle('active', parseInt(b.textContent) === y);
+        Object.keys(yearPills).forEach(function(yr) {
+          yearPills[yr].classList.toggle('active', parseInt(yr) === y);
         });
+        if (strip && yearPills[y]) {
+          var pill = yearPills[y];
+          var target = pill.offsetLeft - (strip.clientWidth / 2) + (pill.offsetWidth / 2);
+          strip.scrollTo({left: Math.max(0, target), behavior: 'smooth'});
+        }
         var games = byYear[y] || [];
+        var totalCount = yearGameCounts[y] || games.length;
         var lbl = document.getElementById('yearPanelLabel');
         var tot = document.getElementById('yearPanelTotal');
         var cnt = document.getElementById('yearPanelCount');
         if (lbl) lbl.textContent = y;
-        if (tot) tot.textContent = games.length+' games';
-        if (cnt) cnt.textContent = games.length+' games';
-        rows['year'] = {data:games,page:0,pageSize:5,rowId:'yearGamesRow',prevId:'yearPrev',nextId:'yearNext',infoId:'yearInfo'};
+        if (tot) tot.textContent = totalCount + ' games';
+        if (cnt) cnt.textContent = totalCount + ' games';
+        rows['year'] = {data:games,page:0,pageSize:5,rowId:'yearGamesRow',prevId:'yearPrev',nextId:'yearNext',infoId:'yearInfo',showRank:false};
         renderRow('year');
       }
       selectYear(activeYear);
