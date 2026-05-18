@@ -230,6 +230,71 @@ const byYearJson = JSON.stringify(
 )
 const yearsJson = JSON.stringify(years)
 
+// Stats tab data
+const reviewedGameCount = allGames.filter((g: any) => (reviewsByGame[g.id]?.length ?? 0) > 0).length
+
+const gameAvgScoresList: number[] = allGames
+  .filter((g: any) => reviewsByGame[g.id]?.length > 0)
+  .map((g: any) => {
+    const scores = reviewsByGame[g.id]
+    return scores.reduce((a: number, b: number) => a + b, 0) / scores.length
+  })
+
+const gameScoreDist = Array.from({ length: 10 }, (_, i) => {
+  if (i === 9) return gameAvgScoresList.filter(avg => avg >= 9.5).length
+  return gameAvgScoresList.filter(avg => avg >= i + 0.5 && avg < i + 1.5).length
+})
+
+const reviewsByYearMap: Record<number, number> = {}
+for (const g of allGames) {
+  const year = g.date_released ? new Date(g.date_released).getFullYear() : 0
+  if (!year) continue
+  const rc = reviewsByGame[g.id]?.length ?? 0
+  if (rc > 0) reviewsByYearMap[year] = (reviewsByYearMap[year] ?? 0) + rc
+}
+const reviewsByYearData = Object.entries(reviewsByYearMap)
+  .map(([year, count]) => ({ year: parseInt(year), count }))
+  .sort((a, b) => a.year - b.year)
+
+const topReviewedGames = allGames
+  .filter((g: any) => (reviewsByGame[g.id]?.length ?? 0) > 0)
+  .sort((a: any, b: any) => (reviewsByGame[b.id]?.length ?? 0) - (reviewsByGame[a.id]?.length ?? 0))
+  .slice(0, 5)
+  .map((g: any) => {
+    const avg = gameAvgScore(g.id)
+    const count = gameReviewCount(g.id)
+    const sc = avg ? scoreClass(parseFloat(avg)) : null
+    return { title: g.title, slug: g.slug, cover: igdbImage(g.cover_img_url), reviews: count, avg, badge: sc ? `badge-${sc}` : null }
+  })
+
+const genreStatsJson = JSON.stringify({ totalReviews, reviewedGameCount, gameAvg: overallAvg ? parseFloat(overallAvg) : null, gameCount: allGames.length, gameScoreDist, reviewsByYearData, topReviewedGames })
+
+// Recent game reviews in this genre
+const { data: recentReviewRows } = await supabase
+  .from('reviews')
+  .select(`id, score, title, body, created_at, game_id, games(id, title, slug, cover_img_url), profiles(id, username, avatar_url)`)
+  .in('game_id', gameIds.length > 0 ? gameIds.slice(0, 200) : ['00000000-0000-0000-0000-000000000000'])
+  .eq('status', 'published')
+  .order('created_at', { ascending: false })
+  .limit(30)
+
+const recentReviews = recentReviewRows ?? []
+
+const activeTab = Astro.url.searchParams.get('tab') || 'overview'
+
+function timeAgo(dateStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
+  if (diff < 60) return `${diff}s`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`
+  return `${Math.floor(diff / 604800)}w`
+}
+
+function getInitials(username: string): string {
+  return username.slice(0, 2).toUpperCase()
+}
+
 // CDN cache — anonymous visitors share a cached response; auth users get a fresh render
 if (!isLoggedIn) {
   Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
@@ -415,6 +480,53 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
     .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
     .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
+    .write-review-btn{display:inline-block;margin-top:16px;background:var(--game-accent);color:white;border-radius:20px;padding:9px 20px;font-size:14px;font-weight:500;border:none;cursor:pointer;font-family:inherit;transition:opacity .15s}
+    .write-review-btn:hover{opacity:.85}
+
+    /* TAB NAV */
+    .tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:28px}
+    .tab-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;transition:all .2s;position:relative;overflow:hidden;text-decoration:none}
+    .tab-link:hover{border-color:rgba(var(--accent-rgb),.35);transform:translateY(-2px);box-shadow:var(--shadow-md)}
+    .tab-link.active{border-color:var(--game-accent);box-shadow:0 0 0 1px var(--game-accent),0 4px 20px rgba(var(--accent-rgb),.15)}
+    .tab-link.active::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--game-accent)}
+    .tab-icon{width:30px;height:30px;border-radius:8px;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;transition:background .2s;flex-shrink:0}
+    .tab-link.active .tab-icon svg,.tab-link:hover .tab-icon svg{stroke:var(--game-accent)}
+    .tab-label{font-size:13px;font-weight:600;color:var(--text-secondary);transition:color .2s}
+    .tab-link.active .tab-label,.tab-link:hover .tab-label{color:var(--text-primary)}
+    .tab-meta{font-size:11px;color:var(--text-tertiary)}
+    .tab-link.active .tab-meta{color:var(--game-accent)}
+    .tab-count-badge{background:var(--game-accent);color:white;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;position:absolute;top:8px;right:8px;z-index:2}
+    .tab-panel{display:none}
+    .tab-panel.active{display:block}
+
+    /* REVIEWS */
+    .reviews-toolbar{display:flex;align-items:center;gap:6px;margin-bottom:20px}
+    .sort-tab{background:var(--tag-bg);color:var(--text-tertiary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;letter-spacing:.04em;text-transform:uppercase}
+    .sort-tab.active{background:var(--game-accent);color:white;border-color:transparent}
+    .review-card{padding:22px 0;border-bottom:1px solid var(--border-subtle)}
+    .review-card:last-child{border-bottom:none}
+    .review-top{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+    .avatar{width:34px;height:34px;border-radius:50%;background:var(--bg-hover);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--text-tertiary);overflow:hidden}
+    .avatar img{width:100%;height:100%;object-fit:cover}
+    .reviewer-info{flex:1;min-width:0}
+    .reviewer-name{font-size:13px;font-weight:500;transition:color .15s}
+    .reviewer-name:hover{color:var(--text-secondary)}
+    .reviewer-meta{font-size:11px;color:var(--text-tertiary);display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px}
+    .score-badge{flex-shrink:0;width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
+    .score-great{color:var(--score-great);background:var(--score-great-bg);border:1px solid rgba(74,222,128,.25)}
+    .score-good{color:var(--score-good);background:var(--score-good-bg);border:1px solid rgba(96,165,250,.25)}
+    .score-mid{color:var(--score-mid);background:var(--score-mid-bg);border:1px solid rgba(251,191,36,.25)}
+    .score-low{color:var(--score-low);background:var(--score-low-bg);border:1px solid rgba(248,113,113,.25)}
+    .review-game-link{display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:7px 10px;background:var(--tag-bg);border-radius:8px;transition:opacity .15s}
+    .review-game-link:hover{opacity:.7}
+    .review-game-cover{width:26px;height:34px;border-radius:4px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)}
+    .review-game-title{font-size:12px;font-weight:500;color:var(--text-secondary)}
+    .review-title{font-family:'DM Serif Display',serif;font-size:18px;line-height:1.3;margin-bottom:8px;letter-spacing:-.2px}
+    .review-body{font-size:14px;line-height:1.75;color:var(--text-secondary)}
+    .review-body.collapsed{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+    .review-footer{display:flex;align-items:center;gap:8px;margin-top:12px}
+    .expand-btn{font-size:11px;color:var(--game-accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;transition:opacity .15s;padding:0;font-weight:500}
+    .expand-btn:hover{opacity:.7}
 
     @media(max-width:600px){
       .genre-header{flex-direction:column;align-items:flex-start}
@@ -430,7 +542,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .mobile-nav{display:none}
     @media(max-width:768px){
       body{padding-bottom:calc(56px + env(safe-area-inset-bottom,0px))}
-      .mobile-nav{display:flex;position:fixed;bottom:0;left:0;right:0;height:calc(56px + env(safe-area-inset-bottom,0px));padding-bottom:env(safe-area-inset-bottom,0px);background:var(--bg-sidebar);border-top:1px solid var(--border);z-index:100;align-items:stretch}
+      .mobile-nav{display:flex;position:fixed;bottom:0;left:0;right:0;height:calc(56px + env(safe-area-inset-bottom,0px));padding-bottom:env(safe-area-inset-bottom,0px);background:var(--bg-card);border-top:1px solid var(--border);z-index:100;align-items:stretch}
       .mn-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;text-decoration:none;color:var(--text-tertiary);transition:color 0.15s;padding:6px 2px;min-width:0;-webkit-tap-highlight-color:transparent}
       .mn-item.active{color:var(--text-primary)}
       .mn-item:active{opacity:.65}
@@ -455,15 +567,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     </button>
   </nav>
 
-  <nav class="jump-nav">
-    <a href="#overview" class="jump-link active">Overview</a>
-    {topRated.length > 0 && <a href="#top-rated" class="jump-link">Top Rated</a>}
-    {years.length > 0 && <a href="#by-year" class="jump-link">By Year</a>}
-    {relatedGenres.length > 0 && <a href="#related" class="jump-link">Related</a>}
-  </nav>
-
   {hasMosaic && (
-    <div class="hero" id="overview">
+    <div class="hero">
       <div class="hero-mosaic visible">
         {mosaicTiles.map((url: string) => (
           <div class="hero-mosaic-tile" style={`background-image:url('${url}')`}></div>
@@ -474,7 +579,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     </div>
   )}
 
-  <div class="page">
+  <div class="page" id="overview">
 
     <div class={`genre-header ${hasMosaic ? 'has-banner' : 'no-banner'}`}>
       <div class="genre-icon-wrap">
@@ -532,134 +637,243 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       </div>
     </div>
 
-    {(genreDescription || relatedGenres.length > 0) && (
-      <div class="about-grid">
-        <div>
-          {genreDescription && (
-            <>
-              <p class="description collapsed" id="desc">{genreDescription}</p>
-              <button class="read-more-btn" id="readMoreBtn" onclick="toggleDesc()">Read more →</button>
-            </>
-          )}
+    <!-- TAB NAV -->
+    <nav class="tab-nav">
+      <a href={`/genres/${genre.slug}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`}>
+        <div class="tab-icon">
+          <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="6" height="6" rx="1.5"/><rect x="10" y="2" width="6" height="6" rx="1.5"/>
+            <rect x="2" y="10" width="6" height="6" rx="1.5"/><rect x="10" y="10" width="6" height="6" rx="1.5"/>
+          </svg>
         </div>
-        <div class="details-card">
-          <div class="detail-row">
-            <span class="detail-label">Games</span>
-            <span class="detail-value">{allGames.length.toLocaleString()} on Chekpoint</span>
+        <div class="tab-label">Overview</div>
+        <div class="tab-meta">Top games &amp; by year</div>
+      </a>
+      <a href={`/genres/${genre.slug}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>
+        {recentReviews.length > 0 && <span class="tab-count-badge">{recentReviews.length}</span>}
+        <div class="tab-icon">
+          <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 4h12M3 8h8M3 12h5"/>
+          </svg>
+        </div>
+        <div class="tab-label">Reviews</div>
+        <div class="tab-meta">{recentReviews.length > 0 ? `${recentReviews.length} recent` : 'No reviews yet'}</div>
+      </a>
+      <a href={`/genres/${genre.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`}>
+        <div class="tab-icon">
+          <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 14l4-5 3 3 3-4 4 6"/>
+          </svg>
+        </div>
+        <div class="tab-label">Stats</div>
+        <div class="tab-meta">Genre insights</div>
+      </a>
+    </nav>
+
+    <!-- OVERVIEW TAB -->
+    <div class={`tab-panel ${activeTab === 'overview' ? 'active' : ''}`}>
+
+      {(genreDescription || relatedGenres.length > 0) && (
+        <div class="about-grid">
+          <div>
+            {genreDescription && (
+              <>
+                <p class="description collapsed" id="desc">{genreDescription}</p>
+                <button class="read-more-btn" id="readMoreBtn" onclick="toggleDesc()">Read more →</button>
+              </>
+            )}
           </div>
-          {totalReviews > 0 && (
+          <div class="details-card">
             <div class="detail-row">
-              <span class="detail-label">Reviews</span>
-              <span class="detail-value">{totalReviews.toLocaleString()} total</span>
+              <span class="detail-label">Games</span>
+              <span class="detail-value">{allGames.length.toLocaleString()} on Chekpoint</span>
             </div>
-          )}
-          {topRated.length > 0 && (
-            <div class="detail-row">
-              <span class="detail-label">Top game</span>
-              <span class="detail-value">{topRated[0].title}</span>
-            </div>
-          )}
-          {years.length > 0 && (
-            <div class="detail-row">
-              <span class="detail-label">Active</span>
-              <span class="detail-value">{years[years.length - 1]} – {years[0]}</span>
-            </div>
-          )}
-        </div>
-      </div>
-    )}
-
-    <!-- TOP RATED -->
-    {topRated.length > 0 && (
-      <div class="section" id="top-rated">
-        <div class="section-header">
-          <span class="section-title">Top Rated</span>
-          <span class="section-count">{topRated.length} games</span>
-        </div>
-        <div class="game-row" id="topRatedRow"></div>
-        <div class="row-nav">
-          <button class="row-arrow" id="topPrev" onclick="pageRow('top',-1)">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
-          </button>
-          <button class="row-arrow" id="topNext" onclick="pageRow('top',1)">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
-          </button>
-          <span class="row-nav-info" id="topInfo"></span>
-        </div>
-      </div>
-    )}
-
-    <!-- MOST REVIEWED -->
-    {mostReviewed.length > 0 && (
-      <div class="section" id="most-reviewed">
-        <div class="section-header">
-          <span class="section-title">Most Reviewed</span>
-          <span class="section-count">{mostReviewed.length} games</span>
-        </div>
-        <div class="game-row" id="mostReviewedRow"></div>
-        <div class="row-nav">
-          <button class="row-arrow" id="mrPrev" onclick="pageRow('mr',-1)">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
-          </button>
-          <button class="row-arrow" id="mrNext" onclick="pageRow('mr',1)">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
-          </button>
-          <span class="row-nav-info" id="mrInfo"></span>
-        </div>
-      </div>
-    )}
-
-    <!-- BY YEAR -->
-    {years.length > 0 && (
-      <div class="section" id="by-year">
-        <div class="section-header">
-          <span class="section-title">By Year</span>
-          <span class="section-count" id="yearPanelCount"></span>
-        </div>
-        <div class="year-pill-strip" id="yearPillStrip"></div>
-        <div>
-          <div class="year-panel-header">
-            <span class="year-panel-label" id="yearPanelLabel"></span>
-            <span class="year-panel-count" id="yearPanelTotal"></span>
+            {totalReviews > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Reviews</span>
+                <span class="detail-value">{totalReviews.toLocaleString()} total</span>
+              </div>
+            )}
+            {topRated.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Top game</span>
+                <span class="detail-value">{topRated[0].title}</span>
+              </div>
+            )}
+            {years.length > 0 && (
+              <div class="detail-row">
+                <span class="detail-label">Active</span>
+                <span class="detail-value">{years[years.length - 1]} – {years[0]}</span>
+              </div>
+            )}
           </div>
-          <div class="game-row" id="yearGamesRow"></div>
+        </div>
+      )}
+
+      {topRated.length > 0 && (
+        <div class="section" id="top-rated">
+          <div class="section-header">
+            <span class="section-title">Top Rated</span>
+            <span class="section-count">{topRated.length} games</span>
+          </div>
+          <div class="game-row" id="topRatedRow"></div>
           <div class="row-nav">
-            <button class="row-arrow" id="yearPrev" onclick="pageRow('year',-1)">
+            <button class="row-arrow" id="topPrev" onclick="pageRow('top',-1)">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
             </button>
-            <button class="row-arrow" id="yearNext" onclick="pageRow('year',1)">
+            <button class="row-arrow" id="topNext" onclick="pageRow('top',1)">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
             </button>
-            <span class="row-nav-info" id="yearInfo"></span>
+            <span class="row-nav-info" id="topInfo"></span>
           </div>
         </div>
-      </div>
-    )}
+      )}
 
-    <!-- RELATED GENRES -->
-    {relatedGenres.length > 0 && (
-      <div class="section" id="related">
-        <div class="section-header">
-          <span class="section-title">Related Genres</span>
+      {mostReviewed.length > 0 && (
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Most Reviewed</span>
+            <span class="section-count">{mostReviewed.length} games</span>
+          </div>
+          <div class="game-row" id="mostReviewedRow"></div>
+          <div class="row-nav">
+            <button class="row-arrow" id="mrPrev" onclick="pageRow('mr',-1)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
+            </button>
+            <button class="row-arrow" id="mrNext" onclick="pageRow('mr',1)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
+            </button>
+            <span class="row-nav-info" id="mrInfo"></span>
+          </div>
         </div>
-        <div class="related-genres">
-          {relatedGenres.map((g: any) => (
-            <a href={`/genres/${g.slug}`} class="genre-chip">{g.name}</a>
-          ))}
-        </div>
-      </div>
-    )}
+      )}
 
-    {allGames.length === 0 && (
-      <div class="empty-state">
-        <div class="empty-title">No games yet</div>
-        <p>We don't have any {genre.name} games in our database yet.</p>
+      {years.length > 0 && (
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Games by Year</span>
+            <span class="section-count" id="yearPanelCount"></span>
+          </div>
+          <div class="year-pill-strip" id="yearPillStrip"></div>
+          <div>
+            <div class="year-panel-header">
+              <span class="year-panel-label" id="yearPanelLabel"></span>
+              <span class="year-panel-count" id="yearPanelTotal"></span>
+            </div>
+            <div class="game-row" id="yearGamesRow"></div>
+            <div class="row-nav">
+              <button class="row-arrow" id="yearPrev" onclick="pageRow('year',-1)">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
+              </button>
+              <button class="row-arrow" id="yearNext" onclick="pageRow('year',1)">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
+              </button>
+              <span class="row-nav-info" id="yearInfo"></span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {relatedGenres.length > 0 && (
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Related Genres</span>
+          </div>
+          <div class="related-genres">
+            {relatedGenres.map((g: any) => (
+              <a href={`/genres/${g.slug}`} class="genre-chip">{g.name}</a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {allGames.length === 0 && (
+        <div class="empty-state">
+          <div class="empty-title">No games yet</div>
+          <p>We don't have any {genre.name} games in our database yet.</p>
+        </div>
+      )}
+    </div>
+
+    <!-- REVIEWS TAB -->
+    <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`}>
+      <div class="section-header" style="margin-bottom:20px">
+        <span class="section-title">Recent Reviews</span>
+        <span class="section-count">{recentReviews.length} {recentReviews.length === 1 ? 'review' : 'reviews'}</span>
       </div>
-    )}
+
+      {recentReviews.length === 0 ? (
+        <div class="empty-state">
+          <div class="empty-title">No reviews yet</div>
+          <p>Be the first to review a {genre.name} game.</p>
+        </div>
+      ) : (
+        <>
+          <div class="reviews-toolbar">
+            <button class="sort-tab active" onclick="sortGenreReviews('recent',this)">Recent</button>
+            <button class="sort-tab" onclick="sortGenreReviews('highest',this)">Highest</button>
+            <button class="sort-tab" onclick="sortGenreReviews('lowest',this)">Lowest</button>
+          </div>
+          <div id="genreReviewsList">
+            {recentReviews.map((review: any) => (
+              <div class="review-card" data-score={review.score} data-date={review.created_at}>
+                {review.games && (
+                  <a href={`/games/${review.games.slug}`} class="review-game-link">
+                    {review.games.cover_img_url
+                      ? <img class="review-game-cover" src={igdbImage(review.games.cover_img_url, 't_cover_small') ?? ''} alt="" />
+                      : <div style="width:26px;height:34px;border-radius:4px;background:var(--tag-bg);flex-shrink:0"></div>
+                    }
+                    <span class="review-game-title">{review.games.title}</span>
+                  </a>
+                )}
+                <div class="review-top">
+                  <div class="avatar">
+                    {review.profiles?.avatar_url
+                      ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+                      : getInitials(review.profiles?.username ?? '??')
+                    }
+                  </div>
+                  <div class="reviewer-info">
+                    <a href={`/reviewers/${review.profiles?.username}`} class="reviewer-name">
+                      @{review.profiles?.username ?? 'unknown'}
+                    </a>
+                    <div class="reviewer-meta">
+                      <span>{timeAgo(review.created_at)}</span>
+                    </div>
+                  </div>
+                  <div class={`score-badge score-${scoreClass(review.score)}`}>{review.score}</div>
+                </div>
+                {review.title && <div class="review-title">{review.title}</div>}
+                {review.body && (
+                  <>
+                    <div class="review-body collapsed" id={`grb-${review.id}`}>{review.body}</div>
+                    <div class="review-footer">
+                      <button class="expand-btn" onclick={`toggleGenreReview('${review.id}',this)`}>Read more →</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+
+    <!-- STATS TAB -->
+    <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`}>
+      {totalReviews === 0 ? (
+        <div class="empty-state">
+          <div class="empty-title">No stats yet</div>
+          <p>Stats will appear once games are reviewed.</p>
+        </div>
+      ) : (
+        <div id="genreStatsContent"></div>
+      )}
+    </div>
 
   </div>
 
-  <script is:inline define:vars={{ topRatedJson, mostReviewedJson, byYearJson, yearsJson, yearGameCountsJson, yearAvgScoresJson }}>
+  <script is:inline define:vars={{ topRatedJson, mostReviewedJson, byYearJson, yearsJson, yearGameCountsJson, yearAvgScoresJson, genreStatsJson, activeTab }}>
 
     var topRated = JSON.parse(topRatedJson);
     var mostReviewed = JSON.parse(mostReviewedJson);
@@ -770,22 +984,129 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     }
     window.toggleDesc = toggleDesc;
 
-    var sections = ['overview','top-rated','most-reviewed','by-year','related'];
-    var jumpLinks = document.querySelectorAll('.jump-link');
-    window.addEventListener('scroll', function(){
-      var c='overview';
-      sections.forEach(function(id){
-        var el=document.getElementById(id);
-        if(el&&window.scrollY>=el.offsetTop-120) c=id;
+    function sortGenreReviews(type, btn) {
+      document.querySelectorAll('.sort-tab').forEach(function(b){b.classList.remove('active');});
+      btn.classList.add('active');
+      var list = document.getElementById('genreReviewsList');
+      if (!list) return;
+      var cards = Array.from(list.querySelectorAll('.review-card'));
+      cards.sort(function(a,b) {
+        if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score);
+        if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score);
+        return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime();
       });
-      jumpLinks.forEach(function(l){
-        l.classList.toggle('active',l.getAttribute('href')==='#'+c);
+      cards.forEach(function(card){list.appendChild(card);});
+    }
+    window.sortGenreReviews = sortGenreReviews;
+
+    function toggleGenreReview(id, btn) {
+      var b = document.getElementById('grb-'+id);
+      if (!b) return;
+      b.classList.toggle('collapsed');
+      btn.textContent = b.classList.contains('collapsed') ? 'Read more →' : 'Read less ↑';
+    }
+    window.toggleGenreReview = toggleGenreReview;
+
+    // ── GENRE STATS ──
+    var gs = JSON.parse(genreStatsJson);
+
+    function buildGenreStats() {
+      var el = document.getElementById('genreStatsContent');
+      if (!el) return;
+      var html = '';
+
+      if (gs.gameAvg) {
+        var sColor = gs.gameAvg >= 9 ? '#4ade80' : gs.gameAvg >= 7 ? '#60a5fa' : gs.gameAvg >= 5 ? '#fbbf24' : '#f87171';
+        html += '<div style="background:var(--bg-card);border:1px solid ' + sColor + '44;border-radius:12px;padding:16px 20px;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">';
+        html += '<div style="position:absolute;inset:0;background:linear-gradient(to right,' + sColor + '10 0%,transparent 55%);pointer-events:none"></div>';
+        html += '<div style="position:relative"><div style="font-size:11px;font-weight:700;color:' + sColor + ';text-transform:uppercase;letter-spacing:.1em;margin-bottom:3px;opacity:.85">Avg game score</div>';
+        html += '<div style="font-size:11px;color:var(--text-tertiary)">across all reviewed games</div></div>';
+        html += '<div style="font-family:\'DM Serif Display\',serif;font-size:52px;letter-spacing:-2px;line-height:1;color:' + sColor + ';position:relative;flex-shrink:0">' + gs.gameAvg.toFixed(1) + '</div></div>';
+      }
+
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">';
+      var mini = [
+        { lbl: 'Total reviews', val: gs.totalReviews.toLocaleString(), sub: 'across all games', color: '#6050c8' },
+        { lbl: 'Reviewed games', val: gs.reviewedGameCount.toLocaleString(), sub: 'of ' + gs.gameCount.toLocaleString() + ' total', color: '#60a5fa' },
+        { lbl: 'Avg score', val: gs.gameAvg ? gs.gameAvg.toFixed(1) : '—', sub: 'per-game average', color: gs.gameAvg ? (gs.gameAvg >= 9 ? '#4ade80' : gs.gameAvg >= 7 ? '#60a5fa' : gs.gameAvg >= 5 ? '#fbbf24' : '#f87171') : '#484644' },
+      ];
+      mini.forEach(function(sc) {
+        html += '<div style="background:var(--bg-card);border:1px solid ' + sc.color + '33;border-radius:12px;padding:12px 14px;position:relative;overflow:hidden">';
+        html += '<div style="position:absolute;inset:0;background:linear-gradient(135deg,' + sc.color + '0d 0%,transparent 70%);pointer-events:none"></div>';
+        html += '<div style="font-size:10px;font-weight:700;color:' + sc.color + ';text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;opacity:.85;position:relative">' + sc.lbl + '</div>';
+        html += '<div style="font-family:\'DM Serif Display\',serif;font-size:32px;letter-spacing:-.5px;line-height:1;color:' + sc.color + ';position:relative;margin-bottom:3px">' + sc.val + '</div>';
+        html += '<div style="font-size:10px;color:var(--text-tertiary);position:relative">' + sc.sub + '</div></div>';
       });
-    });
+      html += '</div>';
+
+      var hasDist = gs.gameScoreDist && gs.gameScoreDist.some(function(v) { return v > 0; });
+      var hasYear = gs.reviewsByYearData && gs.reviewsByYearData.length > 0;
+      if (hasDist || hasYear) {
+        var cols = (hasDist && hasYear) ? '3fr 2fr' : '1fr';
+        html += '<div style="display:grid;grid-template-columns:' + cols + ';gap:8px;margin-bottom:10px">';
+        if (hasDist) {
+          var maxDist = Math.max.apply(null, gs.gameScoreDist.concat([1]));
+          var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#4ade80'];
+          html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px">';
+          html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Score distribution — per-game avg</div>';
+          html += '<div style="display:flex;gap:4px;align-items:flex-end;height:60px">';
+          gs.gameScoreDist.forEach(function(count, i) {
+            var h = Math.max(4, (count / maxDist) * 52);
+            html += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px" title="~' + (i+1) + '/10: ' + count + ' games">';
+            html += '<div style="width:100%;border-radius:4px 4px 0 0;height:' + h + 'px;background:' + barColors[i] + ';opacity:.7;min-height:4px"></div>';
+            html += '<div style="font-size:9px;color:var(--text-tertiary);font-weight:500">' + (i+1) + '</div></div>';
+          });
+          html += '</div></div>';
+        }
+        if (hasYear) {
+          var maxYear = Math.max.apply(null, gs.reviewsByYearData.map(function(d) { return d.count; }).concat([1]));
+          html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px">';
+          html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Reviews by release year</div>';
+          html += '<div style="display:flex;gap:3px;align-items:flex-end;height:60px;overflow:hidden">';
+          gs.reviewsByYearData.forEach(function(d) {
+            var h = Math.max(4, (d.count / maxYear) * 52);
+            html += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0" title="' + d.year + ': ' + d.count + ' reviews">';
+            html += '<div style="width:100%;border-radius:4px 4px 0 0;height:' + h + 'px;background:#6050c8;opacity:.7;min-height:4px"></div>';
+            html += '<div style="font-size:8px;color:var(--text-tertiary);font-weight:500">' + (d.year % 100) + '</div></div>';
+          });
+          html += '</div></div>';
+        }
+        html += '</div>';
+      }
+
+      if (gs.topReviewedGames && gs.topReviewedGames.length > 0) {
+        html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px">';
+        html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Most reviewed games</div>';
+        gs.topReviewedGames.forEach(function(g, i) {
+          html += '<a href="/games/' + g.slug + '" style="display:flex;align-items:center;gap:10px;padding:10px 0;' + (i > 0 ? 'border-top:1px solid var(--border-subtle);' : '') + 'text-decoration:none;transition:opacity .15s" onmouseover="this.style.opacity=\'.75\'" onmouseout="this.style.opacity=\'1\'">';
+          if (g.cover) {
+            html += '<img src="' + g.cover + '" alt="" style="width:32px;height:42px;border-radius:5px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)" loading="lazy">';
+          } else {
+            html += '<div style="width:32px;height:42px;border-radius:5px;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">🎮</div>';
+          }
+          html += '<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:500;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + g.title + '</div>';
+          html += '<div style="font-size:11px;color:var(--text-tertiary);margin-top:2px">' + g.reviews + ' ' + (g.reviews === 1 ? 'review' : 'reviews') + '</div></div>';
+          if (g.avg) {
+            var avgColor = parseFloat(g.avg) >= 9 ? '#4ade80' : parseFloat(g.avg) >= 7 ? '#60a5fa' : parseFloat(g.avg) >= 5 ? '#fbbf24' : '#f87171';
+            html += '<div style="width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;font-family:\'Century Schoolbook\',Georgia,serif;color:' + avgColor + ';background:' + avgColor + '1a;border:1px solid ' + avgColor + '33;flex-shrink:0">' + g.avg + '</div>';
+          }
+          html += '</a>';
+        });
+        html += '</div>';
+      }
+
+      el.innerHTML = html;
+    }
+
+    if (activeTab === 'stats') buildGenreStats();
 
     function toggleTheme() {
       var h=document.documentElement,n=h.getAttribute('data-theme')==='light'?'dark':'light';
       h.setAttribute('data-theme',n);localStorage.setItem('theme',n);updateIcon(n);
+      if (activeTab === 'stats') {
+        var el = document.getElementById('genreStatsContent');
+        if (el) { el.innerHTML = ''; buildGenreStats(); }
+      }
     }
     function updateIcon(t) {
       var i=document.getElementById('themeIcon');
@@ -794,10 +1115,11 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         ?'<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
         :'<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>';
     }
-    window.toggleTheme = function(t) {
-      toggleTheme(t);
+    window.toggleTheme = function() {
+      toggleTheme();
       var m = document.getElementById('meta-theme-color');
-      if (m) m.content = t === 'dark' ? '#0f0f0e' : '#f9f8f6';
+      var n = document.documentElement.getAttribute('data-theme');
+      if (m) m.content = n === 'dark' ? '#0f0f0e' : '#f9f8f6';
     };
 
     var saved=document.documentElement.getAttribute('data-theme')||'light';
