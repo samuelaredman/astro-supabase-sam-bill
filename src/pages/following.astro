@@ -2,18 +2,13 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext } from '../utils/database';
 import Layout from '../components/Layout.astro';
-import ReportModal from '../components/ReportModal.astro';
-import ReviewCard from '../components/ReviewCard.astro';
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await serverClient.auth.getUser();
 const isLoggedIn = !!user;
 
-const sortBy = Astro.url.searchParams.get('sort') || 'recent';
-
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
-let followingReviews: any[] = [];
-let followingCount = 0;
+let followingProfiles: any[] = [];
 
 if (user) {
   const { data: cpData } = await serverClient
@@ -30,85 +25,15 @@ if (user) {
       .eq('follower_id', currentProfile.id);
 
     const followingIds = (followRows ?? []).map((r: any) => r.following_id);
-    followingCount = followingIds.length;
 
     if (followingIds.length > 0) {
-      let query = serverClient
-        .from('reviews')
-        .select(`
-          id, score, title, body, play_time_hours,
-          contains_spoilers, status, published_at, created_at,
-          played_on:platform_played_on ( id, name, slug ),
-          games ( id, title, slug, cover_img_url ),
-          profiles ( id, username, avatar_url ),
-          review_votes( vote ),
-          review_reactions( reaction_type, profile_id ),
-          review_comments( id )
-        `)
-        .eq('status', 'published')
-        .in('profile_id', followingIds)
-        .limit(50)
-        .order('published_at', { ascending: false });
-
-      const { data: fRevs } = await query;
-      followingReviews = (fRevs ?? []) as any[];
-
-      if (sortBy === 'highest') {
-        followingReviews.sort((a: any, b: any) => b.score - a.score);
-      } else if (sortBy === 'lowest') {
-        followingReviews.sort((a: any, b: any) => a.score - b.score);
-      } else if (sortBy === 'top') {
-        followingReviews.sort((a: any, b: any) => {
-          const aVotes = Array.isArray(a.review_votes) ? a.review_votes : [];
-          const bVotes = Array.isArray(b.review_votes) ? b.review_votes : [];
-          const aUp = aVotes.filter((v: any) => v.vote === 1).length;
-          const bUp = bVotes.filter((v: any) => v.vote === 1).length;
-          return bUp - aUp;
-        });
-      }
+      const { data: fProfiles } = await serverClient
+        .from('profiles')
+        .select('id, username, avatar_url')
+        .in('id', followingIds);
+      followingProfiles = (fProfiles ?? []) as any[];
     }
   }
-}
-
-let lastReview: any = null;
-if (currentProfile) {
-  const { data: lr } = await serverClient
-    .from('reviews')
-    .select(`
-      id, score, published_at, created_at, title,
-      games ( id, title, slug, cover_img_url )
-    `)
-    .eq('profile_id', currentProfile.id)
-    .eq('status', 'published')
-    .order('published_at', { ascending: false })
-    .limit(1)
-    .single();
-  lastReview = lr ?? null;
-}
-
-function igdbImage(url: string | null, size = 't_cover_big') {
-  if (!url) return null;
-  const clean = url.startsWith('//') ? `https:${url}` : url;
-  return clean.replace(/t_[a-z_]+/, size);
-}
-
-function timeAgo(dateStr: string): string {
-  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
-  return `${Math.floor(diff / 604800)}w`;
-}
-
-function scoreColor(score: number): string {
-  if (score === 10) return 'score-perfect';
-  if (score >= 9) return 'score-great';
-  if (score >= 8) return 'score-teal';
-  if (score >= 7) return 'score-good';
-  if (score >= 5) return 'score-mid';
-  if (score >= 3) return 'score-orange';
-  return 'score-low';
 }
 
 ---
@@ -125,11 +50,9 @@ function scoreColor(score: number): string {
         <div class="feed-title">Following</div>
         <div class="feed-subtitle">
           {!isLoggedIn
-            ? 'Sign in to see your feed'
-            : followingReviews.length > 0
-            ? `${followingReviews.length} review${followingReviews.length !== 1 ? 's' : ''} from ${followingCount} reviewer${followingCount !== 1 ? 's' : ''} you follow`
-            : followingCount > 0
-            ? 'No reviews from people you follow yet'
+            ? 'Sign in to see who you follow'
+            : followingProfiles.length > 0
+            ? `${followingProfiles.length} reviewer${followingProfiles.length !== 1 ? 's' : ''}`
             : "You aren't following anyone yet"
           }
         </div>
@@ -138,77 +61,38 @@ function scoreColor(score: number): string {
 
     {!isLoggedIn ? (
       <div class="empty-state">
-        <div class="empty-state-title">Sign in to see your feed</div>
-        <p>Follow reviewers to see their latest reviews here.</p>
+        <div class="empty-state-title">Sign in to see who you follow</div>
         <a href="/signin" class="empty-cta">Sign in</a>
       </div>
-    ) : followingCount === 0 ? (
+    ) : followingProfiles.length === 0 ? (
       <div class="empty-state">
-        <div class="empty-state-title">Your feed is empty</div>
-        <p>You're not following anyone yet. Find reviewers and follow them to see their reviews here.</p>
+        <div class="empty-state-title">You aren't following anyone yet</div>
+        <p>Find reviewers and follow them to build your feed.</p>
         <a href="/search?tab=reviewers" class="empty-cta">Find reviewers</a>
       </div>
-    ) : followingReviews.length === 0 ? (
-      <div class="empty-state">
-        <div class="empty-state-title">Nothing here yet</div>
-        <p>The {followingCount} reviewer{followingCount !== 1 ? 's' : ''} you follow haven't posted any reviews yet.</p>
-        <a href="/search?tab=reviewers" class="empty-cta">Find more reviewers</a>
-      </div>
     ) : (
-      <>
-        <div class="sort-bar">
-          <a href="/following?sort=recent" class={`sort-btn ${sortBy === 'recent' ? 'active' : ''}`}>Recent</a>
-          <a href="/following?sort=top" class={`sort-btn ${sortBy === 'top' ? 'active' : ''}`}>Top voted</a>
-          <a href="/following?sort=highest" class={`sort-btn ${sortBy === 'highest' ? 'active' : ''}`}>Highest score</a>
-          <a href="/following?sort=lowest" class={`sort-btn ${sortBy === 'lowest' ? 'active' : ''}`}>Lowest score</a>
-        </div>
-
-        {followingReviews.map((review: any) => (
-          <ReviewCard
-            review={review}
-            isLoggedIn={isLoggedIn}
-            showReviewer={true}
-            showGame={true}
-            currentProfileId={currentProfile?.id ?? null}
-          />
+      <div class="following-list">
+        {followingProfiles.map((profile: any) => (
+          <div class="following-row">
+            <a href={`/reviewers/${profile.username}`} class="following-user">
+              {profile.avatar_url
+                ? <img class="following-avatar" src={profile.avatar_url} alt={profile.username} />
+                : <div class="following-avatar-placeholder">{profile.username[0].toUpperCase()}</div>
+              }
+              <span class="following-username">{profile.username}</span>
+            </a>
+            <button
+              class="follow-btn following"
+              data-reviewer-id={profile.id}
+              data-following="true"
+            >Following</button>
+          </div>
         ))}
-      </>
+      </div>
     )}
   </main>
 
   <div slot="sidebar-right">
-    {isLoggedIn && lastReview && (
-      <div class="widget">
-        <div class="widget-title">Your last review</div>
-        <a href={`/games/${lastReview.games?.slug}`} style="display:flex;gap:12px;align-items:flex-start;text-decoration:none">
-          <div style="flex-shrink:0;width:52px;height:70px;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border)">
-            {lastReview.games?.cover_img_url
-              ? <img src={igdbImage(lastReview.games.cover_img_url) ?? ''} alt={lastReview.games.title} style="width:100%;height:100%;object-fit:cover" />
-              : <span style="display:flex;align-items:center;justify-content:center;height:100%;font-size:22px">🎮</span>
-            }
-          </div>
-          <div style="flex:1;min-width:0">
-            <div style="font-size:13px;font-weight:500;line-height:1.3;margin-bottom:6px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">{lastReview.games?.title}</div>
-            <div class={`score-badge ${scoreColor(lastReview.score)}`} style="width:32px;height:32px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;font-family:'DM Serif Display',serif;margin-bottom:6px">{lastReview.score}</div>
-            {lastReview.title && <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{lastReview.title}</div>}
-            <div style="font-size:11px;color:var(--text-tertiary);margin-top:3px">{timeAgo(lastReview.published_at ?? lastReview.created_at)} ago</div>
-          </div>
-        </a>
-      </div>
-    )}
-    {isLoggedIn && followingCount > 0 && (
-      <div class="widget">
-        <div class="widget-title">Your feed</div>
-        <div class="stat-row">
-          <span class="stat-label">Following</span>
-          <span class="stat-value">{followingCount}</span>
-        </div>
-        <div class="stat-row">
-          <span class="stat-label">Reviews in feed</span>
-          <span class="stat-value">{followingReviews.length}</span>
-        </div>
-      </div>
-    )}
     {isLoggedIn && (
       <div class="widget">
         <div class="widget-title">Discover reviewers</div>
@@ -221,37 +105,59 @@ function scoreColor(score: number): string {
       </div>
     )}
   </div>
-
-  <ReportModal />
 </Layout>
 
+<script>
+  document.querySelectorAll('.follow-btn').forEach(function(btn: any) {
+    btn.addEventListener('mouseenter', function() {
+      if (btn.dataset.following === 'true') btn.textContent = 'Unfollow'
+    })
+    btn.addEventListener('mouseleave', function() {
+      if (btn.dataset.following === 'true') btn.textContent = 'Following'
+    })
+    btn.addEventListener('click', async function() {
+      var reviewerId = btn.dataset.reviewerId
+      var currentlyFollowing = btn.dataset.following === 'true'
+      btn.disabled = true
+      var res = await fetch('/api/follows/toggle', {
+        method: currentlyFollowing ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ following_id: reviewerId }),
+      })
+      if (res.ok) {
+        var nowFollowing = !currentlyFollowing
+        btn.dataset.following = nowFollowing ? 'true' : 'false'
+        btn.textContent = nowFollowing ? 'Following' : '+ Follow'
+        btn.className = 'follow-btn ' + (nowFollowing ? 'following' : 'not-following')
+        if (!nowFollowing) {
+          var row = btn.closest('.following-row')
+          if (row) row.remove()
+          var list = document.querySelector('.following-list')
+          if (list && !list.querySelector('.following-row')) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-title">You aren\'t following anyone yet</div><p>Find reviewers and follow them to build your feed.</p></div>'
+          }
+        }
+      }
+      btn.disabled = false
+    })
+  })
+</script>
+
 <style>
-  .sort-bar {
-    display: flex;
-    gap: 6px;
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--border-subtle);
-    background: var(--bg-card);
-    position: sticky;
-    top: 73px;
-    z-index: 9;
-  }
-  .sort-btn {
-    padding: 6px 14px;
-    border-radius: 20px;
-    font-size: 13px;
-    font-weight: 500;
-    font-family: inherit;
-    color: var(--text-secondary);
-    background: var(--tag-bg);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: all 0.15s;
-    text-decoration: none;
-    display: inline-block;
-  }
-  .sort-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
-  .sort-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .following-list { padding: 8px 0; }
+  .following-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid var(--border-subtle); transition: background 0.15s; }
+  .following-row:last-child { border-bottom: none; }
+  .following-row:hover { background: var(--bg-hover); }
+  .following-user { display: flex; align-items: center; gap: 12px; text-decoration: none; flex: 1; min-width: 0; }
+  .following-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 1px solid var(--border); }
+  .following-avatar-placeholder { width: 40px; height: 40px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 600; color: var(--text-secondary); }
+  .following-username { font-size: 14px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .follow-btn { padding: 7px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; transition: all 0.15s; }
+  .follow-btn.not-following { background: var(--accent); color: var(--accent-text); border: none; }
+  .follow-btn.not-following:hover { opacity: 0.88; }
+  .follow-btn.following { background: var(--tag-bg); color: var(--text-secondary); border: 1px solid var(--border); }
+  .follow-btn.following:hover { border-color: #c0392b; color: #c0392b; }
+  .follow-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .empty-cta {
     display: inline-block;
@@ -265,5 +171,4 @@ function scoreColor(score: number): string {
     margin-top: 16px;
   }
   .empty-cta:hover { opacity: 0.85; }
-
 </style>
