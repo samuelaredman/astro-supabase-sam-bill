@@ -277,6 +277,26 @@ const bannerStyle = reviewer.banner_url
   ? `background-image:url('${reviewer.banner_url}');background-size:cover;background-position:center`
   : ''
 
+// Per-game scatter + hot takes
+const perGameData = publishedReviews
+  .map((r: any) => {
+    const gid = (r as any).games?.id
+    if (!gid || _gameAvgMap2[gid] === undefined) return null
+    const commAvg = Math.round(_gameAvgMap2[gid] * 10) / 10
+    return {
+      title: (r as any).games?.title ?? '',
+      slug: (r as any).games?.slug ?? '',
+      userScore: (r as any).score as number,
+      commAvg,
+      delta: Math.round(((r as any).score - commAvg) * 10) / 10,
+    }
+  })
+  .filter(Boolean) as { title: string; slug: string; userScore: number; commAvg: number; delta: number }[]
+
+const hotTakes = [...perGameData]
+  .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+  .slice(0, 5)
+
 const distJson = JSON.stringify(scoreDistribution)
 const statsJson = JSON.stringify({
   reviewCount: publishedReviews.length,
@@ -284,6 +304,7 @@ const statsJson = JSON.stringify({
   platformBreakdown, genreBreakdown,
   genreActivityData, genreRatingData, yearRatingData,
   monthLabels, monthCounts, scoreDistribution,
+  perGameData, hotTakes,
 })
 const isOwnProfileJson = JSON.stringify(isOwnProfile)
 const showcaseJson = JSON.stringify(
@@ -1549,7 +1570,76 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       })
       html += '</div>'
     }
+
+    // ── SCATTER PLOT ──
+    if (s.perGameData && s.perGameData.length >= 3) {
+      html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">'
+      html += '<div style="font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">Your score vs. community</div>'
+      html += '<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:10px">Each dot is a game — above the line means you rated higher than average</div>'
+      html += '<svg id="scatterSvg" viewBox="0 0 280 200" style="width:100%;display:block;overflow:visible"></svg>'
+      html += '<div style="display:flex;gap:14px;margin-top:8px;flex-wrap:wrap">'
+      html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary)"><div style="width:8px;height:8px;border-radius:50%;background:#4ade80"></div>Rated higher</div>'
+      html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary)"><div style="width:8px;height:8px;border-radius:50%;background:#908d87"></div>Agreed</div>'
+      html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary)"><div style="width:8px;height:8px;border-radius:50%;background:#f87171"></div>Rated lower</div>'
+      html += '</div></div>'
+    }
+
+    // ── HOT TAKES ──
+    if (s.hotTakes && s.hotTakes.length > 0) {
+      html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px">'
+      html += '<div style="font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px">Hot takes — biggest divergences from community</div>'
+      s.hotTakes.forEach(function(d, i) {
+        var isLast = i === s.hotTakes.length - 1
+        var dColor = d.delta > 0 ? '#4ade80' : '#f87171'
+        var dStr = (d.delta > 0 ? '+' : '') + d.delta
+        html += '<div style="display:flex;align-items:center;gap:10px;padding:9px 0;'+(isLast?'':'border-bottom:1px solid var(--border-subtle)')+'">  '
+        html += '<a href="/games/'+d.slug+'" style="flex:1;font-size:13px;font-weight:500;color:var(--text-primary);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+d.title+'</a>'
+        html += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">'
+        html += '<span style="font-size:11px;color:var(--text-tertiary)">community '+d.commAvg+'</span>'
+        html += '<span style="font-size:13px;font-weight:700;color:'+scoreCol(d.userScore)+';background:var(--tag-bg);padding:2px 8px;border-radius:6px;font-family:\'DM Serif Display\',serif">'+d.userScore+'</span>'
+        html += '<span style="font-size:12px;font-weight:700;color:'+dColor+';min-width:32px;text-align:right">'+dStr+'</span>'
+        html += '</div></div>'
+      })
+      html += '</div>'
+    }
+
     el.innerHTML = html
+
+    // ── SCATTER PLOT ──
+    ;(function() {
+      var svgEl = document.getElementById('scatterSvg')
+      if (!svgEl || !s.perGameData || s.perGameData.length < 3) return
+      var data = s.perGameData
+      var ns = 'http://www.w3.org/2000/svg'
+      var L=28, T=10, cW=244, cH=162
+      function sx(v) { return L + (v-1)/9*cW }
+      function sy(v) { return T + (10-v)/9*cH }
+      function mkEl(tag, a) {
+        var e = document.createElementNS(ns, tag)
+        for (var k in a) e.setAttribute(k, a[k])
+        return e
+      }
+      ;[1,3,5,7,9].forEach(function(v) {
+        svgEl.appendChild(mkEl('line',{x1:sx(v),y1:T,x2:sx(v),y2:T+cH,stroke:'var(--border-subtle)','stroke-width':'0.5'}))
+        svgEl.appendChild(mkEl('line',{x1:L,y1:sy(v),x2:L+cW,y2:sy(v),stroke:'var(--border-subtle)','stroke-width':'0.5'}))
+        var xt = mkEl('text',{x:sx(v),y:T+cH+14,'text-anchor':'middle','font-size':'8',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
+        xt.textContent = v; svgEl.appendChild(xt)
+        var yt = mkEl('text',{x:L-4,y:sy(v)+3,'text-anchor':'end','font-size':'8',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
+        yt.textContent = v; svgEl.appendChild(yt)
+      })
+      var xa = mkEl('text',{x:L+cW/2,y:T+cH+24,'text-anchor':'middle','font-size':'9',fill:'var(--text-secondary)','font-family':'DM Sans,sans-serif'})
+      xa.textContent = 'Community avg'; svgEl.appendChild(xa)
+      var ya = mkEl('text',{x:6,y:T+cH/2,'text-anchor':'middle','font-size':'9',fill:'var(--text-secondary)','font-family':'DM Sans,sans-serif',transform:'rotate(-90,6,'+(T+cH/2)+')'})
+      ya.textContent = 'Your score'; svgEl.appendChild(ya)
+      svgEl.appendChild(mkEl('line',{x1:sx(1),y1:sy(1),x2:sx(10),y2:sy(10),stroke:'var(--border)','stroke-width':'1','stroke-dasharray':'4 3'}))
+      data.forEach(function(d) {
+        var col = d.delta > 0.5 ? '#4ade80' : d.delta < -0.5 ? '#f87171' : '#908d87'
+        var c = mkEl('circle',{cx:sx(d.commAvg),cy:sy(d.userScore),r:'5',fill:col,opacity:'0.82',style:'cursor:pointer'})
+        var tip = document.createElementNS(ns,'title')
+        tip.textContent = d.title+'\nYou: '+d.userScore+'  Community: '+d.commAvg+'  ('+(d.delta>0?'+':'')+d.delta+')'
+        c.appendChild(tip); svgEl.appendChild(c)
+      })
+    })()
 
     // ── RENDER DOUBLE BAR ──
     function renderDoubleBar(view) {
@@ -1834,6 +1924,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   }
 
   if (activeTab === 'stats') buildStats()
+
 
   // ── THEME ──
   function toggleTheme() {
