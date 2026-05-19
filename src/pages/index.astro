@@ -119,7 +119,7 @@ const totalReviewers = profileCountRes.count ?? 0
 const { data: genres } = genresRes
 
 // ── Stage 3: user-specific queries (depends on profile) ──────────────────────
-let followingReviews: any[] = []
+let followingProfiles: any[] = []
 let lastReview: any = null
 if (user && currentProfile) {
   // lastReview and follows are independent of each other — run in parallel
@@ -136,14 +136,11 @@ if (user && currentProfile) {
   lastReview = lastReviewRes.data ?? null
   const followingIds = (followRowsRes.data ?? []).map((r: any) => r.following_id)
   if (followingIds.length > 0) {
-    const { data: fRevs } = await db
-      .from('reviews')
-      .select(REVIEW_FIELDS)
-      .eq('status', 'published')
-      .in('profile_id', followingIds)
-      .order('published_at', { ascending: false })
-      .limit(20)
-    followingReviews = (fRevs ?? []) as any[]
+    const { data: fProfiles } = await db
+      .from('profiles')
+      .select('id, username, avatar_url')
+      .in('id', followingIds)
+    followingProfiles = (fProfiles ?? []) as any[]
   }
 }
 
@@ -274,28 +271,32 @@ function formatCount(n: number): string {
 
     {isLoggedIn && (
       <div id="tab-following" style="display:none">
-        {followingReviews.length === 0 ? (
+        {followingProfiles.length === 0 ? (
           <div class="empty-state">
-            <div class="empty-state-title">
-              {followingReviews.length === 0 ? "Nothing here yet" : "Your feed is empty"}
-            </div>
-            <p>Follow reviewers to see their latest reviews here.</p>
+            <div class="empty-state-title">You aren't following anyone yet</div>
+            <p>Follow reviewers to build your feed.</p>
             <a href="/search?tab=reviewers" class="empty-cta" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 24px;border-radius:22px;font-size:14px;font-weight:500;margin-top:16px">Find reviewers</a>
           </div>
         ) : (
-          followingReviews.map((review: any) => (
-            <ReviewCard
-              review={review}
-              isLoggedIn={isLoggedIn}
-              showReviewer={true}
-              showGame={true}
-              currentProfileId={currentProfile?.id ?? null}
-              />
-          ))
+          <div class="following-list">
+            {followingProfiles.map((profile: any) => (
+              <div class="following-row">
+                <a href={`/reviewers/${profile.username}`} class="following-user">
+                  {profile.avatar_url
+                    ? <img class="following-avatar" src={profile.avatar_url} alt={profile.username} />
+                    : <div class="following-avatar-placeholder">{profile.username[0].toUpperCase()}</div>
+                  }
+                  <span class="following-username">{profile.username}</span>
+                </a>
+                <button
+                  class="follow-btn following"
+                  data-reviewer-id={profile.id}
+                  data-following="true"
+                >Following</button>
+              </div>
+            ))}
+          </div>
         )}
-        <div style="padding:16px 20px;text-align:center">
-          <a href="/following" style="font-size:13px;color:var(--text-tertiary)">View full feed →</a>
-        </div>
       </div>
     )}
   </main>
@@ -440,6 +441,40 @@ function formatCount(n: number): string {
         document.getElementById('tab-recent').style.display = tab === 'recent' ? '' : 'none'
         var followingEl = document.getElementById('tab-following')
         if (followingEl) followingEl.style.display = tab === 'following' ? '' : 'none'
+      })
+    })
+
+    document.querySelectorAll('#tab-following .follow-btn').forEach(function(btn) {
+      btn.addEventListener('mouseenter', function() {
+        if (btn.dataset.following === 'true') btn.textContent = 'Unfollow'
+      })
+      btn.addEventListener('mouseleave', function() {
+        if (btn.dataset.following === 'true') btn.textContent = 'Following'
+      })
+      btn.addEventListener('click', async function() {
+        var reviewerId = btn.dataset.reviewerId
+        var currentlyFollowing = btn.dataset.following === 'true'
+        btn.disabled = true
+        var res = await fetch('/api/follows/toggle', {
+          method: currentlyFollowing ? 'DELETE' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ following_id: reviewerId }),
+        })
+        if (res.ok) {
+          var nowFollowing = !currentlyFollowing
+          btn.dataset.following = nowFollowing ? 'true' : 'false'
+          btn.textContent = nowFollowing ? 'Following' : '+ Follow'
+          btn.className = 'follow-btn ' + (nowFollowing ? 'following' : 'not-following')
+          if (!nowFollowing) {
+            var row = btn.closest('.following-row')
+            if (row) row.remove()
+            var list = document.querySelector('.following-list')
+            if (list && !list.querySelector('.following-row')) {
+              list.innerHTML = '<div class="empty-state"><div class="empty-state-title">You aren\'t following anyone yet</div><p>Follow reviewers to build your feed.</p></div>'
+            }
+          }
+        }
+        btn.disabled = false
       })
     })
 
@@ -918,4 +953,20 @@ function formatCount(n: number): string {
   .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; margin-top: 8px; }
   .report-trigger-sm { font-size: 11px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; font-family: inherit; padding: 2px 6px; border-radius: 6px; transition: color 0.15s, background 0.15s; }
   .report-trigger-sm:hover { color: #f87171; background: rgba(248,113,113,.08); }
+
+  /* ─── Following list ─────────────────────────────────────────────────────── */
+  .following-list { padding: 8px 0; }
+  .following-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid var(--border-subtle); transition: background 0.15s; }
+  .following-row:last-child { border-bottom: none; }
+  .following-row:hover { background: var(--bg-hover); }
+  .following-user { display: flex; align-items: center; gap: 12px; text-decoration: none; flex: 1; min-width: 0; }
+  .following-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 1px solid var(--border); }
+  .following-avatar-placeholder { width: 40px; height: 40px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 600; color: var(--text-secondary); }
+  .following-username { font-size: 14px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .follow-btn { padding: 7px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; transition: all 0.15s; }
+  .follow-btn.not-following { background: var(--accent); color: var(--accent-text); border: none; }
+  .follow-btn.not-following:hover { opacity: 0.88; }
+  .follow-btn.following { background: var(--tag-bg); color: var(--text-secondary); border: 1px solid var(--border); }
+  .follow-btn.following:hover { border-color: #c0392b; color: #c0392b; }
+  .follow-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
