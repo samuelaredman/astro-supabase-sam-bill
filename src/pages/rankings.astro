@@ -1,0 +1,253 @@
+---
+export const prerender = false;
+import { getSupabase } from '../utils/database';
+import Layout from '../components/Layout.astro';
+import { createSupabaseServerClientFromContext } from '../utils/database';
+
+const supabase = getSupabase();
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
+
+let currentProfile = null;
+if (user) {
+  const { data: cp } = await serverClient.from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = cp;
+}
+
+// Fetch all published scores + game IDs in one query
+const { data: scoreRows } = await (supabase as any)
+  .from('reviews').select('game_id, score').eq('status', 'published');
+
+// Aggregate per game
+const gameMap: Record<string, { scores: number[] }> = {};
+for (const r of scoreRows ?? []) {
+  if (!gameMap[r.game_id]) gameMap[r.game_id] = { scores: [] };
+  gameMap[r.game_id].scores.push(r.score);
+}
+
+// Global stats for Bayesian average
+const allScores = (scoreRows ?? []).map((r: any) => r.score);
+const globalMean = allScores.length > 0
+  ? allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length
+  : 7;
+
+// Bayesian average: pulls games with few reviews toward the global mean.
+// C = confidence weight — games need this many reviews before their score
+// fully dominates over the global mean. Low enough to work with small datasets,
+// high enough to prevent single-review outliers from topping the chart.
+const C = 5;
+
+const MIN_REVIEWS = 2;
+
+const ranked = Object.entries(gameMap)
+  .filter(([, d]) => d.scores.length >= MIN_REVIEWS)
+  .map(([gameId, d]) => {
+    const n = d.scores.length;
+    const rawAvg = d.scores.reduce((a, b) => a + b, 0) / n;
+    const bayesian = (C * globalMean + d.scores.reduce((a, b) => a + b, 0)) / (C + n);
+    return { gameId, reviewCount: n, rawAvg, bayesian };
+  })
+  .sort((a, b) => b.bayesian - a.bayesian)
+  .slice(0, 100);
+
+// Fetch game info for ranked entries
+let rankedGames: any[] = [];
+if (ranked.length > 0) {
+  const { data: gameRows } = await (supabase as any)
+    .from('games')
+    .select('id, title, slug, cover_img_url, date_released')
+    .in('id', ranked.map(r => r.gameId));
+
+  const gameById: Record<string, any> = {};
+  for (const g of gameRows ?? []) gameById[g.id] = g;
+
+  rankedGames = ranked
+    .map(r => ({ ...r, game: gameById[r.gameId] }))
+    .filter(r => r.game);
+}
+
+function igdbImage(url: string | null, size = 't_cover_big') {
+  if (!url) return null;
+  const clean = url.startsWith('//') ? `https:${url}` : url;
+  return clean.replace(/t_[a-z_]+/, size);
+}
+
+function scoreColor(score: number): string {
+  if (score === 10) return 'score-perfect';
+  if (score >= 9) return 'score-great';
+  if (score >= 8) return 'score-teal';
+  if (score >= 7) return 'score-good';
+  if (score >= 5) return 'score-mid';
+  if (score >= 3) return 'score-orange';
+  return 'score-low';
+}
+---
+
+<Layout
+  title="Rankings — Chekpoint"
+  description="All-time highest rated games on Chekpoint, ranked by community score."
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+  activeNav="rankings"
+>
+  <main class="feed">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Rankings</div>
+        <div class="feed-subtitle">
+          {rankedGames.length > 0
+            ? `Top ${rankedGames.length} games by community score`
+            : 'Not enough reviews yet to rank games'}
+        </div>
+      </div>
+    </div>
+
+    {rankedGames.length === 0 ? (
+      <div class="empty-state">
+        <div class="empty-state-title">Nothing to rank yet</div>
+        <p>Once games have at least {MIN_REVIEWS} reviews, they'll appear here.</p>
+        <a href="/" class="empty-cta">Start reviewing</a>
+      </div>
+    ) : (
+      <div class="ranking-list">
+        {rankedGames.map(({ game, reviewCount, rawAvg, bayesian }, i) => {
+          const year = game.date_released ? new Date(game.date_released).getFullYear() : null;
+          return (
+            <a href={`/games/${game.slug}`} class="ranking-row">
+              <span class="rank-num">{i + 1}</span>
+              <div class="rank-cover">
+                {igdbImage(game.cover_img_url)
+                  ? <img src={igdbImage(game.cover_img_url) ?? ''} alt={game.title} loading="lazy" />
+                  : <span style="font-size:18px;display:flex;align-items:center;justify-content:center;height:100%">🎮</span>
+                }
+              </div>
+              <div class="rank-info">
+                <div class="rank-title">{game.title}</div>
+                <div class="rank-meta">
+                  {year && <span>{year}</span>}
+                  <span>{reviewCount} review{reviewCount !== 1 ? 's' : ''}</span>
+                </div>
+              </div>
+              <div class={`rank-score ${scoreColor(rawAvg)}`}>{rawAvg.toFixed(1)}</div>
+            </a>
+          );
+        })}
+      </div>
+    )}
+  </main>
+
+  <div slot="sidebar-right">
+    <div class="widget">
+      <div class="widget-title">How rankings work</div>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.65;margin:0 0 10px">
+        Games are ranked by a Bayesian average — a game with 3 great reviews ranks lower than one with 30 great reviews. This prevents low-review-count outliers from topping the chart.
+      </p>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.65;margin:0">
+        Minimum {MIN_REVIEWS} reviews to appear.
+      </p>
+    </div>
+    {rankedGames.length > 0 && (
+      <div class="widget" style="margin-top:4px">
+        <div class="widget-title">Stats</div>
+        <div class="stat-row">
+          <span class="stat-label">Games ranked</span>
+          <span class="stat-value">{rankedGames.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Total reviews</span>
+          <span class="stat-value">{(scoreRows ?? []).length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Community avg</span>
+          <span class="stat-value">{globalMean.toFixed(1)}</span>
+        </div>
+      </div>
+    )}
+  </div>
+</Layout>
+
+<style>
+  .ranking-list { padding: 8px 0; }
+  .ranking-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+    text-decoration: none;
+    transition: background 0.15s;
+  }
+  .ranking-row:last-child { border-bottom: none; }
+  .ranking-row:hover { background: var(--bg-hover); }
+
+  .rank-num {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    width: 28px;
+    flex-shrink: 0;
+    text-align: right;
+  }
+  .rank-cover {
+    width: 42px;
+    height: 56px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    overflow: hidden;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .ranking-row:hover .rank-cover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.3); }
+  .rank-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .rank-info { flex: 1; min-width: 0; }
+  .rank-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+    line-height: 1.3;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    margin-bottom: 4px;
+  }
+  .rank-meta {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+  }
+  .rank-meta span + span::before { content: '·'; margin-right: 8px; }
+
+  .rank-score {
+    font-family: 'DM Serif Display', serif;
+    font-size: 20px;
+    font-weight: 700;
+    flex-shrink: 0;
+    width: 42px;
+    text-align: right;
+  }
+  .rank-score.score-perfect { color: #fff; text-shadow: 0 0 12px rgba(255,255,255,.6); }
+  .rank-score.score-great  { color: #4ade80; }
+  .rank-score.score-teal   { color: #2dd4bf; }
+  .rank-score.score-good   { color: #60a5fa; }
+  .rank-score.score-mid    { color: #fbbf24; }
+  .rank-score.score-orange { color: #fb923c; }
+  .rank-score.score-low    { color: #f87171; }
+
+  .empty-cta {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: 10px 24px;
+    border-radius: 22px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: opacity 0.15s;
+    margin-top: 16px;
+  }
+  .empty-cta:hover { opacity: 0.85; }
+</style>
