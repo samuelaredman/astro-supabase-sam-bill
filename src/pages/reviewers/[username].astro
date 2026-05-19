@@ -171,14 +171,26 @@ const recentGames = publishedReviews.slice(0, 6).map((r: any) => r.games).filter
 // We reuse communityScores fetched above — build gameAvgMap here for chart use too
 const _reviewedGameIds2 = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))]
 const _gameAvgMap2: Record<string, number> = {}
+const _gameAvgHoursMap2: Record<string, number> = {}
 if (_reviewedGameIds2.length > 0) {
   const { data: _cs2 } = await (supabase as any)
-    .from('reviews').select('game_id, score').in('game_id', _reviewedGameIds2).eq('status', 'published')
+    .from('reviews').select('game_id, score, play_time_hours').in('game_id', _reviewedGameIds2).eq('status', 'published')
   if (_cs2) {
     const _m: Record<string, number[]> = {}
-    for (const row of _cs2) { if (!_m[row.game_id]) _m[row.game_id] = []; _m[row.game_id].push(row.score) }
+    const _mh: Record<string, number[]> = {}
+    for (const row of _cs2) {
+      if (!_m[row.game_id]) _m[row.game_id] = []
+      _m[row.game_id].push(row.score)
+      if (row.play_time_hours != null && row.play_time_hours > 0) {
+        if (!_mh[row.game_id]) _mh[row.game_id] = []
+        _mh[row.game_id].push(row.play_time_hours)
+      }
+    }
     for (const [gid, sc] of Object.entries(_m)) {
       _gameAvgMap2[gid] = (sc as number[]).reduce((a,b)=>a+b,0) / (sc as number[]).length
+    }
+    for (const [gid, hrs] of Object.entries(_mh)) {
+      _gameAvgHoursMap2[gid] = Math.round((hrs as number[]).reduce((a,b)=>a+b,0) / (hrs as number[]).length)
     }
   }
 }
@@ -289,9 +301,11 @@ const perGameData = publishedReviews
       userScore: (r as any).score as number,
       commAvg,
       delta: Math.round(((r as any).score - commAvg) * 10) / 10,
+      userHours: (r as any).play_time_hours ?? null,
+      commAvgHours: _gameAvgHoursMap2[gid] ?? null,
     }
   })
-  .filter(Boolean) as { title: string; slug: string; userScore: number; commAvg: number; delta: number }[]
+  .filter(Boolean) as { title: string; slug: string; userScore: number; commAvg: number; delta: number; userHours: number | null; commAvgHours: number | null }[]
 
 const hotTakes = [...perGameData]
   .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
@@ -1580,16 +1594,30 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       html += '</div>'
     }
 
-    // ── SCATTER PLOT ──
+    // ── SCATTER PLOTS ──
     if (s.perGameData && s.perGameData.length >= 3) {
-      html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:18px 18px 12px;margin-bottom:10px">'
-      html += '<div style="font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px">Your score vs. community</div>'
-      html += '<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:14px">Each dot is a game — above the line means you scored it higher than average</div>'
-      html += '<svg id="scatterSvg" viewBox="0 0 300 230" style="width:100%;display:block"></svg>'
-      html += '<div style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap">'
-      html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary)"><div style="width:7px;height:7px;border-radius:50%;background:#4ade80"></div>Rated higher</div>'
-      html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary)"><div style="width:7px;height:7px;border-radius:50%;background:#6b6965"></div>Agreed</div>'
-      html += '<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary)"><div style="width:7px;height:7px;border-radius:50%;background:#f87171"></div>Rated lower</div>'
+      html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 14px 10px;margin-bottom:10px">'
+      html += '<div id="scatterGrid" style="display:grid;grid-template-columns:1fr 1fr;gap:14px">'
+      // Left — score scatter
+      html += '<div>'
+      html += '<div style="font-size:10px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px">Score vs. community</div>'
+      html += '<div style="font-size:10px;color:var(--text-tertiary);margin-bottom:8px">Above the line = scored higher</div>'
+      html += '<svg id="scatterSvg" viewBox="0 0 260 205" style="width:100%;display:block"></svg>'
+      html += '<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">'
+      html += '<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-secondary)"><div style="width:6px;height:6px;border-radius:50%;background:#4ade80"></div>Higher</div>'
+      html += '<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-secondary)"><div style="width:6px;height:6px;border-radius:50%;background:#60a5fa"></div>Agreed</div>'
+      html += '<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-secondary)"><div style="width:6px;height:6px;border-radius:50%;background:#f87171"></div>Lower</div>'
+      html += '</div></div>'
+      // Right — hours scatter
+      html += '<div id="hoursScatterWrap">'
+      html += '<div style="font-size:10px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px">Hours vs. community</div>'
+      html += '<div style="font-size:10px;color:var(--text-tertiary);margin-bottom:8px">Above the line = played longer</div>'
+      html += '<svg id="scatterSvgHours" viewBox="0 0 260 205" style="width:100%;display:block"></svg>'
+      html += '<div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">'
+      html += '<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-secondary)"><div style="width:6px;height:6px;border-radius:50%;background:#a78bfa"></div>More</div>'
+      html += '<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-secondary)"><div style="width:6px;height:6px;border-radius:50%;background:#2dd4bf"></div>Similar</div>'
+      html += '<div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-secondary)"><div style="width:6px;height:6px;border-radius:50%;background:#fbbf24"></div>Less</div>'
+      html += '</div></div>'
       html += '</div></div>'
     }
 
@@ -1614,45 +1642,90 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
     el.innerHTML = html
 
-    // ── SCATTER PLOT ──
+    // ── SCATTER PLOTS ──
     ;(function() {
-      var svgEl = document.getElementById('scatterSvg')
-      if (!svgEl || !s.perGameData || s.perGameData.length < 3) return
-      var data = s.perGameData
       var ns = 'http://www.w3.org/2000/svg'
-      // layout — 0.5 padding beyond 1–10 so edge dots have breathing room
-      var L=36, T=10, cW=244, cH=178
-      function sx(v) { return L + (v-0.5)/10*cW }
-      function sy(v) { return T + (10.5-v)/10*cH }
+      var L=42, T=10, cW=202, cH=150
       function mkEl(tag, a) {
         var e = document.createElementNS(ns, tag)
         for (var k in a) e.setAttribute(k, a[k])
         return e
       }
-      // grid lines + labels for every integer 1–10
-      for (var vi=1; vi<=10; vi++) {
-        svgEl.appendChild(mkEl('line',{x1:sx(vi),y1:T,x2:sx(vi),y2:T+cH,stroke:'var(--border-subtle)','stroke-width':'0.4'}))
-        svgEl.appendChild(mkEl('line',{x1:L,y1:sy(vi),x2:L+cW,y2:sy(vi),stroke:'var(--border-subtle)','stroke-width':'0.4'}))
-        var xt = mkEl('text',{x:sx(vi),y:T+cH+11,'text-anchor':'middle','font-size':'7',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
-        xt.textContent = vi; svgEl.appendChild(xt)
-        var yt = mkEl('text',{x:L-5,y:sy(vi)+2.5,'text-anchor':'end','font-size':'7',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
-        yt.textContent = vi; svgEl.appendChild(yt)
+      function axTitles(el, xLabel, yLabel) {
+        var xa = mkEl('text',{x:L+cW/2,y:T+cH+27,'text-anchor':'middle','font-size':'8',fill:'var(--text-secondary)','font-family':'DM Sans,sans-serif'})
+        xa.textContent = xLabel; el.appendChild(xa)
+        var ya = mkEl('text',{x:8,y:T+cH/2,'text-anchor':'middle','font-size':'8',fill:'var(--text-secondary)','font-family':'DM Sans,sans-serif',transform:'rotate(-90,8,'+(T+cH/2)+')'})
+        ya.textContent = yLabel; el.appendChild(ya)
       }
-      // axis titles
-      var xa = mkEl('text',{x:L+cW/2,y:T+cH+23,'text-anchor':'middle','font-size':'8.5',fill:'var(--text-secondary)','font-family':'DM Sans,sans-serif'})
-      xa.textContent = 'Community avg'; svgEl.appendChild(xa)
-      var ya = mkEl('text',{x:10,y:T+cH/2,'text-anchor':'middle','font-size':'8.5',fill:'var(--text-secondary)','font-family':'DM Sans,sans-serif',transform:'rotate(-90,10,'+(T+cH/2)+')'})
-      ya.textContent = 'Your score'; svgEl.appendChild(ya)
-      // parity line (y = x)
-      svgEl.appendChild(mkEl('line',{x1:sx(1),y1:sy(1),x2:sx(10),y2:sy(10),stroke:'var(--text-tertiary)','stroke-width':'0.8','stroke-dasharray':'3 3',opacity:'0.5'}))
-      // dots
-      data.forEach(function(d) {
-        var col = d.delta > 0.5 ? '#4ade80' : d.delta < -0.5 ? '#f87171' : '#6b6965'
-        var c = mkEl('circle',{cx:sx(d.commAvg),cy:sy(d.userScore),r:'3',fill:col,opacity:'0.88',style:'cursor:pointer'})
-        var tip = document.createElementNS(ns,'title')
-        tip.textContent = d.title+'\nYou: '+d.userScore+'  Community: '+d.commAvg+'  ('+(d.delta>0?'+':'')+d.delta+')'
-        c.appendChild(tip); svgEl.appendChild(c)
-      })
+
+      // ── Score scatter ──
+      var scEl = document.getElementById('scatterSvg')
+      if (scEl && s.perGameData && s.perGameData.length >= 3) {
+        var scx = function(v) { return L + (v-0.5)/10*cW }
+        var scy = function(v) { return T + (10.5-v)/10*cH }
+        for (var vi=1; vi<=10; vi++) {
+          scEl.appendChild(mkEl('line',{x1:scx(vi),y1:T,x2:scx(vi),y2:T+cH,stroke:'var(--border-subtle)','stroke-width':'0.4'}))
+          scEl.appendChild(mkEl('line',{x1:L,y1:scy(vi),x2:L+cW,y2:scy(vi),stroke:'var(--border-subtle)','stroke-width':'0.4'}))
+          var sxt = mkEl('text',{x:scx(vi),y:T+cH+12,'text-anchor':'middle','font-size':'7',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
+          sxt.textContent = vi; scEl.appendChild(sxt)
+          var syt = mkEl('text',{x:L-5,y:scy(vi)+2.5,'text-anchor':'end','font-size':'7',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
+          syt.textContent = vi; scEl.appendChild(syt)
+        }
+        axTitles(scEl, 'Community avg', 'Your score')
+        scEl.appendChild(mkEl('line',{x1:scx(0.5),y1:scy(0.5),x2:scx(10.5),y2:scy(10.5),stroke:'var(--text-tertiary)','stroke-width':'0.8','stroke-dasharray':'3 3',opacity:'0.4'}))
+        s.perGameData.forEach(function(d) {
+          var col = d.delta > 0.5 ? '#4ade80' : d.delta < -0.5 ? '#f87171' : '#60a5fa'
+          var c = mkEl('circle',{cx:scx(d.commAvg),cy:scy(d.userScore),r:'3',fill:col,opacity:'0.85',style:'cursor:pointer'})
+          var tip = document.createElementNS(ns,'title')
+          tip.textContent = d.title+'\nYou: '+d.userScore+'  Community: '+d.commAvg+'  ('+(d.delta>0?'+':'')+d.delta+')'
+          c.appendChild(tip); scEl.appendChild(c)
+        })
+      }
+
+      // ── Hours scatter ──
+      var hrEl = document.getElementById('scatterSvgHours')
+      if (hrEl) {
+        var hData = (s.perGameData || []).filter(function(d) {
+          return d.userHours != null && d.userHours > 0 && d.commAvgHours != null && d.commAvgHours > 0
+        })
+        if (hData.length < 3) {
+          var wrap = document.getElementById('hoursScatterWrap')
+          if (wrap) wrap.style.display = 'none'
+          var grid = document.getElementById('scatterGrid')
+          if (grid) grid.style.gridTemplateColumns = '1fr'
+        } else {
+          var allH = hData.map(function(d) { return Math.max(d.userHours, d.commAvgHours) })
+          var rawMax = Math.max.apply(null, allH)
+          var rough = rawMax / 5
+          var mag = Math.pow(10, Math.floor(Math.log10(Math.max(rough, 1))))
+          var nr = rough / mag
+          var niceS = nr < 1.5 ? mag : nr < 3 ? mag*2 : nr < 7 ? mag*5 : mag*10
+          var niceMax = Math.ceil(rawMax / niceS) * niceS
+          var hTicks = []
+          for (var ti=0; ti <= niceMax + niceS*0.001; ti += niceS) hTicks.push(Math.round(ti))
+          var hx = function(v) { return L + v/niceMax*cW }
+          var hy = function(v) { return T + (1 - v/niceMax)*cH }
+          hTicks.forEach(function(v) {
+            hrEl.appendChild(mkEl('line',{x1:hx(v),y1:T,x2:hx(v),y2:T+cH,stroke:'var(--border-subtle)','stroke-width':'0.4'}))
+            hrEl.appendChild(mkEl('line',{x1:L,y1:hy(v),x2:L+cW,y2:hy(v),stroke:'var(--border-subtle)','stroke-width':'0.4'}))
+            var hlbl = v >= 1000 ? (v/1000)+'k' : String(v)
+            var hxt = mkEl('text',{x:hx(v),y:T+cH+12,'text-anchor':'middle','font-size':'7',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
+            hxt.textContent = hlbl; hrEl.appendChild(hxt)
+            var hyt = mkEl('text',{x:L-5,y:hy(v)+2.5,'text-anchor':'end','font-size':'7',fill:'var(--text-tertiary)','font-family':'DM Sans,sans-serif'})
+            hyt.textContent = hlbl; hrEl.appendChild(hyt)
+          })
+          axTitles(hrEl, 'Community avg hours', 'Your hours')
+          hrEl.appendChild(mkEl('line',{x1:hx(0),y1:hy(0),x2:hx(niceMax),y2:hy(niceMax),stroke:'var(--text-tertiary)','stroke-width':'0.8','stroke-dasharray':'3 3',opacity:'0.4'}))
+          hData.forEach(function(d) {
+            var diff = d.userHours - d.commAvgHours
+            var col = diff > 5 ? '#a78bfa' : diff < -5 ? '#fbbf24' : '#2dd4bf'
+            var c = mkEl('circle',{cx:hx(d.commAvgHours),cy:hy(d.userHours),r:'3',fill:col,opacity:'0.85',style:'cursor:pointer'})
+            var tip = document.createElementNS(ns,'title')
+            tip.textContent = d.title+'\nYou: '+d.userHours+'h  Community: '+d.commAvgHours+'h  ('+(diff>0?'+':'')+Math.round(diff)+'h)'
+            c.appendChild(tip); hrEl.appendChild(c)
+          })
+        }
+      }
     })()
 
     // ── RENDER DOUBLE BAR ──
