@@ -15,29 +15,21 @@ if (user) {
   currentProfile = cp;
 }
 
-// Fetch all published scores + game IDs in one query
 const { data: scoreRows } = await (supabase as any)
   .from('reviews').select('game_id, score').eq('status', 'published');
 
-// Aggregate per game
 const gameMap: Record<string, { scores: number[] }> = {};
 for (const r of scoreRows ?? []) {
   if (!gameMap[r.game_id]) gameMap[r.game_id] = { scores: [] };
   gameMap[r.game_id].scores.push(r.score);
 }
 
-// Global stats for Bayesian average
 const allScores = (scoreRows ?? []).map((r: any) => r.score);
 const globalMean = allScores.length > 0
   ? allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length
   : 7;
 
-// Bayesian average: pulls games with few reviews toward the global mean.
-// C = confidence weight — games need this many reviews before their score
-// fully dominates over the global mean. Low enough to work with small datasets,
-// high enough to prevent single-review outliers from topping the chart.
 const C = 5;
-
 const MIN_REVIEWS = 2;
 
 const ranked = Object.entries(gameMap)
@@ -51,7 +43,6 @@ const ranked = Object.entries(gameMap)
   .sort((a, b) => b.bayesian - a.bayesian)
   .slice(0, 100);
 
-// Fetch game info for ranked entries
 let rankedGames: any[] = [];
 if (ranked.length > 0) {
   const { data: gameRows } = await (supabase as any)
@@ -82,6 +73,93 @@ function scoreColor(score: number): string {
   if (score >= 3) return 'score-orange';
   return 'score-low';
 }
+
+// ── WREATH SVG BUILDER ────────────────────────────────────────────────────────
+// Proper olive/laurel leaf: wider, rounded, more natural than the previous
+// grass-blade shape. Each leaf is an ellipse-like bezier with a midrib.
+// Leaves are placed along an arc from bottom-left to bottom-right.
+//
+// Leaf path: origin at stem base (bottom-centre of leaf).
+// Width ~10px, length ~28px, slightly asymmetric for realism.
+const LEAF = "M0 0 C-5 -4,-7 -14,-6 -20 C-5 -26,-2 -29,0 -30 C2 -29,5 -26,6 -20 C7 -14,5 -4,0 0 Z";
+const MIDRIB = "M0 0 Q0 -15 0 -30";
+
+// Leaf positions for the LEFT branch.
+// Format: [cx, cy, rotation°]
+// Rotation 0 = leaf points straight up.
+// Positive rotation = tip leans toward centre (inward).
+// The array goes from innermost (near centre-bottom) outward.
+// Mirror about x=240 for right branch (negate rotation).
+const LEFT_LEAVES: [number, number, number][] = [
+  [238, 58,   2],
+  [214, 52,   8],
+  [190, 44,  16],
+  [164, 36,  24],
+  [138, 28,  32],
+  [112, 22,  40],
+  [ 86, 18,  50],
+  [ 62, 16,  60],
+  [ 38, 18,  72],
+  [ 18, 24,  84],
+];
+
+// Per-tier leaf colours: [primary fill, highlight, vein stroke]
+const WREATH_COLORS = {
+  gold:   { fill: '#c8920a', hi: '#ffd700', vein: '#7c4f00', stem: '#a07010' },
+  silver: { fill: '#909090', hi: '#e0e0e0', vein: '#505050', stem: '#707070' },
+  bronze: { fill: '#a0601a', hi: '#cd7f32', vein: '#603010', stem: '#804820' },
+};
+
+function buildWreathSvg(tier: 'gold' | 'silver' | 'bronze'): string {
+  const c = WREATH_COLORS[tier];
+  const W = 480, H = 80;
+  const cx = W / 2;
+
+  // Build left-branch leaves
+  let leftLeaves = '';
+  LEFT_LEAVES.forEach(([x, y, r], idx) => {
+    // Alternate two shades for depth
+    const fill = idx % 2 === 0 ? c.fill : c.hi;
+    leftLeaves += `
+      <g transform="translate(${x},${y}) rotate(${r})">
+        <path d="${LEAF}" fill="${fill}" opacity="0.95"/>
+        <path d="${MIDRIB}" stroke="${c.vein}" stroke-width="0.7" fill="none" opacity="0.6"/>
+      </g>`;
+  });
+
+  // Mirror for right branch
+  let rightLeaves = '';
+  LEFT_LEAVES.forEach(([x, y, r], idx) => {
+    const fill = idx % 2 === 0 ? c.fill : c.hi;
+    rightLeaves += `
+      <g transform="translate(${W - x},${y}) rotate(${-r})">
+        <path d="${LEAF}" fill="${fill}" opacity="0.95"/>
+        <path d="${MIDRIB}" stroke="${c.vein}" stroke-width="0.7" fill="none" opacity="0.6"/>
+      </g>`;
+  });
+
+  // Curved stems from bottom-corners meeting at centre-bottom
+  const stems = `
+    <path d="M10 72 C80 40 160 25 ${cx} 58" stroke="${c.stem}" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.8"/>
+    <path d="M${W - 10} 72 C${W - 80} 40 ${W - 160} 25 ${cx} 58" stroke="${c.stem}" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.8"/>`;
+
+  // Central ribbon knot
+  const knot = `
+    <ellipse cx="${cx}" cy="60" rx="9" ry="6" fill="${c.vein}" opacity="0.9"/>
+    <ellipse cx="${cx}" cy="60" rx="5" ry="3.5" fill="${c.hi}" opacity="0.75"/>`;
+
+  return `<svg class="laurel-wreath" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
+    aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    ${stems}
+    ${leftLeaves}
+    ${rightLeaves}
+    ${knot}
+  </svg>`;
+}
+
+const wreathGold   = buildWreathSvg('gold');
+const wreathSilver = buildWreathSvg('silver');
+const wreathBronze = buildWreathSvg('bronze');
 ---
 
 <Layout
@@ -115,7 +193,9 @@ function scoreColor(score: number): string {
           const year = game.date_released ? new Date(game.date_released).getFullYear() : null;
           const coverUrl = igdbImage(game.cover_img_url, 't_cover_big');
           const medals = ['🥇', '🥈', '🥉'];
-          const podiumClass = ['rank-gold', 'rank-silver', 'rank-bronze'][i];
+          const podiumClasses = ['rank-gold', 'rank-silver', 'rank-bronze'];
+          const wreaths = [wreathGold, wreathSilver, wreathBronze];
+
           const card = (
             <a href={`/games/${game.slug}`} class="ranking-card" style={coverUrl ? `--card-cover:url('${coverUrl}')` : ''}>
               <span class="rank-num">{i < 3 ? medals[i] : i + 1}</span>
@@ -135,54 +215,11 @@ function scoreColor(score: number): string {
               <div class={`score-badge ${scoreColor(rawAvg)} rank-score-badge`}>{rawAvg.toFixed(1)}</div>
             </a>
           );
-          // Leaf path: elongated Greek bay-laurel shape, 36px tall, 9px wide, pointed both ends
-          // Base at (0,5), tip at (0,-31). Midrib: M0 5 Q0 -13 0 -31
-          const lf = "M0 5 C-4 3,-5 -8,-5 -14 C-5 -23,-2 -29,0 -31 C2 -29,5 -23,5 -14 C5 -8,4 3,0 5Z";
-          const mr = "M0 5 Q0 -13 0 -31"; // midrib
-          // Leaf colors — two alternating shades for depth
-          const lc = ["#2d7525","#3a8c30"]; // dark / medium green
-
-          // Bottom-arc wreath: arc stems from both sides meeting at center-bottom
-          // Leaf positions [x, y, rotation°] for LEFT half (mirrored for right)
-          // Rotation 0° = leaf points up; positive = tip tilts right (inward toward center)
-          const leftLeaves: [number,number,number,number][] = [
-            [28,  58, 28, 0],
-            [64,  47, 22, 1],
-            [102, 39, 16, 0],
-            [141, 33, 11, 1],
-            [180, 29,  7, 0],
-            [214, 27,  3, 1],
-            [238, 26,  0, 0],
-          ];
-
-          const wreathSvg = (
-            <svg class="laurel-wreath" viewBox="0 0 480 68" preserveAspectRatio="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-              {/* Curved stems */}
-              <path d="M14 65 C110 30 370 30 466 65" stroke="#3d6828" stroke-width="2.2" fill="none" stroke-linecap="round"/>
-              {/* Left-branch leaves */}
-              {leftLeaves.map(([x, y, r, ci], idx) => (
-                <g transform={`translate(${x},${y}) rotate(${r})`}>
-                  <path d={lf} fill={lc[ci]}/>
-                  <path d={mr} stroke="#1c4a14" stroke-width="0.55" fill="none" opacity="0.7"/>
-                </g>
-              ))}
-              {/* Right-branch leaves (mirror of left about x=240) */}
-              {leftLeaves.map(([x, y, r, ci], idx) => (
-                <g transform={`translate(${480-x},${y}) rotate(${-r})`}>
-                  <path d={lf} fill={lc[ci]}/>
-                  <path d={mr} stroke="#1c4a14" stroke-width="0.55" fill="none" opacity="0.7"/>
-                </g>
-              ))}
-              {/* Central ribbon knot */}
-              <ellipse cx="240" cy="30" rx="7" ry="5" fill="#8a6200" opacity="0.9"/>
-              <ellipse cx="240" cy="30" rx="4" ry="3" fill="#c89010" opacity="0.8"/>
-            </svg>
-          );
 
           return i < 3 ? (
-            <div class={`podium-frame ${podiumClass}`}>
+            <div class={`podium-frame ${podiumClasses[i]}`}>
               {card}
-              {wreathSvg}
+              <Fragment set:html={wreaths[i]} />
             </div>
           ) : card;
         })}
@@ -221,43 +258,52 @@ function scoreColor(score: number): string {
 </Layout>
 
 <style>
-  .ranking-list { display: flex; flex-direction: column; gap: 14px; padding: 16px 20px; }
+  .ranking-list {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px 20px;
+  }
 
-  /* ── Podium wrapper: gradient border + laurel leaves ── */
+  /* ── PODIUM FRAME ── */
   .podium-frame {
     position: relative;
     border-radius: 15px;
-    padding: 2px;
+    padding: 2px; /* thickness of the metallic border */
   }
-  /* Gradient metallic border */
   .rank-gold   { background: linear-gradient(145deg, #7c4f00, #c8920a, #ffd700, #fff5a0, #ffd700, #c8920a, #7c4f00); }
   .rank-silver { background: linear-gradient(145deg, #4a4a4a, #8a8a8a, #c8c8c8, #f0f0f0, #c8c8c8, #8a8a8a, #4a4a4a); }
   .rank-bronze { background: linear-gradient(145deg, #4a2200, #8b4513, #cd7f32, #e8b06a, #cd7f32, #8b4513, #4a2200); }
 
-  /* Remove inner card's border so the frame border shows */
-  .podium-frame .ranking-card { border: none; }
+  /* Inner card sits inside the frame — no border of its own */
+  .podium-frame .ranking-card {
+    border: none;
+    border-radius: 13px;
+    /* Extra bottom padding so wreath sits below the card text */
+    padding-bottom: 56px;
+  }
 
-  /* Bottom arc wreath — sibling of .ranking-card so card's overflow:hidden doesn't clip it */
+  /* Glow per tier */
+  .rank-gold   .ranking-card { box-shadow: 0 0 24px rgba(255,215,0,0.28), 0 6px 24px rgba(0,0,0,0.4); }
+  .rank-silver .ranking-card { box-shadow: 0 0 20px rgba(192,192,192,0.22), 0 6px 24px rgba(0,0,0,0.4); }
+  .rank-bronze .ranking-card { box-shadow: 0 0 20px rgba(205,127,50,0.22), 0 6px 24px rgba(0,0,0,0.4); }
+
+  /* ── LAUREL WREATH SVG ──
+     Positioned at the bottom of the frame, outside the card's overflow:hidden
+     so the leaves can overlap the card edge naturally. */
   .laurel-wreath {
     position: absolute;
-    bottom: 2px;        /* inside the 2px frame border */
-    left: -6px;
-    width: calc(100% + 12px);
-    height: 68px;
+    bottom: 2px;          /* flush with inner edge of 2px frame */
+    left: -4px;
+    width: calc(100% + 8px);
+    height: 80px;
     pointer-events: none;
     z-index: 10;
     overflow: visible;
-    filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.55));
   }
-  /* Extra bottom padding so wreath sits below main content */
-  .podium-frame .ranking-card { padding-bottom: 52px; border-radius: 13px; }
 
-  /* Extra glow on the card itself for each podium tier */
-  .rank-gold   .ranking-card { box-shadow: 0 0 20px rgba(255,215,0,0.25), 0 6px 24px rgba(0,0,0,0.4); }
-  .rank-silver .ranking-card { box-shadow: 0 0 20px rgba(192,192,192,0.2), 0 6px 24px rgba(0,0,0,0.4); }
-  .rank-bronze .ranking-card { box-shadow: 0 0 20px rgba(205,127,50,0.2), 0 6px 24px rgba(0,0,0,0.4); }
-
-
+  /* ── RANKING CARD ── */
   .ranking-card {
     position: relative;
     display: flex;
@@ -269,12 +315,14 @@ function scoreColor(score: number): string {
     text-decoration: none;
     overflow: hidden;
     transition: transform 0.15s, box-shadow 0.15s;
+    background: var(--bg-card);
   }
   .ranking-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 10px 30px rgba(0,0,0,0.3);
   }
-  /* Blurred cover via ::before, overlay via ::after — avoids child selector conflicts */
+
+  /* Blurred cover bg */
   .ranking-card::before {
     content: '';
     position: absolute;
@@ -283,18 +331,23 @@ function scoreColor(score: number): string {
     background-size: cover;
     background-position: center;
     filter: blur(28px) saturate(1.8);
-    opacity: 0.6;
+    opacity: 0.55;
     z-index: 0;
   }
+  /* Dark overlay so text stays readable */
   .ranking-card::after {
     content: '';
     position: absolute;
     inset: 0;
-    background: rgba(var(--bg-card-rgb), 0.74);
+    background: rgba(13,13,15,0.72);
     z-index: 1;
+  }
+  [data-theme="light"] .ranking-card::after {
+    background: rgba(255,255,255,0.76);
   }
   .ranking-card > * { position: relative; z-index: 2; }
 
+  /* Rank number */
   .rank-num {
     font-family: 'DM Serif Display', serif;
     font-size: 18px;
@@ -307,6 +360,7 @@ function scoreColor(score: number): string {
   }
   .podium-frame .rank-num { font-size: 22px; }
 
+  /* Cover art */
   .rank-cover {
     width: 60px;
     height: 80px;
@@ -318,8 +372,16 @@ function scoreColor(score: number): string {
     box-shadow: 0 4px 14px rgba(0,0,0,0.35);
   }
   .rank-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .rank-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+  .rank-cover-placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+  }
 
+  /* Game info */
   .rank-info { flex: 1; min-width: 0; }
   .rank-title {
     font-size: 15px;
@@ -341,6 +403,7 @@ function scoreColor(score: number): string {
   }
   .rank-meta span + span::before { content: '·'; margin-right: 6px; }
 
+  /* Score badge */
   .rank-score-badge {
     width: 46px;
     height: 46px;
@@ -349,6 +412,7 @@ function scoreColor(score: number): string {
     flex-shrink: 0;
   }
 
+  /* Empty state */
   .empty-cta {
     display: inline-block;
     background: var(--accent);
