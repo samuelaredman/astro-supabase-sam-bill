@@ -1,0 +1,274 @@
+---
+export const prerender = false;
+import { getSupabase, createSupabaseServerClientFromContext } from '../utils/database';
+import Layout from '../components/Layout.astro';
+
+const supabase = getSupabase();
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
+
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
+let recommendations: any[] = [];
+let myReviewCount = 0;
+let similarUserCount = 0;
+
+if (user) {
+  const { data: cpData } = await serverClient
+    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = cpData;
+}
+
+if (currentProfile) {
+  // Step 1: Games I've already reviewed
+  const { data: myReviews } = await (supabase as any)
+    .from('reviews').select('game_id').eq('profile_id', currentProfile.id).eq('status', 'published');
+  const myGameIds = new Set((myReviews ?? []).map((r: any) => r.game_id));
+  myReviewCount = myGameIds.size;
+
+  if (myGameIds.size > 0) {
+    // Step 2: Other reviewers who played the same games — gives us similarity weight per user
+    const { data: overlapRows } = await (supabase as any)
+      .from('reviews').select('profile_id, game_id')
+      .eq('status', 'published')
+      .in('game_id', [...myGameIds])
+      .neq('profile_id', currentProfile.id);
+
+    const similarityMap: Record<string, number> = {};
+    for (const r of overlapRows ?? []) {
+      similarityMap[r.profile_id] = (similarityMap[r.profile_id] ?? 0) + 1;
+    }
+    const similarUserIds = Object.keys(similarityMap);
+    similarUserCount = similarUserIds.length;
+
+    if (similarUserIds.length > 0) {
+      // Step 3: All reviews from similar users for games I haven't reviewed
+      const { data: theirReviews } = await (supabase as any)
+        .from('reviews').select('profile_id, game_id, score')
+        .eq('status', 'published')
+        .in('profile_id', similarUserIds);
+
+      // Step 4: Score each unseen game
+      const gameScoreMap: Record<string, { wSum: number; wCount: number; recommenders: Set<string> }> = {};
+      for (const r of theirReviews ?? []) {
+        if (myGameIds.has(r.game_id)) continue;
+        const w = similarityMap[r.profile_id] ?? 1;
+        if (!gameScoreMap[r.game_id]) gameScoreMap[r.game_id] = { wSum: 0, wCount: 0, recommenders: new Set() };
+        gameScoreMap[r.game_id].wSum += r.score * w;
+        gameScoreMap[r.game_id].wCount += w;
+        gameScoreMap[r.game_id].recommenders.add(r.profile_id);
+      }
+
+      // Step 5: Rank — primary: recommender count, secondary: weighted avg score
+      const ranked = Object.entries(gameScoreMap)
+        .map(([gameId, d]) => ({
+          gameId,
+          recommenderCount: d.recommenders.size,
+          weightedAvg: d.wSum / d.wCount,
+        }))
+        .sort((a, b) => b.recommenderCount - a.recommenderCount || b.weightedAvg - a.weightedAvg)
+        .slice(0, 24);
+
+      if (ranked.length > 0) {
+        const topIds = ranked.map(r => r.gameId);
+        const { data: gameRows } = await (supabase as any)
+          .from('games').select('id, title, slug, cover_img_url').in('id', topIds);
+
+        const gameById: Record<string, any> = {};
+        for (const g of gameRows ?? []) gameById[g.id] = g;
+
+        recommendations = ranked
+          .map(r => ({ ...r, game: gameById[r.gameId] }))
+          .filter(r => r.game);
+      }
+    }
+  }
+}
+
+function igdbImage(url: string | null, size = 't_cover_big') {
+  if (!url) return null;
+  const clean = url.startsWith('//') ? `https:${url}` : url;
+  return clean.replace(/t_[a-z_]+/, size);
+}
+
+function scoreColor(score: number): string {
+  if (score === 10) return 'score-perfect';
+  if (score >= 9) return 'score-great';
+  if (score >= 8) return 'score-teal';
+  if (score >= 7) return 'score-good';
+  if (score >= 5) return 'score-mid';
+  if (score >= 3) return 'score-orange';
+  return 'score-low';
+}
+---
+
+<Layout
+  title="Discover — Chekpoint"
+  description="Game recommendations based on what reviewers with similar taste have played."
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+  activeNav="discover"
+>
+  <main class="feed">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Discover</div>
+        <div class="feed-subtitle">
+          {!isLoggedIn
+            ? 'Sign in to get personalized recommendations'
+            : recommendations.length > 0
+            ? `${recommendations.length} games picked from ${similarUserCount} reviewers with similar taste`
+            : myReviewCount === 0
+            ? 'Write some reviews to get recommendations'
+            : 'Not enough data yet — keep reviewing'
+          }
+        </div>
+      </div>
+    </div>
+
+    {!isLoggedIn ? (
+      <div class="empty-state">
+        <div class="empty-state-title">Sign in to discover games</div>
+        <p>We'll recommend games based on what reviewers with similar taste have played.</p>
+        <a href="/signin" class="empty-cta">Sign in</a>
+      </div>
+    ) : myReviewCount === 0 ? (
+      <div class="empty-state">
+        <div class="empty-state-title">No reviews yet</div>
+        <p>Write a few reviews and we'll find games you'll love based on what similar reviewers have played.</p>
+        <a href="/" class="empty-cta">Start reviewing</a>
+      </div>
+    ) : recommendations.length === 0 ? (
+      <div class="empty-state">
+        <div class="empty-state-title">Nothing to show yet</div>
+        <p>We couldn't find enough reviewers with overlapping games. Try reviewing more games to improve your recommendations.</p>
+        <a href="/search" class="empty-cta">Find games</a>
+      </div>
+    ) : (
+      <div class="rec-grid">
+        {recommendations.map(({ game, recommenderCount, weightedAvg }) => (
+          <a href={`/games/${game.slug}`} class="rec-card">
+            <div class="rec-cover-wrap">
+              {igdbImage(game.cover_img_url)
+                ? <img class="rec-cover" src={igdbImage(game.cover_img_url) ?? ''} alt={game.title} loading="lazy" />
+                : <div class="rec-cover-placeholder">🎮</div>
+              }
+              <div class={`rec-score-badge ${scoreColor(weightedAvg)}`}>{weightedAvg.toFixed(1)}</div>
+            </div>
+            <div class="rec-info">
+              <div class="rec-title">{game.title}</div>
+              <div class="rec-meta">{recommenderCount} reviewer{recommenderCount !== 1 ? 's' : ''} like you played this</div>
+            </div>
+          </a>
+        ))}
+      </div>
+    )}
+  </main>
+
+  <div slot="sidebar-right">
+    <div class="widget">
+      <div class="widget-title">How it works</div>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.65;margin:0">
+        We find reviewers who have played the same games as you, then surface games they loved that you haven't tried yet. The more you review, the better your recommendations get.
+      </p>
+    </div>
+    {isLoggedIn && myReviewCount > 0 && (
+      <div class="widget" style="margin-top:4px">
+        <div class="widget-title">Your stats</div>
+        <div class="stat-row">
+          <span class="stat-label">Games reviewed</span>
+          <span class="stat-value">{myReviewCount}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Similar reviewers</span>
+          <span class="stat-value">{similarUserCount}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Recommendations</span>
+          <span class="stat-value">{recommendations.length}</span>
+        </div>
+      </div>
+    )}
+  </div>
+</Layout>
+
+<style>
+  .rec-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 16px;
+    padding: 20px;
+  }
+  .rec-card {
+    display: block;
+    text-decoration: none;
+    transition: transform 0.15s;
+  }
+  .rec-card:hover { transform: translateY(-4px); }
+  .rec-cover-wrap {
+    position: relative;
+    border-radius: 10px;
+    overflow: hidden;
+    aspect-ratio: 3/4;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    transition: box-shadow 0.15s;
+  }
+  .rec-card:hover .rec-cover-wrap { box-shadow: 0 12px 28px rgba(0,0,0,0.45); }
+  .rec-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .rec-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 32px; }
+  .rec-score-badge {
+    position: absolute;
+    bottom: 6px;
+    right: 6px;
+    min-width: 30px;
+    height: 24px;
+    padding: 0 6px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    font-family: 'DM Serif Display', serif;
+    backdrop-filter: blur(6px);
+  }
+  .rec-score-badge.score-perfect { background: rgba(255,255,255,.95); color: #09090a; box-shadow: 0 0 10px rgba(255,255,255,.7); border: 1px solid rgba(255,255,255,.9); }
+  .rec-score-badge.score-great  { background: rgba(11,32,22,.9);  color: #4ade80; border: 1px solid rgba(74,222,128,.5); }
+  .rec-score-badge.score-teal   { background: rgba(4,31,30,.9);   color: #2dd4bf; border: 1px solid rgba(45,212,191,.5); }
+  .rec-score-badge.score-good   { background: rgba(11,24,40,.88); color: #60a5fa; border: 1px solid rgba(96,165,250,.4); }
+  .rec-score-badge.score-mid    { background: rgba(26,20,0,.88);  color: #fbbf24; border: 1px solid rgba(251,191,36,.4); }
+  .rec-score-badge.score-orange { background: rgba(31,16,8,.88);  color: #fb923c; border: 1px solid rgba(251,146,60,.4); }
+  .rec-score-badge.score-low    { background: rgba(32,8,8,.88);   color: #f87171; border: 1px solid rgba(248,113,113,.4); }
+  .rec-info { margin-top: 8px; }
+  .rec-title {
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    color: var(--text-primary);
+    margin-bottom: 3px;
+  }
+  .rec-meta {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    line-height: 1.3;
+  }
+
+  .empty-cta {
+    display: inline-block;
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: 10px 24px;
+    border-radius: 22px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: opacity 0.15s;
+    margin-top: 16px;
+  }
+  .empty-cta:hover { opacity: 0.85; }
+</style>
