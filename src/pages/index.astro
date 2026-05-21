@@ -1,106 +1,102 @@
 ---
-import { getSupabase, createSupabaseServerClientFromContext } from "../utils/database";
-import Layout from "../components/Layout.astro";
-import ReportModal from "../components/ReportModal.astro";
-import EditModal from "../components/EditModal.astro";
-import ReviewCard from "../components/ReviewCard.astro";
-
+import { getSupabase, createSupabaseServerClient } from "../utils/database";
 const supabase = getSupabase();
-const serverClient = createSupabaseServerClientFromContext(Astro);
 
-// ── Stage 1: auth (must come first) ─────────────────────────────────────────
-const { data: { user } } = await serverClient.auth.getUser();
-const isLoggedIn = !!user;
+const serverClient = createSupabaseServerClient(Astro.request, new Response());
+const { data: { session } } = await serverClient.auth.getSession();
+const isLoggedIn = !!session;
 
-// Cache the public (logged-out) view at Netlify's CDN edge for 5 minutes.
-// Bots are always unauthenticated, so they hit the cache instead of Supabase.
-// Logged-in users always get a fresh, personalised response.
-if (!isLoggedIn) {
-  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
-  Astro.response.headers.set('Cache-Control', 'no-store');
-} else {
-  Astro.response.headers.set('Cache-Control', 'private, no-store');
+const { data: platforms } = await (supabase as any)
+  .from("platforms")
+  .select("id, name, slug")
+  .order("name", { ascending: true });
+
+type Platform = { id: string; name: string; slug: string; };
+
+type Review = {
+  id: string;
+  score: number;
+  title: string;
+  body: string;
+  play_time_hours: number;
+  contains_spoilers: boolean;
+  status: string;
+  published_at: string;
+  created_at: string;
+  played_on: Platform | null;
+  games: { id: string; title: string; slug: string; cover_img_url: string | null; } | null;
+  profiles: { id: string; username: string; avatar_url: string | null; } | null;
 }
-Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
+
+// recent reviews feed
+const { data: rawReviews } = await (supabase as any)
+  .from("reviews")
+  .select(`
+    id, score, title, body, play_time_hours,
+    contains_spoilers, status, published_at, created_at,
+    played_on:platform_played_on ( id, name, slug ),
+    games ( id, title, slug, cover_img_url ),
+    profiles ( id, username, avatar_url )
+  `)
+  .eq("status", "published")
+  .order("published_at", { ascending: false })
+  .limit(20)
+
+const reviews = (rawReviews ?? []) as Review[]
 
 const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-// ── Stage 2: all independent queries fire in parallel ────────────────────────
-const REVIEW_FIELDS = `
-  id, score, title, body, play_time_hours,
-  contains_spoilers, status, published_at, created_at,
-  played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url ),
-  profiles ( id, username, avatar_url ),
-  review_votes( vote, profile_id ),
-  review_reactions( reaction_type, profile_id ),
-  review_comments( id )
-`
-const db = supabase as any
-const [
-  profileRes,
-  platformsRes,
-  rawReviewsRes,
-  todayRawRes,
-  // weekReviews powers both "Trending this week" AND "Top rated" — one query, two uses
-  weekReviewsRes,
-  reviewCountRes,
-  gameCountRes,
-  profileCountRes,
-  genresRes,
-] = await Promise.all([
-  user
-    ? db.from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single()
-    : Promise.resolve({ data: null }),
-  db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
-  db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(20),
-  db.from('reviews').select('game_id, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneDayAgo).limit(100),
-  db.from('reviews').select('game_id, score, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
-  db.from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
-  db.from('games').select('*', { count: 'exact', head: true }),
-  db.from('profiles').select('*', { count: 'exact', head: true }),
-  db.from('genres').select('id, name, slug').order('name'),
-])
+// most reviewed today — for hero
+const { data: todayRaw } = await (supabase as any)
+  .from('reviews')
+  .select('game_id, games(id, title, slug, cover_img_url)')
+  .eq('status', 'published')
+  .gte('published_at', oneDayAgo)
+  .limit(100)
 
-// Unpack results
-const currentProfile = profileRes.data ?? null
-const { data: platforms } = platformsRes
-
-type Platform = { id: string; name: string; slug: string; };
-type Review = {
-  id: string; score: number; title: string; body: string;
-  play_time_hours: number; contains_spoilers: boolean; status: string;
-  published_at: string; created_at: string; played_on: Platform | null;
-  games: { id: string; title: string; slug: string; cover_img_url: string | null } | null;
-  profiles: { id: string; username: string; avatar_url: string | null } | null;
-  review_votes: { vote: number; profile_id: string }[] | { vote: number; profile_id: string } | null;
-}
-const reviews = (rawReviewsRes.data ?? []) as Review[]
-
-// mostReviewedToday
 const todayMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
-for (const r of todayRawRes.data ?? []) {
+for (const r of todayRaw ?? []) {
   const g = (r as any).games
   if (!g) continue
   if (!todayMap[g.id]) todayMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
   todayMap[g.id].count++
 }
 const mostReviewedToday = Object.values(todayMap).sort((a, b) => b.count - a.count)[0] ?? null
-const featuredGame = mostReviewedToday
 
-// Trending + topRated derived from the same week dataset (no second query)
+// trending this week — most reviewed games
+const { data: trendingRaw } = await (supabase as any)
+  .from('reviews')
+  .select('game_id, games(id, title, slug, cover_img_url)')
+  .eq('status', 'published')
+  .gte('published_at', oneWeekAgo)
+  .limit(200)
+
 const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
-const weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {}
-for (const r of weekReviewsRes.data ?? []) {
+for (const r of trendingRaw ?? []) {
   const g = (r as any).games
   if (!g) continue
   if (!trendingMap[g.id]) trendingMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
   trendingMap[g.id].count++
+}
+const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
+
+// top rated this week — games with best avg score from this week's reviews
+const { data: weekReviewsRaw } = await (supabase as any)
+  .from('reviews')
+  .select('game_id, score, games(id, title, slug, cover_img_url)')
+  .eq('status', 'published')
+  .gte('published_at', oneWeekAgo)
+  .limit(500)
+
+const weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {}
+for (const r of weekReviewsRaw ?? []) {
+  const g = (r as any).games
+  if (!g) continue
   if (!weekGameMap[g.id]) weekGameMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, scores: [] }
   if (r.score != null) weekGameMap[g.id].scores.push(r.score)
 }
-const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
+
 const topRated = Object.entries(weekGameMap)
   .map(([id, g]) => {
     if (g.scores.length < 2) return null
@@ -111,42 +107,72 @@ const topRated = Object.entries(weekGameMap)
   .sort((a: any, b: any) => b.avg_score - a.avg_score)
   .slice(0, 12)
 
-// Site stats
-const totalReviews = reviewCountRes.count ?? 0
-const totalGames = gameCountRes.count ?? 0
-const totalReviewers = profileCountRes.count ?? 0
-
-const { data: genres } = genresRes
-
-// ── Stage 3: user-specific queries (depends on profile) ──────────────────────
+// following feed — reviews from people the current user follows
 let followingReviews: any[] = []
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null
 let lastReview: any = null
-if (user && currentProfile) {
-  // lastReview and follows are independent of each other — run in parallel
-  const [lastReviewRes, followRowsRes] = await Promise.all([
-    db.from('reviews')
-      .select('id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url )')
+if (session?.user) {
+  const { data: cpData } = await (supabase as any)
+    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', session.user.id).single()
+  currentProfile = cpData ?? null
+
+  if (currentProfile) {
+    const { data: lr } = await (supabase as any)
+      .from('reviews')
+      .select(`
+        id, score, published_at, created_at, title,
+        games ( id, title, slug, cover_img_url )
+      `)
       .eq('profile_id', currentProfile.id)
       .eq('status', 'published')
       .order('published_at', { ascending: false })
       .limit(1)
-      .maybeSingle(),
-    db.from('follows').select('following_id').eq('follower_id', currentProfile.id),
-  ])
-  lastReview = lastReviewRes.data ?? null
-  const followingIds = (followRowsRes.data ?? []).map((r: any) => r.following_id)
-  if (followingIds.length > 0) {
-    const { data: fRevs } = await db
-      .from('reviews')
-      .select(REVIEW_FIELDS)
-      .eq('status', 'published')
-      .in('profile_id', followingIds)
-      .order('published_at', { ascending: false })
-      .limit(20)
-    followingReviews = (fRevs ?? []) as any[]
+      .single()
+    lastReview = lr ?? null
+  }
+
+  if (cpData) {
+    const { data: followRows } = await (supabase as any)
+      .from('follows').select('following_id').eq('follower_id', cpData.id)
+    const followingIds = (followRows ?? []).map((r: any) => r.following_id)
+    if (followingIds.length > 0) {
+      const { data: fRevs } = await (supabase as any)
+        .from('reviews')
+        .select(`
+          id, score, title, body, play_time_hours,
+          contains_spoilers, status, published_at, created_at,
+          played_on:platform_played_on ( id, name, slug ),
+          games ( id, title, slug, cover_img_url ),
+          profiles ( id, username, avatar_url ),
+          review_votes( vote )
+        `)
+        .eq('status', 'published')
+        .in('profile_id', followingIds)
+        .order('published_at', { ascending: false })
+        .limit(20)
+      followingReviews = (fRevs ?? []) as any[]
+    }
   }
 }
 
+// site stats
+const [reviewCountRes, gameCountRes, profileCountRes] = await Promise.all([
+  (supabase as any).from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
+  (supabase as any).from('games').select('*', { count: 'exact', head: true }),
+  (supabase as any).from('profiles').select('*', { count: 'exact', head: true }),
+])
+const totalReviews = reviewCountRes.count ?? 0
+const totalGames = gameCountRes.count ?? 0
+const totalReviewers = profileCountRes.count ?? 0
+
+const featuredGame = mostReviewedToday
+
+const { data: genres } = await (supabase as any)
+  .from('genres')
+  .select('id, name')
+  .order('name')
+
+const featuredGenres = ['Action','Adventure','Role-playing (RPG)','Shooter','Platform','Puzzle','Strategy','Indie','Fighting','Racing']
 
 function igdbImage(url: string | null, size = 't_cover_big') {
   if (!url) return null
@@ -172,18 +198,298 @@ function scoreColor(score: number): string {
   return 'score-low'
 }
 
+function getInitials(username: string): string {
+  return username.slice(0, 2).toUpperCase()
+}
+
 function formatCount(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
   return String(n)
 }
+
+function getVoteCounts(votes: any) {
+  const arr = Array.isArray(votes) ? votes : votes ? [votes] : []
+  const up = arr.filter((v: any) => v.vote === 1).length
+  const down = arr.filter((v: any) => v.vote === -1).length
+  return { up, down }
+}
 ---
 
-<Layout
-  title="Chekpoint — Game Reviews"
-  description="Discover what gamers really think. Read honest community reviews, hot takes, and scores for thousands of games on Chekpoint."
-  isLoggedIn={isLoggedIn}
-  currentProfile={currentProfile}
-  activeNav="home">
+<!DOCTYPE html>
+<!-- data-theme="dark" is SSR default; inline script corrects from localStorage before first paint -->
+<html lang="en" data-theme="dark">
+<head>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Chekpoint — Game Reviews</title>
+
+  <!-- !! FOUC FIX: set theme synchronously before any paint !! -->
+  <script>
+    (function(){
+      var t = localStorage.getItem('theme') ||
+              (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+  <style>
+    :root[data-theme="light"] {
+      --bg: #f9f8f6; --bg-card: #ffffff; --bg-hover: #f4f3f0; --bg-sidebar: #ffffff;
+      --border: #e8e6e1; --border-subtle: #f0ede8;
+      --text-primary: #141412; --text-secondary: #6b6860; --text-tertiary: #a09d98;
+      --accent: #141412; --accent-text: #ffffff; --logo-color: #141412;
+      --tag-bg: #f0ede8; --tag-text: #6b6860;
+      --shadow: 0 1px 3px rgba(0,0,0,0.06); --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+      --score-perfect: #1a1a2e; --score-perfect-bg: #f0f0ff;
+      --score-great: #1a6b3c;  --score-great-bg: #eaf5ee;
+      --score-teal: #0f766e;   --score-teal-bg: #ccfbf1;
+      --score-good: #1a4a6b;   --score-good-bg: #eaf0f5;
+      --score-mid: #6b5a00;    --score-mid-bg: #fffbeb;
+      --score-orange: #92400e; --score-orange-bg: #fff7ed;
+      --score-low: #6b1a1a;    --score-low-bg: #f5eaea;
+      --chekpoint-purple: #4a3a8a;
+      --chekpoint-purple-rgb: 74,58,138;
+    }
+    :root[data-theme="dark"] {
+      --bg: #0f0f0e; --bg-card: #1a1a18; --bg-hover: #222220; --bg-sidebar: #141412;
+      --border: #2a2a27; --border-subtle: #222220;
+      --text-primary: #f0ede8; --text-secondary: #908d87; --text-tertiary: #5a5855;
+      --accent: #f0ede8; --accent-text: #141412; --logo-color: #f0ede8;
+      --tag-bg: #2a2a27; --tag-text: #908d87;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3); --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+      /* Score backgrounds bumped up slightly for better visibility on dark cards */
+      --score-perfect: #ffffff;    --score-perfect-bg: #09090a;
+      --score-great: #4ade80;      --score-great-bg: #0f2e1c;
+      --score-teal: #2dd4bf;       --score-teal-bg: #0d2624;
+      --score-good: #60a5fa;       --score-good-bg: #0d2038;
+      --score-mid: #fbbf24;        --score-mid-bg: #221a00;
+      --score-orange: #fb923c;     --score-orange-bg: #281408;
+      --score-low: #f87171;        --score-low-bg: #280a0a;
+      --chekpoint-purple: #6050c8;
+      --chekpoint-purple-rgb: 96,80,200;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text-primary); min-height: 100vh; -webkit-font-smoothing: antialiased; transition: background 0.2s, color 0.2s; }
+    a { color: inherit; text-decoration: none; }
+
+    .layout { display: grid; grid-template-columns: 240px 1fr 280px; max-width: 1140px; margin: 0 auto; min-height: 100vh; }
+    @media (max-width: 1000px) { .layout { grid-template-columns: 200px 1fr; } .sidebar-right { display: none; } }
+    @media (max-width: 680px) { .layout { grid-template-columns: 1fr; } .sidebar-left { display: none; } }
+
+    /* SIDEBAR LEFT */
+    .sidebar-left { position: sticky; top: 0; height: 100vh; padding: 28px 20px; display: flex; flex-direction: column; gap: 6px; border-right: 1px solid var(--border); background: var(--bg-sidebar); }
+    .logo { font-family: 'Press Start 2P', monospace; font-size: 13px; color: var(--logo-color); padding: 8px 12px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .logo-dot { width: 8px; height: 8px; background: var(--text-primary); border-radius: 50%; }
+    .nav-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; font-size: 15px; color: var(--text-secondary); transition: background 0.15s, color 0.15s; }
+    .nav-item:hover, .nav-item.active { background: var(--bg-hover); color: var(--text-primary); }
+    .nav-item.active { font-weight: 500; }
+    .nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .nav-divider { height: 1px; background: var(--border); margin: 10px 0; }
+    .sidebar-bottom { margin-top: auto; }
+    .sidebar-avatar { width: 24px; height: 24px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 500; color: var(--text-secondary); overflow: hidden; }
+    .sidebar-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .theme-toggle { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; cursor: pointer; font-size: 15px; color: var(--text-secondary); background: none; border: none; font-family: inherit; width: 100%; text-align: left; transition: background 0.15s, color 0.15s; }
+    .theme-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+    /* MAIN FEED */
+    .feed { border-right: 1px solid var(--border); min-height: 100vh; }
+    .feed-header { position: sticky; top: 0; background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; z-index: 10; backdrop-filter: blur(8px); }
+    .feed-title { font-size: 17px; font-weight: 500; letter-spacing: -0.2px; }
+    .feed-subtitle { font-size: 13px; color: var(--text-tertiary); margin-top: 1px; }
+    .new-review-btn { background: var(--accent); color: var(--accent-text); border: none; border-radius: 20px; padding: 8px 18px; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; white-space: nowrap; }
+    .new-review-btn:hover { opacity: 0.85; }
+
+    /* HERO */
+    .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
+    .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.62; filter: blur(1px) saturate(1.7) brightness(0.82); transform: scale(1.05); }
+    .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.96) 0%, rgba(10,10,10,0.62) 50%, rgba(10,10,10,0.2) 100%); }
+    .hero-content { position: relative; z-index: 2; padding: 28px 24px; display: flex; align-items: flex-end; gap: 20px; width: 100%; }
+    .hero-cover { width: 90px; height: 120px; border-radius: 10px; object-fit: cover; box-shadow: 0 8px 32px rgba(0,0,0,0.6); flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); }
+    .hero-cover-placeholder { width: 90px; height: 120px; border-radius: 10px; background: #222; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 36px; }
+    .hero-info { flex: 1; min-width: 0; }
+    /* Purple pill label — matches genre/profile accent system */
+    .hero-label { display: inline-flex; align-items: center; gap: 5px; background: rgba(var(--chekpoint-purple-rgb), 0.22); border: 1px solid rgba(var(--chekpoint-purple-rgb), 0.5); border-radius: 20px; padding: 3px 10px; font-size: 10px; font-weight: 700; color: #b8a8f8; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+    [data-theme="light"] .hero-label { color: var(--chekpoint-purple); background: rgba(var(--chekpoint-purple-rgb), 0.1); border-color: rgba(var(--chekpoint-purple-rgb), 0.35); }
+    .hero-title { font-family: 'DM Serif Display', serif; font-size: 26px; color: #fff; line-height: 1.2; margin-bottom: 8px; letter-spacing: -0.3px; }
+    .hero-score { display: inline-flex; align-items: center; gap: 6px; }
+    .hero-score-num { font-family: 'DM Serif Display', serif; font-size: 22px; color: #4ade80; }
+    .hero-score-label { font-size: 12px; color: rgba(255,255,255,0.5); }
+    .hero-cta { display: inline-block; margin-top: 10px; background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.2); border-radius: 20px; padding: 6px 14px; font-size: 13px; backdrop-filter: blur(8px); transition: background 0.15s; }
+    .hero-cta:hover { background: rgba(255,255,255,0.25); }
+
+    /* TOP RATED ROW */
+    .section-block { padding: 20px 20px 0; border-bottom: 1px solid var(--border-subtle); background: linear-gradient(135deg, rgba(var(--chekpoint-purple-rgb), 0.055) 0%, transparent 60%); border-top: 1px solid rgba(var(--chekpoint-purple-rgb), 0.12); }
+    .section-block-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .section-block-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--chekpoint-purple); }
+    .section-block-link { font-size: 12px; color: var(--text-tertiary); transition: color 0.15s; }
+    .section-block-link:hover { color: var(--text-primary); }
+    .top-rated-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 20px; scrollbar-width: none; }
+    .top-rated-scroll::-webkit-scrollbar { display: none; }
+    .top-rated-card { flex-shrink: 0; width: 100px; display: block; }
+    .top-rated-cover-wrap { position: relative; width: 100px; height: 133px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); transition: transform 0.15s, box-shadow 0.15s; background: var(--tag-bg); }
+    .top-rated-card:hover .top-rated-cover-wrap { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(0,0,0,.45); }
+    .top-rated-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .top-rated-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; }
+    /* top-rated badges sit on cover art so always use dark context colors regardless of theme */
+    .top-rated-badge { position: absolute; bottom: 6px; right: 6px; min-width: 28px; height: 22px; padding: 0 6px; border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'DM Serif Display', serif; backdrop-filter: blur(6px); }
+    .top-rated-badge.score-perfect { background: rgba(255,255,255,.95) !important; color: #09090a !important; box-shadow: 0 0 10px rgba(255,255,255,.7), 0 0 20px rgba(255,255,255,.3); border: 1px solid rgba(255,255,255,.9) !important; }
+    .top-rated-badge.score-great   { background: rgba(15,46,28,.92);  color: #4ade80; border: 1px solid rgba(74,222,128,.5); }
+    .top-rated-badge.score-teal    { background: rgba(13,38,36,.92);  color: #2dd4bf; border: 1px solid rgba(45,212,191,.5); }
+    .top-rated-badge.score-good    { background: rgba(13,32,56,.92);  color: #60a5fa; border: 1px solid rgba(96,165,250,.5); }
+    .top-rated-badge.score-mid     { background: rgba(34,26,0,.92);   color: #fbbf24; border: 1px solid rgba(251,191,36,.5); }
+    .top-rated-badge.score-orange  { background: rgba(40,20,8,.92);   color: #fb923c; border: 1px solid rgba(251,146,60,.5); }
+    .top-rated-badge.score-low     { background: rgba(40,10,10,.92);  color: #f87171; border: 1px solid rgba(248,113,113,.5); }
+    .top-rated-info { margin-top: 6px; }
+    .top-rated-title { font-size: 11px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
+
+    /* GENRE CHIPS */
+    .genre-section { padding: 16px 20px; border-bottom: 1px solid var(--border-subtle); display: flex; gap: 6px; flex-wrap: wrap; }
+    .genre-chip { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; }
+    .genre-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+    /* SCORE BADGES — review feed + sidebar widgets */
+    .score-badge { flex-shrink: 0; width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; font-family: 'DM Serif Display', serif; }
+    /* perfect: white glow in dark, dark navy in light */
+    .score-perfect { color: #ffffff !important; background: #09090a !important; border: 1px solid rgba(255,255,255,.35) !important; box-shadow: 0 0 8px rgba(255,255,255,.5), 0 0 20px rgba(167,139,250,.3), 0 0 40px rgba(167,139,250,.15) !important; }
+    [data-theme="light"] .score-perfect { color: #ffffff !important; background: #1a1a2e !important; box-shadow: 0 0 8px rgba(30,26,60,.4) !important; border: 1px solid rgba(30,26,60,.3) !important; }
+    /* all others use CSS vars + bumped border opacity for visibility */
+    .score-great  { color: var(--score-great);  background: var(--score-great-bg);  border: 1px solid rgba(74,222,128,.4); }
+    .score-teal   { color: var(--score-teal);   background: var(--score-teal-bg);   border: 1px solid rgba(45,212,191,.4); }
+    .score-good   { color: var(--score-good);   background: var(--score-good-bg);   border: 1px solid rgba(96,165,250,.4); }
+    .score-mid    { color: var(--score-mid);    background: var(--score-mid-bg);    border: 1px solid rgba(251,191,36,.4); }
+    .score-orange { color: var(--score-orange); background: var(--score-orange-bg); border: 1px solid rgba(251,146,60,.4); }
+    .score-low    { color: var(--score-low);    background: var(--score-low-bg);    border: 1px solid rgba(248,113,113,.4); }
+
+    /* REVIEW CARDS */
+    .review-card { padding: 18px 20px; border-bottom: 1px solid var(--border-subtle); transition: background 0.15s; cursor: pointer; }
+    .review-card:hover { background: var(--bg-hover); }
+    .card-top { display: flex; gap: 12px; align-items: flex-start; }
+    .avatar { width: 38px; height: 38px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 500; color: var(--text-secondary); overflow: hidden; }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .card-body { flex: 1; min-width: 0; }
+    .card-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+    .username { font-family: 'Cinzel', serif; font-size: 13px; font-weight: 600; letter-spacing: .04em; }
+    .meta-dot { color: var(--text-tertiary); font-size: 12px; }
+    .timestamp { font-size: 13px; color: var(--text-tertiary); }
+    .game-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .game-cover-sm { width: 32px; height: 32px; border-radius: 6px; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; overflow: hidden; }
+    .game-cover-sm img { width: 100%; height: 100%; object-fit: cover; }
+    .game-title-text { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+    .review-title { font-family: 'DM Serif Display', serif; font-size: 16px; line-height: 1.35; margin-bottom: 5px; letter-spacing: -0.2px; }
+    .review-body { font-size: 14px; line-height: 1.6; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .spoiler-pill { display: inline-flex; align-items: center; gap: 4px; background: var(--tag-bg); color: var(--tag-text); font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 20px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px; }
+    .card-footer { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .footer-tag { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; padding: 3px 9px; border-radius: 6px; }
+    .read-more { margin-left: auto; font-size: 13px; color: var(--text-tertiary); transition: color 0.15s; }
+    .review-card:hover .read-more { color: var(--text-primary); }
+
+    .empty-state { padding: 60px 20px; text-align: center; color: var(--text-tertiary); }
+    .empty-state-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--text-secondary); margin-bottom: 8px; }
+
+    /* SIDEBAR RIGHT */
+    .sidebar-right { padding: 28px 20px; display: flex; flex-direction: column; gap: 20px; }
+    .widget { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); }
+    .widget-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 14px; color: var(--chekpoint-purple); }
+
+    /* Idea #7 — last-review widget: border glow matches score color, set via JS */
+    .widget-last-review { transition: border-color 0.3s, box-shadow 0.3s; }
+
+    .trending-item { display: flex; align-items: flex-start; gap: 10px; border-bottom: 1px solid var(--border-subtle); transition: background 0.15s; border-radius: 8px; padding: 8px; margin: 0 -8px; }
+    .trending-item:last-child { border-bottom: none; }
+    .trending-item:hover { background: var(--bg-hover); }
+    .trending-rank { font-size: 12px; color: var(--chekpoint-purple); width: 16px; flex-shrink: 0; font-weight: 700; }
+    .trending-cover { width: 44px; height: 58px; border-radius: 7px; flex-shrink: 0; background: var(--tag-bg); border: 1px solid var(--border); overflow: hidden; transition: transform 0.15s, box-shadow 0.15s; }
+    .trending-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .trending-item:hover .trending-cover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.3); }
+    .trending-info { flex: 1; min-width: 0; }
+    .trending-game { font-size: 13px; font-weight: 500; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .trending-count { font-size: 12px; color: var(--text-tertiary); margin-top: 3px; }
+    .stat-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); }
+    .stat-row:last-child { border-bottom: none; padding-bottom: 0; }
+    .stat-label { font-size: 13px; color: var(--text-secondary); }
+    .stat-value { font-size: 14px; font-weight: 600; color: var(--chekpoint-purple); }
+
+    /* COMPOSER */
+    .composer { border-bottom: 1px solid var(--border); background: var(--bg-card); }
+    .composer-inner { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+    .composer-field { display: flex; flex-direction: column; gap: 6px; }
+    .composer-row { display: flex; gap: 12px; align-items: flex-end; }
+    .composer-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
+    .composer-input, .composer-select { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; font-family: inherit; color: var(--text-primary); width: 100%; outline: none; transition: border-color 0.15s; }
+    .composer-input:focus, .composer-select:focus { border-color: var(--text-secondary); }
+    .composer-textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; font-family: inherit; color: var(--text-primary); width: 100%; outline: none; resize: vertical; min-height: 90px; transition: border-color 0.15s; line-height: 1.5; }
+    .composer-textarea:focus { border-color: var(--text-secondary); }
+    .score-picker { display: flex; gap: 6px; flex-wrap: wrap; }
+    .score-btn { width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text-secondary); font-size: 14px; font-weight: 500; cursor: pointer; font-family: inherit; transition: all 0.12s; }
+    .score-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+    .score-btn.selected { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    .autocomplete-wrap { position: relative; }
+    .autocomplete-results { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; z-index: 100; max-height: 200px; overflow-y: auto; display: none; box-shadow: var(--shadow-md); }
+    .autocomplete-results.open { display: block; }
+    .autocomplete-item { padding: 10px 14px; font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 10px; transition: background 0.1s; }
+    .autocomplete-item:hover { background: var(--bg-hover); }
+    .autocomplete-item-title { font-weight: 500; }
+    .composer-actions { display: flex; align-items: center; gap: 12px; padding-top: 4px; }
+    .spoiler-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
+    .composer-cancel { padding: 8px 16px; border-radius: 20px; border: 1px solid var(--border); background: none; font-size: 14px; font-family: inherit; color: var(--text-secondary); cursor: pointer; transition: background 0.15s; }
+    .composer-cancel:hover { background: var(--bg-hover); }
+    .composer-submit { padding: 8px 18px; border-radius: 20px; border: none; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
+    .composer-submit:hover { opacity: 0.85; }
+    .composer-submit:disabled { opacity: 0.45; cursor: not-allowed; }
+    .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; }
+  </style>
+</head>
+
+<body>
+<div class="layout">
+
+  <aside class="sidebar-left">
+    <div class="logo"><span class="logo-dot"></span>Chekpoint</div>
+    <a href="/" class="nav-item active">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
+      Home
+    </a>
+    <a href="/following" class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 14c0-2.21-1.79-4-4-4s-4 1.79-4 4"/><circle cx="9" cy="6" r="3"/><path d="M16 14c0-1.86-1.28-3.41-3-3.83"/><path d="M15 4a3 3 0 010 4"/></svg></span>
+      Following
+    </a>
+    <a href="/search" class="nav-item">
+      <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
+      Search
+    </a>
+    <div class="sidebar-bottom">
+      <div class="nav-divider"></div>
+      {isLoggedIn ? (
+        <a href={currentProfile ? `/reviewers/${currentProfile.username}` : '/signin'} class="nav-item">
+          <div class="sidebar-avatar">
+            {currentProfile?.avatar_url
+              ? <img src={currentProfile.avatar_url} alt={currentProfile.username} />
+              : <span>{getInitials(currentProfile?.username ?? '?')}</span>
+            }
+          </div>
+          Profile
+        </a>
+      ) : (
+        <a href="/signin" class="nav-item">
+          <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11v4M9 3v4M5 7h8M3 15h12"/></svg></span>
+          Sign in / Sign up
+        </a>
+      )}
+      <div class="nav-divider"></div>
+      <button class="theme-toggle" id="themeToggle">
+        <span class="nav-icon" id="themeIcon">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>
+        </span>
+        <span id="themeLabel">Light mode</span>
+      </button>
+    </div>
+  </aside>
 
   <main class="feed">
     <div class="feed-header">
@@ -194,10 +500,14 @@ function formatCount(n: number): string {
       <button class="new-review-btn" id="openComposer">+ Write a review</button>
     </div>
 
+    <!-- HERO — featured top rated game -->
     {featuredGame && (
       <div class="hero">
         {igdbImage((featuredGame as any).cover, 't_1080p') && (
-          <div class="hero-bg" style={`background-image: url('${igdbImage((featuredGame as any).cover, 't_1080p')}')`}></div>
+          <div
+            class="hero-bg"
+            style={`background-image: url('${igdbImage((featuredGame as any).cover, 't_1080p')}')`}
+          ></div>
         )}
         <div class="hero-overlay"></div>
         <div class="hero-content">
@@ -218,6 +528,7 @@ function formatCount(n: number): string {
       </div>
     )}
 
+    <!-- TOP RATED ROW -->
     {topRated.length > 0 && (
       <div class="section-block">
         <div class="section-block-header">
@@ -245,462 +556,130 @@ function formatCount(n: number): string {
       </div>
     )}
 
-
-    {isLoggedIn && (
-      <div class="feed-tabs">
-        <button class="feed-tab active" data-tab="recent">Recent</button>
-        <button class="feed-tab" data-tab="following">Following</button>
+    <!-- GENRE BROWSE CHIPS -->
+    {(genres ?? []).length > 0 && (
+      <div class="genre-section">
+        {(genres ?? [])
+          .filter((g: any) => featuredGenres.some(n => g.name.toLowerCase().includes(n.toLowerCase())))
+          .slice(0, 10)
+          .map((g: any) => (
+            <a href={`/search?tab=games&genre=${g.id}`} class="genre-chip">{g.name}</a>
+          ))
+        }
       </div>
     )}
 
-    <div id="tab-recent">
-      {reviews.length === 0 ? (
-        <div class="empty-state">
-          <div class="empty-state-title">No reviews yet</div>
-          <p>Be the first to review a game.</p>
+    <!-- COMPOSER -->
+    <div class="composer" id="composer" style="display:none">
+      <div class="composer-inner">
+        <div class="composer-field">
+          <label class="composer-label">Game</label>
+          <div class="autocomplete-wrap">
+            <input type="text" id="gameSearch" class="composer-input" placeholder="Search for a game..." autocomplete="off" />
+            <div class="autocomplete-results" id="gameResults"></div>
+          </div>
+          <input type="hidden" id="gameId" />
         </div>
-      ) : (
-        reviews.map((review: any) => (
-          <ReviewCard
-            review={review}
-            isLoggedIn={isLoggedIn}
-            showReviewer={true}
-            showGame={true}
-            currentProfileId={currentProfile?.id ?? null}
-          />
-        ))
-      )}
+        <div class="composer-field">
+          <label class="composer-label">Score</label>
+          <div class="score-picker" id="scorePicker">
+            {[1,2,3,4,5,6,7,8,9,10].map(n => (
+              <button class="score-btn" data-score={n}>{n}</button>
+            ))}
+          </div>
+          <input type="hidden" id="scoreVal" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Title</label>
+          <input type="text" id="reviewTitle" class="composer-input" placeholder="Sum it up in a line..." maxlength="120" />
+        </div>
+        <div class="composer-field">
+          <label class="composer-label">Review</label>
+          <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4"></textarea>
+        </div>
+        <div class="composer-row">
+          <div class="composer-field" style="flex:1">
+            <label class="composer-label">Platform played on</label>
+            <select id="platformSelect" class="composer-select">
+              <option value="">Select platform...</option>
+              {(platforms ?? []).map((p: any) => (
+                <option value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </div>
+          <div class="composer-field" style="width:120px">
+            <label class="composer-label">Hours played</label>
+            <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
+          </div>
+        </div>
+        <div class="composer-actions">
+          <label class="spoiler-toggle">
+            <input type="checkbox" id="spoilerCheck" />
+            <span>Contains spoilers</span>
+          </label>
+          <div style="display:flex;gap:8px;margin-left:auto">
+            <button class="composer-cancel" id="cancelComposer">Cancel</button>
+            <button class="composer-submit" id="submitReview">Post review</button>
+          </div>
+        </div>
+        <div class="composer-error" id="composerError"></div>
+      </div>
     </div>
 
-    {isLoggedIn && (
-      <div id="tab-following" style="display:none">
-        {followingReviews.length === 0 ? (
-          <div class="empty-state">
-            <div class="empty-state-title">
-              {followingReviews.length === 0 ? "Nothing here yet" : "Your feed is empty"}
-            </div>
-            <p>Follow reviewers to see their latest reviews here.</p>
-            <a href="/search?tab=reviewers" class="empty-cta" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 24px;border-radius:22px;font-size:14px;font-weight:500;margin-top:16px">Find reviewers</a>
-          </div>
-        ) : (
-          followingReviews.map((review: any) => (
-            <ReviewCard
-              review={review}
-              isLoggedIn={isLoggedIn}
-              showReviewer={true}
-              showGame={true}
-              currentProfileId={currentProfile?.id ?? null}
-              />
-          ))
-        )}
-        <div style="padding:16px 20px;text-align:center">
-          <a href="/following" style="font-size:13px;color:var(--text-tertiary)">View full feed →</a>
-        </div>
+    <!-- REVIEW FEED -->
+    {reviews.length === 0 ? (
+      <div class="empty-state">
+        <div class="empty-state-title">No reviews yet</div>
+        <p>Be the first to review a game.</p>
       </div>
+    ) : (
+      reviews.map((review) => (
+        <article class="review-card">
+          <div class="card-top">
+            <a href={`/reviewers/${review.profiles?.username}`} style="flex-shrink:0">
+              <div class="avatar">
+                {review.profiles?.avatar_url
+                  ? <img src={review.profiles.avatar_url} alt={review.profiles.username} />
+                  : getInitials(review.profiles?.username ?? "??")
+                }
+              </div>
+            </a>
+            <div class="card-body">
+              <div class="card-meta">
+                <a href={`/reviewers/${review.profiles?.username}`} class="username">@{review.profiles?.username ?? "unknown"}</a>
+                <span class="meta-dot">·</span>
+                <span class="timestamp">{timeAgo(review.published_at ?? review.created_at)}</span>
+              </div>
+              <div class="game-row">
+                <a href={`/games/${review.games?.slug}`} class="game-cover-sm">
+                  {review.games?.cover_img_url
+                    ? <img src={igdbImage(review.games.cover_img_url, 't_thumb') ?? ''} alt={review.games.title} />
+                    : "🎮"
+                  }
+                </a>
+                <a href={`/games/${review.games?.slug}`} class="game-title-text">{review.games?.title ?? "Unknown Game"}</a>
+                <div class={`score-badge ${scoreColor(review.score)}`}>{review.score}</div>
+              </div>
+              {review.contains_spoilers && <div class="spoiler-pill">⚠ spoilers</div>}
+              {review.title && <div class="review-title">{review.title}</div>}
+              <div class="review-body">{review.body}</div>
+              <div class="card-footer">
+                {review.played_on && <span class="footer-tag">{review.played_on.name}</span>}
+                {review.play_time_hours > 0 && <span class="footer-tag">{review.play_time_hours}h played</span>}
+                <a href={`/reviews/${review.id}`} class="read-more">Read more →</a>
+              </div>
+            </div>
+          </div>
+        </article>
+      ))
     )}
   </main>
 
-  <!-- Composer overlay -->
-  <div id="composerOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:150"></div>
+  <aside class="sidebar-right">
 
-  <!-- Composer modal -->
-  <div id="composer" style="display:none;position:fixed;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:calc(100vw - 32px);background:var(--bg-card);border:1px solid var(--border);border-radius:16px;z-index:160;padding:24px;max-height:calc(100dvh - 100px);overflow-y:auto">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-      <div id="composerTitle" style="font-size:17px;font-weight:500;letter-spacing:-0.2px">Write a review</div>
-      <button id="cancelComposer" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-tertiary);line-height:1;padding:4px">×</button>
-    </div>
-
-    <!-- ── Post-review reveal card (hidden until submit succeeds) ── -->
-    <div id="reviewResult" style="display:none;text-align:center;padding:8px 0 20px;animation:resultFadeIn 0.3s ease">
-      <div id="resultCover" style="display:none;margin-bottom:14px">
-        <img id="resultCoverImg" src="" alt="" style="width:64px;height:88px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" />
-      </div>
-      <div id="resultGameTitle" style="font-size:15px;font-weight:500;color:var(--text-primary);margin-bottom:20px"></div>
-
-      <!-- Score comparison row -->
-      <div id="resultScoreRow" style="display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:24px">
-        <div style="text-align:center;padding:0 28px">
-          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-tertiary);margin-bottom:8px">Your score</div>
-          <div id="resultScoreNumWrap" style="position:relative;display:inline-block">
-            <div id="resultUserScore" style="font-family:'DM Serif Display',serif;font-size:52px;line-height:1;color:var(--text-primary)"></div>
-          </div>
-          <div style="font-size:12px;color:var(--text-tertiary);margin-top:5px">out of 10</div>
-        </div>
-        <div id="resultDivider" style="width:1px;height:72px;background:var(--border);flex-shrink:0"></div>
-        <div id="resultCommunityCol" style="text-align:center;padding:0 28px">
-          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-tertiary);margin-bottom:8px">Community avg</div>
-          <div id="resultCommunityScore" style="font-family:'DM Serif Display',serif;font-size:52px;line-height:1;color:var(--text-secondary)"></div>
-          <div id="resultReviewCount" style="font-size:12px;color:var(--text-tertiary);margin-top:5px"></div>
-        </div>
-      </div>
-
-      <!-- First-reviewer message (replaces score row when no prior reviews) -->
-      <div id="resultFirstMsg" style="display:none;font-size:14px;color:var(--text-secondary);margin-bottom:24px;line-height:1.6;padding:0 8px"></div>
-
-      <div style="display:flex;gap:8px;justify-content:center">
-        <button id="resultClose" style="padding:10px 20px;border:1px solid var(--border);border-radius:10px;background:transparent;color:var(--text-secondary);font-size:14px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity 0.15s">Close</button>
-        <a id="resultGameLink" href="#" style="padding:10px 20px;border-radius:10px;background:var(--accent);color:var(--accent-text);font-size:14px;font-weight:500;text-decoration:none;transition:opacity 0.15s">See all reviews →</a>
-      </div>
-    </div>
-
-    <!-- ── Composer form (hidden after submit succeeds) ── -->
-    <div id="composerFormContent">
-    <div class="composer-field">
-      <label class="composer-label">Game</label>
-      <div class="autocomplete-wrap">
-        <input type="text" id="gameSearch" class="composer-input" placeholder="Search for a game..." autocomplete="off" />
-        <div class="autocomplete-results" id="gameResults"></div>
-      </div>
-      <input type="hidden" id="gameId" />
-    </div>
-    <div class="composer-field" style="margin-top:12px">
-      <label class="composer-label">Score</label>
-      <div style="display:flex;align-items:center;gap:8px">
-        <input type="number" id="scoreVal" class="composer-input" placeholder="0.0" min="0.1" max="10" step="0.1" style="width:90px" />
-        <span style="font-size:15px;color:var(--text-tertiary);font-family:'DM Serif Display',serif">/ 10</span>
-      </div>
-    </div>
-    <div class="composer-field" style="margin-top:12px">
-      <label class="composer-label">Title</label>
-      <input type="text" id="reviewTitle" class="composer-input" placeholder="Sum it up in a line..." maxlength="120" />
-    </div>
-    <div class="composer-field" style="margin-top:12px">
-      <label class="composer-label">Review</label>
-      <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="4" maxlength="5000"></textarea>
-      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 5000</div>
-    </div>
-    <div class="composer-row" style="margin-top:12px">
-      <div class="composer-field" style="flex:1">
-        <label class="composer-label">Platform played on</label>
-        <select id="platformSelect" class="composer-select">
-          <option value="">Select platform...</option>
-          {(platforms ?? []).map((p: any) => (
-            <option value={p.id}>{p.name}</option>
-          ))}
-        </select>
-      </div>
-      <div class="composer-field" style="width:120px">
-        <label class="composer-label">Hours played</label>
-        <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
-      </div>
-    </div>
-    <div class="composer-actions" style="margin-top:14px">
-      <label class="spoiler-toggle">
-        <input type="checkbox" id="spoilerCheck" />
-        <span>Contains spoilers</span>
-      </label>
-      <div style="display:flex;gap:8px;margin-left:auto">
-        <button class="composer-submit" id="submitReview">Post review</button>
-      </div>
-    </div>
-    <div class="composer-error" id="composerError"></div>
-    </div><!-- /composerFormContent -->
-  </div>
-
-  <script is:inline define:vars={{ isLoggedIn }}>
-    function openComposer() {
-      document.getElementById('composer').style.display = 'block'
-      document.getElementById('composerOverlay').style.display = 'block'
-      document.getElementById('gameSearch').focus()
-      if (window.__lockScroll) window.__lockScroll()
-    }
-
-    function closeComposer() {
-      document.getElementById('composer').style.display = 'none'
-      document.getElementById('composerOverlay').style.display = 'none'
-      if (window.__unlockScroll) window.__unlockScroll()
-      resetComposer()
-    }
-
-    function resetComposer() {
-      document.getElementById('gameSearch').value = ''
-      document.getElementById('gameId').value = ''
-      document.getElementById('reviewTitle').value = ''
-      document.getElementById('reviewBody').value = ''
-      document.getElementById('hoursPlayed').value = ''
-      document.getElementById('scoreVal').value = ''
-      document.getElementById('platformSelect').value = ''
-      document.getElementById('spoilerCheck').checked = false
-      document.getElementById('composerError').textContent = ''
-      document.getElementById('charCount').textContent = '0 / 5000'
-      document.getElementById('charCount').style.color = 'var(--text-tertiary)'
-      document.getElementById('gameResults').classList.remove('open')
-    }
-
-    document.getElementById('openComposer').addEventListener('click', () => {
-      if (!isLoggedIn) { window.location.href = '/signin'; return; }
-      openComposer()
-    })
-
-    document.querySelectorAll('.feed-tab').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        document.querySelectorAll('.feed-tab').forEach(function(b) { b.classList.remove('active') })
-        btn.classList.add('active')
-        var tab = btn.dataset.tab
-        document.getElementById('tab-recent').style.display = tab === 'recent' ? '' : 'none'
-        var followingEl = document.getElementById('tab-following')
-        if (followingEl) followingEl.style.display = tab === 'following' ? '' : 'none'
-      })
-    })
-
-    document.getElementById('cancelComposer').addEventListener('click', closeComposer)
-    document.getElementById('composerOverlay').addEventListener('click', closeComposer)
-
-    document.getElementById('reviewBody').addEventListener('input', function() {
-      const count = this.value.length
-      const el = document.getElementById('charCount')
-      el.textContent = count + ' / 5000'
-      el.style.color = count > 4500 ? (count >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
-    })
-
-    document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(el => {
-      el.addEventListener('click', () => el.classList.remove('spoiler-hidden'))
-    })
-
-    let searchTimeout
-    document.getElementById('gameSearch').addEventListener('input', (e) => {
-      clearTimeout(searchTimeout)
-      const q = e.target.value.trim()
-      if (q.length < 2) { document.getElementById('gameResults').classList.remove('open'); return; }
-      searchTimeout = setTimeout(() => searchGames(q), 300)
-    })
-
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('.autocomplete-wrap')) {
-        document.getElementById('gameResults').classList.remove('open')
-      }
-    })
-
-    async function searchGames(q) {
-      const res = await fetch('/api/games/search?q=' + encodeURIComponent(q))
-      const games = await res.json()
-      const results = document.getElementById('gameResults')
-      results.innerHTML = ''
-      if (!games.length) {
-        results.innerHTML = '<div class="autocomplete-item" style="color:var(--text-tertiary)">No games found</div>'
-      } else {
-        games.forEach(game => {
-          const item = document.createElement('div')
-          item.className = 'autocomplete-item'
-          item.innerHTML = '<div><div class="autocomplete-item-title">' + game.title + '</div>'
-            + (game.source === 'igdb' ? '<div style="font-size:11px;color:var(--text-tertiary);margin-top:2px">Add to Chekpoint</div>' : '')
-            + '</div>'
-          item.addEventListener('click', () => {
-            document.getElementById('gameSearch').value = game.title
-            results.classList.remove('open')
-            if (game.source === 'igdb') {
-              document.getElementById('gameId').value = ''
-              document.getElementById('composerError').textContent = 'Importing game...'
-              fetch('/api/games/import', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ igdb_id: game.igdb_id }),
-              })
-                .then(async r => {
-                  const data = await r.json()
-                  if (!r.ok) {
-                    document.getElementById('composerError').textContent =
-                      data.error ?? 'Failed to import game, try again.'
-                    return
-                  }
-                  document.getElementById('gameId').value = data.id
-                  document.getElementById('composerError').textContent = ''
-                  fetchGamePlatforms(data.id)
-                })
-                .catch(() => {
-                  document.getElementById('composerError').textContent = 'Failed to import game, try again.'
-                })
-            } else {
-              document.getElementById('gameId').value = game.id
-              fetchGamePlatforms(game.id)
-            }
-          })
-          results.appendChild(item)
-        })
-      }
-      results.classList.add('open')
-    }
-
-    async function fetchGamePlatforms(gameId) {
-      const select = document.getElementById('platformSelect')
-      select.innerHTML = '<option value="">Loading...</option>'
-      const res = await fetch('/api/games/platforms?id=' + gameId)
-      const platforms = await res.json()
-      if (platforms.length === 0) {
-        select.innerHTML = '<option value="">Any platform</option>'
-      } else {
-        select.innerHTML = '<option value="">Select platform...</option>' +
-          platforms.map(p => `<option value="${p.id}">${p.name}</option>`).join('')
-      }
-    }
-
-    document.getElementById('submitReview').addEventListener('click', async () => {
-      const gameId = document.getElementById('gameId').value
-      const score = document.getElementById('scoreVal').value
-      const title = document.getElementById('reviewTitle').value.trim()
-      const body = document.getElementById('reviewBody').value.trim()
-      const platformId = document.getElementById('platformSelect').value
-      const hours = document.getElementById('hoursPlayed').value
-      const spoilers = document.getElementById('spoilerCheck').checked
-      const errorEl = document.getElementById('composerError')
-
-      errorEl.textContent = ''
-      if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
-      if (!score || parseFloat(score) < 0.1 || parseFloat(score) > 10) { errorEl.textContent = 'Please enter a score between 0.1 and 10.'; return; }
-      if (!title) { errorEl.textContent = 'Please add a title.'; return; }
-      if (!body) { errorEl.textContent = 'Please write a review.'; return; }
-      if (body.length > 5000) { errorEl.textContent = 'Review must be at most 5000 characters.'; return; }
-      if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) { errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return; }
-
-      const btn = document.getElementById('submitReview')
-      btn.disabled = true
-      btn.textContent = 'Posting...'
-
-      const res = await fetch('/api/reviews/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          game_id: gameId,
-          score: parseFloat(score),
-          title,
-          body,
-          platform_played_on: platformId || null,
-          play_time_hours: hours ? parseInt(hours) : null,
-          contains_spoilers: spoilers,
-        }),
-      })
-
-      const data = await res.json()
-      if (!res.ok) {
-        errorEl.textContent = data.error ?? 'Something went wrong.'
-        btn.disabled = false
-        btn.textContent = 'Post review'
-      } else {
-        if (typeof gtag === 'function') {
-          gtag('event', 'review_posted', {
-            game_title: document.getElementById('gameSearch').value,
-            score: parseFloat(score),
-          });
-        }
-
-        // ── Show post-review reveal card ──
-        const userScore = parseFloat(score)
-        const gameTitle = document.getElementById('gameSearch').value
-        const { gameSlug, gameCover, communityAvg, reviewCount } = data
-
-        // Populate card
-        document.getElementById('resultGameTitle').textContent = gameTitle
-        const scoreEl = document.getElementById('resultUserScore')
-        const scoreWrap = document.getElementById('resultScoreNumWrap')
-        scoreEl.textContent = userScore.toFixed(1)
-        if (gameSlug) document.getElementById('resultGameLink').href = '/games/' + gameSlug
-
-        // Score color
-        const scoreColorMap = {
-          'score-perfect': 'var(--score-perfect)',
-          'score-great':   'var(--score-great)',
-          'score-teal':    'var(--score-teal)',
-          'score-good':    'var(--score-good)',
-          'score-mid':     'var(--score-mid)',
-          'score-orange':  'var(--score-orange)',
-          'score-low':     'var(--score-low)',
-        }
-        function clientScoreClass(s) {
-          if (s === 10) return 'score-perfect'
-          if (s >= 9)   return 'score-great'
-          if (s >= 8)   return 'score-teal'
-          if (s >= 7)   return 'score-good'
-          if (s >= 5)   return 'score-mid'
-          if (s >= 3)   return 'score-orange'
-          return 'score-low'
-        }
-        scoreEl.style.color = scoreColorMap[clientScoreClass(userScore)]
-
-        // Score-based animations
-        if (userScore >= 9) {
-          scoreEl.classList.add('score-stellar')
-        } else if (userScore <= 3) {
-          scoreEl.classList.add('score-crumble')
-        }
-
-        if (gameCover) {
-          const img = document.getElementById('resultCoverImg')
-          img.src = gameCover.startsWith('//') ? 'https:' + gameCover : gameCover
-          img.src = img.src.replace(/t_[a-z0-9_]+/, 't_cover_big')
-          img.alt = gameTitle
-          document.getElementById('resultCover').style.display = 'block'
-        }
-
-        if (reviewCount > 1) {
-          // Show comparison
-          document.getElementById('resultCommunityScore').textContent = communityAvg.toFixed(1)
-          document.getElementById('resultReviewCount').textContent =
-            'from ' + reviewCount + ' review' + (reviewCount !== 1 ? 's' : '')
-        } else {
-          // First reviewer — hide comparison, show message
-          document.getElementById('resultScoreRow').style.justifyContent = 'center'
-          document.getElementById('resultDivider').style.display = 'none'
-          document.getElementById('resultCommunityCol').style.display = 'none'
-          document.getElementById('resultFirstMsg').style.display = 'block'
-          // Weighted random picker — increase a weight to make that line appear more often. Set weight to 0 to "retire" line without deleting it, for stats or future reuse.
-        const firstReviewerSuffixes = [
-          { text: 'Nice.',                                              weight: 1 },
-          { text: 'Achievement unlocked.',                              weight: 1 },
-          { text: 'Save point established.',                            weight: 1 },
-          { text: 'Pioneer behavior.',                                  weight: 1 },
-          { text: 'You set the benchmark.',                             weight: 1 },
-          { text: 'Someone had to go first.',                           weight: 1 },
-          { text: 'History is written by the first reviewer. Probably.',weight: 1 },
-          { text: 'Is anyone out there?',                               weight: 1 },
-          { text: 'The record shows it.',                               weight: 1 },
-          { text: 'It is written.',                                     weight: 1 },
-          { text: 'Here I am. Here I remain.',                          weight: 1 },
-          { text: 'The reviews must flow.',                             weight: 1 },
-          { text: 'Never tell me the odds.',                            weight: 1 },
-          { text: 'Stay a while and listen.',                           weight: 1 },
-          { text: 'Gorp gorp gorp.',                                    weight: 1 },
-          { text: 'So it begins.',                                      weight: 1 },
-        ]
-        function pickWeighted(items) {
-          const total = items.reduce((sum, m) => sum + m.weight, 0)
-          let r = Math.random() * total
-          for (const m of items) { r -= m.weight; if (r <= 0) return m.text }
-          return items[items.length - 1].text
-        }
-        const suffix = pickWeighted(firstReviewerSuffixes)
-        document.getElementById('resultFirstMsg').textContent =
-            'You\'re the first person to review ' + gameTitle + ' on Chekpoint. ' + suffix
-        }
-
-        // Swap form for result card, hide the "Write a review" title
-        document.getElementById('composerTitle').style.display = 'none'
-        document.getElementById('composerFormContent').style.display = 'none'
-        document.getElementById('reviewResult').style.display = 'block'
-
-        // Prefetch the current page in the background so Close feels instant
-        fetch(window.location.href).catch(() => {})
-
-        // Wire up close button — reload feed on dismiss
-        document.getElementById('resultClose').addEventListener('click', () => {
-          closeComposer()
-          window.location.reload()
-        })
-        // Navigating to game page also counts as a clean exit
-        document.getElementById('resultGameLink').addEventListener('click', () => {
-          if (window.__unlockScroll) window.__unlockScroll()
-        })
-      }
-    })
-
-
-  </script>
-
-  <ReportModal />
-  <EditModal />
-
-  <div slot="sidebar-right">
+    <!-- LAST REVIEWED -->
     {isLoggedIn && lastReview && (
-      <div class="widget">
+      <div class="widget widget-last-review" id="lastReviewWidget" data-score={lastReview.score}>
         <div class="widget-title">Your last review</div>
         <a href={`/games/${lastReview.games?.slug}`} style="display:flex;gap:12px;align-items:flex-start;text-decoration:none">
           <div style="flex-shrink:0;width:52px;height:70px;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border)">
@@ -719,7 +698,8 @@ function formatCount(n: number): string {
       </div>
     )}
 
-    <div class="widget" style="margin-top:4px">
+    <!-- TRENDING THIS WEEK -->
+    <div class="widget">
       <div class="widget-title">Trending this week</div>
       {trending.length === 0 ? (
         <div style="font-size:13px;color:var(--text-tertiary)">No activity yet this week.</div>
@@ -742,7 +722,8 @@ function formatCount(n: number): string {
       )}
     </div>
 
-    <div class="widget" style="margin-top:4px">
+    <!-- SITE STATS -->
+    <div class="widget">
       <div class="widget-title">Site stats</div>
       <div class="stat-row">
         <span class="stat-label">Total reviews</span>
@@ -758,185 +739,175 @@ function formatCount(n: number): string {
       </div>
     </div>
 
-    {(genres ?? []).length > 0 && (
-      <div class="widget" style="margin-top:4px">
-        <div class="widget-title">Browse Genres</div>
-        <div class="genre-pills">
-          {(genres ?? []).map((g: any) => (
-            <a href={`/genres/${g.slug}`} class="genre-pill">{g.name}</a>
-          ))}
-        </div>
-      </div>
-    )}
-  </div>
+  </aside>
 
-</Layout>
+</div>
 
-<style>
-  /* ─── Hero ──────────────────────────────────────────────────────────────── */
-  .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
-  .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.4; filter: blur(2px) saturate(1.4); transform: scale(1.05); }
-  .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.6) 50%, rgba(10,10,10,0.2) 100%); }
-  .hero-content { position: relative; z-index: 2; padding: 28px 24px; display: flex; align-items: flex-end; gap: 20px; width: 100%; }
-  .hero-cover { width: 90px; height: 120px; border-radius: 10px; object-fit: cover; box-shadow: 0 8px 32px rgba(0,0,0,0.6); flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); }
-  .hero-cover-placeholder { width: 90px; height: 120px; border-radius: 10px; background: #222; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 36px; }
-  .hero-info { flex: 1; min-width: 0; }
-  .hero-label { font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
-  .hero-title { font-family: 'DM Serif Display', serif; font-size: 26px; color: #fff; line-height: 1.2; margin-bottom: 8px; letter-spacing: -0.3px; }
-  .hero-score { display: inline-flex; align-items: center; gap: 6px; }
-  .hero-score-num { font-family: 'DM Serif Display', serif; font-size: 22px; color: #4ade80; }
-  .hero-score-label { font-size: 12px; color: rgba(255,255,255,0.5); }
-  .hero-cta { display: inline-block; margin-top: 10px; background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.2); border-radius: 20px; padding: 6px 14px; font-size: 13px; backdrop-filter: blur(8px); transition: background 0.15s; }
-  .hero-cta:hover { background: rgba(255,255,255,0.25); }
-
-  /* ─── Top Rated section ─────────────────────────────────────────────────── */
-  .section-block { padding: 20px 20px 0; border-bottom: 1px solid var(--border-subtle); }
-  .section-block-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-  .section-block-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-tertiary); }
-  .section-block-link { font-size: 12px; color: var(--text-tertiary); transition: color 0.15s; }
-  .section-block-link:hover { color: var(--text-primary); }
-  .top-rated-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 20px; scrollbar-width: none; }
-  .top-rated-scroll::-webkit-scrollbar { display: none; }
-  .top-rated-card { flex-shrink: 0; width: 100px; display: block; }
-  .top-rated-cover-wrap { position: relative; width: 100px; height: 133px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); transition: transform 0.15s, box-shadow 0.15s; background: var(--tag-bg); }
-  .top-rated-card:hover .top-rated-cover-wrap { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(0,0,0,.45); }
-  .top-rated-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .top-rated-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; }
-  .top-rated-badge { position: absolute; bottom: 6px; right: 6px; min-width: 28px; height: 22px; padding: 0 6px; border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'DM Serif Display', serif; backdrop-filter: blur(6px); }
-  .top-rated-badge.score-perfect { background: rgba(255,255,255,.95); color: #09090a; box-shadow: 0 0 10px rgba(255,255,255,.7), 0 0 20px rgba(255,255,255,.3); border: 1px solid rgba(255,255,255,.9); }
-  .top-rated-badge.score-great  { background: rgba(17,46,28,.9);  color: #4ade80; border: 1px solid rgba(74,222,128,.5); }
-  .top-rated-badge.score-teal   { background: rgba(8,45,42,.9);   color: #2dd4bf; border: 1px solid rgba(45,212,191,.5); }
-  .top-rated-badge.score-good   { background: rgba(14,34,64,.88); color: #60a5fa; border: 1px solid rgba(96,165,250,.4); }
-  .top-rated-badge.score-mid    { background: rgba(39,30,0,.88);  color: #fbbf24; border: 1px solid rgba(251,191,36,.4); }
-  .top-rated-badge.score-orange { background: rgba(44,22,10,.88); color: #fb923c; border: 1px solid rgba(251,146,60,.4); }
-  .top-rated-badge.score-low    { background: rgba(48,14,14,.88); color: #f87171; border: 1px solid rgba(248,113,113,.4); }
-  .top-rated-info { margin-top: 6px; }
-  .top-rated-title { font-size: 11px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
-
-  /* ─── Feed tabs ─────────────────────────────────────────────────────────── */
-  .feed-tabs {
-    display: flex;
-    gap: 6px;
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--border-subtle);
-    background: var(--bg-card);
-    position: sticky;
-    top: 73px;
-    z-index: 9;
-  }
-  .feed-tab {
-    padding: 6px 16px;
-    border-radius: 20px;
-    font-size: 13px;
-    font-weight: 500;
-    font-family: inherit;
-    color: var(--text-secondary);
-    background: var(--tag-bg);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .feed-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
-  .feed-tab.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-
-  /* ─── Genre pills (sidebar) ──────────────────────────────────────────────── */
-  .genre-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-  .genre-pill { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; }
-  .genre-pill:hover { background: var(--accent); color: var(--accent-text); }
-
-  /* ─── Trending widget ────────────────────────────────────────────────────── */
-  .trending-item { display: flex; align-items: flex-start; gap: 10px; padding: 8px; margin: 0 -8px; border-bottom: 1px solid var(--border-subtle); transition: background 0.15s; border-radius: 8px; }
-  .trending-item:last-child { border-bottom: none; }
-  .trending-item:hover { background: var(--bg-hover); }
-  .trending-rank { font-size: 12px; color: var(--text-tertiary); width: 16px; flex-shrink: 0; font-weight: 500; }
-  .trending-cover { width: 44px; height: 58px; border-radius: 7px; flex-shrink: 0; background: var(--tag-bg); border: 1px solid var(--border); overflow: hidden; transition: transform 0.15s, box-shadow 0.15s; }
-  .trending-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .trending-item:hover .trending-cover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.3); }
-  .trending-info { flex: 1; min-width: 0; }
-  .trending-game { font-size: 13px; font-weight: 500; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .trending-count { font-size: 12px; color: var(--text-tertiary); margin-top: 3px; }
-
-  /* ─── Post-review reveal card ───────────────────────────────────────────── */
-  @keyframes resultFadeIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-  #resultClose:hover, #resultGameLink:hover { opacity: 0.8; }
-
-  /* ── High score: gold shimmer text + rotating sun rays ── */
-  @keyframes goldShimmer {
-    0%   { background-position: -300% center; }
-    100% { background-position: 300% center; }
-  }
-  .score-stellar {
-    background: linear-gradient(105deg,
-      #b8860b 0%, #e8b800 20%, #fff5a0 40%, #ffd700 55%, #e8b800 70%, #b8860b 100%);
-    background-size: 300% auto;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    display: inline-block; /* required for transform animations on text */
-    animation: goldShimmer 2.5s linear infinite, happyBounce 1.4s ease-in-out 1;
+<script define:vars={{ isLoggedIn }}>
+  // Theme — icon/label sync only; theme attr already set by inline <head> script
+  function updateThemeUI(theme) {
+    const label = document.getElementById('themeLabel')
+    const icon = document.getElementById('themeIcon')
+    if (!label || !icon) return
+    if (theme === 'dark') {
+      label.textContent = 'Dark mode'
+      icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/></svg>'
+    } else {
+      label.textContent = 'Light mode'
+      icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/></svg>'
+    }
   }
 
-  /* ── Low score: stone texture + one-shot shake on appear ── */
-  /* Sad, heavy shake — drifts downward with gravity, slumps at the end */
-  @keyframes stoneSad {
-    0%   { transform: translate(0,    0)   rotate( 0.0deg); }
-    10%  { transform: translate(-8px, 2px) rotate(-3.0deg); }
-    22%  { transform: translate( 7px, 5px) rotate( 2.5deg); }
-    34%  { transform: translate(-6px, 9px) rotate(-2.0deg); }
-    46%  { transform: translate( 5px,12px) rotate( 1.5deg); }
-    58%  { transform: translate(-4px,15px) rotate(-1.0deg); }
-    70%  { transform: translate( 3px,17px) rotate( 0.6deg); }
-    82%  { transform: translate(-2px,18px) rotate(-0.4deg); }
-    92%  { transform: translate( 1px,19px) rotate( 0.1deg); }
-    100% { transform: translate( 0,   5px) rotate(-1.2deg); }
-  }
-  .score-crumble {
-    color: #8a8480 !important;
-    -webkit-text-fill-color: #8a8480 !important;
-    text-shadow:
-      2px  2px 0   #4a4240,
-      -1px 1px 0   #5a5450,
-      1px -1px 0   #3a3230,
-      -2px -1px 1px rgba(0,0,0,0.4);
-    display: inline-block;
-    animation: stoneSad 1.2s cubic-bezier(.25,.46,.45,.94) 1 forwards;
+  // Theme already applied by inline <head> script — just sync the UI
+  updateThemeUI(document.documentElement.getAttribute('data-theme') || 'dark')
+
+  // Idea #7 — last review widget border glow matching score color
+  ;(function() {
+    var widget = document.getElementById('lastReviewWidget')
+    if (!widget) return
+    var score = parseFloat(widget.dataset.score)
+    var scoreColors = {
+      great:  { border: 'rgba(74,222,128,0.45)',  shadow: 'rgba(74,222,128,0.15)',  bottom: '#4ade80' },
+      teal:   { border: 'rgba(45,212,191,0.45)',  shadow: 'rgba(45,212,191,0.15)',  bottom: '#2dd4bf' },
+      good:   { border: 'rgba(96,165,250,0.45)',  shadow: 'rgba(96,165,250,0.15)',  bottom: '#60a5fa' },
+      mid:    { border: 'rgba(251,191,36,0.45)',  shadow: 'rgba(251,191,36,0.15)',  bottom: '#fbbf24' },
+      orange: { border: 'rgba(251,146,60,0.45)',  shadow: 'rgba(251,146,60,0.15)',  bottom: '#fb923c' },
+      low:    { border: 'rgba(248,113,113,0.45)', shadow: 'rgba(248,113,113,0.15)', bottom: '#f87171' },
+    }
+    var tier = score >= 9 ? 'great' : score >= 8 ? 'teal' : score >= 7 ? 'good' : score >= 5 ? 'mid' : score >= 3 ? 'orange' : 'low'
+    var c = scoreColors[tier]
+    widget.style.borderColor = c.border
+    widget.style.borderBottomColor = c.bottom
+    widget.style.borderBottomWidth = '2px'
+    widget.style.boxShadow = '0 0 0 0 transparent, inset 0 0 18px ' + c.shadow
+  })();
+
+  document.getElementById('themeToggle').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light'
+    document.documentElement.setAttribute('data-theme', next)
+    localStorage.setItem('theme', next)
+    updateThemeUI(next)
+  })
+
+  // Composer
+  document.getElementById('openComposer').addEventListener('click', () => {
+    if (!isLoggedIn) { window.location.href = '/signin'; return; }
+    document.getElementById('composer').style.display = 'block'
+    document.getElementById('gameSearch').focus()
+  })
+
+  document.getElementById('cancelComposer').addEventListener('click', () => {
+    document.getElementById('composer').style.display = 'none'
+    resetComposer()
+  })
+
+  function resetComposer() {
+    document.getElementById('gameSearch').value = ''
+    document.getElementById('gameId').value = ''
+    document.getElementById('reviewTitle').value = ''
+    document.getElementById('reviewBody').value = ''
+    document.getElementById('hoursPlayed').value = ''
+    document.getElementById('scoreVal').value = ''
+    document.getElementById('platformSelect').value = ''
+    document.getElementById('spoilerCheck').checked = false
+    document.getElementById('composerError').textContent = ''
+    document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'))
+    document.getElementById('gameResults').classList.remove('open')
   }
 
-  /* Happy bounce — 3 bounces then settles back to rest */
-  @keyframes happyBounce {
-    0%   { transform: translateY(  0)   rotate( 0.0deg) scale(1.00); }
-    14%  { transform: translateY(-16px) rotate(-3.0deg) scale(1.07); }
-    28%  { transform: translateY( -3px) rotate( 1.5deg) scale(0.96); }
-    44%  { transform: translateY(-14px) rotate( 2.5deg) scale(1.05); }
-    58%  { transform: translateY( -2px) rotate(-1.0deg) scale(0.97); }
-    72%  { transform: translateY(-13px) rotate(-2.0deg) scale(1.04); }
-    86%  { transform: translateY( -2px) rotate( 0.5deg) scale(0.99); }
-    100% { transform: translateY(  0)   rotate( 0.0deg) scale(1.00); }
+  // Score picker
+  document.querySelectorAll('.score-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('selected'))
+      btn.classList.add('selected')
+      document.getElementById('scoreVal').value = btn.dataset.score
+    })
+  })
+
+  // Game autocomplete
+  let searchTimeout
+  document.getElementById('gameSearch').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout)
+    const q = e.target.value.trim()
+    if (q.length < 2) { document.getElementById('gameResults').classList.remove('open'); return; }
+    searchTimeout = setTimeout(() => searchGames(q), 300)
+  })
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.autocomplete-wrap')) {
+      document.getElementById('gameResults').classList.remove('open')
+    }
+  })
+
+  async function searchGames(q) {
+    const res = await fetch('/api/games/search?q=' + encodeURIComponent(q))
+    const games = await res.json()
+    const results = document.getElementById('gameResults')
+    results.innerHTML = ''
+    if (!games.length) {
+      results.innerHTML = '<div class="autocomplete-item" style="color:var(--text-tertiary)">No games found</div>'
+    } else {
+      games.forEach(game => {
+        const item = document.createElement('div')
+        item.className = 'autocomplete-item'
+        item.innerHTML = '<div><div class="autocomplete-item-title">' + game.title + '</div></div>'
+        item.addEventListener('click', () => {
+          document.getElementById('gameSearch').value = game.title
+          document.getElementById('gameId').value = game.id
+          results.classList.remove('open')
+        })
+        results.appendChild(item)
+      })
+    }
+    results.classList.add('open')
   }
 
-  /* ─── Composer modal ─────────────────────────────────────────────────────── */
-  .composer-field { display: flex; flex-direction: column; gap: 6px; }
-  .composer-row { display: flex; gap: 12px; align-items: flex-end; }
-  .composer-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
-  .composer-input, .composer-select { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; font-family: inherit; color: var(--text-primary); width: 100%; outline: none; transition: border-color 0.15s; }
-  .composer-input:focus, .composer-select:focus { border-color: var(--text-secondary); }
-  .composer-textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; font-family: inherit; color: var(--text-primary); width: 100%; outline: none; resize: vertical; min-height: 90px; transition: border-color 0.15s; line-height: 1.5; }
-  .composer-textarea:focus { border-color: var(--text-secondary); }
-  .autocomplete-wrap { position: relative; }
-  .autocomplete-results { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; z-index: 100; max-height: 200px; overflow-y: auto; display: none; box-shadow: var(--shadow-md); }
-  .autocomplete-results.open { display: block; }
-  .autocomplete-item { padding: 10px 14px; font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 10px; transition: background 0.1s; }
-  .autocomplete-item:hover { background: var(--bg-hover); }
-  .autocomplete-item-title { font-weight: 500; }
-  .composer-actions { display: flex; align-items: center; gap: 12px; padding-top: 4px; }
-  .spoiler-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
-  .composer-submit { padding: 8px 18px; border-radius: 20px; border: none; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
-  .composer-submit:hover { opacity: 0.85; }
-  .composer-submit:disabled { opacity: 0.45; cursor: not-allowed; }
-  .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; margin-top: 8px; }
-  .report-trigger-sm { font-size: 11px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; font-family: inherit; padding: 2px 6px; border-radius: 6px; transition: color 0.15s, background 0.15s; }
-  .report-trigger-sm:hover { color: #f87171; background: rgba(248,113,113,.08); }
-</style>
+  // Submit review
+  document.getElementById('submitReview').addEventListener('click', async () => {
+    const gameId = document.getElementById('gameId').value
+    const score = document.getElementById('scoreVal').value
+    const title = document.getElementById('reviewTitle').value.trim()
+    const body = document.getElementById('reviewBody').value.trim()
+    const platformId = document.getElementById('platformSelect').value
+    const hours = document.getElementById('hoursPlayed').value
+    const spoilers = document.getElementById('spoilerCheck').checked
+    const errorEl = document.getElementById('composerError')
+
+    errorEl.textContent = ''
+    if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
+    if (!score) { errorEl.textContent = 'Please select a score.'; return; }
+    if (!title) { errorEl.textContent = 'Please add a title.'; return; }
+    if (!body) { errorEl.textContent = 'Please write a review.'; return; }
+
+    const btn = document.getElementById('submitReview')
+    btn.disabled = true
+    btn.textContent = 'Posting...'
+
+    const res = await fetch('/api/reviews/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        game_id: gameId,
+        score: parseInt(score),
+        title,
+        body,
+        platform_played_on: platformId || null,
+        play_time_hours: hours ? parseInt(hours) : null,
+        contains_spoilers: spoilers,
+      }),
+    })
+
+    const data = await res.json()
+    if (!res.ok) {
+      errorEl.textContent = data.error ?? 'Something went wrong.'
+      btn.disabled = false
+      btn.textContent = 'Post review'
+    } else {
+      document.getElementById('composer').style.display = 'none'
+      resetComposer()
+      window.location.reload()
+    }
+  })
+</script>
+</body>
+</html>
