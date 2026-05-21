@@ -1,0 +1,62 @@
+import type { APIRoute } from "astro";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+
+export const POST: APIRoute = async (context) => {
+  const supabase = createSupabaseServerClientFromContext(context);
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return json({ error: "Unauthorized" }, 401);
+
+  const { data: profile } = await (supabase as any)
+    .from("profiles").select("id").eq("auth_user_id", user.id).single();
+  if (!profile) return json({ error: "Profile not found" }, 404);
+
+  const body = await context.request.json();
+  const { group_id, invite_code } = body;
+
+  const db = getSupabaseAdmin() as any;
+
+  // Resolve the group — by id (public) or invite_code (private)
+  let groupQuery = db.from("groups").select("id, visibility, invite_code");
+  if (invite_code) {
+    groupQuery = groupQuery.eq("invite_code", invite_code.toUpperCase());
+  } else if (group_id) {
+    groupQuery = groupQuery.eq("id", group_id);
+  } else {
+    return json({ error: "group_id or invite_code required" }, 400);
+  }
+
+  const { data: group } = await groupQuery.single();
+  if (!group) return json({ error: "Group not found" }, 404);
+
+  if (group.visibility === "private" && group.invite_code !== invite_code?.toUpperCase()) {
+    return json({ error: "Invalid invite code" }, 403);
+  }
+
+  const { data: existing } = await db.from("group_members")
+    .select("id").eq("group_id", group.id).eq("profile_id", profile.id).maybeSingle();
+  if (existing) return json({ error: "Already a member" }, 409);
+
+  const { error } = await db.from("group_members").insert({
+    group_id: group.id,
+    profile_id: profile.id,
+    role: "member",
+  });
+  if (error) return json({ error: error.message }, 500);
+
+  // If joining via direct invite, mark it accepted
+  if (invite_code) {
+    await db.from("group_invites")
+      .update({ status: "accepted" })
+      .eq("group_id", group.id)
+      .eq("invited_profile_id", profile.id);
+  }
+
+  return json({ id: group.id });
+};
+
+function json(body: object, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}

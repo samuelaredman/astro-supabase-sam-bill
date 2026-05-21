@@ -1,0 +1,216 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import Layout from "../../../components/Layout.astro";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+if (!user) return Astro.redirect("/signin");
+
+const { id } = Astro.params;
+
+const { data: profile } = await (supabase as any)
+  .from("profiles").select("id").eq("auth_user_id", user.id).single();
+if (!profile) return Astro.redirect("/signin");
+
+const { data: group } = await (supabase as any)
+  .from("groups").select("*").eq("id", id).single();
+if (!group) return Astro.redirect("/404");
+
+const { data: membership } = await (supabase as any)
+  .from("group_members").select("role").eq("group_id", id).eq("profile_id", profile.id).single();
+if (!membership || !["owner", "admin"].includes(membership.role)) {
+  return Astro.redirect(`/groups/${id}`);
+}
+
+const isOwner = membership.role === "owner";
+---
+
+<Layout title={`Settings — ${group.name} — Chekpoint`} isLoggedIn={true} currentProfile={profile} variant="centered">
+<style is:global>
+  .settings-wrap { max-width:520px; margin:40px auto; padding:0 20px; }
+  .settings-back { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--text-tertiary); margin-bottom:20px; text-decoration:none; }
+  .settings-back:hover { color:var(--text-primary); }
+  .settings-title { font-family:'DM Serif Display',serif; font-size:24px; margin-bottom:28px; }
+  .settings-section { background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:16px; }
+  .settings-section-title { font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); margin-bottom:16px; }
+  .form-group { margin-bottom:16px; }
+  .form-label { display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px; }
+  .form-input { width:100%; padding:9px 13px; border-radius:9px; border:1px solid var(--border); background:var(--bg); color:var(--text-primary); font-size:14px; font-family:inherit; outline:none; transition:border-color .15s; }
+  .form-input:focus { border-color:var(--accent); }
+  textarea.form-input { resize:vertical; min-height:72px; }
+  .visibility-options { display:flex; gap:10px; }
+  .vis-option { flex:1; border:2px solid var(--border); border-radius:10px; padding:12px; cursor:pointer; transition:border-color .15s; }
+  .vis-option.selected { border-color:var(--accent); background:var(--accent-subtle); }
+  .vis-option input { display:none; }
+  .vis-label { font-size:13px; font-weight:600; margin-bottom:2px; }
+  .vis-desc { font-size:11px; color:var(--text-tertiary); }
+  .btn-primary { background:var(--accent); color:#fff; border:none; padding:10px 22px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; }
+  .btn-primary:hover { opacity:.85; }
+  .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-ghost { background:var(--tag-bg); color:var(--text-secondary); border:none; padding:10px 18px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; }
+  .btn-danger { background:#300e0e; color:#f87171; border:1px solid #5a1a1a; padding:10px 18px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; }
+  .btn-danger:hover { background:#3d1010; }
+  .form-msg { font-size:13px; margin-top:10px; display:none; }
+  .form-msg.ok { color:#4ade80; }
+  .form-msg.err { color:#f87171; }
+  .invite-row { display:flex; gap:8px; }
+  .invite-code-display { flex:1; padding:9px 13px; border-radius:9px; border:1px solid var(--border); background:var(--bg); color:var(--text-secondary); font-size:13px; font-family:monospace; }
+</style>
+
+<div slot="main">
+  <div class="settings-wrap">
+    <a class="settings-back" href={`/groups/${group.id}`}>← Back to group</a>
+    <h1 class="settings-title">Group Settings</h1>
+
+    <!-- General -->
+    <div class="settings-section">
+      <div class="settings-section-title">General</div>
+      <div class="form-group">
+        <label class="form-label">Group Name</label>
+        <input id="setting-name" class="form-input" type="text" value={group.name} maxlength="60" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description</label>
+        <textarea id="setting-desc" class="form-input">{group.description ?? ""}</textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Visibility</label>
+        <div class="visibility-options">
+          <label class={`vis-option${group.visibility === "public" ? " selected" : ""}`} id="opt-public">
+            <input type="radio" name="visibility" value="public" checked={group.visibility === "public"} />
+            <div class="vis-label">Public</div>
+            <div class="vis-desc">Anyone can join</div>
+          </label>
+          <label class={`vis-option${group.visibility === "private" ? " selected" : ""}`} id="opt-private">
+            <input type="radio" name="visibility" value="private" checked={group.visibility === "private"} />
+            <div class="vis-label">Private</div>
+            <div class="vis-desc">Invite-only</div>
+          </label>
+        </div>
+      </div>
+      <button class="btn-primary" onclick="saveGeneral()">Save Changes</button>
+      <p class="form-msg" id="general-msg"></p>
+    </div>
+
+    <!-- Invite link (only for private groups or owner/admin) -->
+    {group.invite_code && (
+      <div class="settings-section">
+        <div class="settings-section-title">Invite Link</div>
+        <div class="invite-row">
+          <input
+            class="invite-code-display"
+            id="invite-code-display"
+            type="text"
+            readonly
+            value={`${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`}
+          />
+          <button class="btn-ghost" onclick="copyInviteLink()">Copy</button>
+        </div>
+        <div style="margin-top:10px">
+          <button class="btn-ghost" onclick="regenerateInvite()">Regenerate Code</button>
+        </div>
+        <p class="form-msg" id="invite-msg"></p>
+      </div>
+    )}
+
+    <!-- Danger zone (owner only) -->
+    {isOwner && (
+      <div class="settings-section" style="border-color:#5a1a1a">
+        <div class="settings-section-title" style="color:#f87171">Danger Zone</div>
+        <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px">
+          Permanently delete this group and all its data. This cannot be undone.
+        </p>
+        <button class="btn-danger" onclick="deleteGroup()">Delete Group</button>
+        <p class="form-msg" id="delete-msg"></p>
+      </div>
+    )}
+  </div>
+</div>
+</Layout>
+
+<script define:vars={{ groupId: group.id }}>
+document.querySelectorAll('.vis-option').forEach(opt => {
+  opt.addEventListener('click', () => {
+    document.querySelectorAll('.vis-option').forEach(o => o.classList.remove('selected'));
+    opt.classList.add('selected');
+  });
+});
+
+async function saveGeneral() {
+  const name = document.getElementById('setting-name').value;
+  const description = document.getElementById('setting-desc').value;
+  const visibility = document.querySelector('input[name="visibility"]:checked')?.value;
+  const msg = document.getElementById('general-msg');
+  msg.style.display = 'none';
+
+  const res = await fetch('/api/groups/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, name, description, visibility }),
+  });
+  const data = await res.json();
+  msg.style.display = 'block';
+  if (res.ok) {
+    msg.className = 'form-msg ok';
+    msg.textContent = 'Saved!';
+    if (data.invite_code) {
+      const display = document.getElementById('invite-code-display');
+      if (display) display.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
+    }
+  } else {
+    msg.className = 'form-msg err';
+    msg.textContent = data.error ?? 'Error saving';
+  }
+}
+window.saveGeneral = saveGeneral;
+
+function copyInviteLink() {
+  const field = document.getElementById('invite-code-display');
+  if (!field) return;
+  navigator.clipboard.writeText(field.value).then(() => {
+    const msg = document.getElementById('invite-msg');
+    msg.style.display = 'block';
+    msg.className = 'form-msg ok';
+    msg.textContent = 'Copied to clipboard!';
+    setTimeout(() => msg.style.display = 'none', 2000);
+  });
+}
+window.copyInviteLink = copyInviteLink;
+
+async function regenerateInvite() {
+  if (!confirm('Regenerate the invite link? The old link will stop working.')) return;
+  const res = await fetch('/api/groups/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, regenerate_invite: true }),
+  });
+  const data = await res.json();
+  const msg = document.getElementById('invite-msg');
+  msg.style.display = 'block';
+  if (res.ok && data.invite_code) {
+    const newUrl = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
+    const field = document.getElementById('invite-code-display');
+    if (field) field.value = newUrl;
+    msg.className = 'form-msg ok';
+    msg.textContent = 'New link generated!';
+  } else {
+    msg.className = 'form-msg err';
+    msg.textContent = data.error ?? 'Error';
+  }
+}
+window.regenerateInvite = regenerateInvite;
+
+async function deleteGroup() {
+  const name = document.getElementById('setting-name')?.value;
+  if (!confirm(`Delete "${name}"? This is permanent.`)) return;
+  const res = await fetch('/api/groups/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId }),
+  });
+  if (res.ok) window.location.href = '/groups';
+  else { const d = await res.json(); alert(d.error ?? 'Error deleting group'); }
+}
+window.deleteGroup = deleteGroup;
+</script>

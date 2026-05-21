@@ -1,0 +1,788 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext } from "../../utils/database";
+import Layout from "../../components/Layout.astro";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+const { id } = Astro.params;
+const activeTab = Astro.url.searchParams.get("tab") ?? "overview";
+const joinCode = Astro.url.searchParams.get("code");
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await (supabase as any)
+    .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
+  currentProfile = cp;
+}
+
+const { data: group } = await (supabase as any)
+  .from("groups")
+  .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at")
+  .eq("id", id)
+  .single();
+
+if (!group) return Astro.redirect("/404");
+
+// Membership check
+let membership: any = null;
+if (currentProfile) {
+  const { data: m } = await (supabase as any)
+    .from("group_members").select("role").eq("group_id", id).eq("profile_id", currentProfile.id).maybeSingle();
+  membership = m;
+}
+
+const isMember = !!membership;
+const isAdminOrOwner = ["owner", "admin"].includes(membership?.role);
+const isOwner = membership?.role === "owner";
+
+// Private group — non-members can only see it if they have the invite code in the URL
+if (group.visibility === "private" && !isMember) {
+  if (!joinCode || joinCode.toUpperCase() !== group.invite_code) {
+    return Astro.redirect("/groups");
+  }
+}
+
+// Members
+const { data: members } = await (supabase as any)
+  .from("group_members")
+  .select("role, joined_at, profiles ( id, username, avatar_url )")
+  .eq("group_id", id)
+  .order("joined_at", { ascending: true });
+
+const memberList = (members ?? []).map((m: any) => ({ ...m.profiles, role: m.role, joined_at: m.joined_at }));
+const memberProfileIds = memberList.map((m: any) => m.id);
+
+// Group watchlist
+const { data: watchlistData } = await (supabase as any)
+  .from("group_watchlist")
+  .select("id, game_id, added_at, notes, games ( id, title, slug, cover_img_url ), added_by_profile:added_by ( username )")
+  .eq("group_id", id)
+  .order("added_at", { ascending: false });
+
+// Sessions
+const { data: sessionsData } = await (supabase as any)
+  .from("group_sessions")
+  .select(`
+    id, played_at, notes,
+    games ( id, title, slug, cover_img_url ),
+    created_by_profile:created_by ( username ),
+    group_session_members ( profiles ( id, username, avatar_url ) )
+  `)
+  .eq("group_id", id)
+  .order("played_at", { ascending: false })
+  .limit(50);
+
+// Score comparison — games reviewed by 2+ members
+let sharedGames: any[] = [];
+if (memberProfileIds.length >= 2) {
+  const { data: memberReviews } = await (supabase as any)
+    .from("reviews")
+    .select("profile_id, game_id, score, games ( id, title, slug, cover_img_url )")
+    .in("profile_id", memberProfileIds)
+    .eq("status", "published");
+
+  const gameReviewMap: Record<string, any> = {};
+  for (const r of memberReviews ?? []) {
+    if (!gameReviewMap[r.game_id]) gameReviewMap[r.game_id] = { game: r.games, reviews: [] };
+    gameReviewMap[r.game_id].reviews.push({ profile_id: r.profile_id, score: r.score });
+  }
+  sharedGames = Object.values(gameReviewMap)
+    .filter((g: any) => g.reviews.length >= 2)
+    .sort((a: any, b: any) => b.reviews.length - a.reviews.length)
+    .slice(0, 30);
+}
+
+// Group activity — recent reviews by any member
+const { data: activityReviews } = await (supabase as any)
+  .from("reviews")
+  .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
+  .in("profile_id", memberProfileIds)
+  .eq("status", "published")
+  .order("published_at", { ascending: false })
+  .limit(15);
+
+// Most played games by group (games reviewed by group members)
+const gameCounts: Record<string, { game: any; count: number; avgScore: number; scores: number[] }> = {};
+for (const r of activityReviews ?? []) {
+  const gid = r.games?.id;
+  if (!gid) continue;
+  if (!gameCounts[gid]) gameCounts[gid] = { game: r.games, count: 0, avgScore: 0, scores: [] };
+  gameCounts[gid].count++;
+  gameCounts[gid].scores.push(r.score);
+}
+const topGames = Object.values(gameCounts)
+  .map((g: any) => ({ ...g, avgScore: +(g.scores.reduce((a: number, b: number) => a + b, 0) / g.scores.length).toFixed(1) }))
+  .sort((a: any, b: any) => b.count - a.count)
+  .slice(0, 8);
+
+// Group avg score
+const allScores = (activityReviews ?? []).map((r: any) => r.score);
+const groupAvgScore = allScores.length > 0
+  ? +(allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length).toFixed(1)
+  : null;
+
+function igdbCover(url: string | null, size = "t_cover_big") {
+  if (!url) return null;
+  const clean = url.startsWith("//") ? `https:${url}` : url;
+  return clean.replace(/t_[a-z0-9_]+/, size);
+}
+function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
+function timeAgo(d: string) {
+  const diff = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
+  if (diff < 60) return `${diff}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+  return `${Math.floor(diff / 604800)}w`;
+}
+function scoreClass(s: number) {
+  if (s === 10) return "score-perfect";
+  if (s >= 9) return "score-great";
+  if (s >= 8) return "score-teal";
+  if (s >= 7) return "score-good";
+  if (s >= 5) return "score-mid";
+  if (s >= 3) return "score-orange";
+  return "score-low";
+}
+
+const inviteUrl = group.invite_code
+  ? `${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`
+  : null;
+
+const groupDataJson = JSON.stringify({ id: group.id, memberProfileIds, isMember, isAdminOrOwner });
+const memberListJson = JSON.stringify(memberList);
+---
+
+<Layout
+  title={`${group.name} — Chekpoint`}
+  isLoggedIn={!!user}
+  currentProfile={currentProfile}
+  variant="two-col"
+>
+<style is:global>
+  /* ── Group header ── */
+  .group-hero { padding:28px 28px 0; display:flex; align-items:flex-start; gap:18px; }
+  .group-avatar-lg { width:64px; height:64px; border-radius:16px; background:var(--accent-subtle); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-family:'DM Serif Display',serif; font-size:22px; color:var(--accent); flex-shrink:0; overflow:hidden; }
+  .group-avatar-lg img { width:100%; height:100%; object-fit:cover; }
+  .group-hero-info { flex:1; min-width:0; }
+  .group-hero-name { font-family:'DM Serif Display',serif; font-size:26px; margin-bottom:4px; }
+  .group-hero-desc { font-size:14px; color:var(--text-secondary); line-height:1.5; margin-bottom:8px; }
+  .group-hero-meta { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .badge { font-size:11px; font-weight:600; padding:3px 9px; border-radius:10px; background:var(--tag-bg); color:var(--tag-text); }
+  .badge-accent { background:var(--accent-subtle); color:var(--accent); }
+  .group-hero-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .btn-primary { background:var(--accent); color:#fff; border:none; padding:8px 18px; border-radius:20px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
+  .btn-primary:hover { opacity:.85; }
+  .btn-ghost { background:var(--tag-bg); color:var(--text-secondary); border:none; padding:8px 16px; border-radius:20px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
+  .btn-ghost:hover { background:var(--bg-hover); }
+  .btn-danger { background:#300e0e; color:#f87171; border:none; padding:8px 16px; border-radius:20px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; }
+
+  /* ── Tabs ── */
+  .tab-bar { display:flex; gap:0; border-bottom:1px solid var(--border); padding:0 28px; margin-top:20px; overflow-x:auto; }
+  .tab-btn { padding:10px 16px; font-size:13px; font-weight:500; color:var(--text-tertiary); border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px; transition:color .15s, border-color .15s; white-space:nowrap; font-family:inherit; }
+  .tab-btn.active { color:var(--text-primary); border-bottom-color:var(--accent); }
+
+  /* ── Tab panels ── */
+  .tab-panel { display:none; padding:24px 28px; }
+  .tab-panel.active { display:block; }
+
+  /* ── Stats row ── */
+  .stats-row { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:24px; }
+  .stat-card { flex:1; min-width:100px; background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+  .stat-val { font-family:'DM Serif Display',serif; font-size:26px; margin-bottom:2px; }
+  .stat-lbl { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); }
+
+  /* ── Section ── */
+  .section-title { font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); margin-bottom:14px; }
+  .section-block { margin-bottom:28px; }
+
+  /* ── Activity feed ── */
+  .activity-item { display:flex; align-items:flex-start; gap:12px; padding:12px 0; border-bottom:1px solid var(--border-subtle); }
+  .activity-item:last-child { border-bottom:none; }
+  .activity-cover { width:36px; height:48px; border-radius:6px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
+  .activity-body { flex:1; min-width:0; }
+  .activity-user { font-size:13px; font-weight:600; }
+  .activity-game { font-size:13px; color:var(--text-secondary); }
+  .activity-time { font-size:11px; color:var(--text-tertiary); }
+  .score-badge { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:7px; font-size:12px; font-weight:700; flex-shrink:0; }
+  .score-perfect { background:var(--score-perfect-bg); color:var(--score-perfect); }
+  .score-great { background:var(--score-great-bg); color:var(--score-great); }
+  .score-teal { background:var(--score-teal-bg); color:var(--score-teal); }
+  .score-good { background:var(--score-good-bg); color:var(--score-good); }
+  .score-mid { background:var(--score-mid-bg); color:var(--score-mid); }
+  .score-orange { background:var(--score-orange-bg); color:var(--score-orange); }
+  .score-low { background:var(--score-low-bg); color:var(--score-low); }
+
+  /* ── Top games grid ── */
+  .games-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(80px,1fr)); gap:10px; }
+  .game-thumb { position:relative; }
+  .game-thumb img { width:100%; aspect-ratio:3/4; object-fit:cover; border-radius:8px; display:block; }
+  .game-thumb-placeholder { width:100%; aspect-ratio:3/4; border-radius:8px; background:var(--tag-bg); display:flex; align-items:center; justify-content:center; font-size:10px; color:var(--text-tertiary); text-align:center; padding:4px; }
+  .game-count-badge { position:absolute; bottom:4px; right:4px; background:rgba(0,0,0,.75); color:#fff; font-size:10px; font-weight:700; padding:2px 5px; border-radius:5px; }
+
+  /* ── Watchlist ── */
+  .watchlist-item { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--border-subtle); }
+  .watchlist-item:last-child { border-bottom:none; }
+  .wl-cover { width:36px; height:48px; border-radius:6px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
+  .wl-info { flex:1; min-width:0; }
+  .wl-title { font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .wl-meta { font-size:11px; color:var(--text-tertiary); }
+  .wl-remove { background:none; border:none; cursor:pointer; color:var(--text-tertiary); font-size:16px; padding:4px; transition:color .15s; }
+  .wl-remove:hover { color:#f87171; }
+
+  /* ── Sessions ── */
+  .session-card { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
+  .session-header { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .session-cover { width:32px; height:42px; border-radius:6px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
+  .session-game { font-size:14px; font-weight:600; }
+  .session-date { font-size:12px; color:var(--text-tertiary); }
+  .session-notes { font-size:13px; color:var(--text-secondary); margin-bottom:8px; line-height:1.5; }
+  .session-attendees { display:flex; gap:6px; flex-wrap:wrap; }
+  .attendee-chip { font-size:11px; padding:3px 9px; border-radius:10px; background:var(--tag-bg); color:var(--tag-text); }
+  .session-delete { background:none; border:none; cursor:pointer; color:var(--text-tertiary); font-size:12px; margin-left:auto; transition:color .15s; }
+  .session-delete:hover { color:#f87171; }
+
+  /* ── Score compare ── */
+  .compare-game { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:10px; }
+  .compare-header { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+  .compare-cover { width:30px; height:40px; border-radius:5px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
+  .compare-title { font-size:14px; font-weight:600; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .compare-scores { display:flex; gap:8px; flex-wrap:wrap; }
+  .compare-score-item { display:flex; align-items:center; gap:6px; }
+  .compare-username { font-size:12px; color:var(--text-secondary); }
+  .no-review { font-size:12px; color:var(--text-tertiary); font-style:italic; }
+  .variance-tag { font-size:11px; padding:2px 8px; border-radius:8px; margin-left:auto; }
+  .variance-low { background:var(--score-great-bg); color:var(--score-great); }
+  .variance-mid { background:var(--score-mid-bg); color:var(--score-mid); }
+  .variance-high { background:var(--score-low-bg); color:var(--score-low); }
+
+  /* ── Members ── */
+  .member-item { display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--border-subtle); }
+  .member-item:last-child { border-bottom:none; }
+  .member-avatar { width:38px; height:38px; border-radius:50%; background:var(--accent-subtle); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; color:var(--accent); flex-shrink:0; overflow:hidden; }
+  .member-avatar img { width:100%; height:100%; object-fit:cover; }
+  .member-name { font-size:14px; font-weight:500; flex:1; }
+  .member-role { font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; background:var(--accent-subtle); color:var(--accent); text-transform:capitalize; }
+  .member-role.owner { background:#271e00; color:#fbbf24; }
+  .member-actions { display:flex; gap:6px; }
+  .btn-xs { font-size:11px; padding:4px 10px; border-radius:8px; border:none; cursor:pointer; font-family:inherit; font-weight:500; }
+  .btn-xs-ghost { background:var(--tag-bg); color:var(--text-secondary); }
+  .btn-xs-danger { background:#300e0e; color:#f87171; }
+
+  /* ── Invite section ── */
+  .invite-box { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:20px; }
+  .invite-box-title { font-size:13px; font-weight:600; margin-bottom:8px; }
+  .invite-url-row { display:flex; gap:8px; }
+  .invite-url-input { flex:1; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-hover); color:var(--text-secondary); font-size:12px; font-family:monospace; outline:none; }
+  .btn-copy { background:var(--accent); color:#fff; border:none; padding:8px 14px; border-radius:8px; font-size:12px; font-weight:500; font-family:inherit; cursor:pointer; white-space:nowrap; }
+  .invite-send-row { display:flex; gap:8px; margin-top:10px; }
+  .invite-user-input { flex:1; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); font-size:13px; font-family:inherit; outline:none; }
+  .invite-user-input:focus { border-color:var(--accent); }
+
+  /* ── Log session form ── */
+  .log-form { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:20px; }
+  .log-form-title { font-size:13px; font-weight:600; margin-bottom:12px; }
+  .log-row { display:flex; gap:10px; flex-wrap:wrap; }
+  .log-input { flex:1; min-width:140px; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); font-size:13px; font-family:inherit; outline:none; }
+  .log-input:focus { border-color:var(--accent); }
+  .log-attendees { margin-top:10px; display:flex; gap:6px; flex-wrap:wrap; }
+  .attendee-toggle { font-size:12px; padding:4px 10px; border-radius:10px; border:1px solid var(--border); background:var(--tag-bg); color:var(--tag-text); cursor:pointer; transition:all .12s; }
+  .attendee-toggle.selected { border-color:var(--accent); background:var(--accent-subtle); color:var(--accent); }
+  .empty-tab { padding:32px 0; text-align:center; color:var(--text-tertiary); font-size:14px; }
+</style>
+
+<div slot="main">
+  <!-- Header -->
+  <div class="group-hero">
+    <div class="group-avatar-lg">
+      {group.avatar_url ? <img src={group.avatar_url} alt={group.name} /> : getInitials(group.name)}
+    </div>
+    <div class="group-hero-info">
+      <h1 class="group-hero-name">{group.name}</h1>
+      {group.description && <p class="group-hero-desc">{group.description}</p>}
+      <div class="group-hero-meta">
+        <span class="badge">{memberList.length} member{memberList.length !== 1 ? "s" : ""}</span>
+        <span class="badge">{group.visibility}</span>
+        {membership && <span class="badge badge-accent">{membership.role}</span>}
+      </div>
+      <div class="group-hero-actions">
+        {!user && group.visibility === "public" && (
+          <a href="/signin" class="btn-primary">Sign in to join</a>
+        )}
+        {user && !isMember && group.visibility === "public" && (
+          <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
+        )}
+        {user && !isMember && joinCode && (
+          <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
+        )}
+        {isMember && isAdminOrOwner && (
+          <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
+        )}
+        {isMember && !isOwner && (
+          <button class="btn-ghost" id="leave-btn" onclick="leaveGroup()">Leave</button>
+        )}
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tab-bar">
+    {[
+      { key: "overview", label: "Overview" },
+      { key: "compare", label: "Score Compare" },
+      { key: "watchlist", label: `Watchlist (${(watchlistData ?? []).length})` },
+      { key: "sessions", label: `Sessions (${(sessionsData ?? []).length})` },
+      { key: "members", label: `Members (${memberList.length})` },
+    ].map(t => (
+      <button
+        class={`tab-btn${activeTab === t.key ? " active" : ""}`}
+        data-tab={t.key}
+        onclick={`switchTab('${t.key}')`}
+      >{t.label}</button>
+    ))}
+  </div>
+
+  <!-- Overview tab -->
+  <div class={`tab-panel${activeTab === "overview" ? " active" : ""}`} id="tab-overview">
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-val">{memberList.length}</div>
+        <div class="stat-lbl">Members</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">{(activityReviews ?? []).length}</div>
+        <div class="stat-lbl">Reviews</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">{groupAvgScore ?? "—"}</div>
+        <div class="stat-lbl">Avg Score</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">{(sessionsData ?? []).length}</div>
+        <div class="stat-lbl">Sessions</div>
+      </div>
+    </div>
+
+    {topGames.length > 0 && (
+      <div class="section-block">
+        <div class="section-title">Most Played by Group</div>
+        <div class="games-grid">
+          {topGames.map((g: any) => (
+            <a class="game-thumb" href={`/games/${g.game.slug}`} title={g.game.title}>
+              {igdbCover(g.game.cover_img_url)
+                ? <img src={igdbCover(g.game.cover_img_url, "t_cover_small")!} alt={g.game.title} loading="lazy" />
+                : <div class="game-thumb-placeholder">{g.game.title}</div>
+              }
+              <span class="game-count-badge">{g.count}</span>
+            </a>
+          ))}
+        </div>
+      </div>
+    )}
+
+    <div class="section-block">
+      <div class="section-title">Recent Activity</div>
+      {(activityReviews ?? []).length === 0
+        ? <div class="empty-tab">No reviews yet from group members.</div>
+        : (activityReviews ?? []).map((r: any) => (
+          <div class="activity-item">
+            {igdbCover(r.games?.cover_img_url, "t_thumb")
+              ? <img class="activity-cover" src={igdbCover(r.games?.cover_img_url, "t_thumb")!} alt={r.games?.title} loading="lazy" />
+              : <div class="activity-cover" />
+            }
+            <div class="activity-body">
+              <div class="activity-user">
+                <a href={`/reviewers/${r.profiles?.username}`} style="color:inherit">@{r.profiles?.username}</a>
+                <span class="activity-game"> reviewed </span>
+                <a href={`/games/${r.games?.slug}`} style="color:inherit;font-weight:500">{r.games?.title}</a>
+              </div>
+              <div class="activity-time">{timeAgo(r.published_at)}</div>
+            </div>
+            <div class={`score-badge ${scoreClass(r.score)}`}>{r.score}</div>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+
+  <!-- Score Compare tab -->
+  <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
+    {sharedGames.length === 0
+      ? <div class="empty-tab">No games reviewed by 2 or more members yet.</div>
+      : sharedGames.map((g: any) => {
+          const scores = g.reviews.map((r: any) => r.score);
+          const variance = scores.length > 1 ? Math.max(...scores) - Math.min(...scores) : 0;
+          const varClass = variance >= 5 ? "variance-high" : variance >= 3 ? "variance-mid" : "variance-low";
+          const varLabel = variance >= 5 ? "Divisive" : variance >= 3 ? "Mixed" : "Consensus";
+          return (
+            <div class="compare-game">
+              <div class="compare-header">
+                {igdbCover(g.game.cover_img_url, "t_thumb")
+                  ? <img class="compare-cover" src={igdbCover(g.game.cover_img_url, "t_thumb")!} alt={g.game.title} />
+                  : <div class="compare-cover" />
+                }
+                <a class="compare-title" href={`/games/${g.game.slug}`} style="color:inherit">{g.game.title}</a>
+                <span class={`variance-tag ${varClass}`}>{varLabel}</span>
+              </div>
+              <div class="compare-scores">
+                {memberList.map((m: any) => {
+                  const rev = g.reviews.find((r: any) => r.profile_id === m.id);
+                  return (
+                    <div class="compare-score-item">
+                      <span class="compare-username">@{m.username}</span>
+                      {rev
+                        ? <div class={`score-badge ${scoreClass(rev.score)}`}>{rev.score}</div>
+                        : <span class="no-review">—</span>
+                      }
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })
+    }
+  </div>
+
+  <!-- Watchlist tab -->
+  <div class={`tab-panel${activeTab === "watchlist" ? " active" : ""}`} id="tab-watchlist">
+    {isMember && (
+      <div style="margin-bottom:20px">
+        <div class="invite-box">
+          <div class="invite-box-title">Add a game</div>
+          <div class="invite-url-row">
+            <input id="wl-game-input" class="invite-user-input" type="text" placeholder="Search for a game…" autocomplete="off" />
+            <button class="btn-copy" onclick="searchWatchlistGame()">Search</button>
+          </div>
+          <div id="wl-search-results" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
+      </div>
+    )}
+    {(watchlistData ?? []).length === 0
+      ? <div class="empty-tab">No games on the group watchlist yet.</div>
+      : (watchlistData ?? []).map((w: any) => (
+          <div class="watchlist-item" data-wl-id={w.id} data-game-id={w.game_id}>
+            {igdbCover(w.games?.cover_img_url, "t_thumb")
+              ? <img class="wl-cover" src={igdbCover(w.games?.cover_img_url, "t_thumb")!} alt={w.games?.title} loading="lazy" />
+              : <div class="wl-cover" />
+            }
+            <div class="wl-info">
+              <div class="wl-title">
+                <a href={`/games/${w.games?.slug}`} style="color:inherit">{w.games?.title}</a>
+              </div>
+              <div class="wl-meta">Added by @{w.added_by_profile?.username}</div>
+              {w.notes && <div class="wl-meta" style="margin-top:2px;font-style:italic">{w.notes}</div>}
+            </div>
+            {isMember && (
+              <button class="wl-remove" title="Remove" onclick={`removeFromWatchlist('${w.game_id}')`}>×</button>
+            )}
+          </div>
+        ))
+    }
+  </div>
+
+  <!-- Sessions tab -->
+  <div class={`tab-panel${activeTab === "sessions" ? " active" : ""}`} id="tab-sessions">
+    {isMember && (
+      <div class="log-form" id="log-session-form">
+        <div class="log-form-title">Log a Game Night</div>
+        <div class="log-row">
+          <input id="session-game-input" class="log-input" type="text" placeholder="Game name…" />
+          <input id="session-game-hidden" type="hidden" />
+          <input id="session-date" class="log-input" type="date" value={new Date().toISOString().slice(0, 10)} style="max-width:160px" />
+        </div>
+        <input id="session-notes" class="log-input" type="text" placeholder="Notes (optional)" style="margin-top:8px;width:100%" />
+        <div class="log-attendees" id="attendee-chips">
+          {memberList.map((m: any) => (
+            <button
+              class={`attendee-toggle${m.id === currentProfile?.id ? " selected" : ""}`}
+              data-profile-id={m.id}
+              onclick="toggleAttendee(this)"
+            >@{m.username}</button>
+          ))}
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;">
+          <button class="btn-primary" onclick="logSession()" style="font-size:13px;padding:8px 16px">Log Session</button>
+        </div>
+        <div id="session-search-results" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
+      </div>
+    )}
+
+    {(sessionsData ?? []).length === 0
+      ? <div class="empty-tab">No game nights logged yet.</div>
+      : (sessionsData ?? []).map((s: any) => {
+          const attendees = (s.group_session_members ?? []).map((sm: any) => sm.profiles?.username).filter(Boolean);
+          return (
+            <div class="session-card" data-session-id={s.id}>
+              <div class="session-header">
+                {igdbCover(s.games?.cover_img_url, "t_thumb")
+                  ? <img class="session-cover" src={igdbCover(s.games?.cover_img_url, "t_thumb")!} alt={s.games?.title} loading="lazy" />
+                  : <div class="session-cover" />
+                }
+                <div style="flex:1;min-width:0">
+                  <div class="session-game">
+                    <a href={`/games/${s.games?.slug}`} style="color:inherit">{s.games?.title}</a>
+                  </div>
+                  <div class="session-date">{new Date(s.played_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</div>
+                </div>
+                {isMember && (
+                  <button class="session-delete" title="Delete session" onclick={`deleteSession('${s.id}')`}>Delete</button>
+                )}
+              </div>
+              {s.notes && <div class="session-notes">{s.notes}</div>}
+              <div class="session-attendees">
+                {attendees.map((u: string) => <span class="attendee-chip">@{u}</span>)}
+              </div>
+            </div>
+          );
+        })
+    }
+  </div>
+
+  <!-- Members tab -->
+  <div class={`tab-panel${activeTab === "members" ? " active" : ""}`} id="tab-members">
+    {isAdminOrOwner && group.invite_code && (
+      <div class="invite-box">
+        <div class="invite-box-title">Invite Link</div>
+        <div class="invite-url-row">
+          <input class="invite-url-input" id="invite-url-field" type="text" readonly value={inviteUrl ?? ""} />
+          <button class="btn-copy" onclick="copyInvite()">Copy</button>
+        </div>
+        <div class="invite-send-row" style="margin-top:12px">
+          <input id="invite-username-input" class="invite-user-input" type="text" placeholder="@username to invite directly" />
+          <button class="btn-copy" onclick="sendInvite()" style="background:var(--tag-bg);color:var(--text-secondary)">Invite</button>
+        </div>
+        <div id="invite-msg" style="font-size:12px;color:var(--text-tertiary);margin-top:6px;"></div>
+      </div>
+    )}
+
+    {memberList.map((m: any) => (
+      <div class="member-item" data-profile-id={m.id}>
+        <div class="member-avatar">
+          {m.avatar_url
+            ? <img src={m.avatar_url} alt={m.username} />
+            : getInitials(m.username)
+          }
+        </div>
+        <a class="member-name" href={`/reviewers/${m.username}`} style="color:inherit">@{m.username}</a>
+        <span class={`member-role${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
+        {isAdminOrOwner && currentProfile && m.id !== currentProfile.id && m.role !== "owner" && (
+          <div class="member-actions">
+            {isOwner && (
+              <button
+                class="btn-xs btn-xs-ghost"
+                onclick={`updateRole('${m.id}', '${m.role === "admin" ? "member" : "admin"}')`}
+              >{m.role === "admin" ? "Demote" : "Make Admin"}</button>
+            )}
+            <button class="btn-xs btn-xs-danger" onclick={`removeMember('${m.id}')`}>Remove</button>
+          </div>
+        )}
+      </div>
+    ))}
+  </div>
+</div>
+</Layout>
+
+<script define:vars={{ groupDataJson, memberListJson, inviteUrl }}>
+const groupData = JSON.parse(groupDataJson);
+const memberList = JSON.parse(memberListJson);
+
+function switchTab(key) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === key));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `tab-${key}`));
+  const url = new URL(window.location.href);
+  url.searchParams.set('tab', key);
+  history.replaceState(null, '', url.toString());
+}
+window.switchTab = switchTab;
+
+async function joinGroup() {
+  const btn = document.getElementById('join-btn');
+  if (btn) btn.disabled = true;
+  const res = await fetch('/api/groups/join', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Could not join'); if (btn) btn.disabled = false; }
+}
+window.joinGroup = joinGroup;
+
+async function joinGroupByCode() {
+  const btn = document.getElementById('join-btn');
+  if (btn) btn.disabled = true;
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  const res = await fetch('/api/groups/join', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ invite_code: code }),
+  });
+  if (res.ok) window.location.href = `/groups/${groupData.id}`;
+  else { const d = await res.json(); alert(d.error ?? 'Could not join'); if (btn) btn.disabled = false; }
+}
+window.joinGroupByCode = joinGroupByCode;
+
+async function leaveGroup() {
+  if (!confirm('Leave this group?')) return;
+  const res = await fetch('/api/groups/leave', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id }),
+  });
+  if (res.ok) window.location.href = '/groups';
+  else { const d = await res.json(); alert(d.error ?? 'Could not leave'); }
+}
+window.leaveGroup = leaveGroup;
+
+function copyInvite() {
+  const field = document.getElementById('invite-url-field');
+  navigator.clipboard.writeText(field.value).then(() => {
+    const btn = field.nextElementSibling;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 2000);
+  });
+}
+window.copyInvite = copyInvite;
+
+async function sendInvite() {
+  const input = document.getElementById('invite-username-input');
+  const msg = document.getElementById('invite-msg');
+  const username = input.value.trim().replace(/^@/, '');
+  if (!username) return;
+  const res = await fetch('/api/groups/invite/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, invited_username: username }),
+  });
+  const data = await res.json();
+  msg.textContent = res.ok ? `Invite sent to @${data.username}` : (data.error ?? 'Error');
+  msg.style.color = res.ok ? 'var(--score-great)' : '#f87171';
+  if (res.ok) input.value = '';
+}
+window.sendInvite = sendInvite;
+
+async function removeMember(profileId) {
+  if (!confirm('Remove this member?')) return;
+  const res = await fetch('/api/groups/members/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, target_profile_id: profileId }),
+  });
+  if (res.ok) document.querySelector(`[data-profile-id="${profileId}"]`)?.remove();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.removeMember = removeMember;
+
+async function updateRole(profileId, role) {
+  const res = await fetch('/api/groups/members/update-role', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, target_profile_id: profileId, role }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.updateRole = updateRole;
+
+async function removeFromWatchlist(gameId) {
+  const res = await fetch('/api/groups/watchlist/toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, game_id: gameId }),
+  });
+  if (res.ok) document.querySelector(`[data-game-id="${gameId}"]`)?.remove();
+}
+window.removeFromWatchlist = removeFromWatchlist;
+
+let wlSearchTimeout;
+async function searchWatchlistGame() {
+  const input = document.getElementById('wl-game-input');
+  const q = input.value.trim();
+  if (!q) return;
+  const res = await fetch(`/api/games/search?q=${encodeURIComponent(q)}`);
+  if (!res.ok) return;
+  const data = await res.json();
+  const container = document.getElementById('wl-search-results');
+  container.innerHTML = '';
+  (data.games ?? data ?? []).slice(0, 5).forEach(g => {
+    const btn = document.createElement('button');
+    btn.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;text-align:left;font-family:inherit;font-size:13px;color:var(--text-primary);width:100%';
+    btn.textContent = g.title ?? g.name;
+    btn.onclick = async () => {
+      await fetch('/api/groups/watchlist/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: groupData.id, game_id: g.id }),
+      });
+      window.location.reload();
+    };
+    container.appendChild(btn);
+  });
+}
+window.searchWatchlistGame = searchWatchlistGame;
+document.getElementById('wl-game-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') searchWatchlistGame(); });
+
+function toggleAttendee(btn) {
+  btn.classList.toggle('selected');
+}
+window.toggleAttendee = toggleAttendee;
+
+let sessionGameId = null;
+const sessionInput = document.getElementById('session-game-input');
+if (sessionInput) {
+  sessionInput.addEventListener('input', async () => {
+    const q = sessionInput.value.trim();
+    const container = document.getElementById('session-search-results');
+    if (!q) { container.innerHTML = ''; return; }
+    const res = await fetch(`/api/games/search?q=${encodeURIComponent(q)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    container.innerHTML = '';
+    (data.games ?? data ?? []).slice(0, 5).forEach(g => {
+      const btn = document.createElement('button');
+      btn.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;text-align:left;font-family:inherit;font-size:13px;color:var(--text-primary);width:100%';
+      btn.textContent = g.title ?? g.name;
+      btn.onclick = () => {
+        sessionGameId = g.id;
+        sessionInput.value = g.title ?? g.name;
+        document.getElementById('session-game-hidden').value = g.id;
+        container.innerHTML = '';
+      };
+      container.appendChild(btn);
+    });
+  });
+}
+
+async function logSession() {
+  const gameId = document.getElementById('session-game-hidden')?.value;
+  const date = document.getElementById('session-date')?.value;
+  const notes = document.getElementById('session-notes')?.value;
+  if (!gameId) { alert('Please select a game'); return; }
+  if (!date) { alert('Please pick a date'); return; }
+  const attendeeIds = Array.from(document.querySelectorAll('.attendee-toggle.selected'))
+    .map(b => b.dataset.profileId);
+  const res = await fetch('/api/groups/sessions/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, game_id: gameId, played_at: date, notes, attendee_ids: attendeeIds }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Error logging session'); }
+}
+window.logSession = logSession;
+
+async function deleteSession(sessionId) {
+  if (!confirm('Delete this session?')) return;
+  const res = await fetch('/api/groups/sessions/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (res.ok) document.querySelector(`[data-session-id="${sessionId}"]`)?.remove();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.deleteSession = deleteSession;
+</script>

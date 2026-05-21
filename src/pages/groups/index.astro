@@ -1,0 +1,187 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext } from "../../utils/database";
+import Layout from "../../components/Layout.astro";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+if (!user) return Astro.redirect("/signin");
+
+const { data: profile } = await (supabase as any)
+  .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
+if (!profile) return Astro.redirect("/signin");
+
+// My groups
+const { data: myMemberships } = await (supabase as any)
+  .from("group_members")
+  .select(`role, groups ( id, name, description, avatar_url, visibility, created_at )`)
+  .eq("profile_id", profile.id)
+  .order("joined_at", { ascending: false });
+
+const myGroups = (myMemberships ?? []).map((m: any) => ({ ...m.groups, role: m.role }));
+
+// Count members for each group
+const groupIds = myGroups.map((g: any) => g.id);
+const memberCounts: Record<string, number> = {};
+if (groupIds.length > 0) {
+  const { data: counts } = await (supabase as any)
+    .from("group_members").select("group_id").in("group_id", groupIds);
+  for (const row of counts ?? []) {
+    memberCounts[row.group_id] = (memberCounts[row.group_id] ?? 0) + 1;
+  }
+}
+
+// Pending invites
+const { data: pendingInvites } = await (supabase as any)
+  .from("group_invites")
+  .select(`id, group_id, groups ( id, name, description, visibility ), invited_by_profile:invited_by ( username, avatar_url )`)
+  .eq("invited_profile_id", profile.id)
+  .eq("status", "pending");
+
+// Discover public groups (not already a member)
+const { data: publicGroups } = await (supabase as any)
+  .from("groups")
+  .select("id, name, description, avatar_url, created_at")
+  .eq("visibility", "public")
+  .not("id", "in", `(${groupIds.length > 0 ? groupIds.join(",") : "00000000-0000-0000-0000-000000000000"})`)
+  .order("created_at", { ascending: false })
+  .limit(20);
+
+const publicMemberCounts: Record<string, number> = {};
+if ((publicGroups ?? []).length > 0) {
+  const pubIds = (publicGroups ?? []).map((g: any) => g.id);
+  const { data: pubCounts } = await (supabase as any)
+    .from("group_members").select("group_id").in("group_id", pubIds);
+  for (const row of pubCounts ?? []) {
+    publicMemberCounts[row.group_id] = (publicMemberCounts[row.group_id] ?? 0) + 1;
+  }
+}
+
+function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
+---
+
+<Layout title="Groups — Chekpoint" isLoggedIn={true} currentProfile={profile} variant="two-col">
+<style is:global>
+  .groups-header { display:flex; align-items:center; justify-content:space-between; padding:24px 28px 0; }
+  .groups-title { font-family:'DM Serif Display',serif; font-size:24px; }
+  .btn-primary { background:var(--accent); color:#fff; border:none; padding:9px 20px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
+  .btn-primary:hover { opacity:.85; }
+  .section-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--text-tertiary); padding:24px 28px 10px; }
+  .group-list { display:flex; flex-direction:column; gap:1px; }
+  .group-card { display:flex; align-items:center; gap:14px; padding:14px 28px; background:var(--bg-card); border-bottom:1px solid var(--border-subtle); transition:background .12s; text-decoration:none; color:inherit; }
+  .group-card:hover { background:var(--bg-hover); }
+  .group-avatar { width:44px; height:44px; border-radius:12px; background:var(--accent-subtle); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-family:'DM Serif Display',serif; font-size:16px; font-weight:600; color:var(--accent); flex-shrink:0; overflow:hidden; }
+  .group-avatar img { width:100%; height:100%; object-fit:cover; }
+  .group-info { flex:1; min-width:0; }
+  .group-name { font-size:15px; font-weight:600; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .group-meta { font-size:12px; color:var(--text-tertiary); display:flex; align-items:center; gap:8px; }
+  .group-role { font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; background:var(--accent-subtle); color:var(--accent); text-transform:capitalize; }
+  .visibility-badge { font-size:11px; padding:2px 8px; border-radius:10px; background:var(--tag-bg); color:var(--tag-text); }
+  .empty-state { padding:40px 28px; text-align:center; color:var(--text-tertiary); font-size:14px; }
+  .invite-card { display:flex; align-items:center; gap:14px; padding:14px 28px; background:var(--bg-card); border-bottom:1px solid var(--border-subtle); }
+  .invite-info { flex:1; min-width:0; }
+  .invite-group-name { font-size:14px; font-weight:600; margin-bottom:2px; }
+  .invite-from { font-size:12px; color:var(--text-tertiary); }
+  .invite-actions { display:flex; gap:8px; }
+  .btn-accept { background:var(--accent); color:#fff; border:none; padding:7px 14px; border-radius:18px; font-size:12px; font-weight:500; font-family:inherit; cursor:pointer; }
+  .btn-decline { background:var(--tag-bg); color:var(--text-secondary); border:none; padding:7px 14px; border-radius:18px; font-size:12px; font-weight:500; font-family:inherit; cursor:pointer; }
+  .join-link { font-size:12px; color:var(--accent); font-weight:500; margin-left:auto; white-space:nowrap; }
+  .divider { border:none; border-top:1px solid var(--border); margin:4px 0; }
+</style>
+
+<div slot="main">
+  <div class="groups-header">
+    <h1 class="groups-title">Groups</h1>
+    <a href="/groups/create" class="btn-primary">+ New Group</a>
+  </div>
+
+  {(pendingInvites ?? []).length > 0 && (
+    <>
+      <div class="section-label">Pending Invites</div>
+      <div class="group-list" id="invites-list">
+        {(pendingInvites ?? []).map((inv: any) => (
+          <div class="invite-card" data-invite-id={inv.id} data-group-id={inv.group_id}>
+            <div class="group-avatar">{getInitials(inv.groups?.name ?? "?")}</div>
+            <div class="invite-info">
+              <div class="invite-group-name">{inv.groups?.name}</div>
+              <div class="invite-from">Invited by @{inv.invited_by_profile?.username}</div>
+            </div>
+            <div class="invite-actions">
+              <button class="btn-accept" onclick="respondInvite(this, 'accept')">Accept</button>
+              <button class="btn-decline" onclick="respondInvite(this, 'decline')">Decline</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  )}
+
+  <div class="section-label">My Groups</div>
+  {myGroups.length === 0 ? (
+    <div class="empty-state">You haven't joined any groups yet.<br/>Create one or join a public group below.</div>
+  ) : (
+    <div class="group-list">
+      {myGroups.map((g: any) => (
+        <a class="group-card" href={`/groups/${g.id}`}>
+          <div class="group-avatar">
+            {g.avatar_url ? <img src={g.avatar_url} alt={g.name} /> : getInitials(g.name)}
+          </div>
+          <div class="group-info">
+            <div class="group-name">{g.name}</div>
+            <div class="group-meta">
+              <span>{memberCounts[g.id] ?? 1} member{(memberCounts[g.id] ?? 1) !== 1 ? "s" : ""}</span>
+              <span class="visibility-badge">{g.visibility}</span>
+            </div>
+          </div>
+          <span class="group-role">{g.role}</span>
+        </a>
+      ))}
+    </div>
+  )}
+
+  {(publicGroups ?? []).length > 0 && (
+    <>
+      <div class="section-label">Discover Public Groups</div>
+      <div class="group-list">
+        {(publicGroups ?? []).map((g: any) => (
+          <a class="group-card" href={`/groups/${g.id}`}>
+            <div class="group-avatar">
+              {g.avatar_url ? <img src={g.avatar_url} alt={g.name} /> : getInitials(g.name)}
+            </div>
+            <div class="group-info">
+              <div class="group-name">{g.name}</div>
+              <div class="group-meta">
+                <span>{publicMemberCounts[g.id] ?? 0} member{(publicMemberCounts[g.id] ?? 0) !== 1 ? "s" : ""}</span>
+              </div>
+            </div>
+            <span class="join-link">View →</span>
+          </a>
+        ))}
+      </div>
+    </>
+  )}
+</div>
+</Layout>
+
+<script>
+async function respondInvite(btn: HTMLButtonElement, action: 'accept' | 'decline') {
+  const card = btn.closest('[data-invite-id]') as HTMLElement;
+  if (!card) return;
+  const group_id = card.dataset.groupId;
+  btn.disabled = true;
+  const res = await fetch('/api/groups/invite/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id, action }),
+  });
+  if (res.ok) {
+    card.remove();
+    if (action === 'accept') window.location.reload();
+  } else {
+    const data = await res.json();
+    alert(data.error ?? 'Something went wrong');
+    btn.disabled = false;
+  }
+}
+(window as any).respondInvite = respondInvite;
+</script>
