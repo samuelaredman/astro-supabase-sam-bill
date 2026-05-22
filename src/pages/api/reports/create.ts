@@ -1,12 +1,13 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 
 const VALID_TARGET_TYPES = ['review', 'comment', 'profile'];
 const VALID_REASONS = ['spam', 'harassment', 'spoilers', 'inappropriate', 'other'];
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await supabase.auth.getUser();
+  // Auth check with user client
+  const userClient = createSupabaseServerClientFromContext(context);
+  const { data: { user } } = await userClient.auth.getUser();
   if (!user) {
     return new Response(JSON.stringify({ error: "You must be signed in to report content." }), {
       status: 401, headers: { "Content-Type": "application/json" },
@@ -21,7 +22,10 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  const { data: profile } = await (supabase as any)
+  // All DB operations use admin client to bypass RLS
+  const db = getSupabaseAdmin() as any;
+
+  const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();
   if (!profile) {
     return new Response(JSON.stringify({ error: "Profile not found." }), {
@@ -30,7 +34,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   // Prevent duplicate reports from the same user for the same target
-  const { data: existing } = await (supabase as any)
+  const { data: existing } = await db
     .from('reports')
     .select('id')
     .eq('reporter_id', profile.id)
@@ -44,7 +48,7 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  const { error } = await (supabase as any)
+  const { error } = await db
     .from('reports')
     .insert({
       reporter_id: profile.id,
