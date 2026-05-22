@@ -12,58 +12,58 @@ export const GET: APIRoute = async ({ request }) => {
     });
   }
 
-  const supabase = getSupabase();
-  const { data, error } = await (supabase as any)
-    .from("games")
-    .select("id, title, slug, cover_img_url, date_released")
-    .ilike("title", `%${q}%`)
-    .limit(8);
+  const supabase = getSupabase() as any;
 
-  if (!error && data && data.length > 0) {
-    return new Response(JSON.stringify(data.map((g: any) => ({
-      id: g.id,
-      title: g.title,
-      slug: g.slug,
-      cover_img_url: g.cover_img_url ?? null,
-      date_released: g.date_released ?? null,
-      source: 'db',
-    }))), { headers: { "Content-Type": "application/json" } });
+  // Run fuzzy DB search and IGDB fetch in parallel
+  const [rpcRes, igdbRes] = await Promise.all([
+    supabase.rpc('search_games', { search_query: q, result_limit: 8 }),
+    igdbFetch("games", `fields name, slug, cover.url; search "${q}"; limit 6;`).catch(() => []),
+  ]);
+
+  const rpcIds: string[] = (rpcRes.data ?? []).map((g: any) => g.id);
+
+  let dbGames: any[] = [];
+  if (rpcIds.length > 0) {
+    const { data } = await supabase
+      .from("games")
+      .select("id, title, slug, cover_img_url, date_released")
+      .in("id", rpcIds);
+    const orderMap = new Map(rpcIds.map((id, i) => [id, i]));
+    dbGames = (data ?? []).sort(
+      (a: any, b: any) => (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
+    );
+  } else {
+    // RPC found nothing — fall back to ilike so partial-word queries still work
+    const { data } = await supabase
+      .from("games")
+      .select("id, title, slug, cover_img_url, date_released")
+      .ilike("title", `%${q}%`)
+      .limit(8);
+    dbGames = data ?? [];
   }
 
-  // DB miss — fall back to IGDB
-  try {
-    const igdbResults = await igdbFetch("games", `
-      fields name, slug, summary, first_release_date, cover.url;
-      search "${q}";
-      limit 8;
-    `);
+  const dbIdSet = new Set(dbGames.map((g: any) => g.id));
 
-    if (!igdbResults || igdbResults.length === 0) {
-      return new Response(JSON.stringify([]), {
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    const results = igdbResults.map((g: any) => ({
+  const igdbExtra = (igdbRes ?? [])
+    .filter((g: any) => !dbIdSet.has(String(g.id)))
+    .slice(0, Math.max(0, 8 - dbGames.length))
+    .map((g: any) => ({
       id: String(g.id),
       title: g.name,
       slug: g.slug,
       cover_img_url: g.cover?.url
-        ? `https:${g.cover.url.replace('t_thumb', 't_cover_big')}`
-        : null,
-      date_released: g.first_release_date
-        ? new Date(g.first_release_date * 1000).toISOString().split('T')[0]
+        ? `https:${g.cover.url.replace("t_thumb", "t_cover_big")}`
         : null,
       igdb_id: g.id,
-      source: 'igdb',
+      source: "igdb",
     }));
 
-    return new Response(JSON.stringify(results), {
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch {
-    return new Response(JSON.stringify([]), {
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  const results = [
+    ...dbGames.map((g: any) => ({ ...g, source: "db" })),
+    ...igdbExtra,
+  ];
+
+  return new Response(JSON.stringify(results), {
+    headers: { "Content-Type": "application/json" },
+  });
 };
