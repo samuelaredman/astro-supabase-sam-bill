@@ -63,7 +63,7 @@ const memberProfileIds = memberList.map((m: any) => m.id);
 // Accurate full stats — lightweight query, no limit
 const { data: allReviewStats } = await (supabase as any)
   .from("reviews")
-  .select("game_id, score")
+  .select("game_id, score, play_time_hours, published_at")
   .in("profile_id", memberProfileIds.length ? memberProfileIds : ["00000000-0000-0000-0000-000000000000"])
   .eq("status", "published");
 const totalReviews = (allReviewStats ?? []).length;
@@ -72,6 +72,30 @@ const allGroupScores = (allReviewStats ?? []).map((r: any) => r.score);
 const groupAvgScoreAccurate = allGroupScores.length > 0
   ? +(allGroupScores.reduce((a: number, b: number) => a + b, 0) / allGroupScores.length).toFixed(1)
   : null;
+const totalHours = (allReviewStats ?? []).reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0);
+
+const scoreDistribution = Array.from({ length: 10 }, (_: any, i: number) =>
+  (allReviewStats ?? []).filter((r: any) => r.score === i + 1).length
+);
+
+const monthlyActivity: Record<string, number> = {};
+for (const r of allReviewStats ?? []) {
+  const d = new Date(r.published_at);
+  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  monthlyActivity[key] = (monthlyActivity[key] ?? 0) + 1;
+}
+const monthLabels: string[] = [];
+const monthCounts: number[] = [];
+for (let i = 11; i >= 0; i--) {
+  const d = new Date();
+  d.setMonth(d.getMonth() - i);
+  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  monthLabels.push(d.toLocaleDateString("en-US", { month: "short" }));
+  monthCounts.push(monthlyActivity[key] ?? 0);
+}
+
+const distJson = JSON.stringify(scoreDistribution);
+const activityJson = JSON.stringify({ monthLabels, monthCounts });
 
 const { data: watchlistData } = await (supabase as any)
   .from("group_watchlist")
@@ -259,12 +283,11 @@ const memberListJson = JSON.stringify(memberList);
   .tab-panel{display:none}
   .tab-panel.active{display:block}
 
-  /* ── Stats bar ── */
-  .stats-bar{display:flex;align-items:stretch;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;margin-bottom:20px;overflow:hidden}
-  .stats-bar-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:16px 8px;border-right:1px solid var(--border)}
-  .stats-bar-item:last-child{border-right:none}
-  .stats-bar-val{font-family:'DM Serif Display',serif;font-size:22px;line-height:1;letter-spacing:-.3px}
-  .stats-bar-lbl{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text-secondary);text-align:center}
+  /* ── Score distribution ── */
+  .dist-mini{display:flex;gap:4px;align-items:flex-end;height:48px;margin-top:4px}
+  .dist-col{display:flex;flex-direction:column;align-items:center;gap:2px;flex:1}
+  .dist-bar{width:100%;border-radius:3px 3px 0 0;min-height:3px;opacity:.75}
+  .dist-num{font-size:10px;color:var(--text-secondary);margin-top:3px;font-weight:500}
 
   /* ── Two-col layout ── */
   .two-col{display:grid;grid-template-columns:1fr 280px;gap:20px;align-items:start}
@@ -454,6 +477,26 @@ const memberListJson = JSON.stringify(memberList);
       </div>
       <div class="group-stats-row">
         <div class="gstat">
+          <span class="gstat-val">{memberList.length}</span>
+          <span class="gstat-lbl">Members</span>
+        </div>
+        <div class="gstat">
+          <span class="gstat-val">{totalReviews}</span>
+          <span class="gstat-lbl">Reviews</span>
+        </div>
+        <div class="gstat">
+          <span class="gstat-val">{groupAvgScoreAccurate ?? "—"}</span>
+          <span class="gstat-lbl">Avg Score</span>
+        </div>
+        <div class="gstat">
+          <span class="gstat-val">{uniqueGamesCount}</span>
+          <span class="gstat-lbl">Games Played</span>
+        </div>
+        <div class="gstat">
+          <span class="gstat-val">{totalHours > 0 ? totalHours : "—"}</span>
+          <span class="gstat-lbl">Hours Played</span>
+        </div>
+        <div class="gstat">
           <span class="gstat-val">{(sessionsData ?? []).length}</span>
           <span class="gstat-lbl">Sessions</span>
         </div>
@@ -487,29 +530,6 @@ const memberListJson = JSON.stringify(memberList);
 
 <!-- Main content -->
 <div class="page">
-
-  <div class="stats-bar">
-    <div class="stats-bar-item">
-      <span class="stats-bar-val">{memberList.length}</span>
-      <span class="stats-bar-lbl">Members</span>
-    </div>
-    <div class="stats-bar-item">
-      <span class="stats-bar-val">{totalReviews}</span>
-      <span class="stats-bar-lbl">Reviews</span>
-    </div>
-    <div class="stats-bar-item">
-      <span class="stats-bar-val">{groupAvgScoreAccurate ?? "—"}</span>
-      <span class="stats-bar-lbl">Avg Score</span>
-    </div>
-    <div class="stats-bar-item">
-      <span class="stats-bar-val">{uniqueGamesCount}</span>
-      <span class="stats-bar-lbl">Games Played</span>
-    </div>
-    <div class="stats-bar-item">
-      <span class="stats-bar-val">—</span>
-      <span class="stats-bar-lbl">Hours Played</span>
-    </div>
-  </div>
 
   <nav class="tab-nav">
     <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>
@@ -611,6 +631,20 @@ const memberListJson = JSON.stringify(memberList);
                 </a>
               ) : <div class="podium-slot" />}
             </div>
+          </div>
+        )}
+
+        {allGroupScores.length > 0 && (
+          <div class="card" style="margin-top:24px">
+            <div class="card-title">Score distribution</div>
+            <div class="dist-mini" id="distMini"></div>
+          </div>
+        )}
+
+        {allGroupScores.length > 0 && (
+          <div class="card" style="margin-top:14px">
+            <div class="card-title">Review activity — last 12 months</div>
+            <svg id="groupActivityChart" height="70" style="width:100%;overflow:visible;display:block"></svg>
           </div>
         )}
 
@@ -857,9 +891,65 @@ const memberListJson = JSON.stringify(memberList);
 
 </div>
 
-<script define:vars={{ groupDataJson, memberListJson, inviteUrl, isAdminOrOwner, groupId: group.id }}>
+<script define:vars={{ groupDataJson, memberListJson, inviteUrl, isAdminOrOwner, groupId: group.id, distJson, activityJson }}>
 const groupData = JSON.parse(groupDataJson);
 const memberList = JSON.parse(memberListJson);
+
+// ── Score distribution ──
+var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#ffffff'];
+var dist = JSON.parse(distJson);
+var maxD = Math.max.apply(null, dist.concat([1]));
+var distEl = document.getElementById('distMini');
+if (distEl) {
+  dist.forEach(function(count, i) {
+    var col = document.createElement('div'); col.className = 'dist-col';
+    var bar = document.createElement('div'); bar.className = 'dist-bar';
+    bar.style.height = Math.max(3, (count/maxD)*40)+'px';
+    bar.style.background = barColors[i];
+    var num = document.createElement('div'); num.className = 'dist-num';
+    num.textContent = i+1;
+    col.appendChild(bar); col.appendChild(num); distEl.appendChild(col);
+  });
+}
+
+// ── Activity line chart ──
+var act = JSON.parse(activityJson);
+var actEl = document.getElementById('groupActivityChart');
+if (actEl && act.monthLabels && act.monthCounts) {
+  setTimeout(function() {
+    var w = actEl.getBoundingClientRect().width || 500;
+    var chartH = 48, padL = 4, padR = 4;
+    var pts = act.monthCounts, n = pts.length;
+    var step = (w-padL-padR)/(n-1);
+    var maxM = Math.max.apply(null, pts.concat([1]));
+    var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.85-4];});
+    var aPath = 'M'+coords[0][0]+','+chartH+coords.map(function(c){return ' L'+c[0]+','+c[1];}).join('')+' L'+coords[n-1][0]+','+chartH+' Z';
+    var area = document.createElementNS('http://www.w3.org/2000/svg','path');
+    area.setAttribute('d',aPath); area.setAttribute('fill','var(--accent)'); area.setAttribute('opacity','0.1');
+    actEl.appendChild(area);
+    var lPath = 'M'+coords[0][0]+','+coords[0][1]+coords.slice(1).map(function(c){return ' L'+c[0]+','+c[1];}).join('');
+    var line = document.createElementNS('http://www.w3.org/2000/svg','path');
+    line.setAttribute('d',lPath); line.setAttribute('fill','none');
+    line.setAttribute('stroke','var(--accent)'); line.setAttribute('stroke-width','2');
+    line.setAttribute('stroke-linecap','round'); line.setAttribute('stroke-linejoin','round');
+    actEl.appendChild(line);
+    coords.forEach(function(c,i){
+      var dot = document.createElementNS('http://www.w3.org/2000/svg','circle');
+      dot.setAttribute('cx',c[0]); dot.setAttribute('cy',c[1]);
+      dot.setAttribute('r', pts[i]>0?'4':'2');
+      dot.setAttribute('fill', pts[i]>0?'var(--accent)':'var(--border)');
+      dot.setAttribute('stroke','var(--bg-card)'); dot.setAttribute('stroke-width','2');
+      actEl.appendChild(dot);
+      if (i % 3 === 0 || i === n-1) {
+        var lbl = document.createElementNS('http://www.w3.org/2000/svg','text');
+        lbl.setAttribute('x',c[0]); lbl.setAttribute('y',chartH+14);
+        lbl.setAttribute('text-anchor','middle'); lbl.setAttribute('font-size','9');
+        lbl.setAttribute('fill','var(--text-secondary)'); lbl.setAttribute('font-family','DM Sans,sans-serif');
+        lbl.textContent = act.monthLabels[i]; actEl.appendChild(lbl);
+      }
+    });
+  }, 50);
+}
 
 // Mark body for admin-only CSS (banner/avatar edit buttons)
 if (isAdminOrOwner) document.body.classList.add('group-admin');
