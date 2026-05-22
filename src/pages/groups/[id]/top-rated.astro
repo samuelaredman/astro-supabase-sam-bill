@@ -1,0 +1,173 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import Layout from "../../../components/Layout.astro";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+const { id } = Astro.params;
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await (supabase as any)
+    .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
+  currentProfile = cp;
+}
+
+const { data: group } = await (supabase as any)
+  .from("groups")
+  .select("id, name, visibility, invite_code")
+  .eq("id", id)
+  .single();
+
+if (!group) return Astro.redirect("/groups");
+
+let membership: any = null;
+if (currentProfile) {
+  const { data: m } = await (supabase as any)
+    .from("group_members").select("role").eq("group_id", id).eq("profile_id", currentProfile.id).maybeSingle();
+  membership = m;
+}
+
+const isMember = !!membership;
+const joinCode = Astro.url.searchParams.get("code");
+
+if (group.visibility === "private" && !isMember) {
+  if (!joinCode || joinCode.toUpperCase() !== group.invite_code) {
+    return Astro.redirect("/groups");
+  }
+}
+
+const { data: members } = await (supabase as any)
+  .from("group_members")
+  .select("profile_id")
+  .eq("group_id", id);
+
+const memberProfileIds = (members ?? []).map((m: any) => m.profile_id);
+
+const { data: allReviews } = await (supabase as any)
+  .from("reviews")
+  .select("profile_id, game_id, score, games ( id, title, slug, cover_img_url )")
+  .in("profile_id", memberProfileIds.length ? memberProfileIds : ["00000000-0000-0000-0000-000000000000"])
+  .eq("status", "published")
+  .limit(1000);
+
+const gameCounts: Record<string, { game: any; count: number; scores: number[] }> = {};
+for (const r of allReviews ?? []) {
+  const gid = r.games?.id;
+  if (!gid) continue;
+  if (!gameCounts[gid]) gameCounts[gid] = { game: r.games, count: 0, scores: [] };
+  gameCounts[gid].count++;
+  gameCounts[gid].scores.push(r.score);
+}
+
+const sortedGames = Object.values(gameCounts)
+  .map((g: any) => ({
+    ...g,
+    avgScore: +(g.scores.reduce((a: number, b: number) => a + b, 0) / g.scores.length).toFixed(1),
+  }))
+  .sort((a: any, b: any) => b.avgScore - a.avgScore || b.count - a.count);
+
+function igdbCover(url: string | null, size = "t_cover_big") {
+  if (!url) return null;
+  const clean = url.startsWith("//") ? `https:${url}` : url;
+  return clean.replace(/t_[a-z0-9_]+/, size);
+}
+function scoreClass(s: number) {
+  if (s === 10) return "score-perfect";
+  if (s >= 9) return "score-great";
+  if (s >= 8) return "score-teal";
+  if (s >= 7) return "score-good";
+  if (s >= 5) return "score-mid";
+  if (s >= 3) return "score-orange";
+  return "score-low";
+}
+---
+
+<Layout title={`Top Rated — ${group.name} — Chekpoint`} isLoggedIn={!!user} currentProfile={currentProfile} variant="fullwidth">
+<style is:global>
+  :root[data-theme="dark"] {
+    --bg:#09090a;--bg-card:#131314;--bg-hover:#1c1c1e;
+    --border:#222224;--border-subtle:#191919;
+    --text-tertiary:#484644;--tag-bg:#1c1c1e;--tag-text:#6a6866;
+    --shadow:0 1px 3px rgba(0,0,0,.5);
+    --score-perfect:#ffffff;--score-perfect-bg:#22223a;
+    --score-great:#4ade80;--score-great-bg:#112e1c;
+    --score-teal:#2dd4bf;--score-teal-bg:#082d2a;
+    --score-good:#60a5fa;--score-good-bg:#0e2240;
+    --score-mid:#fbbf24;--score-mid-bg:#271e00;
+    --score-orange:#fb923c;--score-orange-bg:#2c160a;
+    --score-low:#f87171;--score-low-bg:#300e0e;
+  }
+
+  .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.85);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;gap:16px;backdrop-filter:blur(20px)}
+  [data-theme="light"] .topnav{background:rgba(245,244,242,.85)}
+  .topnav-back{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-tertiary);text-decoration:none;transition:color .15s}
+  .topnav-back:hover{color:var(--text-primary)}
+  .topnav-logo{font-family:'Press Start 2P',monospace;font-size:13px;display:flex;align-items:center;gap:7px;margin-left:auto;color:var(--text-primary);text-decoration:none}
+  .topnav-logo-dot{width:6px;height:6px;background:var(--accent);border-radius:50%;box-shadow:0 0 10px var(--accent)}
+
+  .page{max-width:700px;margin:0 auto;padding:32px 28px 80px}
+  .page-title{font-family:'DM Serif Display',serif;font-size:22px;margin-bottom:4px}
+  .page-sub{font-size:13px;color:var(--text-secondary);margin-bottom:24px}
+
+  .rank-list{display:flex;flex-direction:column}
+  .rank-item{display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--border-subtle);text-decoration:none;color:inherit}
+  .rank-item:last-child{border-bottom:none}
+  .rank-item:hover .rank-title{color:var(--accent)}
+  .rank-num{width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:12px;font-weight:700;flex-shrink:0;background:var(--tag-bg);color:var(--text-tertiary)}
+  .rank-1{background:rgba(251,191,36,.2);color:#fbbf24}
+  .rank-2{background:rgba(148,163,184,.15);color:#94a3b8}
+  .rank-3{background:rgba(194,129,60,.15);color:#c2813c}
+  .rank-cover{width:38px;height:50px;border-radius:6px;object-fit:cover;flex-shrink:0;display:block}
+  .rank-cover-placeholder{width:38px;height:50px;border-radius:6px;background:var(--tag-bg);flex-shrink:0}
+  .rank-info{flex:1;min-width:0}
+  .rank-title{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .15s}
+  .rank-meta{font-size:12px;color:var(--text-tertiary);margin-top:2px}
+  .score-badge{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:7px;font-size:12px;font-weight:700;flex-shrink:0}
+  .score-perfect{background:var(--score-perfect-bg);color:var(--score-perfect)}
+  .score-great{background:var(--score-great-bg);color:var(--score-great)}
+  .score-teal{background:var(--score-teal-bg);color:var(--score-teal)}
+  .score-good{background:var(--score-good-bg);color:var(--score-good)}
+  .score-mid{background:var(--score-mid-bg);color:var(--score-mid)}
+  .score-orange{background:var(--score-orange-bg);color:var(--score-orange)}
+  .score-low{background:var(--score-low-bg);color:var(--score-low)}
+  .empty{padding:48px 0;text-align:center;color:var(--text-tertiary);font-size:14px}
+</style>
+
+<nav class="topnav">
+  <a href={`/groups/${group.id}`} class="topnav-back">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M10 12L6 8l4-4"/>
+    </svg>
+    {group.name}
+  </a>
+  <a href="/" class="topnav-logo"><span class="topnav-logo-dot"></span>Chekpoint</a>
+</nav>
+
+<div class="page">
+  <div class="page-title">Top Rated by Group</div>
+  <div class="page-sub">Ranked by average group score · ties broken by review count</div>
+
+  {sortedGames.length === 0 ? (
+    <div class="empty">No games reviewed yet.</div>
+  ) : (
+    <div class="rank-list">
+      {sortedGames.map((g: any, i: number) => (
+        <a class="rank-item" href={`/games/${g.game.slug}`}>
+          <div class={`rank-num${i === 0 ? " rank-1" : i === 1 ? " rank-2" : i === 2 ? " rank-3" : ""}`}>{i + 1}</div>
+          {igdbCover(g.game.cover_img_url, "t_thumb")
+            ? <img class="rank-cover" src={igdbCover(g.game.cover_img_url, "t_thumb")!} alt={g.game.title} loading="lazy" />
+            : <div class="rank-cover-placeholder" />
+          }
+          <div class="rank-info">
+            <div class="rank-title">{g.game.title}</div>
+            <div class="rank-meta">{g.count} review{g.count !== 1 ? "s" : ""}</div>
+          </div>
+          <div class={`score-badge ${scoreClass(Math.round(g.avgScore))}`}>{g.avgScore}</div>
+        </a>
+      ))}
+    </div>
+  )}
+</div>
+</Layout>
