@@ -21,7 +21,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   const { data: invitee } = await db.from("profiles")
-    .select("id, username").eq("username", invited_username).single();
+    .select("id, username").ilike("username", invited_username.replace(/[%_]/g, "\\$&")).single();
   if (!invitee) return json({ error: "User not found" }, 404);
 
   // Can't invite someone already in the group
