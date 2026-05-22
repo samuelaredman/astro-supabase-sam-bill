@@ -63,7 +63,7 @@ const memberProfileIds = memberList.map((m: any) => m.id);
 // Accurate full stats — lightweight query, no limit
 const { data: allReviewStats } = await (supabase as any)
   .from("reviews")
-  .select("game_id, score, play_time_hours, published_at")
+  .select("game_id, score, play_time_hours, profile_id")
   .in("profile_id", memberProfileIds.length ? memberProfileIds : ["00000000-0000-0000-0000-000000000000"])
   .eq("status", "published");
 const totalReviews = (allReviewStats ?? []).length;
@@ -73,29 +73,6 @@ const groupAvgScoreAccurate = allGroupScores.length > 0
   ? +(allGroupScores.reduce((a: number, b: number) => a + b, 0) / allGroupScores.length).toFixed(1)
   : null;
 const totalHours = (allReviewStats ?? []).reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0);
-
-const scoreDistribution = Array.from({ length: 10 }, (_: any, i: number) =>
-  (allReviewStats ?? []).filter((r: any) => r.score === i + 1).length
-);
-
-const monthlyActivity: Record<string, number> = {};
-for (const r of allReviewStats ?? []) {
-  const d = new Date(r.published_at);
-  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-  monthlyActivity[key] = (monthlyActivity[key] ?? 0) + 1;
-}
-const monthLabels: string[] = [];
-const monthCounts: number[] = [];
-for (let i = 11; i >= 0; i--) {
-  const d = new Date();
-  d.setMonth(d.getMonth() - i);
-  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-  monthLabels.push(d.toLocaleDateString("en-US", { month: "short" }));
-  monthCounts.push(monthlyActivity[key] ?? 0);
-}
-
-const distJson = JSON.stringify(scoreDistribution);
-const activityJson = JSON.stringify({ monthLabels, monthCounts });
 
 const { data: watchlistData } = await (supabase as any)
   .from("group_watchlist")
@@ -159,6 +136,43 @@ const allScores = (activityReviews ?? []).map((r: any) => r.score);
 const groupAvgScore = allScores.length > 0
   ? +(allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length).toFixed(1)
   : null;
+
+// Critic spectrum — avg score per member
+const memberAvgScores = memberList
+  .map((m: any) => {
+    const revs = (allReviewStats ?? []).filter((r: any) => r.profile_id === m.id);
+    if (revs.length === 0) return null;
+    const avg = +(revs.reduce((s: number, r: any) => s + r.score, 0) / revs.length).toFixed(1);
+    return { ...m, avgScore: avg, reviewCount: revs.length };
+  })
+  .filter(Boolean);
+
+// Hot take — group's biggest divergence from community average
+const gameListIds = gameList.map((g: any) => g.game?.id).filter(Boolean);
+let hotTake: any = null;
+if (gameListIds.length > 0) {
+  const { data: communityRevs } = await (supabase as any)
+    .from("reviews")
+    .select("game_id, score")
+    .in("game_id", gameListIds)
+    .eq("status", "published");
+  const commGroups: Record<string, number[]> = {};
+  for (const r of communityRevs ?? []) {
+    if (!commGroups[r.game_id]) commGroups[r.game_id] = [];
+    commGroups[r.game_id].push(r.score);
+  }
+  let maxDelta = 0;
+  for (const g of gameList) {
+    const gid = g.game?.id;
+    if (!gid || !commGroups[gid] || commGroups[gid].length < 3) continue;
+    const commAvg = +(commGroups[gid].reduce((a: number, b: number) => a + b, 0) / commGroups[gid].length).toFixed(1);
+    const delta = +((g.avgScore as number) - commAvg).toFixed(1);
+    if (Math.abs(delta) > maxDelta) {
+      maxDelta = Math.abs(delta);
+      hotTake = { game: g.game, groupAvg: g.avgScore, commAvg, delta };
+    }
+  }
+}
 
 function igdbCover(url: string | null, size = "t_cover_big") {
   if (!url) return null;
@@ -283,11 +297,27 @@ const memberListJson = JSON.stringify(memberList);
   .tab-panel{display:none}
   .tab-panel.active{display:block}
 
-  /* ── Score distribution ── */
-  .dist-mini{display:flex;gap:4px;align-items:flex-end;height:48px;margin-top:4px}
-  .dist-col{display:flex;flex-direction:column;align-items:center;gap:2px;flex:1}
-  .dist-bar{width:100%;border-radius:3px 3px 0 0;min-height:3px;opacity:.75}
-  .dist-num{font-size:10px;color:var(--text-secondary);margin-top:3px;font-weight:500}
+  /* ── Hot Take ── */
+  .hot-take-inner{display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit}
+  .hot-take-cover{width:52px;height:70px;border-radius:8px;object-fit:cover;flex-shrink:0;background:var(--tag-bg)}
+  .hot-take-body{flex:1;min-width:0}
+  .hot-take-title{font-size:13px;font-weight:600;margin-bottom:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .hot-take-scores{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .hot-take-lbl{font-size:10px;color:var(--text-tertiary);text-align:center;margin-top:3px;font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+  .hot-take-vs{font-size:12px;color:var(--text-tertiary)}
+  .hot-take-delta{font-size:12px;font-weight:700}
+  .delta-up{color:var(--score-great)}
+  .delta-down{color:var(--score-low)}
+
+  /* ── Critic Spectrum ── */
+  .spectrum-wrap{padding-top:4px}
+  .spectrum-edge-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--text-tertiary);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:28px}
+  .spectrum-track{position:relative;height:32px;margin-bottom:20px}
+  .spectrum-bar{position:absolute;top:50%;left:0;right:0;height:3px;background:linear-gradient(to right,var(--score-low-bg),var(--score-mid-bg),var(--score-great-bg));border-radius:2px;transform:translateY(-50%)}
+  .spectrum-avatar{position:absolute;top:50%;transform:translate(-50%,-50%);width:26px;height:26px;border-radius:50%;background:var(--accent-subtle);border:2px solid var(--bg-card);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--accent);overflow:hidden;box-shadow:0 0 0 1px var(--border)}
+  .spectrum-avatar img{width:100%;height:100%;object-fit:cover}
+  .spectrum-ticks{position:absolute;bottom:-14px;left:0;right:0;pointer-events:none}
+  .spectrum-ticks span{position:absolute;font-size:9px;color:var(--text-tertiary);transform:translateX(-50%)}
 
   /* ── Two-col layout ── */
   .two-col{display:grid;grid-template-columns:1fr 280px;gap:20px;align-items:start}
@@ -389,6 +419,9 @@ const memberListJson = JSON.stringify(memberList);
   .invite-user-input{flex:1;padding:7px 11px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:inherit;outline:none}
   .invite-user-input:focus{border-color:var(--accent)}
 
+  .stats-section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+  .stats-section-header>span:first-child{font-size:13px;font-weight:700;color:var(--text-primary)}
+  .stats-section-count{font-size:12px;color:var(--text-tertiary);font-weight:500}
   .empty-tab{padding:24px 0;text-align:center;color:var(--text-tertiary);font-size:14px}
   .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);margin-bottom:12px}
   .see-all-link{font-size:11px;color:var(--accent);font-weight:600;text-decoration:none}
@@ -634,17 +667,60 @@ const memberListJson = JSON.stringify(memberList);
           </div>
         )}
 
-        {allGroupScores.length > 0 && (
+        {hotTake && (
           <div class="card" style="margin-top:24px">
-            <div class="card-title">Score distribution</div>
-            <div class="dist-mini" id="distMini"></div>
+            <div class="card-title">Group's Hot Take</div>
+            <a class="hot-take-inner" href={`/games/${hotTake.game.slug}`}>
+              {igdbCover(hotTake.game.cover_img_url, "t_cover_small")
+                ? <img class="hot-take-cover" src={igdbCover(hotTake.game.cover_img_url, "t_cover_small")!} alt={hotTake.game.title} loading="lazy" />
+                : <div class="hot-take-cover" />
+              }
+              <div class="hot-take-body">
+                <div class="hot-take-title">{hotTake.game.title}</div>
+                <div class="hot-take-scores">
+                  <div>
+                    <div class={`score-badge ${scoreClass(Math.round(hotTake.groupAvg))}`}>{hotTake.groupAvg}</div>
+                    <div class="hot-take-lbl">Group</div>
+                  </div>
+                  <div class="hot-take-vs">vs</div>
+                  <div>
+                    <div class={`score-badge ${scoreClass(Math.round(hotTake.commAvg))}`}>{hotTake.commAvg}</div>
+                    <div class="hot-take-lbl">World</div>
+                  </div>
+                </div>
+                <div class={`hot-take-delta ${hotTake.delta > 0 ? "delta-up" : "delta-down"}`}>
+                  {hotTake.delta > 0 ? "+" : ""}{hotTake.delta} vs the world
+                </div>
+              </div>
+            </a>
           </div>
         )}
 
-        {allGroupScores.length > 0 && (
+        {memberAvgScores.length >= 2 && (
           <div class="card" style="margin-top:14px">
-            <div class="card-title">Review activity — last 12 months</div>
-            <svg id="groupActivityChart" height="70" style="width:100%;overflow:visible;display:block"></svg>
+            <div class="card-title">Critic Spectrum</div>
+            <div class="spectrum-wrap">
+              <div class="spectrum-edge-labels"><span>Harsh</span><span>Generous</span></div>
+              <div class="spectrum-track">
+                <div class="spectrum-bar"></div>
+                {(memberAvgScores as any[]).map((m: any) => {
+                  const pct = ((m.avgScore - 1) / 9) * 100;
+                  return (
+                    <a href={`/reviewers/${m.username}`} class="spectrum-avatar" style={`left:${pct}%`} title={`@${m.username} — avg ${m.avgScore}`}>
+                      {m.avatar_url
+                        ? <img src={m.avatar_url} alt={m.username} />
+                        : <span>{getInitials(m.username)}</span>
+                      }
+                    </a>
+                  );
+                })}
+                <div class="spectrum-ticks">
+                  <span style="left:0%">1</span>
+                  <span style="left:44.4%">5</span>
+                  <span style="left:100%">10</span>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -792,8 +868,12 @@ const memberListJson = JSON.stringify(memberList);
     </div>
   </div>
 
-  <!-- Score Compare tab -->
+  <!-- Stats tab -->
   <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
+    <div class="stats-section-header">
+      <span>Score Comparison</span>
+      <span class="stats-section-count">{sharedGames.length} shared game{sharedGames.length !== 1 ? "s" : ""}</span>
+    </div>
     {sharedGames.length === 0
       ? <div class="empty-tab">No games reviewed by 2 or more members yet.</div>
       : sharedGames.map((g: any) => {
@@ -891,65 +971,9 @@ const memberListJson = JSON.stringify(memberList);
 
 </div>
 
-<script define:vars={{ groupDataJson, memberListJson, inviteUrl, isAdminOrOwner, groupId: group.id, distJson, activityJson }}>
+<script define:vars={{ groupDataJson, memberListJson, inviteUrl, isAdminOrOwner, groupId: group.id }}>
 const groupData = JSON.parse(groupDataJson);
 const memberList = JSON.parse(memberListJson);
-
-// ── Score distribution ──
-var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#ffffff'];
-var dist = JSON.parse(distJson);
-var maxD = Math.max.apply(null, dist.concat([1]));
-var distEl = document.getElementById('distMini');
-if (distEl) {
-  dist.forEach(function(count, i) {
-    var col = document.createElement('div'); col.className = 'dist-col';
-    var bar = document.createElement('div'); bar.className = 'dist-bar';
-    bar.style.height = Math.max(3, (count/maxD)*40)+'px';
-    bar.style.background = barColors[i];
-    var num = document.createElement('div'); num.className = 'dist-num';
-    num.textContent = i+1;
-    col.appendChild(bar); col.appendChild(num); distEl.appendChild(col);
-  });
-}
-
-// ── Activity line chart ──
-var act = JSON.parse(activityJson);
-var actEl = document.getElementById('groupActivityChart');
-if (actEl && act.monthLabels && act.monthCounts) {
-  setTimeout(function() {
-    var w = actEl.getBoundingClientRect().width || 500;
-    var chartH = 48, padL = 4, padR = 4;
-    var pts = act.monthCounts, n = pts.length;
-    var step = (w-padL-padR)/(n-1);
-    var maxM = Math.max.apply(null, pts.concat([1]));
-    var coords = pts.map(function(v,i){return [padL+i*step, chartH-(v/maxM)*chartH*0.85-4];});
-    var aPath = 'M'+coords[0][0]+','+chartH+coords.map(function(c){return ' L'+c[0]+','+c[1];}).join('')+' L'+coords[n-1][0]+','+chartH+' Z';
-    var area = document.createElementNS('http://www.w3.org/2000/svg','path');
-    area.setAttribute('d',aPath); area.setAttribute('fill','var(--accent)'); area.setAttribute('opacity','0.1');
-    actEl.appendChild(area);
-    var lPath = 'M'+coords[0][0]+','+coords[0][1]+coords.slice(1).map(function(c){return ' L'+c[0]+','+c[1];}).join('');
-    var line = document.createElementNS('http://www.w3.org/2000/svg','path');
-    line.setAttribute('d',lPath); line.setAttribute('fill','none');
-    line.setAttribute('stroke','var(--accent)'); line.setAttribute('stroke-width','2');
-    line.setAttribute('stroke-linecap','round'); line.setAttribute('stroke-linejoin','round');
-    actEl.appendChild(line);
-    coords.forEach(function(c,i){
-      var dot = document.createElementNS('http://www.w3.org/2000/svg','circle');
-      dot.setAttribute('cx',c[0]); dot.setAttribute('cy',c[1]);
-      dot.setAttribute('r', pts[i]>0?'4':'2');
-      dot.setAttribute('fill', pts[i]>0?'var(--accent)':'var(--border)');
-      dot.setAttribute('stroke','var(--bg-card)'); dot.setAttribute('stroke-width','2');
-      actEl.appendChild(dot);
-      if (i % 3 === 0 || i === n-1) {
-        var lbl = document.createElementNS('http://www.w3.org/2000/svg','text');
-        lbl.setAttribute('x',c[0]); lbl.setAttribute('y',chartH+14);
-        lbl.setAttribute('text-anchor','middle'); lbl.setAttribute('font-size','9');
-        lbl.setAttribute('fill','var(--text-secondary)'); lbl.setAttribute('font-family','DM Sans,sans-serif');
-        lbl.textContent = act.monthLabels[i]; actEl.appendChild(lbl);
-      }
-    });
-  }, 50);
-}
 
 // Mark body for admin-only CSS (banner/avatar edit buttons)
 if (isAdminOrOwner) document.body.classList.add('group-admin');
