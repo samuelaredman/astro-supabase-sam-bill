@@ -1,6 +1,4 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-
-serve(async (req) => {
+Deno.serve(async (req) => {
   try {
     const payload = await req.json();
     const record = payload.record;
@@ -43,8 +41,8 @@ serve(async (req) => {
     }
 
     // ── Email via Resend ──────────────────────────────────────────────────────
-    const resendKey = Deno.env.get("RESEND_API_KEY");
-    const notifyEmail = Deno.env.get("NOTIFY_EMAIL"); // e.g. you@yourdomain.com
+    const resendKey   = Deno.env.get("RESEND_API_KEY");
+    const notifyEmail = Deno.env.get("NOTIFY_EMAIL");
     if (resendKey && notifyEmail) {
       promises.push(
         fetch("https://api.resend.com/emails", {
