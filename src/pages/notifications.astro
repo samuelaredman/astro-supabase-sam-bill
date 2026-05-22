@@ -29,11 +29,17 @@ const { data: rawNotifs } = await serverClient
 
 const notifications = rawNotifs ?? [];
 
+// Whether any notification is still unread (used to show the "Mark all as read" button)
+const hasUnread = notifications.some((n: any) => !n.read);
+
 // Mark all unread as read now that the user is viewing the page
 await serverClient.from('notifications')
   .update({ read: true })
   .eq('profile_id', profile.id)
   .eq('read', false);
+
+// Never serve a cached version — mark-as-read must always execute
+Astro.response.headers.set('Cache-Control', 'no-store');
 
 function timeAgo(dateStr: string): string {
   const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
@@ -64,6 +70,11 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
       <h1 class="notif-title">Notifications</h1>
       {notifications.length > 0 && (
         <span class="notif-count">{notifications.length}</span>
+      )}
+      {notifications.length > 0 && (
+        <button id="mark-all-read" class="notif-mark-all" type="button">
+          Mark all as read
+        </button>
       )}
     </div>
 
@@ -146,6 +157,27 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
   </main>
 </Layout>
 
+<script>
+  const markAllBtn = document.getElementById('mark-all-read');
+  if (markAllBtn) {
+    markAllBtn.addEventListener('click', async () => {
+      markAllBtn.setAttribute('disabled', 'true');
+      markAllBtn.textContent = 'Marking…';
+      try {
+        await fetch('/api/notifications/mark-read', { method: 'POST' });
+      } catch (e) {
+        // Best effort — the page already marks notifications read on view.
+      }
+      // Clear unread styling on the current page
+      document.querySelectorAll('.notif-item.unread')
+        .forEach((el) => el.classList.remove('unread'));
+      document.querySelectorAll('.notif-dot')
+        .forEach((el) => el.remove());
+      markAllBtn.textContent = 'All read';
+    });
+  }
+</script>
+
 <style>
   .notif-main {
     min-width: 0;
@@ -175,6 +207,29 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     padding: 2px 8px;
     border-radius: 20px;
     line-height: 1.5;
+  }
+
+  .notif-mark-all {
+    margin-left: auto;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .notif-mark-all:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+  .notif-mark-all:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
 
   /* Empty */
