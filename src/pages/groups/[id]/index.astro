@@ -18,13 +18,12 @@ if (user) {
 
 const { data: group } = await (supabase as any)
   .from("groups")
-  .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at")
+  .select("id, name, description, avatar_url, banner_url, visibility, invite_code, created_by, created_at")
   .eq("id", id)
   .single();
 
 if (!group) return Astro.redirect("/groups");
 
-// Membership check
 let membership: any = null;
 if (currentProfile) {
   const { data: m } = await (supabase as any)
@@ -36,14 +35,12 @@ const isMember = !!membership;
 const isAdminOrOwner = ["owner", "admin"].includes(membership?.role);
 const isOwner = membership?.role === "owner";
 
-// Private group — non-members can only see it if they have the invite code in the URL
 if (group.visibility === "private" && !isMember) {
   if (!joinCode || joinCode.toUpperCase() !== group.invite_code) {
     return Astro.redirect("/groups");
   }
 }
 
-// Members
 const { data: members } = await (supabase as any)
   .from("group_members")
   .select("role, joined_at, profiles ( id, username, avatar_url )")
@@ -53,14 +50,12 @@ const { data: members } = await (supabase as any)
 const memberList = (members ?? []).map((m: any) => ({ ...m.profiles, role: m.role, joined_at: m.joined_at }));
 const memberProfileIds = memberList.map((m: any) => m.id);
 
-// Group watchlist
 const { data: watchlistData } = await (supabase as any)
   .from("group_watchlist")
   .select("id, game_id, added_at, notes, games ( id, title, slug, cover_img_url ), added_by_profile:added_by ( username )")
   .eq("group_id", id)
   .order("added_at", { ascending: false });
 
-// Sessions
 const { data: sessionsData } = await (supabase as any)
   .from("group_sessions")
   .select(`
@@ -73,7 +68,6 @@ const { data: sessionsData } = await (supabase as any)
   .order("played_at", { ascending: false })
   .limit(50);
 
-// Score comparison — games reviewed by 2+ members
 let sharedGames: any[] = [];
 if (memberProfileIds.length >= 2) {
   const { data: memberReviews } = await (supabase as any)
@@ -93,16 +87,14 @@ if (memberProfileIds.length >= 2) {
     .slice(0, 30);
 }
 
-// Group activity — recent reviews by any member
 const { data: activityReviews } = await (supabase as any)
   .from("reviews")
   .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
-  .in("profile_id", memberProfileIds)
+  .in("profile_id", memberProfileIds.length ? memberProfileIds : ['00000000-0000-0000-0000-000000000000'])
   .eq("status", "published")
   .order("published_at", { ascending: false })
   .limit(15);
 
-// Most played games by group (games reviewed by group members)
 const gameCounts: Record<string, { game: any; count: number; avgScore: number; scores: number[] }> = {};
 for (const r of activityReviews ?? []) {
   const gid = r.games?.id;
@@ -116,7 +108,6 @@ const topGames = Object.values(gameCounts)
   .sort((a: any, b: any) => b.count - a.count)
   .slice(0, 8);
 
-// Group avg score
 const allScores = (activityReviews ?? []).map((r: any) => r.score);
 const groupAvgScore = allScores.length > 0
   ? +(allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length).toFixed(1)
@@ -150,157 +141,217 @@ const inviteUrl = group.invite_code
   ? `${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`
   : null;
 
-const groupDataJson = JSON.stringify({ id: group.id, memberProfileIds, isMember, isAdminOrOwner });
+const createdDate = new Date(group.created_at).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+const bannerStyle = group.banner_url
+  ? `background-image:url('${group.banner_url}');background-size:cover;background-position:center`
+  : "";
+
+const groupDataJson = JSON.stringify({ id: group.id, memberProfileIds, isMember, isAdminOrOwner, isOwner });
 const memberListJson = JSON.stringify(memberList);
 ---
 
-<Layout
-  title={`${group.name} — Chekpoint`}
-  isLoggedIn={!!user}
-  currentProfile={currentProfile}
-  variant="fullwidth"
->
+<Layout title={`${group.name} — Chekpoint`} isLoggedIn={!!user} currentProfile={currentProfile} variant="fullwidth">
 <style is:global>
+  :root[data-theme="dark"] {
+    --bg:#09090a;--bg-card:#131314;--bg-hover:#1c1c1e;
+    --border:#222224;--border-subtle:#191919;
+    --text-tertiary:#484644;--tag-bg:#1c1c1e;--tag-text:#6a6866;
+    --shadow:0 1px 3px rgba(0,0,0,.5);--shadow-md:0 4px 16px rgba(0,0,0,.7);
+    --score-perfect:#ffffff;--score-perfect-bg:#22223a;
+    --score-great:#4ade80;--score-great-bg:#112e1c;
+    --score-teal:#2dd4bf;--score-teal-bg:#082d2a;
+    --score-good:#60a5fa;--score-good-bg:#0e2240;
+    --score-mid:#fbbf24;--score-mid-bg:#271e00;
+    --score-orange:#fb923c;--score-orange-bg:#2c160a;
+    --score-low:#f87171;--score-low-bg:#300e0e;
+  }
+  html{scroll-behavior:smooth}
+
   /* ── Top nav ── */
-  .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.82);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;gap:16px;backdrop-filter:blur(20px)}
-  [data-theme="light"] .topnav{background:rgba(245,244,242,.82)}
+  .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.85);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;gap:16px;backdrop-filter:blur(20px)}
+  [data-theme="light"] .topnav{background:rgba(245,244,242,.85)}
   .topnav-back{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-tertiary);text-decoration:none;transition:color .15s}
   .topnav-back:hover{color:var(--text-primary)}
-  .topnav-logo{font-family:'Press Start 2P',monospace;font-size:13px;letter-spacing:-.3px;display:flex;align-items:center;gap:7px;margin-left:auto;color:var(--text-primary);text-decoration:none}
+  .topnav-logo{font-family:'Press Start 2P',monospace;font-size:13px;display:flex;align-items:center;gap:7px;margin-left:auto;color:var(--text-primary);text-decoration:none}
   .topnav-logo-dot{width:6px;height:6px;background:var(--accent);border-radius:50%;box-shadow:0 0 10px var(--accent)}
-  .group-page{max-width:900px;margin:0 auto;padding:0 28px 80px}
 
-  /* ── Group header ── */
-  .group-hero { padding:28px 0 0; display:flex; align-items:flex-start; gap:18px; }
-  .group-avatar-lg { width:64px; height:64px; border-radius:16px; background:var(--accent-subtle); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-family:'DM Serif Display',serif; font-size:22px; color:var(--accent); flex-shrink:0; overflow:hidden; }
-  .group-avatar-lg img { width:100%; height:100%; object-fit:cover; }
-  .group-hero-info { flex:1; min-width:0; }
-  .group-hero-name { font-family:'DM Serif Display',serif; font-size:26px; margin-bottom:4px; }
-  .group-hero-desc { font-size:14px; color:var(--text-secondary); line-height:1.5; margin-bottom:8px; }
-  .group-hero-meta { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-  .badge { font-size:11px; font-weight:600; padding:3px 9px; border-radius:10px; background:var(--tag-bg); color:var(--tag-text); }
-  .badge-accent { background:var(--accent-subtle); color:var(--accent); }
-  .group-hero-actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
-  .btn-primary { background:var(--accent); color:#fff; border:none; padding:8px 18px; border-radius:20px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
-  .btn-primary:hover { opacity:.85; }
-  .btn-ghost { background:var(--tag-bg); color:var(--text-secondary); border:none; padding:8px 16px; border-radius:20px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
-  .btn-ghost:hover { background:var(--bg-hover); }
-  .btn-danger { background:#300e0e; color:#f87171; border:none; padding:8px 16px; border-radius:20px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; }
+  /* ── Banner ── */
+  .group-banner{width:100%;height:200px;background:linear-gradient(135deg,#1a1030 0%,#0d1a2e 40%,#0a1a1a 100%);position:relative;overflow:hidden}
+  [data-theme="light"] .group-banner{background:linear-gradient(135deg,#e8e4f8 0%,#dce8f5 40%,#daf0f0 100%)}
+  .banner-glow{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,var(--accent) 0%,transparent 70%);opacity:.15;top:-120px;right:5%}
+  .banner-glow2{position:absolute;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,#60a5fa 0%,transparent 70%);opacity:.1;top:-60px;left:20%}
+  .banner-edit-btn{position:absolute;bottom:12px;right:16px;display:none;align-items:center;gap:7px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.2);color:white;font-size:12px;font-weight:500;font-family:'DM Sans',sans-serif;padding:7px 14px;border-radius:20px;cursor:pointer;transition:background .15s;z-index:2}
+  .banner-edit-btn:hover{background:rgba(0,0,0,.75)}
+  body.group-admin .banner-edit-btn{display:flex}
 
-  /* ── Tabs ── */
-  .tab-bar { display:flex; gap:0; border-bottom:1px solid var(--border); padding:0; margin-top:20px; overflow-x:auto; }
-  .tab-btn { padding:10px 16px; font-size:13px; font-weight:500; color:var(--text-tertiary); border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px; transition:color .15s, border-color .15s; white-space:nowrap; font-family:inherit; }
-  .tab-btn.active { color:var(--text-primary); border-bottom-color:var(--accent); }
+  /* ── Avatar ── */
+  .group-header{max-width:980px;margin:0 auto;padding:0 28px;position:relative}
+  .group-avatar-wrap{position:absolute;top:-52px;left:28px}
+  .group-avatar-container{position:relative;width:104px;height:104px;border-radius:20px}
+  .group-avatar-sq{width:104px;height:104px;border-radius:20px;background:var(--bg-card);border:4px solid var(--bg);display:flex;align-items:center;justify-content:center;font-family:'DM Serif Display',serif;font-size:36px;color:var(--accent);overflow:hidden;box-shadow:0 0 0 2px var(--accent)}
+  .group-avatar-sq img{width:100%;height:100%;object-fit:cover}
+  .group-avatar-edit{position:absolute;inset:0;border-radius:20px;background:rgba(0,0,0,.55);display:none;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;border:4px solid transparent}
+  body.group-admin .group-avatar-container:hover .group-avatar-edit{display:flex}
+  .group-avatar-edit span{font-size:10px;font-weight:600;color:white;text-transform:uppercase;letter-spacing:.08em}
+  .spinner{width:24px;height:24px;border:2px solid rgba(255,255,255,.3);border-top-color:white;border-radius:50%;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* ── Tab panels ── */
-  .tab-panel { display:none; padding:24px 0; }
-  .tab-panel.active { display:block; }
+  /* ── Group info ── */
+  .group-info-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-top:62px;padding-bottom:20px}
+  .group-left{flex:1;min-width:0}
+  .group-name{font-family:'Cinzel',serif;font-size:28px;font-weight:600;letter-spacing:.04em;margin-bottom:6px;line-height:1.2}
+  .group-desc{font-size:14px;color:var(--text-secondary);line-height:1.6;margin-bottom:10px;max-width:480px}
+  .group-meta-badges{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .badge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:10px;background:var(--tag-bg);color:var(--tag-text)}
+  .badge-accent{background:var(--accent-subtle);color:var(--accent)}
+  .group-stats-row{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+  .gstat{display:flex;flex-direction:column;gap:2px}
+  .gstat-val{font-family:'DM Serif Display',serif;font-size:20px;letter-spacing:-.3px;line-height:1}
+  .gstat-lbl{font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.08em}
+  .group-since{font-size:13px;color:var(--text-secondary);align-self:center}
+  .group-actions{display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex-shrink:0}
+  .btn-primary{background:var(--accent);color:#fff;border:none;padding:9px 22px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity .15s;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+  .btn-primary:hover{opacity:.85}
+  .btn-ghost{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);padding:9px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+  .btn-ghost:hover{border-color:var(--text-tertiary)}
+  .btn-danger{background:#300e0e;color:#f87171;border:none;padding:8px 16px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer}
 
-  /* ── Stats row ── */
-  .stats-row { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:24px; }
-  .stat-card { flex:1; min-width:100px; background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
-  .stat-val { font-family:'DM Serif Display',serif; font-size:26px; margin-bottom:2px; }
-  .stat-lbl { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); }
+  /* ── Tab nav (card style) ── */
+  .page{max-width:980px;margin:0 auto;padding:20px 28px 80px}
+  .tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px}
+  .tab-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:14px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;text-decoration:none}
+  .tab-link::before{content:'';position:absolute;inset:0;background:var(--accent-subtle);opacity:0;transition:opacity .2s}
+  .tab-link:hover::before,.tab-link.active::before{opacity:1}
+  .tab-link:hover{border-color:rgba(96,80,200,.35);transform:translateY(-2px);box-shadow:var(--shadow-md)}
+  .tab-link.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 4px 20px rgba(96,80,200,.15)}
+  .tab-link.active::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent)}
+  .tab-icon{width:28px;height:28px;border-radius:8px;background:var(--tag-bg);display:flex;align-items:center;justify-content:center}
+  .tab-link.active .tab-icon,.tab-link:hover .tab-icon{background:var(--accent-subtle)}
+  .tab-link.active .tab-icon svg,.tab-link:hover .tab-icon svg{stroke:var(--accent)}
+  .tab-label{font-size:13px;font-weight:600;color:var(--text-secondary);position:relative;z-index:1;transition:color .2s}
+  .tab-link.active .tab-label,.tab-link:hover .tab-label{color:var(--text-primary)}
+  .tab-meta{font-size:12px;color:var(--text-secondary);position:relative;z-index:1}
+  .tab-link.active .tab-meta{color:var(--accent)}
+  .tab-badge{background:var(--accent);color:white;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;position:absolute;top:8px;right:8px;z-index:2}
+  .tab-panel{display:none}
+  .tab-panel.active{display:block}
 
-  /* ── Section ── */
-  .section-title { font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); margin-bottom:14px; }
-  .section-block { margin-bottom:28px; }
+  /* ── Two-col layout ── */
+  .two-col{display:grid;grid-template-columns:1fr 280px;gap:20px;align-items:start}
+  @media(max-width:700px){.two-col{grid-template-columns:1fr}}
+  .sidebar{display:flex;flex-direction:column;gap:14px}
+  .card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px}
+  .card:last-child{margin-bottom:0}
+  .card-title{font-size:11px;font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px}
 
-  /* ── Activity feed ── */
-  .activity-item { display:flex; align-items:flex-start; gap:12px; padding:12px 0; border-bottom:1px solid var(--border-subtle); }
-  .activity-item:last-child { border-bottom:none; }
-  .activity-cover { width:36px; height:48px; border-radius:6px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
-  .activity-body { flex:1; min-width:0; }
-  .activity-user { font-size:13px; font-weight:600; }
-  .activity-game { font-size:13px; color:var(--text-secondary); }
-  .activity-time { font-size:11px; color:var(--text-tertiary); }
-  .score-badge { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:7px; font-size:12px; font-weight:700; flex-shrink:0; }
-  .score-perfect { background:var(--score-perfect-bg); color:var(--score-perfect); }
-  .score-great { background:var(--score-great-bg); color:var(--score-great); }
-  .score-teal { background:var(--score-teal-bg); color:var(--score-teal); }
-  .score-good { background:var(--score-good-bg); color:var(--score-good); }
-  .score-mid { background:var(--score-mid-bg); color:var(--score-mid); }
-  .score-orange { background:var(--score-orange-bg); color:var(--score-orange); }
-  .score-low { background:var(--score-low-bg); color:var(--score-low); }
+  /* ── Stats ── */
+  .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+  .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .stat-val{font-family:'DM Serif Display',serif;font-size:26px;margin-bottom:2px}
+  .stat-lbl{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary)}
 
-  /* ── Top games grid ── */
-  .games-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(80px,1fr)); gap:10px; }
-  .game-thumb { position:relative; }
-  .game-thumb img { width:100%; aspect-ratio:3/4; object-fit:cover; border-radius:8px; display:block; }
-  .game-thumb-placeholder { width:100%; aspect-ratio:3/4; border-radius:8px; background:var(--tag-bg); display:flex; align-items:center; justify-content:center; font-size:10px; color:var(--text-tertiary); text-align:center; padding:4px; }
-  .game-count-badge { position:absolute; bottom:4px; right:4px; background:rgba(0,0,0,.75); color:#fff; font-size:10px; font-weight:700; padding:2px 5px; border-radius:5px; }
-
-  /* ── Watchlist ── */
-  .watchlist-item { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--border-subtle); }
-  .watchlist-item:last-child { border-bottom:none; }
-  .wl-cover { width:36px; height:48px; border-radius:6px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
-  .wl-info { flex:1; min-width:0; }
-  .wl-title { font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .wl-meta { font-size:11px; color:var(--text-tertiary); }
-  .wl-remove { background:none; border:none; cursor:pointer; color:var(--text-tertiary); font-size:16px; padding:4px; transition:color .15s; }
-  .wl-remove:hover { color:#f87171; }
-
-  /* ── Sessions ── */
-  .session-card { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
-  .session-header { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
-  .session-cover { width:32px; height:42px; border-radius:6px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
-  .session-game { font-size:14px; font-weight:600; }
-  .session-date { font-size:12px; color:var(--text-tertiary); }
-  .session-notes { font-size:13px; color:var(--text-secondary); margin-bottom:8px; line-height:1.5; }
-  .session-attendees { display:flex; gap:6px; flex-wrap:wrap; }
-  .attendee-chip { font-size:11px; padding:3px 9px; border-radius:10px; background:var(--tag-bg); color:var(--tag-text); }
-  .session-delete { background:none; border:none; cursor:pointer; color:var(--text-tertiary); font-size:12px; margin-left:auto; transition:color .15s; }
-  .session-delete:hover { color:#f87171; }
+  /* ── Top games ── */
+  .games-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:8px;margin-bottom:20px}
+  .game-thumb{position:relative;display:block;text-decoration:none}
+  .game-thumb img{width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:8px;display:block;transition:transform .15s}
+  .game-thumb:hover img{transform:translateY(-3px)}
+  .game-thumb-placeholder{width:100%;aspect-ratio:3/4;border-radius:8px;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-tertiary);text-align:center;padding:4px}
+  .game-count-badge{position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;font-size:10px;font-weight:700;padding:2px 5px;border-radius:5px}
 
   /* ── Score compare ── */
-  .compare-game { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:10px; }
-  .compare-header { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-  .compare-cover { width:30px; height:40px; border-radius:5px; object-fit:cover; background:var(--tag-bg); flex-shrink:0; }
-  .compare-title { font-size:14px; font-weight:600; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .compare-scores { display:flex; gap:8px; flex-wrap:wrap; }
-  .compare-score-item { display:flex; align-items:center; gap:6px; }
-  .compare-username { font-size:12px; color:var(--text-secondary); }
-  .no-review { font-size:12px; color:var(--text-tertiary); font-style:italic; }
-  .variance-tag { font-size:11px; padding:2px 8px; border-radius:8px; margin-left:auto; }
-  .variance-low { background:var(--score-great-bg); color:var(--score-great); }
-  .variance-mid { background:var(--score-mid-bg); color:var(--score-mid); }
-  .variance-high { background:var(--score-low-bg); color:var(--score-low); }
+  .compare-game{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px}
+  .compare-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .compare-cover{width:30px;height:40px;border-radius:5px;object-fit:cover;background:var(--tag-bg);flex-shrink:0}
+  .compare-title{font-size:14px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .compare-scores{display:flex;gap:8px;flex-wrap:wrap}
+  .compare-score-item{display:flex;align-items:center;gap:6px}
+  .compare-username{font-size:12px;color:var(--text-secondary)}
+  .variance-tag{font-size:11px;padding:2px 8px;border-radius:8px;margin-left:auto}
+  .variance-low{background:var(--score-great-bg);color:var(--score-great)}
+  .variance-mid{background:var(--score-mid-bg);color:var(--score-mid)}
+  .variance-high{background:var(--score-low-bg);color:var(--score-low)}
 
-  /* ── Members ── */
-  .member-item { display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--border-subtle); }
-  .member-item:last-child { border-bottom:none; }
-  .member-avatar { width:38px; height:38px; border-radius:50%; background:var(--accent-subtle); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; color:var(--accent); flex-shrink:0; overflow:hidden; }
-  .member-avatar img { width:100%; height:100%; object-fit:cover; }
-  .member-name { font-size:14px; font-weight:500; flex:1; }
-  .member-role { font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; background:var(--accent-subtle); color:var(--accent); text-transform:capitalize; }
-  .member-role.owner { background:#271e00; color:#fbbf24; }
-  .member-actions { display:flex; gap:6px; }
-  .btn-xs { font-size:11px; padding:4px 10px; border-radius:8px; border:none; cursor:pointer; font-family:inherit; font-weight:500; }
-  .btn-xs-ghost { background:var(--tag-bg); color:var(--text-secondary); }
-  .btn-xs-danger { background:#300e0e; color:#f87171; }
-
-  /* ── Invite section ── */
-  .invite-box { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:20px; }
-  .invite-box-title { font-size:13px; font-weight:600; margin-bottom:8px; }
-  .invite-url-row { display:flex; gap:8px; }
-  .invite-url-input { flex:1; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-hover); color:var(--text-secondary); font-size:12px; font-family:monospace; outline:none; }
-  .btn-copy { background:var(--accent); color:#fff; border:none; padding:8px 14px; border-radius:8px; font-size:12px; font-weight:500; font-family:inherit; cursor:pointer; white-space:nowrap; }
-  .invite-send-row { display:flex; gap:8px; margin-top:10px; }
-  .invite-user-input { flex:1; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); font-size:13px; font-family:inherit; outline:none; }
-  .invite-user-input:focus { border-color:var(--accent); }
+  /* ── Sessions ── */
+  .session-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px}
+  .session-header{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .session-cover{width:32px;height:42px;border-radius:6px;object-fit:cover;background:var(--tag-bg);flex-shrink:0}
+  .session-game{font-size:14px;font-weight:600}
+  .session-date{font-size:12px;color:var(--text-tertiary)}
+  .session-notes{font-size:13px;color:var(--text-secondary);margin-bottom:8px;line-height:1.5}
+  .session-attendees{display:flex;gap:6px;flex-wrap:wrap}
+  .attendee-chip{font-size:11px;padding:3px 9px;border-radius:10px;background:var(--tag-bg);color:var(--tag-text)}
+  .session-delete{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:12px;margin-left:auto;transition:color .15s}
+  .session-delete:hover{color:#f87171}
 
   /* ── Log session form ── */
-  .log-form { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:20px; }
-  .log-form-title { font-size:13px; font-weight:600; margin-bottom:12px; }
-  .log-row { display:flex; gap:10px; flex-wrap:wrap; }
-  .log-input { flex:1; min-width:140px; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); font-size:13px; font-family:inherit; outline:none; }
-  .log-input:focus { border-color:var(--accent); }
-  .log-attendees { margin-top:10px; display:flex; gap:6px; flex-wrap:wrap; }
-  .attendee-toggle { font-size:12px; padding:4px 10px; border-radius:10px; border:1px solid var(--border); background:var(--tag-bg); color:var(--tag-text); cursor:pointer; transition:all .12s; }
-  .attendee-toggle.selected { border-color:var(--accent); background:var(--accent-subtle); color:var(--accent); }
-  .empty-tab { padding:32px 0; text-align:center; color:var(--text-tertiary); font-size:14px; }
+  .log-form{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:20px}
+  .log-form-title{font-size:13px;font-weight:600;margin-bottom:12px}
+  .log-row{display:flex;gap:10px;flex-wrap:wrap}
+  .log-input{flex:1;min-width:140px;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:inherit;outline:none}
+  .log-input:focus{border-color:var(--accent)}
+  .log-attendees{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap}
+  .attendee-toggle{font-size:12px;padding:4px 10px;border-radius:10px;border:1px solid var(--border);background:var(--tag-bg);color:var(--tag-text);cursor:pointer;transition:all .12s}
+  .attendee-toggle.selected{border-color:var(--accent);background:var(--accent-subtle);color:var(--accent)}
+
+  /* ── Sidebar ── */
+  .activity-item{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-subtle)}
+  .activity-item:last-child{border-bottom:none}
+  .mini-cover{width:34px;height:45px;border-radius:5px;background:var(--tag-bg);overflow:hidden;flex-shrink:0;border:1px solid var(--border);display:flex;align-items:center;justify-content:center}
+  .mini-cover img{width:100%;height:100%;object-fit:cover}
+  .mini-score{flex-shrink:0;width:26px;height:26px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+  .score-badge{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:7px;font-size:12px;font-weight:700;flex-shrink:0}
+  .score-perfect{background:var(--score-perfect-bg);color:var(--score-perfect)}
+  .score-great{background:var(--score-great-bg);color:var(--score-great)}
+  .score-teal{background:var(--score-teal-bg);color:var(--score-teal)}
+  .score-good{background:var(--score-good-bg);color:var(--score-good)}
+  .score-mid{background:var(--score-mid-bg);color:var(--score-mid)}
+  .score-orange{background:var(--score-orange-bg);color:var(--score-orange)}
+  .score-low{background:var(--score-low-bg);color:var(--score-low)}
+
+  .wl-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border-subtle)}
+  .wl-item:last-child{border-bottom:none}
+  .wl-cover{width:30px;height:40px;border-radius:5px;object-fit:cover;background:var(--tag-bg);flex-shrink:0}
+  .wl-title{font-size:13px;font-weight:500;flex:1;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .wl-remove{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:16px;padding:2px;transition:color .15s}
+  .wl-remove:hover{color:#f87171}
+
+  .member-item{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-subtle)}
+  .member-item:last-child{border-bottom:none}
+  .member-avatar{width:34px;height:34px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--accent);flex-shrink:0;overflow:hidden}
+  .member-avatar img{width:100%;height:100%;object-fit:cover}
+  .member-name{font-size:13px;font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .member-role-tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:8px;background:var(--accent-subtle);color:var(--accent);text-transform:capitalize;flex-shrink:0}
+  .member-role-tag.owner{background:#271e00;color:#fbbf24}
+  .member-actions-row{display:flex;gap:5px;flex-shrink:0}
+  .btn-xs{font-size:11px;padding:3px 9px;border-radius:7px;border:none;cursor:pointer;font-family:inherit;font-weight:500}
+  .btn-xs-ghost{background:var(--tag-bg);color:var(--text-secondary)}
+  .btn-xs-danger{background:#300e0e;color:#f87171}
+
+  /* ── Invite ── */
+  .invite-box{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px}
+  .invite-url-row{display:flex;gap:8px}
+  .invite-url-input{flex:1;padding:7px 11px;border-radius:8px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-secondary);font-size:12px;font-family:monospace;outline:none}
+  .btn-copy{background:var(--accent);color:#fff;border:none;padding:7px 13px;border-radius:8px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;white-space:nowrap}
+  .invite-send-row{display:flex;gap:8px;margin-top:8px}
+  .invite-user-input{flex:1;padding:7px 11px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:inherit;outline:none}
+  .invite-user-input:focus{border-color:var(--accent)}
+
+  .empty-tab{padding:24px 0;text-align:center;color:var(--text-tertiary);font-size:14px}
+  .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);margin-bottom:12px}
+
+  @media(max-width:600px){
+    .group-name{font-size:22px}
+    .page{padding:16px 16px 60px}
+    .group-header{padding:0 16px}
+    .group-avatar-wrap{left:16px}
+    .tab-nav{grid-template-columns:1fr}
+    .stats-row{grid-template-columns:repeat(2,1fr)}
+  }
 </style>
 
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet" />
+
+<!-- Top nav -->
 <nav class="topnav">
   <a href="/groups" class="topnav-back">
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -308,122 +359,287 @@ const memberListJson = JSON.stringify(memberList);
     </svg>
     Groups
   </a>
-  <a href="/" class="topnav-logo">
-    <span class="topnav-logo-dot"></span>Chekpoint
-  </a>
+  <a href="/" class="topnav-logo"><span class="topnav-logo-dot"></span>Chekpoint</a>
 </nav>
 
-<div class="group-page">
-  <!-- Header -->
-  <div class="group-hero">
-    <div class="group-avatar-lg">
-      {group.avatar_url ? <img src={group.avatar_url} alt={group.name} /> : getInitials(group.name)}
+<!-- Banner -->
+<div class="group-banner" id="groupBanner" style={bannerStyle}>
+  {!group.banner_url && <div class="banner-glow"></div>}
+  {!group.banner_url && <div class="banner-glow2"></div>}
+  <button class="banner-edit-btn" onclick="document.getElementById('bannerInput').click()">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+    Change banner
+  </button>
+  <div id="bannerUploading" style="display:none;position:absolute;inset:0;background:rgba(0,0,0,.5);align-items:center;justify-content:center;gap:10px;z-index:3">
+    <div class="spinner" style="width:20px;height:20px"></div>
+    <span style="font-size:13px;color:white;font-weight:500">Uploading…</span>
+  </div>
+  <input type="file" id="bannerInput" accept="image/jpeg,image/png,image/webp" style="display:none" />
+</div>
+
+<!-- Group header -->
+<div class="group-header">
+  <div class="group-avatar-wrap">
+    <div class="group-avatar-container" id="avatarContainer">
+      <div class="group-avatar-sq" id="avatarEl">
+        {group.avatar_url
+          ? <img src={group.avatar_url} alt={group.name} id="avatarImg" />
+          : <span>{getInitials(group.name)}</span>
+        }
+      </div>
+      <div class="group-avatar-edit" id="avatarOverlay" onclick="document.getElementById('avatarInput').click()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        <span>Change</span>
+      </div>
+      <div id="avatarUploading" style="display:none;position:absolute;inset:0;border-radius:20px;background:rgba(0,0,0,.7);align-items:center;justify-content:center">
+        <div class="spinner"></div>
+      </div>
+      <input type="file" id="avatarInput" accept="image/jpeg,image/png,image/webp" style="display:none" />
     </div>
-    <div class="group-hero-info">
-      <h1 class="group-hero-name">{group.name}</h1>
-      {group.description && <p class="group-hero-desc">{group.description}</p>}
-      <div class="group-hero-meta">
-        <span class="badge">{memberList.length} member{memberList.length !== 1 ? "s" : ""}</span>
+  </div>
+
+  <div class="group-info-row">
+    <div class="group-left">
+      <h1 class="group-name">{group.name}</h1>
+      {group.description && <p class="group-desc">{group.description}</p>}
+      <div class="group-meta-badges">
         <span class="badge">{group.visibility}</span>
         {membership && <span class="badge badge-accent">{membership.role}</span>}
       </div>
-      <div class="group-hero-actions">
-        {!user && group.visibility === "public" && (
-          <a href="/signin" class="btn-primary">Sign in to join</a>
+      <div class="group-stats-row">
+        <div class="gstat">
+          <span class="gstat-val">{memberList.length}</span>
+          <span class="gstat-lbl">Members</span>
+        </div>
+        <div class="gstat">
+          <span class="gstat-val">{(sessionsData ?? []).length}</span>
+          <span class="gstat-lbl">Sessions</span>
+        </div>
+        {groupAvgScore && (
+          <div class="gstat">
+            <span class="gstat-val">{groupAvgScore}</span>
+            <span class="gstat-lbl">Avg score</span>
+          </div>
         )}
-        {user && !isMember && group.visibility === "public" && (
-          <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
-        )}
-        {user && !isMember && joinCode && (
-          <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
-        )}
-        {isMember && isAdminOrOwner && (
-          <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
-        )}
-        {isMember && !isOwner && (
-          <button class="btn-ghost" id="leave-btn" onclick="leaveGroup()">Leave</button>
-        )}
+        <div class="gstat">
+          <span class="gstat-val">{(watchlistData ?? []).length}</span>
+          <span class="gstat-lbl">Want to play</span>
+        </div>
+        <div class="group-since">Since {createdDate}</div>
       </div>
     </div>
-  </div>
 
-  <!-- Tabs -->
-  <div class="tab-bar">
-    {[
-      { key: "overview", label: "Overview" },
-      { key: "compare", label: "Score Compare" },
-      { key: "watchlist", label: `Watchlist (${(watchlistData ?? []).length})` },
-      { key: "sessions", label: `Sessions (${(sessionsData ?? []).length})` },
-      { key: "members", label: `Members (${memberList.length})` },
-    ].map(t => (
-      <button
-        class={`tab-btn${activeTab === t.key ? " active" : ""}`}
-        data-tab={t.key}
-        onclick={`switchTab('${t.key}')`}
-      >{t.label}</button>
-    ))}
+    <div class="group-actions">
+      {!user && group.visibility === "public" && (
+        <a href="/signin" class="btn-primary">Sign in to join</a>
+      )}
+      {user && !isMember && group.visibility === "public" && (
+        <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
+      )}
+      {user && !isMember && joinCode && (
+        <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
+      )}
+      {isMember && isAdminOrOwner && (
+        <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
+      )}
+      {isMember && !isOwner && (
+        <button class="btn-ghost" id="leave-btn" onclick="leaveGroup()">Leave</button>
+      )}
+    </div>
   </div>
+</div>
+
+<!-- Main content -->
+<div class="page">
+
+  <nav class="tab-nav">
+    <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>
+      <div class="tab-icon">
+        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2" width="6" height="6" rx="1.5"/><rect x="10" y="2" width="6" height="6" rx="1.5"/>
+          <rect x="2" y="10" width="6" height="6" rx="1.5"/><rect x="10" y="10" width="6" height="6" rx="1.5"/>
+        </svg>
+      </div>
+      <div class="tab-label">Overview</div>
+      <div class="tab-meta">Stats &amp; activity</div>
+    </a>
+    <a href={`/groups/${group.id}?tab=compare`} class={`tab-link${activeTab === "compare" ? " active" : ""}`}>
+      {sharedGames.length > 0 && <span class="tab-badge">{sharedGames.length}</span>}
+      <div class="tab-icon">
+        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 14l4-5 3 3 3-4 4 6"/>
+        </svg>
+      </div>
+      <div class="tab-label">Score Compare</div>
+      <div class="tab-meta">{sharedGames.length} shared games</div>
+    </a>
+    <a href={`/groups/${group.id}?tab=sessions`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
+      {(sessionsData ?? []).length > 0 && <span class="tab-badge">{(sessionsData ?? []).length}</span>}
+      <div class="tab-icon">
+        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="14" height="13" rx="2"/><path d="M6 1v4M12 1v4M2 8h14"/>
+        </svg>
+      </div>
+      <div class="tab-label">Sessions</div>
+      <div class="tab-meta">{(sessionsData ?? []).length} game nights</div>
+    </a>
+  </nav>
 
   <!-- Overview tab -->
   <div class={`tab-panel${activeTab === "overview" ? " active" : ""}`} id="tab-overview">
-    <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-val">{memberList.length}</div>
-        <div class="stat-lbl">Members</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-val">{(activityReviews ?? []).length}</div>
-        <div class="stat-lbl">Reviews</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-val">{groupAvgScore ?? "—"}</div>
-        <div class="stat-lbl">Avg Score</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-val">{(sessionsData ?? []).length}</div>
-        <div class="stat-lbl">Sessions</div>
-      </div>
-    </div>
+    <div class="two-col">
+      <!-- Left: stats + top games -->
+      <div>
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-val">{memberList.length}</div>
+            <div class="stat-lbl">Members</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val">{(activityReviews ?? []).length}</div>
+            <div class="stat-lbl">Reviews</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val">{groupAvgScore ?? "—"}</div>
+            <div class="stat-lbl">Avg Score</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val">{(sessionsData ?? []).length}</div>
+            <div class="stat-lbl">Sessions</div>
+          </div>
+        </div>
 
-    {topGames.length > 0 && (
-      <div class="section-block">
-        <div class="section-title">Most Played by Group</div>
-        <div class="games-grid">
-          {topGames.map((g: any) => (
-            <a class="game-thumb" href={`/games/${g.game.slug}`} title={g.game.title}>
-              {igdbCover(g.game.cover_img_url)
-                ? <img src={igdbCover(g.game.cover_img_url, "t_cover_small")!} alt={g.game.title} loading="lazy" />
-                : <div class="game-thumb-placeholder">{g.game.title}</div>
-              }
-              <span class="game-count-badge">{g.count}</span>
-            </a>
+        {topGames.length > 0 && (
+          <div>
+            <div class="section-title">Most Played by Group</div>
+            <div class="games-grid">
+              {topGames.map((g: any) => (
+                <a class="game-thumb" href={`/games/${g.game.slug}`} title={g.game.title}>
+                  {igdbCover(g.game.cover_img_url)
+                    ? <img src={igdbCover(g.game.cover_img_url, "t_cover_small")!} alt={g.game.title} loading="lazy" />
+                    : <div class="game-thumb-placeholder">{g.game.title}</div>
+                  }
+                  <span class="game-count-badge">{g.count}</span>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {topGames.length === 0 && (activityReviews ?? []).length === 0 && (
+          <div class="empty-tab">No activity yet — members need to log reviews or sessions.</div>
+        )}
+      </div>
+
+      <!-- Right sidebar -->
+      <div class="sidebar">
+        <!-- Recent reviews -->
+        {(activityReviews ?? []).length > 0 && (
+          <div class="card">
+            <div class="card-title">Recent Reviews</div>
+            {(activityReviews ?? []).slice(0, 8).map((r: any) => (
+              <div class="activity-item">
+                <a href={`/games/${r.games?.slug}`} class="mini-cover">
+                  {igdbCover(r.games?.cover_img_url, "t_thumb")
+                    ? <img src={igdbCover(r.games?.cover_img_url, "t_thumb")!} alt={r.games?.title} loading="lazy" />
+                    : <span style="font-size:14px">🎮</span>
+                  }
+                </a>
+                <div style="flex:1;min-width:0">
+                  <a href={`/reviewers/${r.profiles?.username}`} style="font-size:12px;font-weight:600;color:inherit">@{r.profiles?.username}</a>
+                  <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
+                    <a href={`/games/${r.games?.slug}`} style="color:inherit">{r.games?.title}</a>
+                  </div>
+                  <div style="font-size:11px;color:var(--text-tertiary)">{timeAgo(r.published_at)}</div>
+                </div>
+                <div class={`mini-score ${scoreClass(r.score)}`}>{r.score}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <!-- Want to Play -->
+        <div class="card">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Want to Play</span>
+            {isMember && (
+              <button onclick="openWatchlistSearch()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ Add</button>
+            )}
+          </div>
+          <div id="wl-search-box" style="display:none;margin-bottom:10px">
+            <div style="display:flex;gap:6px">
+              <input id="wl-game-input" class="invite-user-input" style="font-size:12px;padding:6px 10px" type="text" placeholder="Search for a game…" autocomplete="off" />
+              <button class="btn-copy" style="font-size:11px;padding:6px 10px" onclick="searchWatchlistGame()">Go</button>
+            </div>
+            <div id="wl-search-results" style="margin-top:6px;display:flex;flex-direction:column;gap:4px;"></div>
+          </div>
+          {(watchlistData ?? []).length === 0
+            ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No games added yet.</div>
+            : (watchlistData ?? []).slice(0, 8).map((w: any) => (
+              <div class="wl-item" data-wl-id={w.id} data-game-id={w.game_id}>
+                {igdbCover(w.games?.cover_img_url, "t_thumb")
+                  ? <img class="wl-cover" src={igdbCover(w.games?.cover_img_url, "t_thumb")!} alt={w.games?.title} loading="lazy" />
+                  : <div class="wl-cover" />
+                }
+                <a class="wl-title" href={`/games/${w.games?.slug}`} style="color:inherit;text-decoration:none">{w.games?.title}</a>
+                {isMember && (
+                  <button class="wl-remove" title="Remove" onclick={`removeFromWatchlist('${w.game_id}')`}>×</button>
+                )}
+              </div>
+            ))
+          }
+          {(watchlistData ?? []).length > 8 && (
+            <div style="font-size:12px;color:var(--text-tertiary);padding-top:8px;text-align:center">+{(watchlistData ?? []).length - 8} more</div>
+          )}
+        </div>
+
+        <!-- Members -->
+        <div class="card">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Members</span>
+            {isAdminOrOwner && group.invite_code && (
+              <button onclick="openInvitePanel()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ Invite</button>
+            )}
+          </div>
+
+          {isAdminOrOwner && group.invite_code && (
+            <div id="invite-panel" style="display:none;margin-bottom:12px">
+              <div class="invite-url-row">
+                <input class="invite-url-input" id="invite-url-field" type="text" readonly value={inviteUrl ?? ""} />
+                <button class="btn-copy" onclick="copyInvite()" style="font-size:11px;padding:6px 10px">Copy</button>
+              </div>
+              <div class="invite-send-row">
+                <input id="invite-username-input" class="invite-user-input" style="font-size:12px;padding:6px 10px" type="text" placeholder="@username" />
+                <button class="btn-copy" onclick="sendInvite()" style="background:var(--tag-bg);color:var(--text-secondary);font-size:11px;padding:6px 10px">Send</button>
+              </div>
+              <div id="invite-msg" style="font-size:11px;color:var(--text-tertiary);margin-top:5px;"></div>
+            </div>
+          )}
+
+          {memberList.map((m: any) => (
+            <div class="member-item" data-profile-id={m.id}>
+              <div class="member-avatar">
+                {m.avatar_url
+                  ? <img src={m.avatar_url} alt={m.username} />
+                  : getInitials(m.username)
+                }
+              </div>
+              <a class="member-name" href={`/reviewers/${m.username}`} style="color:inherit;text-decoration:none">@{m.username}</a>
+              <span class={`member-role-tag${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
+              {isAdminOrOwner && currentProfile && m.id !== currentProfile.id && m.role !== "owner" && (
+                <div class="member-actions-row">
+                  {isOwner && (
+                    <button class="btn-xs btn-xs-ghost" onclick={`updateRole('${m.id}','${m.role === "admin" ? "member" : "admin"}')`}>
+                      {m.role === "admin" ? "Demote" : "Admin"}
+                    </button>
+                  )}
+                  <button class="btn-xs btn-xs-danger" onclick={`removeMember('${m.id}')`}>Remove</button>
+                </div>
+              )}
+            </div>
           ))}
         </div>
       </div>
-    )}
-
-    <div class="section-block">
-      <div class="section-title">Recent Activity</div>
-      {(activityReviews ?? []).length === 0
-        ? <div class="empty-tab">No reviews yet from group members.</div>
-        : (activityReviews ?? []).map((r: any) => (
-          <div class="activity-item">
-            {igdbCover(r.games?.cover_img_url, "t_thumb")
-              ? <img class="activity-cover" src={igdbCover(r.games?.cover_img_url, "t_thumb")!} alt={r.games?.title} loading="lazy" />
-              : <div class="activity-cover" />
-            }
-            <div class="activity-body">
-              <div class="activity-user">
-                <a href={`/reviewers/${r.profiles?.username}`} style="color:inherit">@{r.profiles?.username}</a>
-                <span class="activity-game"> reviewed </span>
-                <a href={`/games/${r.games?.slug}`} style="color:inherit;font-weight:500">{r.games?.title}</a>
-              </div>
-              <div class="activity-time">{timeAgo(r.published_at)}</div>
-            </div>
-            <div class={`score-badge ${scoreClass(r.score)}`}>{r.score}</div>
-          </div>
-        ))
-      }
     </div>
   </div>
 
@@ -454,7 +670,7 @@ const memberListJson = JSON.stringify(memberList);
                       <span class="compare-username">@{m.username}</span>
                       {rev
                         ? <div class={`score-badge ${scoreClass(rev.score)}`}>{rev.score}</div>
-                        : <span class="no-review">—</span>
+                        : <span style="font-size:12px;color:var(--text-tertiary);font-style:italic">—</span>
                       }
                     </div>
                   );
@@ -466,47 +682,10 @@ const memberListJson = JSON.stringify(memberList);
     }
   </div>
 
-  <!-- Watchlist tab -->
-  <div class={`tab-panel${activeTab === "watchlist" ? " active" : ""}`} id="tab-watchlist">
-    {isMember && (
-      <div style="margin-bottom:20px">
-        <div class="invite-box">
-          <div class="invite-box-title">Add a game</div>
-          <div class="invite-url-row">
-            <input id="wl-game-input" class="invite-user-input" type="text" placeholder="Search for a game…" autocomplete="off" />
-            <button class="btn-copy" onclick="searchWatchlistGame()">Search</button>
-          </div>
-          <div id="wl-search-results" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
-        </div>
-      </div>
-    )}
-    {(watchlistData ?? []).length === 0
-      ? <div class="empty-tab">No games on the group watchlist yet.</div>
-      : (watchlistData ?? []).map((w: any) => (
-          <div class="watchlist-item" data-wl-id={w.id} data-game-id={w.game_id}>
-            {igdbCover(w.games?.cover_img_url, "t_thumb")
-              ? <img class="wl-cover" src={igdbCover(w.games?.cover_img_url, "t_thumb")!} alt={w.games?.title} loading="lazy" />
-              : <div class="wl-cover" />
-            }
-            <div class="wl-info">
-              <div class="wl-title">
-                <a href={`/games/${w.games?.slug}`} style="color:inherit">{w.games?.title}</a>
-              </div>
-              <div class="wl-meta">Added by @{w.added_by_profile?.username}</div>
-              {w.notes && <div class="wl-meta" style="margin-top:2px;font-style:italic">{w.notes}</div>}
-            </div>
-            {isMember && (
-              <button class="wl-remove" title="Remove" onclick={`removeFromWatchlist('${w.game_id}')`}>×</button>
-            )}
-          </div>
-        ))
-    }
-  </div>
-
   <!-- Sessions tab -->
   <div class={`tab-panel${activeTab === "sessions" ? " active" : ""}`} id="tab-sessions">
     {isMember && (
-      <div class="log-form" id="log-session-form">
+      <div class="log-form">
         <div class="log-form-title">Log a Game Night</div>
         <div class="log-row">
           <input id="session-game-input" class="log-input" type="text" placeholder="Game name…" />
@@ -548,7 +727,7 @@ const memberListJson = JSON.stringify(memberList);
                   <div class="session-date">{new Date(s.played_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</div>
                 </div>
                 {isMember && (
-                  <button class="session-delete" title="Delete session" onclick={`deleteSession('${s.id}')`}>Delete</button>
+                  <button class="session-delete" onclick={`deleteSession('${s.id}')`}>Delete</button>
                 )}
               </div>
               {s.notes && <div class="session-notes">{s.notes}</div>}
@@ -561,72 +740,60 @@ const memberListJson = JSON.stringify(memberList);
     }
   </div>
 
-  <!-- Members tab -->
-  <div class={`tab-panel${activeTab === "members" ? " active" : ""}`} id="tab-members">
-    {isAdminOrOwner && group.invite_code && (
-      <div class="invite-box">
-        <div class="invite-box-title">Invite Link</div>
-        <div class="invite-url-row">
-          <input class="invite-url-input" id="invite-url-field" type="text" readonly value={inviteUrl ?? ""} />
-          <button class="btn-copy" onclick="copyInvite()">Copy</button>
-        </div>
-        <div class="invite-send-row" style="margin-top:12px">
-          <input id="invite-username-input" class="invite-user-input" type="text" placeholder="@username to invite directly" />
-          <button class="btn-copy" onclick="sendInvite()" style="background:var(--tag-bg);color:var(--text-secondary)">Invite</button>
-        </div>
-        <div id="invite-msg" style="font-size:12px;color:var(--text-tertiary);margin-top:6px;"></div>
-      </div>
-    )}
-
-    {memberList.map((m: any) => (
-      <div class="member-item" data-profile-id={m.id}>
-        <div class="member-avatar">
-          {m.avatar_url
-            ? <img src={m.avatar_url} alt={m.username} />
-            : getInitials(m.username)
-          }
-        </div>
-        <a class="member-name" href={`/reviewers/${m.username}`} style="color:inherit">@{m.username}</a>
-        <span class={`member-role${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
-        {isAdminOrOwner && currentProfile && m.id !== currentProfile.id && m.role !== "owner" && (
-          <div class="member-actions">
-            {isOwner && (
-              <button
-                class="btn-xs btn-xs-ghost"
-                onclick={`updateRole('${m.id}', '${m.role === "admin" ? "member" : "admin"}')`}
-              >{m.role === "admin" ? "Demote" : "Make Admin"}</button>
-            )}
-            <button class="btn-xs btn-xs-danger" onclick={`removeMember('${m.id}')`}>Remove</button>
-          </div>
-        )}
-      </div>
-    ))}
-  </div>
 </div>
-</div>
-</Layout>
 
-<script define:vars={{ groupDataJson, memberListJson, inviteUrl }}>
+<script define:vars={{ groupDataJson, memberListJson, inviteUrl, isAdminOrOwner, groupId: group.id }}>
 const groupData = JSON.parse(groupDataJson);
 const memberList = JSON.parse(memberListJson);
 
-function switchTab(key) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === key));
-  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `tab-${key}`));
-  const url = new URL(window.location.href);
-  url.searchParams.set('tab', key);
-  history.replaceState(null, '', url.toString());
-}
-window.switchTab = switchTab;
+// Mark body for admin-only CSS (banner/avatar edit buttons)
+if (isAdminOrOwner) document.body.classList.add('group-admin');
 
+// ── Avatar upload ──
+document.getElementById('avatarInput')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const uploading = document.getElementById('avatarUploading');
+  if (uploading) { uploading.style.display = 'flex'; }
+  const form = new FormData();
+  form.append('avatar', file);
+  form.append('group_id', groupId);
+  const res = await fetch('/api/groups/avatar', { method: 'POST', body: form });
+  if (uploading) { uploading.style.display = 'none'; }
+  if (res.ok) {
+    const data = await res.json();
+    const el = document.getElementById('avatarEl');
+    if (el) el.innerHTML = `<img id="avatarImg" src="${data.url}" alt="" style="width:100%;height:100%;object-fit:cover" />`;
+  }
+});
+
+// ── Banner upload ──
+document.getElementById('bannerInput')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const uploading = document.getElementById('bannerUploading');
+  if (uploading) { uploading.style.display = 'flex'; }
+  const form = new FormData();
+  form.append('banner', file);
+  form.append('group_id', groupId);
+  const res = await fetch('/api/groups/banner', { method: 'POST', body: form });
+  if (uploading) { uploading.style.display = 'none'; }
+  if (res.ok) {
+    const data = await res.json();
+    const banner = document.getElementById('groupBanner');
+    if (banner) {
+      banner.style.backgroundImage = `url('${data.url}')`;
+      banner.style.backgroundSize = 'cover';
+      banner.style.backgroundPosition = 'center';
+    }
+  }
+});
+
+// ── Join / Leave ──
 async function joinGroup() {
   const btn = document.getElementById('join-btn');
   if (btn) btn.disabled = true;
-  const res = await fetch('/api/groups/join', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id }),
-  });
+  const res = await fetch('/api/groups/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id }) });
   if (res.ok) window.location.reload();
   else { const d = await res.json(); alert(d.error ?? 'Could not join'); if (btn) btn.disabled = false; }
 }
@@ -635,13 +802,8 @@ window.joinGroup = joinGroup;
 async function joinGroupByCode() {
   const btn = document.getElementById('join-btn');
   if (btn) btn.disabled = true;
-  const params = new URLSearchParams(window.location.search);
-  const code = params.get('code');
-  const res = await fetch('/api/groups/join', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ invite_code: code }),
-  });
+  const code = new URLSearchParams(window.location.search).get('code');
+  const res = await fetch('/api/groups/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ invite_code: code }) });
   if (res.ok) window.location.href = `/groups/${groupData.id}`;
   else { const d = await res.json(); alert(d.error ?? 'Could not join'); if (btn) btn.disabled = false; }
 }
@@ -649,15 +811,18 @@ window.joinGroupByCode = joinGroupByCode;
 
 async function leaveGroup() {
   if (!confirm('Leave this group?')) return;
-  const res = await fetch('/api/groups/leave', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id }),
-  });
+  const res = await fetch('/api/groups/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id }) });
   if (res.ok) window.location.href = '/groups';
   else { const d = await res.json(); alert(d.error ?? 'Could not leave'); }
 }
 window.leaveGroup = leaveGroup;
+
+// ── Invite panel ──
+function openInvitePanel() {
+  const panel = document.getElementById('invite-panel');
+  if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+window.openInvitePanel = openInvitePanel;
 
 function copyInvite() {
   const field = document.getElementById('invite-url-field');
@@ -674,11 +839,7 @@ async function sendInvite() {
   const msg = document.getElementById('invite-msg');
   const username = input.value.trim().replace(/^@/, '');
   if (!username) return;
-  const res = await fetch('/api/groups/invite/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, invited_username: username }),
-  });
+  const res = await fetch('/api/groups/invite/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, invited_username: username }) });
   const data = await res.json();
   msg.textContent = res.ok ? `Invite sent to @${data.username}` : (data.error ?? 'Error');
   msg.style.color = res.ok ? 'var(--score-great)' : '#f87171';
@@ -686,40 +847,29 @@ async function sendInvite() {
 }
 window.sendInvite = sendInvite;
 
+// ── Member management ──
 async function removeMember(profileId) {
   if (!confirm('Remove this member?')) return;
-  const res = await fetch('/api/groups/members/remove', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, target_profile_id: profileId }),
-  });
+  const res = await fetch('/api/groups/members/remove', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, target_profile_id: profileId }) });
   if (res.ok) document.querySelector(`[data-profile-id="${profileId}"]`)?.remove();
   else { const d = await res.json(); alert(d.error ?? 'Error'); }
 }
 window.removeMember = removeMember;
 
 async function updateRole(profileId, role) {
-  const res = await fetch('/api/groups/members/update-role', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, target_profile_id: profileId, role }),
-  });
+  const res = await fetch('/api/groups/members/update-role', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, target_profile_id: profileId, role }) });
   if (res.ok) window.location.reload();
   else { const d = await res.json(); alert(d.error ?? 'Error'); }
 }
 window.updateRole = updateRole;
 
-async function removeFromWatchlist(gameId) {
-  const res = await fetch('/api/groups/watchlist/toggle', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, game_id: gameId }),
-  });
-  if (res.ok) document.querySelector(`[data-game-id="${gameId}"]`)?.remove();
+// ── Want to Play ──
+function openWatchlistSearch() {
+  const box = document.getElementById('wl-search-box');
+  if (box) { box.style.display = box.style.display === 'none' ? 'block' : 'none'; }
 }
-window.removeFromWatchlist = removeFromWatchlist;
+window.openWatchlistSearch = openWatchlistSearch;
 
-let wlSearchTimeout;
 async function searchWatchlistGame() {
   const input = document.getElementById('wl-game-input');
   const q = input.value.trim();
@@ -731,14 +881,10 @@ async function searchWatchlistGame() {
   container.innerHTML = '';
   (data.games ?? data ?? []).slice(0, 5).forEach(g => {
     const btn = document.createElement('button');
-    btn.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;text-align:left;font-family:inherit;font-size:13px;color:var(--text-primary);width:100%';
+    btn.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;text-align:left;font-family:inherit;font-size:12px;color:var(--text-primary);width:100%';
     btn.textContent = g.title ?? g.name;
     btn.onclick = async () => {
-      await fetch('/api/groups/watchlist/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ group_id: groupData.id, game_id: g.id }),
-      });
+      await fetch('/api/groups/watchlist/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, game_id: g.id }) });
       window.location.reload();
     };
     container.appendChild(btn);
@@ -747,9 +893,14 @@ async function searchWatchlistGame() {
 window.searchWatchlistGame = searchWatchlistGame;
 document.getElementById('wl-game-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') searchWatchlistGame(); });
 
-function toggleAttendee(btn) {
-  btn.classList.toggle('selected');
+async function removeFromWatchlist(gameId) {
+  const res = await fetch('/api/groups/watchlist/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, game_id: gameId }) });
+  if (res.ok) document.querySelector(`[data-game-id="${gameId}"]`)?.remove();
 }
+window.removeFromWatchlist = removeFromWatchlist;
+
+// ── Sessions ──
+function toggleAttendee(btn) { btn.classList.toggle('selected'); }
 window.toggleAttendee = toggleAttendee;
 
 let sessionGameId = null;
@@ -784,13 +935,8 @@ async function logSession() {
   const notes = document.getElementById('session-notes')?.value;
   if (!gameId) { alert('Please select a game'); return; }
   if (!date) { alert('Please pick a date'); return; }
-  const attendeeIds = Array.from(document.querySelectorAll('.attendee-toggle.selected'))
-    .map(b => b.dataset.profileId);
-  const res = await fetch('/api/groups/sessions/create', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, game_id: gameId, played_at: date, notes, attendee_ids: attendeeIds }),
-  });
+  const attendeeIds = Array.from(document.querySelectorAll('.attendee-toggle.selected')).map(b => b.dataset.profileId);
+  const res = await fetch('/api/groups/sessions/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, game_id: gameId, played_at: date, notes, attendee_ids: attendeeIds }) });
   if (res.ok) window.location.reload();
   else { const d = await res.json(); alert(d.error ?? 'Error logging session'); }
 }
@@ -798,13 +944,10 @@ window.logSession = logSession;
 
 async function deleteSession(sessionId) {
   if (!confirm('Delete this session?')) return;
-  const res = await fetch('/api/groups/sessions/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId }),
-  });
+  const res = await fetch('/api/groups/sessions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }) });
   if (res.ok) document.querySelector(`[data-session-id="${sessionId}"]`)?.remove();
   else { const d = await res.json(); alert(d.error ?? 'Error'); }
 }
 window.deleteSession = deleteSession;
 </script>
+</Layout>
