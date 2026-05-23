@@ -49,7 +49,7 @@ export const POST: APIRoute = async (context) => {
 
   const { error: uploadError } = await supabase.storage
     .from('banners')
-    .upload(path, file, { contentType: file.type });
+    .upload(path, file, { contentType: file.type, upsert: true });
 
   if (uploadError) {
     return new Response(JSON.stringify({ error: uploadError.message }), {
