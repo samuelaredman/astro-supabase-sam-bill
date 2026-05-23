@@ -1,20 +1,24 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from "../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../utils/database";
 import Layout from "../components/Layout.astro";
 
+// User client — only for session check
 const serverClient = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await serverClient.auth.getUser();
 
 if (!user) return Astro.redirect('/signin');
 
-const { data: profile } = await serverClient
+// Admin client — bypasses RLS for all DB operations
+const db = getSupabaseAdmin() as any;
+
+const { data: profile } = await db
   .from('profiles').select('id').eq('auth_user_id', user.id).single();
 
 if (!profile) return Astro.redirect('/signin');
 
 // Fetch last 50 notifications with joined data
-const { data: rawNotifs } = await serverClient
+const { data: rawNotifs } = await db
   .from('notifications')
   .select(`
     id, type, read, created_at,
@@ -33,7 +37,7 @@ const notifications = rawNotifs ?? [];
 const hasUnread = notifications.some((n: any) => !n.read);
 
 // Mark all unread as read now that the user is viewing the page
-await serverClient.from('notifications')
+await db.from('notifications')
   .update({ read: true })
   .eq('profile_id', profile.id)
   .eq('read', false);
