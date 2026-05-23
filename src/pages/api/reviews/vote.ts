@@ -23,7 +23,7 @@ export const POST: APIRoute = async (context) => {
   // Check for existing vote
   const { data: existing } = await db
     .from('review_votes')
-    .select('id, vote')
+    .select('vote')
     .eq('profile_id', profile.id)
     .eq('review_id', review_id)
     .maybeSingle();
@@ -33,12 +33,20 @@ export const POST: APIRoute = async (context) => {
   if (existing) {
     if (existing.vote === vote) {
       // Same vote — toggle off (delete)
-      const { error } = await db.from('review_votes').delete().eq('id', existing.id);
+      const { error } = await db
+        .from('review_votes')
+        .delete()
+        .eq('profile_id', profile.id)
+        .eq('review_id', review_id);
       if (error) return json({ error: "Failed to remove vote." }, 500);
       newVote = null;
     } else {
       // Different vote — switch it
-      const { error } = await db.from('review_votes').update({ vote }).eq('id', existing.id);
+      const { error } = await db
+        .from('review_votes')
+        .update({ vote })
+        .eq('profile_id', profile.id)
+        .eq('review_id', review_id);
       if (error) return json({ error: "Failed to update vote." }, 500);
       newVote = vote;
     }
