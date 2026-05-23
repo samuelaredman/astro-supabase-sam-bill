@@ -1,5 +1,5 @@
 ---
-import { getSupabase, createSupabaseServerClientFromContext } from '../utils/database'
+import { getSupabase, createSupabaseServerClientFromContext, getSupabaseAdmin } from '../utils/database'
 import { igdbFetch } from '../utils/igdb'
 import Layout from '../components/Layout.astro'
 
@@ -32,6 +32,9 @@ if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData()
   const igdbId = parseInt(form.get('igdb_id') as string)
 
+  const db = getSupabaseAdmin() as any
+
+  // Check if already in DB (read — anon client is fine)
   const { data: existing } = await supabase
     .from('games')
     .select('slug')
@@ -58,35 +61,43 @@ if (Astro.request.method === 'POST') {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
 
-  const { data: inserted } = await supabase.from('games').insert({
+  // All writes use admin client to bypass RLS
+  const { data: inserted, error: insertError } = await db.from('games').insert({
     igdb_id: igdbGame.id,
     title: igdbGame.name,
     slug,
     game_description: igdbGame.summary,
-    cover_img_url: igdbGame.cover?.url ?? null,
+    cover_img_url: igdbGame.cover?.url
+      ? `https:${igdbGame.cover.url.replace('t_thumb', 't_cover_big')}`
+      : null,
     date_released: igdbGame.first_release_date
-      ? new Date(igdbGame.first_release_date * 1000).toISOString()
+      ? new Date(igdbGame.first_release_date * 1000).toISOString().split('T')[0]
       : null
   }).select('id').single()
 
+  if (insertError) {
+    console.error('[search import] insert error:', insertError)
+    return Astro.redirect(`/search?tab=games&q=${encodeURIComponent(igdbGame.name)}&error=import_failed`)
+  }
+
   if (inserted) {
     for (const genre of igdbGame.genres ?? []) {
-      await supabase.from('genres').upsert({ igdb_id: genre.id, name: genre.name, slug: genre.slug }, { onConflict: 'igdb_id' })
-      const { data: genreRow } = await supabase.from('genres').select('id').eq('igdb_id', genre.id).single()
-      if (genreRow) await supabase.from('game_genres').upsert({ game_id: inserted.id, genre_id: genreRow.id }, { onConflict: 'game_id,genre_id' })
+      await db.from('genres').upsert({ igdb_id: genre.id, name: genre.name, slug: genre.slug }, { onConflict: 'igdb_id' })
+      const { data: genreRow } = await db.from('genres').select('id').eq('igdb_id', genre.id).single()
+      if (genreRow) await db.from('game_genres').upsert({ game_id: inserted.id, genre_id: genreRow.id }, { onConflict: 'game_id,genre_id' })
     }
     for (const platform of igdbGame.platforms ?? []) {
-      await supabase.from('platforms').upsert({ igdb_id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'igdb_id' })
-      const { data: platformRow } = await supabase.from('platforms').select('id').eq('igdb_id', platform.id).single()
-      if (platformRow) await supabase.from('game_platforms').upsert({ game_id: inserted.id, platform_id: platformRow.id }, { onConflict: 'game_id,platform_id' })
+      await db.from('platforms').upsert({ igdb_id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'igdb_id' })
+      const { data: platformRow } = await db.from('platforms').select('id').eq('igdb_id', platform.id).single()
+      if (platformRow) await db.from('game_platforms').upsert({ game_id: inserted.id, platform_id: platformRow.id }, { onConflict: 'game_id,platform_id' })
     }
     for (const ic of igdbGame.involved_companies ?? []) {
       if (!ic.company) continue
-      await supabase.from('developers').upsert({ igdb_id: ic.company.id, name: ic.company.name, slug: ic.company.slug }, { onConflict: 'igdb_id' })
-      const { data: devRow } = await supabase.from('developers').select('id').eq('igdb_id', ic.company.id).single()
+      await db.from('developers').upsert({ igdb_id: ic.company.id, name: ic.company.name, slug: ic.company.slug }, { onConflict: 'igdb_id' })
+      const { data: devRow } = await db.from('developers').select('id').eq('igdb_id', ic.company.id).single()
       if (devRow) {
         const role = ic.developer ? 'developer' : ic.publisher ? 'publisher' : 'other'
-        await supabase.from('game_companies').upsert({ game_id: inserted.id, company_id: devRow.id, role }, { onConflict: 'game_id,company_id' })
+        await db.from('game_companies').upsert({ game_id: inserted.id, company_id: devRow.id, role }, { onConflict: 'game_id,company_id' })
       }
     }
   }
@@ -548,9 +559,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
               <span class="igdb-label">Not yet in Chekpoint — click to add</span>
               <div class="game-grid">
                 {igdbGames.map((game: any) => (
-                  <form method="POST">
+                  <form method="POST" class="igdb-import-form">
                     <input type="hidden" name="igdb_id" value={game.id} />
-                    <button type="submit" style="width:100%;background:none;border:none;padding:0;cursor:pointer;text-align:left">
+                    <button type="submit" class="igdb-import-btn" style="width:100%;background:none;border:none;padding:0;cursor:pointer;text-align:left">
                       <div class="game-card">
                         <div class="game-cover">
                           {game.cover?.url
@@ -560,7 +571,11 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
                         </div>
                         <div class="game-card-info">
                           <div class="game-card-title">{game.name}</div>
-                          <div class="add-pill">Click to add →</div>
+                          <div class="add-pill import-label">+ Add to Chekpoint</div>
+                        </div>
+                        <div class="import-loading-overlay" aria-hidden="true">
+                          <div class="import-spinner"></div>
+                          <span>Adding…</span>
                         </div>
                       </div>
                     </button>
@@ -773,6 +788,37 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
   .igdb-label { display: inline-flex; align-items: center; gap: 4px; background: var(--tag-bg); color: var(--tag-text); font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 20px; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.3px; }
   .add-pill { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
+  .import-label { color: var(--accent, #7c3aed); font-weight: 600; }
+
+  .igdb-import-form .game-card { position: relative; overflow: hidden; }
+  .igdb-import-btn:hover .game-card { border-color: var(--accent, #7c3aed); }
+
+  .import-loading-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(15,15,15,0.82);
+    backdrop-filter: blur(2px);
+    border-radius: inherit;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .import-loading-overlay.active { display: flex; }
+
+  .import-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(255,255,255,0.2);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   .profile-list { display: flex; flex-direction: column; gap: 2px; }
   .profile-item { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; transition: background 0.15s; }
@@ -799,3 +845,14 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   .genre-chip:hover { background: var(--bg-hover); color: var(--text-primary); }
   .genre-chip.active { background: var(--accent); color: var(--accent-text); }
 </style>
+
+<script>
+  document.querySelectorAll('.igdb-import-form').forEach(function(form) {
+    form.addEventListener('submit', function() {
+      var overlay = form.querySelector('.import-loading-overlay')
+      var btn = form.querySelector('.igdb-import-btn')
+      if (overlay) overlay.classList.add('active')
+      if (btn) btn.disabled = true
+    })
+  })
+</script>
