@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -19,18 +19,21 @@ export const POST: APIRoute = async (context) => {
   if (reviewBody.length > 5000)
     return json({ error: "Review must be at most 5000 characters." }, 400);
 
+  // Admin client — bypasses RLS for ownership check and update
+  const db = getSupabaseAdmin() as any;
+
   // Resolve profile
-  const { data: profile } = await (supabase as any)
+  const { data: profile } = await db
     .from("profiles").select("id").eq("auth_user_id", user.id).single();
   if (!profile) return json({ error: "Profile not found." }, 404);
 
   // Verify ownership
-  const { data: review } = await (supabase as any)
+  const { data: review } = await db
     .from("reviews").select("id, profile_id").eq("id", review_id).maybeSingle();
   if (!review) return json({ error: "Review not found." }, 404);
   if (review.profile_id !== profile.id) return json({ error: "Forbidden." }, 403);
 
-  const { error: updateError } = await (supabase as any)
+  const { error: updateError } = await db
     .from("reviews")
     .update({
       score: parseFloat(score),
