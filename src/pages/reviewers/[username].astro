@@ -2091,6 +2091,43 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   updateIcon(document.documentElement.getAttribute('data-theme') || 'dark')
 
   // ── FOLLOW ──
+  // ── NOTIFY BELL — extracted so it can be attached to both server-rendered
+  //    and dynamically created buttons ──────────────────────────────────────
+  function attachNotifyListener(btn) {
+    btn.addEventListener('click', async function() {
+      var reviewerId = btn.dataset.reviewerId
+      var notifying  = btn.dataset.notifying === 'true'
+      var newNotifying = !notifying
+      // Optimistic
+      btn.dataset.notifying = newNotifying ? 'true' : 'false'
+      btn.classList.toggle('notifying', newNotifying)
+      btn.querySelector('svg').setAttribute('fill', newNotifying ? 'currentColor' : 'none')
+      btn.title = newNotifying ? 'Turn off notifications' : 'Get notified when they post'
+      try {
+        var res = await fetch('/api/follows/notify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ following_id: reviewerId }),
+        })
+        var data = await res.json()
+        if (!res.ok) throw new Error()
+        btn.dataset.notifying = data.notify ? 'true' : 'false'
+        btn.classList.toggle('notifying', data.notify)
+        btn.querySelector('svg').setAttribute('fill', data.notify ? 'currentColor' : 'none')
+        btn.title = data.notify ? 'Turn off notifications' : 'Get notified when they post'
+      } catch(e) {
+        // Revert on failure
+        btn.dataset.notifying = notifying ? 'true' : 'false'
+        btn.classList.toggle('notifying', notifying)
+        btn.querySelector('svg').setAttribute('fill', notifying ? 'currentColor' : 'none')
+      }
+    })
+  }
+
+  // Attach to server-rendered bell (only present when already following on load)
+  var existingNotifyBtn = document.getElementById('notifyBtn')
+  if (existingNotifyBtn) attachNotifyListener(existingNotifyBtn)
+
   var followBtn = document.getElementById('followBtn')
   if (followBtn) {
     followBtn.addEventListener('mouseenter', function() {
@@ -2115,49 +2152,29 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         followBtn.className = 'follow-btn ' + (nowFollowing ? 'following' : 'not-following')
         var countEl = document.getElementById('followerCount')
         if (countEl) countEl.textContent = String(parseInt(countEl.textContent) + (nowFollowing ? 1 : -1))
-        // Show/hide notify button based on follow state
-        var notifyBtn = document.getElementById('notifyBtn')
-        if (notifyBtn) notifyBtn.style.display = nowFollowing ? '' : 'none'
+
+        if (nowFollowing) {
+          // Inject the notify bell — it was never in the DOM since isFollowing was false at render
+          var newNotifyBtn = document.createElement('button')
+          newNotifyBtn.id = 'notifyBtn'
+          newNotifyBtn.className = 'notify-btn'
+          newNotifyBtn.dataset.reviewerId = reviewerId
+          newNotifyBtn.dataset.notifying = 'false'
+          newNotifyBtn.title = 'Get notified when they post'
+          newNotifyBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 6a4.5 4.5 0 0 0-9 0c0 5-2 6.5-2 6.5h13s-2-1.5-2-6.5"/><path d="M10.3 15a1.5 1.5 0 0 1-2.6 0"/></svg>'
+          followBtn.parentNode.appendChild(newNotifyBtn)
+          attachNotifyListener(newNotifyBtn)
+        } else {
+          // Remove the bell when unfollowing
+          var bellBtn = document.getElementById('notifyBtn')
+          if (bellBtn) bellBtn.remove()
+        }
+
         if (typeof gtag === 'function' && nowFollowing) {
           gtag('event', 'follow_user', { reviewer_id: reviewerId });
         }
       }
       followBtn.disabled = false
-    })
-  }
-
-  // ── NOTIFY BELL ──
-  var notifyBtn = document.getElementById('notifyBtn')
-  if (notifyBtn) {
-    notifyBtn.addEventListener('click', async function() {
-      var reviewerId = notifyBtn.dataset.reviewerId
-      var notifying  = notifyBtn.dataset.notifying === 'true'
-      var newNotifying = !notifying
-
-      // Optimistic
-      notifyBtn.dataset.notifying = newNotifying ? 'true' : 'false'
-      notifyBtn.classList.toggle('notifying', newNotifying)
-      notifyBtn.querySelector('svg').setAttribute('fill', newNotifying ? 'currentColor' : 'none')
-      notifyBtn.title = newNotifying ? 'Turn off notifications' : 'Get notified when they post'
-
-      try {
-        var res = await fetch('/api/follows/notify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ following_id: reviewerId }),
-        })
-        var data = await res.json()
-        if (!res.ok) throw new Error()
-        notifyBtn.dataset.notifying = data.notify ? 'true' : 'false'
-        notifyBtn.classList.toggle('notifying', data.notify)
-        notifyBtn.querySelector('svg').setAttribute('fill', data.notify ? 'currentColor' : 'none')
-        notifyBtn.title = data.notify ? 'Turn off notifications' : 'Get notified when they post'
-      } catch(e) {
-        // Revert
-        notifyBtn.dataset.notifying = notifying ? 'true' : 'false'
-        notifyBtn.classList.toggle('notifying', notifying)
-        notifyBtn.querySelector('svg').setAttribute('fill', notifying ? 'currentColor' : 'none')
-      }
     })
   }
 
