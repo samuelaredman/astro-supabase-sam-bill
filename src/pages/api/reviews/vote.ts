@@ -38,7 +38,10 @@ export const POST: APIRoute = async (context) => {
         .delete()
         .eq('profile_id', profile.id)
         .eq('review_id', review_id);
-      if (error) return json({ error: "Failed to remove vote." }, 500);
+      if (error) {
+        console.error('[vote] delete error:', JSON.stringify(error));
+        return json({ error: "Failed to remove vote.", detail: error.message, code: error.code }, 500);
+      }
       newVote = null;
     } else {
       // Different vote — switch it
@@ -47,13 +50,19 @@ export const POST: APIRoute = async (context) => {
         .update({ vote })
         .eq('profile_id', profile.id)
         .eq('review_id', review_id);
-      if (error) return json({ error: "Failed to update vote." }, 500);
+      if (error) {
+        console.error('[vote] update error:', JSON.stringify(error));
+        return json({ error: "Failed to update vote.", detail: error.message, code: error.code }, 500);
+      }
       newVote = vote;
     }
   } else {
     // No existing vote — insert
     const { error } = await db.from('review_votes').insert({ profile_id: profile.id, review_id, vote });
-    if (error) return json({ error: "Failed to save vote." }, 500);
+    if (error) {
+      console.error('[vote] insert error:', JSON.stringify(error));
+      return json({ error: "Failed to save vote.", detail: error.message, code: error.code }, 500);
+    }
     newVote = vote;
   }
 
