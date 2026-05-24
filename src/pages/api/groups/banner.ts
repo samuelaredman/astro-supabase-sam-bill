@@ -11,7 +11,7 @@ export const POST: APIRoute = async (context) => {
   const file = form.get('banner') as File;
   const groupId = form.get('group_id') as string;
   if (!file || !groupId) return json({ error: 'Missing file or group_id' }, 400);
-  if (file.size > 6 * 1024 * 1024) return json({ error: 'File must be under 6MB' }, 400);
+  if (file.size > 15 * 1024 * 1024) return json({ error: 'File must be under 15MB' }, 400);
   if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type)) {
     return json({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }, 400);
   }

@@ -20,8 +20,8 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  if (file.size > 6 * 1024 * 1024) {
-    return new Response(JSON.stringify({ error: 'File must be under 6MB' }), {
+  if (file.size > 15 * 1024 * 1024) {
+    return new Response(JSON.stringify({ error: 'File must be under 15MB' }), {
       status: 400, headers: { 'Content-Type': 'application/json' }
     });
   }
