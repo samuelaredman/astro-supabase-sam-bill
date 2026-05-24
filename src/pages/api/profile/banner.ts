@@ -1,85 +1,62 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
-import { createSupabaseServerClientFromContext } from '../../../utils/database';
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
+  const userClient = createSupabaseServerClientFromContext(context);
+  const { data: { user }, error: authError } = await userClient.auth.getUser();
+  if (!user) return json({ error: 'Unauthorized', detail: authError?.message }, 401);
 
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
-  if (!user) {
-    return new Response(JSON.stringify({ error: 'Unauthorized', detail: authError?.message }), {
-      status: 401, headers: { 'Content-Type': 'application/json' }
-    });
+  let form: FormData;
+  try {
+    form = await context.request.formData();
+  } catch {
+    return json({ error: 'Invalid request body' }, 400);
   }
 
-  const form = await context.request.formData();
   const file = form.get('banner') as File;
-  if (!file) {
-    return new Response(JSON.stringify({ error: 'No file provided' }), {
-      status: 400, headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  if (file.size > 15 * 1024 * 1024) {
-    return new Response(JSON.stringify({ error: 'File must be under 15MB' }), {
-      status: 400, headers: { 'Content-Type': 'application/json' }
-    });
-  }
+  if (!file) return json({ error: 'No file provided' }, 400);
+  if (file.size > 15 * 1024 * 1024) return json({ error: 'File must be under 15MB' }, 400);
 
   const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-  if (!allowed.includes(file.type)) {
-    return new Response(JSON.stringify({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }), {
-      status: 400, headers: { 'Content-Type': 'application/json' }
-    });
-  }
+  if (!allowed.includes(file.type)) return json({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }, 400);
 
-  // Delete any existing banner files for this user (all extensions)
-  // so we don't end up with stale jpg when uploading png etc.
-  const { data: existing } = await supabase.storage
-    .from('banners')
-    .list(user.id);
+  const db = getSupabaseAdmin() as any;
 
-  if (existing && existing.length > 0) {
-    const paths = existing.map((f: any) => `${user.id}/${f.name}`);
-    await supabase.storage.from('banners').remove(paths);
+  const { data: profile } = await db
+    .from('profiles').select('id').eq('auth_user_id', user.id).single();
+  if (!profile) return json({ error: 'Profile not found' }, 404);
+
+  const { data: existing } = await db.storage.from('banners').list(user.id);
+  if (existing?.length) {
+    await db.storage.from('banners').remove(existing.map((f: any) => `${user.id}/${f.name}`));
   }
 
   const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : file.type === 'image/gif' ? 'gif' : 'jpg';
   const path = `${user.id}/banner.${ext}`;
 
-  const { error: uploadError } = await supabase.storage
-    .from('banners')
-    .upload(path, file, { contentType: file.type, upsert: true });
-
+  const { error: uploadError } = await db.storage
+    .from('banners').upload(path, file, { contentType: file.type, upsert: true });
   if (uploadError) {
-    return new Response(JSON.stringify({ error: uploadError.message }), {
-      status: 500, headers: { 'Content-Type': 'application/json' }
-    });
+    console.error('[profile/banner] upload error:', JSON.stringify(uploadError));
+    return json({ error: uploadError.message }, 500);
   }
 
-  const { data: { publicUrl } } = supabase.storage.from('banners').getPublicUrl(path);
-
+  const { data: { publicUrl } } = db.storage.from('banners').getPublicUrl(path);
   const bannerPosition = (form.get('banner_position') as string) || 'center';
 
-  const { data, error: updateError } = await (supabase as any)
+  const { error: updateError } = await db
     .from('profiles')
     .update({ banner_url: publicUrl, banner_position: bannerPosition })
-    .eq('auth_user_id', user.id)
-    .select('id');
+    .eq('id', profile.id);
 
   if (updateError) {
-    return new Response(JSON.stringify({ error: updateError.message }), {
-      status: 500, headers: { 'Content-Type': 'application/json' }
-    });
+    console.error('[profile/banner] update error:', JSON.stringify(updateError));
+    return json({ error: updateError.message }, 500);
   }
 
-  if (!data || data.length === 0) {
-    return new Response(JSON.stringify({ error: 'No profile found', userId: user.id }), {
-      status: 404, headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  return new Response(JSON.stringify({ url: publicUrl + '?t=' + Date.now() }), {
-    status: 200, headers: { 'Content-Type': 'application/json' }
-  });
+  return json({ url: publicUrl + '?t=' + Date.now() });
 };
