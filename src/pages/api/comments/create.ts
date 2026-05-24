@@ -33,7 +33,8 @@ export const POST: APIRoute = async (context) => {
 
   if (insertError) {
     console.error('[comments/create] insert error:', insertError);
-    return json({ error: "Failed to post comment." }, 500);
+    const msg = insertError.message ?? "Failed to post comment.";
+    return json({ error: msg }, 500);
   }
 
   // Return the comment with the profile already resolved server-side
