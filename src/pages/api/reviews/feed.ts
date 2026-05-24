@@ -60,11 +60,6 @@ export const GET: APIRoute = async (context) => {
   }
 
   // ── Recent tab — public, CDN-cacheable ────────────────────────────────────
-  // Cache at the edge for 2 min so repeated/bot requests don't hit Supabase.
-  // Cursor varies the response so we vary the cache key on it.
-  context.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=120, stale-while-revalidate=300');
-  context.response.headers.set('Cache-Control', 'no-store');
-
   let query = db
     .from("reviews")
     .select(REVIEW_FIELDS)
@@ -79,5 +74,14 @@ export const GET: APIRoute = async (context) => {
     console.error("[feed] recent error:", JSON.stringify(error));
     return json({ error: "Failed to load reviews." }, 500);
   }
-  return json(data ?? []);
+
+  // Cache at the edge for 2 min — protects Supabase from repeated/bot hits.
+  return new Response(JSON.stringify(data ?? []), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Netlify-CDN-Cache-Control": "public, max-age=120, stale-while-revalidate=300",
+      "Cache-Control": "no-store",
+    },
+  });
 };
