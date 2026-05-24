@@ -193,6 +193,14 @@ function formatCount(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
   return String(n)
 }
+
+// Infinite scroll — cursor is the published_at of the last SSR-rendered review
+const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
+const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
+const initialRecentCursor = lastRecentReview?.published_at ?? lastRecentReview?.created_at ?? null
+const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
+const initialRecentDone = reviews.length < 20
+const initialFollowingDone = followingReviews.length < 20
 ---
 
 <Layout
@@ -288,6 +296,9 @@ function formatCount(n: number): string {
           />
         ))
       )}
+      <div id="sentinel-recent" style="height:1px;margin:0"></div>
+      <div id="loader-recent" style="display:none;padding:20px;text-align:center;font-size:13px;color:var(--text-tertiary)">Loading more…</div>
+      <div id="end-recent" style="display:none;padding:16px 20px;text-align:center;font-size:13px;color:var(--text-tertiary)">You're all caught up ✓</div>
     </div>
 
     {isLoggedIn && (
@@ -312,6 +323,9 @@ function formatCount(n: number): string {
               />
           ))
         )}
+        <div id="sentinel-following" style="height:1px;margin:0"></div>
+        <div id="loader-following" style="display:none;padding:20px;text-align:center;font-size:13px;color:var(--text-tertiary)">Loading more…</div>
+        <div id="end-following" style="display:none;padding:16px 20px;text-align:center;font-size:13px;color:var(--text-tertiary)">You're all caught up ✓</div>
         <div style="padding:16px 20px;text-align:center">
           <a href="/following" style="font-size:13px;color:var(--text-tertiary)">View full feed →</a>
         </div>
@@ -720,6 +734,252 @@ function formatCount(n: number): string {
     })
 
 
+  </script>
+
+  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursor, initialFollowingCursor, initialRecentDone, initialFollowingDone }}>
+  (function () {
+    // ── Helpers ────────────────────────────────────────────────────────────────
+    function esc(s) {
+      return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function timeAgo(dateStr) {
+      var diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
+      if (diff < 60)     return diff + 's';
+      if (diff < 3600)   return Math.floor(diff / 60) + 'm';
+      if (diff < 86400)  return Math.floor(diff / 3600) + 'h';
+      if (diff < 604800) return Math.floor(diff / 86400) + 'd';
+      return Math.floor(diff / 604800) + 'w';
+    }
+    function scoreColor(score) {
+      if (score === 10) return 'score-perfect';
+      if (score >= 9)   return 'score-great';
+      if (score >= 8)   return 'score-teal';
+      if (score >= 7)   return 'score-good';
+      if (score >= 5)   return 'score-mid';
+      if (score >= 3)   return 'score-orange';
+      return 'score-low';
+    }
+    function igdbThumb(url) {
+      if (!url) return null;
+      var clean = url.startsWith('//') ? 'https:' + url : url;
+      return clean.replace(/t_[a-z0-9_]+/, 't_thumb');
+    }
+    function initials(u) { return (u || '?').slice(0, 2).toUpperCase(); }
+
+    // ── Build card HTML matching ReviewCard.astro exactly ──────────────────────
+    function buildCard(r) {
+      var g   = r.games    || {};
+      var p   = r.profiles || {};
+      var ts  = r.published_at || r.created_at;
+      var thumb = igdbThumb(g.cover_img_url);
+      var isOwn = !!(currentProfileId && p.id === currentProfileId);
+      var li    = isLoggedIn ? 'true' : 'false';
+
+      var votesArr = Array.isArray(r.review_votes) ? r.review_votes : (r.review_votes ? [r.review_votes] : []);
+      var up   = votesArr.filter(function(v){ return v.vote ===  1; }).length;
+      var down = votesArr.filter(function(v){ return v.vote === -1; }).length;
+      var myV  = currentProfileId ? ((votesArr.find(function(v){ return v.profile_id === currentProfileId; }) || {}).vote || 0) : 0;
+
+      var rxArr = Array.isArray(r.review_reactions) ? r.review_reactions : [];
+      function rxInfo(type) {
+        return {
+          count:  rxArr.filter(function(rx){ return rx.reaction_type === type; }).length,
+          active: !!(currentProfileId && rxArr.some(function(rx){ return rx.reaction_type === type && rx.profile_id === currentProfileId; }))
+        };
+      }
+      var rxDefs = [
+        Object.assign({ type: 'sold',     display: '$'  }, rxInfo('sold')),
+        Object.assign({ type: 'heart',    display: '❤️' }, rxInfo('heart')),
+        Object.assign({ type: 'facepalm', display: '🤦' }, rxInfo('facepalm'))
+      ];
+      var commentCount = Array.isArray(r.review_comments) ? r.review_comments.length : 0;
+
+      var h = '<article class="rc" data-score="' + esc(r.score) + '" data-date="' + esc(ts) + '" data-upvotes="' + up + '">';
+
+      // Three-dot menu (non-own)
+      if (!isOwn) {
+        h += '<div class="rc-menu-wrap">'
+           + '<button class="rc-menu-btn" data-menu-id="' + esc(r.id) + '" aria-label="More options">⋯</button>'
+           + '<div class="rc-menu-dropdown" id="rcd-' + esc(r.id) + '" style="display:none">'
+           + '<button class="rc-menu-report" data-report-review-id="' + esc(r.id) + '" data-is-logged-in="' + li + '">Report</button>'
+           + '</div></div>';
+      }
+
+      // Owner actions
+      if (isLoggedIn && isOwn) {
+        h += '<div class="rc-owner-actions">'
+           + '<button class="rc-edit-btn" data-review-id="' + esc(r.id) + '" data-game-id="' + esc(g.id||'') + '" data-game-title="' + esc(g.title||'') + '" data-score="' + esc(r.score) + '" data-review-title="' + esc(r.title||'') + '" data-body="' + esc(r.body) + '" data-platform-id="' + esc((r.played_on||{}).id||'') + '" data-hours="' + esc(r.play_time_hours||'') + '" data-spoilers="' + (r.contains_spoilers?'true':'false') + '" title="Edit review">'
+           + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
+           + '</button>'
+           + '<button class="rc-delete-btn" data-review-id="' + esc(r.id) + '" title="Delete review">'
+           + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>'
+           + '</button>'
+           + '<span class="rc-delete-confirm" data-review-id="' + esc(r.id) + '" style="display:none">Sure? '
+           + '<button class="rc-delete-yes" data-review-id="' + esc(r.id) + '">Yes, delete</button> '
+           + '<button class="rc-delete-no" data-review-id="' + esc(r.id) + '">Cancel</button></span>'
+           + '</div>';
+      }
+
+      // Reviewer row
+      h += '<div class="rc-reviewer">'
+         + '<a href="/reviewers/' + esc(p.username) + '" class="rc-avatar">'
+         + (p.avatar_url ? '<img src="' + esc(p.avatar_url) + '" alt="' + esc(p.username) + '" />' : '<span>' + esc(initials(p.username)) + '</span>')
+         + '</a>'
+         + '<a href="/reviewers/' + esc(p.username) + '" class="rc-reviewer-name">@' + esc(p.username) + '</a>'
+         + '<span class="rc-dot">·</span>'
+         + '<span class="rc-ts">' + esc(timeAgo(ts)) + '</span>'
+         + '</div>';
+
+      // Main row
+      h += '<div class="rc-main">'
+         + '<a href="/games/' + esc(g.slug) + '" class="rc-cover">'
+         + (thumb ? '<img src="' + esc(thumb) + '" alt="' + esc(g.title||'') + '" loading="lazy" />' : '<span>🎮</span>')
+         + '</a>'
+         + '<div class="rc-content">'
+         + '<div class="rc-game-row">'
+         + '<a href="/games/' + esc(g.slug) + '" class="rc-game-link">' + esc(g.title || 'Unknown Game') + '</a>'
+         + '<div class="score-badge ' + scoreColor(r.score) + '">' + esc(r.score) + '</div>'
+         + '</div>';
+
+      if (r.contains_spoilers) h += '<div class="rc-spoiler-pill">⚠ spoilers</div>';
+      if (r.title) h += '<div class="rc-title">' + esc(r.title) + '</div>';
+
+      h += '<div class="rc-body' + (r.contains_spoilers ? ' spoiler-hidden' : '') + '"'
+         + ' data-spoiler="' + (r.contains_spoilers ? 'true' : 'false') + '"'
+         + ' data-href="/reviews/' + esc(r.id) + '"'
+         + ' id="rcb-' + esc(r.id) + '">'
+         + esc(r.body)
+         + '</div>';
+
+      // Footer
+      h += '<div class="rc-footer"><div class="rc-chips">';
+      if (r.played_on) h += '<span class="rc-chip">' + esc(r.played_on.name) + '</span>';
+      if ((r.play_time_hours || 0) > 0) h += '<span class="rc-chip">' + esc(r.play_time_hours) + 'h</span>';
+      h += '</div>'
+         + '<a href="/reviews/' + esc(r.id) + '" class="rc-comment-bubble">'
+         + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10a2 2 0 0 1-2 2H5l-3 3V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6z"/></svg>'
+         + commentCount
+         + '</a></div>';
+
+      // Votes + reactions
+      h += '<div class="rc-votes">'
+         + '<button class="vote-btn' + (myV === 1 ? ' active-up' : '') + '" data-review-id="' + esc(r.id) + '" data-vote="1" data-count="' + up + '">▲ ' + up + '</button>'
+         + '<button class="vote-btn' + (myV === -1 ? ' active-down' : '') + '" data-review-id="' + esc(r.id) + '" data-vote="-1" data-count="' + down + '">▼ ' + down + '</button>'
+         + '<span class="rc-votes-sep"></span>'
+         + '<div class="rc-reaction-wrap">';
+
+      rxDefs.forEach(function(rx) {
+        h += '<button class="rc-reaction-btn rc-reaction-inline' + (rx.active ? ' reaction-active' : '') + '"'
+           + ' data-review-id="' + esc(r.id) + '" data-reaction="' + esc(rx.type) + '" data-display="' + esc(rx.display) + '"'
+           + ' data-reacted="' + (rx.active ? 'true' : 'false') + '" data-count="' + rx.count + '" data-logged-in="' + li + '"'
+           + (rx.count === 0 ? ' style="display:none"' : '') + '>'
+           + esc(rx.display) + ' ' + rx.count + '</button>';
+      });
+
+      h += '<button class="rc-reaction-toggle" data-panel-id="' + esc(r.id) + '" title="React">+</button>'
+         + '<div class="rc-reaction-panel" id="rrp-' + esc(r.id) + '" style="display:none">'
+         + '<div class="rc-reaction-panel-title">React</div>'
+         + '<div class="rc-reaction-list">';
+
+      rxDefs.forEach(function(rx) {
+        h += '<button class="rc-reaction-btn rc-reaction-panel-btn' + (rx.active ? ' reaction-active' : '') + '"'
+           + ' data-review-id="' + esc(r.id) + '" data-reaction="' + esc(rx.type) + '" data-display="' + esc(rx.display) + '"'
+           + ' data-reacted="' + (rx.active ? 'true' : 'false') + '" data-count="' + rx.count + '" data-logged-in="' + li + '">'
+           + esc(rx.display) + '</button>';
+      });
+
+      h += '</div></div></div>'          // reaction-list, reaction-panel, reaction-wrap
+         + '<span class="rc-vote-ts">' + esc(timeAgo(ts)) + '</span>'
+         + '</div>'                      // rc-votes
+         + '</div></div>'               // rc-content, rc-main
+         + '</article>';
+
+      return h;
+    }
+
+    // ── Per-tab state ──────────────────────────────────────────────────────────
+    var state = {
+      recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
+      following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone }
+    };
+
+    // ── Load next page for a tab ───────────────────────────────────────────────
+    async function loadMore(tab) {
+      var s = state[tab];
+      if (s.loading || s.done) return;
+      s.loading = true;
+
+      var sentinel = document.getElementById('sentinel-' + tab);
+      var loader   = document.getElementById('loader-' + tab);
+      var endEl    = document.getElementById('end-' + tab);
+
+      if (loader) loader.style.display = 'block';
+
+      try {
+        var url = '/api/reviews/feed?tab=' + tab + '&limit=20';
+        if (s.cursor) url += '&cursor=' + encodeURIComponent(s.cursor);
+
+        var res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var reviews = await res.json();
+
+        if (!Array.isArray(reviews) || reviews.length === 0) {
+          s.done = true;
+          if (endEl) endEl.style.display = 'block';
+          if (sentinel) sentinel.remove();
+          return;
+        }
+
+        // Insert new cards before the sentinel
+        var tmp = document.createElement('div');
+        reviews.forEach(function(review) {
+          tmp.innerHTML = buildCard(review);
+          if (tmp.firstChild && sentinel && sentinel.parentNode) {
+            sentinel.parentNode.insertBefore(tmp.firstChild, sentinel);
+          }
+        });
+
+        // Advance cursor to last returned review's published_at
+        var last = reviews[reviews.length - 1];
+        s.cursor = last.published_at || last.created_at;
+
+        if (reviews.length < 20) {
+          s.done = true;
+          if (endEl) endEl.style.display = 'block';
+          if (sentinel) sentinel.remove();
+        }
+      } catch (e) {
+        console.error('[feed] loadMore error:', e);
+      } finally {
+        s.loading = false;
+        if (loader) loader.style.display = 'none';
+      }
+    }
+
+    // ── IntersectionObserver — fires 300px before sentinel enters viewport ─────
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (!entry.isIntersecting) return;
+        var tab = entry.target.id === 'sentinel-recent' ? 'recent' : 'following';
+        loadMore(tab);
+      });
+    }, { rootMargin: '300px' });
+
+    var sentinelRecent    = document.getElementById('sentinel-recent');
+    var sentinelFollowing = document.getElementById('sentinel-following');
+
+    // Only observe if there's content to load
+    if (sentinelRecent    && !initialRecentDone)    observer.observe(sentinelRecent);
+    if (sentinelFollowing && !initialFollowingDone) observer.observe(sentinelFollowing);
+
+    // Show end message immediately if the initial batch was already complete
+    if (initialRecentDone && document.getElementById('end-recent')) {
+      document.getElementById('end-recent').style.display = 'block';
+    }
+    if (initialFollowingDone && document.getElementById('end-following')) {
+      document.getElementById('end-following').style.display = 'block';
+    }
+  })();
   </script>
 
   <ReportModal />
