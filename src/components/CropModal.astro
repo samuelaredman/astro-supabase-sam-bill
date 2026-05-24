@@ -1,0 +1,249 @@
+---
+// Exposes two globals:
+//   window.openImageCropper(file, opts) → Promise<Blob>
+//     opts: { aspectRatio?, minWidth?, minHeight?, title? }
+//   window.openGifPositioner(file, opts) → Promise<string>  (CSS background-position)
+//     opts: { aspectRatio, title? }
+---
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css" />
+
+<!-- Crop modal (static images) -->
+<div id="cropModal" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:20px;width:100%;max-width:780px;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.8);overflow:hidden">
+    <div style="padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span id="cropModalTitle" style="font-family:'DM Serif Display',serif;font-size:18px;letter-spacing:-.2px;color:var(--text-primary)">Crop Image</span>
+      <button id="cropCancelX" style="background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:4px 8px;font-size:24px;line-height:1;transition:color .15s">×</button>
+    </div>
+    <div style="padding:16px;overflow:hidden;max-height:62vh">
+      <img id="cropImage" src="" alt="" style="max-width:100%;display:block" />
+    </div>
+    <div style="padding:12px 20px 16px;display:flex;align-items:center;justify-content:flex-end;gap:10px;border-top:1px solid var(--border);flex-shrink:0">
+      <button id="cropCancelBtn" style="padding:7px 18px;border-radius:20px;font-size:13px;font-weight:500;font-family:'DM Sans',sans-serif;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text-secondary);transition:all .15s">Cancel</button>
+      <button id="cropConfirmBtn" style="padding:7px 18px;border-radius:20px;font-size:13px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;border:none;background:var(--accent);color:white;transition:opacity .15s">Crop & Use</button>
+    </div>
+  </div>
+</div>
+
+<!-- GIF position modal -->
+<div id="gifModal" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:20px;width:100%;max-width:780px;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.8);overflow:hidden">
+    <div style="padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span id="gifModalTitle" style="font-family:'DM Serif Display',serif;font-size:18px;letter-spacing:-.2px;color:var(--text-primary)">Position GIF</span>
+      <button id="gifCancelX" style="background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:4px 8px;font-size:24px;line-height:1;transition:color .15s">×</button>
+    </div>
+    <div style="padding:16px">
+      <div id="gifViewport" style="width:100%;overflow:hidden;position:relative;cursor:grab;border-radius:8px;touch-action:none;user-select:none">
+        <img id="gifImg" src="" alt="" draggable="false" style="position:absolute;display:block;max-width:none;pointer-events:none" />
+      </div>
+      <p style="text-align:center;font-size:12px;color:var(--text-tertiary);margin:10px 0 0;font-family:'DM Sans',sans-serif">Drag to choose which part of the GIF will be shown</p>
+    </div>
+    <div style="padding:12px 20px 16px;display:flex;align-items:center;justify-content:flex-end;gap:10px;border-top:1px solid var(--border);flex-shrink:0">
+      <button id="gifCancelBtn" style="padding:7px 18px;border-radius:20px;font-size:13px;font-weight:500;font-family:'DM Sans',sans-serif;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text-secondary);transition:all .15s">Cancel</button>
+      <button id="gifConfirmBtn" style="padding:7px 18px;border-radius:20px;font-size:13px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;border:none;background:var(--accent);color:white;transition:opacity .15s">Use This Position</button>
+    </div>
+  </div>
+</div>
+
+<script is:inline src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js"></script>
+<script is:inline>
+(function () {
+  // ── Image cropper ──────────────────────────────────────────────────────────
+  var _cropper = null;
+  var _cropResolve = null;
+  var _cropReject = null;
+
+  function cropCleanup(objectUrl) {
+    if (_cropper) { _cropper.destroy(); _cropper = null; }
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    var img = document.getElementById('cropImage');
+    if (img) img.src = '';
+    var modal = document.getElementById('cropModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  window.openImageCropper = function (file, opts) {
+    opts = opts || {};
+    return new Promise(function (resolve, reject) {
+      _cropResolve = resolve;
+      _cropReject = reject;
+
+      var modal = document.getElementById('cropModal');
+      var img = document.getElementById('cropImage');
+      var title = document.getElementById('cropModalTitle');
+      var confirmBtn = document.getElementById('cropConfirmBtn');
+      var cancelBtn = document.getElementById('cropCancelBtn');
+      var cancelX = document.getElementById('cropCancelX');
+
+      if (title) title.textContent = opts.title || 'Crop Image';
+
+      var objectUrl = URL.createObjectURL(file);
+      var mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+
+      img.src = objectUrl;
+      modal.style.display = 'flex';
+
+      img.onload = function () {
+        if (_cropper) { _cropper.destroy(); _cropper = null; }
+        _cropper = new Cropper(img, {
+          aspectRatio: opts.aspectRatio !== undefined ? opts.aspectRatio : NaN,
+          viewMode: 1,
+          dragMode: 'move',
+          autoCropArea: 0.85,
+          responsive: true,
+          restore: false,
+          guides: true,
+          center: true,
+          highlight: false,
+          cropBoxMovable: true,
+          cropBoxResizable: true,
+          toggleDragModeOnDblclick: false,
+          minCropBoxWidth: 60,
+          minCropBoxHeight: opts.aspectRatio === 1 ? 60 : 20,
+        });
+      };
+
+      function doConfirm() {
+        if (!_cropper) return;
+        var canvas = _cropper.getCroppedCanvas({
+          minWidth: opts.minWidth || 100,
+          minHeight: opts.minHeight || 100,
+          imageSmoothingEnabled: true,
+          imageSmoothingQuality: 'high',
+        });
+        var res = _cropResolve;
+        cropCleanup(objectUrl);
+        _cropResolve = null; _cropReject = null;
+        canvas.toBlob(function (blob) {
+          if (blob) res(blob);
+          else reject(new Error('Failed to crop'));
+        }, mimeType, 0.92);
+        removeCropListeners();
+      }
+
+      function doCancel() {
+        var rej = _cropReject;
+        cropCleanup(objectUrl);
+        _cropResolve = null; _cropReject = null;
+        rej(new Error('cancelled'));
+        removeCropListeners();
+      }
+
+      function onKey(e) { if (e.key === 'Escape') doCancel(); }
+
+      function removeCropListeners() {
+        confirmBtn.removeEventListener('click', doConfirm);
+        cancelBtn.removeEventListener('click', doCancel);
+        cancelX.removeEventListener('click', doCancel);
+        document.removeEventListener('keydown', onKey);
+      }
+
+      confirmBtn.addEventListener('click', doConfirm);
+      cancelBtn.addEventListener('click', doCancel);
+      cancelX.addEventListener('click', doCancel);
+      document.addEventListener('keydown', onKey);
+    });
+  };
+
+  // ── GIF positioner ─────────────────────────────────────────────────────────
+  window.openGifPositioner = function (file, opts) {
+    opts = opts || {};
+    return new Promise(function (resolve, reject) {
+      var modal = document.getElementById('gifModal');
+      var viewport = document.getElementById('gifViewport');
+      var img = document.getElementById('gifImg');
+      var title = document.getElementById('gifModalTitle');
+      var confirmBtn = document.getElementById('gifConfirmBtn');
+      var cancelBtn = document.getElementById('gifCancelBtn');
+      var cancelX = document.getElementById('gifCancelX');
+
+      if (title) title.textContent = opts.title || 'Position GIF';
+
+      var aspectRatio = opts.aspectRatio || 4;
+      viewport.style.aspectRatio = String(aspectRatio);
+
+      var objectUrl = URL.createObjectURL(file);
+      img.src = objectUrl;
+      modal.style.display = 'flex';
+
+      var currentLeft = 0, currentTop = 0;
+      var overflowX = 0, overflowY = 0;
+      var dragState = null;
+
+      img.onload = function () {
+        var cW = viewport.clientWidth;
+        var cH = viewport.clientHeight || cW / aspectRatio;
+        var iW = img.naturalWidth;
+        var iH = img.naturalHeight;
+        var scale = Math.max(cW / iW, cH / iH);
+        var rW = iW * scale, rH = iH * scale;
+        overflowX = Math.max(0, rW - cW);
+        overflowY = Math.max(0, rH - cH);
+        img.style.width = rW + 'px';
+        img.style.height = rH + 'px';
+        currentLeft = -overflowX / 2;
+        currentTop = -overflowY / 2;
+        img.style.left = currentLeft + 'px';
+        img.style.top = currentTop + 'px';
+      };
+
+      function onPointerDown(e) {
+        e.preventDefault();
+        viewport.style.cursor = 'grabbing';
+        dragState = { startX: e.clientX, startY: e.clientY, startLeft: currentLeft, startTop: currentTop };
+      }
+      function onPointerMove(e) {
+        if (!dragState) return;
+        var dx = e.clientX - dragState.startX;
+        var dy = e.clientY - dragState.startY;
+        currentLeft = Math.max(-overflowX, Math.min(0, dragState.startLeft + dx));
+        currentTop = Math.max(-overflowY, Math.min(0, dragState.startTop + dy));
+        img.style.left = currentLeft + 'px';
+        img.style.top = currentTop + 'px';
+      }
+      function onPointerUp() { dragState = null; viewport.style.cursor = 'grab'; }
+
+      viewport.addEventListener('pointerdown', onPointerDown);
+      window.addEventListener('pointermove', onPointerMove);
+      window.addEventListener('pointerup', onPointerUp);
+
+      function gifCleanup() {
+        viewport.removeEventListener('pointerdown', onPointerDown);
+        window.removeEventListener('pointermove', onPointerMove);
+        window.removeEventListener('pointerup', onPointerUp);
+        URL.revokeObjectURL(objectUrl);
+        img.src = '';
+        modal.style.display = 'none';
+      }
+
+      function doConfirm() {
+        var bgX = overflowX > 0 ? (-currentLeft / overflowX * 100).toFixed(1) : '50';
+        var bgY = overflowY > 0 ? (-currentTop / overflowY * 100).toFixed(1) : '50';
+        gifCleanup();
+        removeGifListeners();
+        resolve(bgX + '% ' + bgY + '%');
+      }
+
+      function doCancel() {
+        gifCleanup();
+        removeGifListeners();
+        reject(new Error('cancelled'));
+      }
+
+      function onKey(e) { if (e.key === 'Escape') doCancel(); }
+
+      function removeGifListeners() {
+        confirmBtn.removeEventListener('click', doConfirm);
+        cancelBtn.removeEventListener('click', doCancel);
+        cancelX.removeEventListener('click', doCancel);
+        document.removeEventListener('keydown', onKey);
+      }
+
+      confirmBtn.addEventListener('click', doConfirm);
+      cancelBtn.addEventListener('click', doCancel);
+      cancelX.addEventListener('click', doCancel);
+      document.addEventListener('keydown', onKey);
+    });
+  };
+})();
+</script>

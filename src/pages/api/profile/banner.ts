@@ -20,15 +20,15 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  if (file.size > 6 * 1024 * 1024) {
-    return new Response(JSON.stringify({ error: 'File must be under 6MB' }), {
+  if (file.size > 15 * 1024 * 1024) {
+    return new Response(JSON.stringify({ error: 'File must be under 15MB' }), {
       status: 400, headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+  const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
   if (!allowed.includes(file.type)) {
-    return new Response(JSON.stringify({ error: 'Only JPEG, PNG, or WebP allowed' }), {
+    return new Response(JSON.stringify({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }), {
       status: 400, headers: { 'Content-Type': 'application/json' }
     });
   }
@@ -44,7 +44,7 @@ export const POST: APIRoute = async (context) => {
     await supabase.storage.from('banners').remove(paths);
   }
 
-  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
+  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : file.type === 'image/gif' ? 'gif' : 'jpg';
   const path = `${user.id}/banner.${ext}`;
 
   const { error: uploadError } = await supabase.storage
@@ -59,9 +59,11 @@ export const POST: APIRoute = async (context) => {
 
   const { data: { publicUrl } } = supabase.storage.from('banners').getPublicUrl(path);
 
+  const bannerPosition = (form.get('banner_position') as string) || 'center';
+
   const { data, error: updateError } = await (supabase as any)
     .from('profiles')
-    .update({ banner_url: publicUrl })
+    .update({ banner_url: publicUrl, banner_position: bannerPosition })
     .eq('auth_user_id', user.id)
     .select('id');
 

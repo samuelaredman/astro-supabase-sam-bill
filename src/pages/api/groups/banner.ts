@@ -11,9 +11,9 @@ export const POST: APIRoute = async (context) => {
   const file = form.get('banner') as File;
   const groupId = form.get('group_id') as string;
   if (!file || !groupId) return json({ error: 'Missing file or group_id' }, 400);
-  if (file.size > 6 * 1024 * 1024) return json({ error: 'File must be under 6MB' }, 400);
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-    return json({ error: 'Only JPEG, PNG, or WebP allowed' }, 400);
+  if (file.size > 15 * 1024 * 1024) return json({ error: 'File must be under 15MB' }, 400);
+  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type)) {
+    return json({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }, 400);
   }
 
   const { data: profile } = await (supabase as any)
@@ -33,16 +33,18 @@ export const POST: APIRoute = async (context) => {
     await db.storage.from('banners').remove(existing.map((f: any) => `groups/${groupId}/${f.name}`));
   }
 
-  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
+  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : file.type === 'image/gif' ? 'gif' : 'jpg';
   const path = `groups/${groupId}/banner.${ext}`;
 
   const { error: uploadError } = await db.storage
     .from('banners').upload(path, file, { contentType: file.type });
   if (uploadError) return json({ error: uploadError.message }, 500);
 
+  const bannerPosition = (form.get('banner_position') as string) || 'center';
+
   const { data: { publicUrl } } = db.storage.from('banners').getPublicUrl(path);
   const { error: updateError } = await db.from('groups')
-    .update({ banner_url: publicUrl }).eq('id', groupId);
+    .update({ banner_url: publicUrl, banner_position: bannerPosition }).eq('id', groupId);
   if (updateError) return json({ error: updateError.message }, 500);
 
   return json({ url: publicUrl + '?t=' + Date.now() });
