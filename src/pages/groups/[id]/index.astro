@@ -19,7 +19,7 @@ if (user) {
 
 let { data: group, error: groupError } = await (supabase as any)
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, visibility, invite_code, created_by, created_at")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at")
   .eq("id", id)
   .single();
 
@@ -30,7 +30,7 @@ if (!group && groupError) {
     .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at")
     .eq("id", id)
     .single();
-  if (fallback) group = { ...fallback, banner_url: null };
+  if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center' };
 }
 
 if (!group) return Astro.redirect("/groups");
@@ -205,7 +205,7 @@ const inviteUrl = group.invite_code
 
 const createdDate = new Date(group.created_at).toLocaleDateString("en-US", { month: "long", year: "numeric" });
 const bannerStyle = group.banner_url
-  ? `background-image:url('${group.banner_url}');background-size:cover;background-position:center`
+  ? `background-image:url('${group.banner_url}');background-size:cover;background-position:${group.banner_position ?? 'center'}`
   : "";
 
 const groupDataJson = JSON.stringify({ id: group.id, memberProfileIds, isMember, isAdminOrOwner, isOwner });
@@ -1009,6 +1009,9 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
   if (!file) return;
   if (file.size > 15 * 1024 * 1024) { alert('Banner must be under 15MB'); e.target.value = ''; return; }
   let uploadFile = file;
+  let bannerPosition = 'center';
+  const bannerEl = document.getElementById('groupBanner');
+  const bannerAspect = bannerEl ? bannerEl.offsetWidth / bannerEl.offsetHeight : window.innerWidth / 280;
   if (file.type === 'image/gif') {
     const valid = await new Promise(res => {
       const img = new Image(), url = URL.createObjectURL(file);
@@ -1017,10 +1020,11 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
       img.src = url;
     });
     if (!valid) { alert('Banner must be at least 1200 × 300 px'); e.target.value = ''; return; }
+    try {
+      bannerPosition = await window.openGifPositioner(file, { aspectRatio: bannerAspect, title: 'Position GIF' });
+    } catch { e.target.value = ''; return; }
   } else {
     try {
-      const bannerEl = document.getElementById('groupBanner');
-      const bannerAspect = bannerEl ? bannerEl.offsetWidth / bannerEl.offsetHeight : window.innerWidth / 280;
       const blob = await window.openImageCropper(file, { aspectRatio: bannerAspect, minWidth: 1200, minHeight: 300, title: 'Crop Banner' });
       uploadFile = new File([blob], 'banner.' + (blob.type === 'image/png' ? 'png' : 'jpg'), { type: blob.type });
     } catch { e.target.value = ''; return; }
@@ -1030,6 +1034,7 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
   const form = new FormData();
   form.append('banner', uploadFile);
   form.append('group_id', groupId);
+  form.append('banner_position', bannerPosition);
   const res = await fetch('/api/groups/banner', { method: 'POST', body: form });
   if (uploading) { uploading.style.display = 'none'; }
   if (res.ok) {
@@ -1038,7 +1043,7 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
     if (banner) {
       banner.style.backgroundImage = `url('${data.url}')`;
       banner.style.backgroundSize = 'cover';
-      banner.style.backgroundPosition = 'center';
+      banner.style.backgroundPosition = bannerPosition;
       banner.querySelectorAll('.banner-glow,.banner-glow2').forEach(el => { el.style.display = 'none'; });
     }
   } else {

@@ -59,9 +59,11 @@ export const POST: APIRoute = async (context) => {
 
   const { data: { publicUrl } } = supabase.storage.from('banners').getPublicUrl(path);
 
+  const bannerPosition = (form.get('banner_position') as string) || 'center';
+
   const { data, error: updateError } = await (supabase as any)
     .from('profiles')
-    .update({ banner_url: publicUrl })
+    .update({ banner_url: publicUrl, banner_position: bannerPosition })
     .eq('auth_user_id', user.id)
     .select('id');
 

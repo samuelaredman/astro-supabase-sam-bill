@@ -40,9 +40,11 @@ export const POST: APIRoute = async (context) => {
     .from('banners').upload(path, file, { contentType: file.type });
   if (uploadError) return json({ error: uploadError.message }, 500);
 
+  const bannerPosition = (form.get('banner_position') as string) || 'center';
+
   const { data: { publicUrl } } = db.storage.from('banners').getPublicUrl(path);
   const { error: updateError } = await db.from('groups')
-    .update({ banner_url: publicUrl }).eq('id', groupId);
+    .update({ banner_url: publicUrl, banner_position: bannerPosition }).eq('id', groupId);
   if (updateError) return json({ error: updateError.message }, 500);
 
   return json({ url: publicUrl + '?t=' + Date.now() });

@@ -16,7 +16,7 @@ const { data: { user } } = await supabase.auth.getUser();
 const { data: reviewer, error: reviewerError } = await (supabase as any)
   .from('profiles')
   .select(`
-    id, username, avatar_url, bio, banner_url, created_at, is_active,
+    id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
     favorite_game_id, showcase_games,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
@@ -295,7 +295,7 @@ function scoreClass(score: number): string {
 function getInitials(u: string): string { return u.slice(0, 2).toUpperCase() }
 
 const bannerStyle = reviewer.banner_url
-  ? `background-image:url('${reviewer.banner_url}');background-size:cover;background-position:center`
+  ? `background-image:url('${reviewer.banner_url}');background-size:cover;background-position:${reviewer.banner_position ?? 'center'}`
   : ''
 
 // Per-game scatter + hot takes
@@ -1069,6 +1069,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   // ── EDIT MODE ──
   var _pendingAvatarFile = null
   var _pendingBannerFile = null
+  var _pendingBannerPosition = null
   var _origBioValue = ''
 
   function enterEditMode() {
@@ -1133,6 +1134,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     if (_pendingBannerFile) {
       var bform = new FormData()
       bform.append('banner', _pendingBannerFile)
+      bform.append('banner_position', _pendingBannerPosition || 'center')
       try {
         var bres = await fetch('/api/profile/banner', { method: 'POST', body: bform })
         var bdata = await bres.json()
@@ -1141,7 +1143,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         if (banner) {
           banner.style.backgroundImage = 'url(\'' + bdata.url + '\')'
           banner.style.backgroundSize = 'cover'
-          banner.style.backgroundPosition = 'center'
+          banner.style.backgroundPosition = _pendingBannerPosition || 'center'
           banner.querySelectorAll('.banner-glow,.banner-glow2').forEach(function(el){ el.style.display='none' })
         }
       } catch(e) { errors.push('Banner: ' + (e?.message || 'upload failed')) }
@@ -1184,6 +1186,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       if (bioDisplay2) bioDisplay2.style.display = ''
       _pendingAvatarFile = null
       _pendingBannerFile = null
+      _pendingBannerPosition = null
     }
   }
   window.saveProfile = saveProfile
@@ -1224,6 +1227,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       if (!file) return
       if (file.size > 15 * 1024 * 1024) { showToast('Banner must be under 15MB', 'error'); bannerInput.value = ''; return }
       var uploadFile = file
+      var pendingPosition = 'center'
       if (file.type === 'image/gif') {
         var valid = await new Promise(function(res) {
           var img = new Image(), url = URL.createObjectURL(file)
@@ -1232,6 +1236,11 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
           img.src = url
         })
         if (!valid) { showToast('Banner must be at least 1200 × 300 px', 'error'); bannerInput.value = ''; return }
+        var bannerEl2 = document.getElementById('profileBanner')
+        var bannerAspect2 = bannerEl2 ? bannerEl2.offsetWidth / bannerEl2.offsetHeight : window.innerWidth / 280
+        try {
+          pendingPosition = await window.openGifPositioner(file, { aspectRatio: bannerAspect2, title: 'Position GIF' })
+        } catch(e) { bannerInput.value = ''; return }
       } else {
         var blob
         try {
@@ -1242,13 +1251,14 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         uploadFile = new File([blob], 'banner.' + (blob.type === 'image/png' ? 'png' : 'jpg'), { type: blob.type })
       }
       _pendingBannerFile = uploadFile
+      _pendingBannerPosition = pendingPosition
       var previewReader = new FileReader()
       previewReader.onload = function(ev) {
         var banner = document.getElementById('profileBanner')
         if (banner) {
           banner.style.backgroundImage = 'url(\'' + ev.target.result + '\')'
           banner.style.backgroundSize = 'cover'
-          banner.style.backgroundPosition = 'center'
+          banner.style.backgroundPosition = pendingPosition
           banner.querySelectorAll('.banner-glow,.banner-glow2').forEach(function(el){ el.style.display='none' })
         }
       }
