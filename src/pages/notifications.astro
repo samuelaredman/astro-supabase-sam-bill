@@ -36,6 +36,20 @@ const notifications = rawNotifs ?? [];
 // Whether any notification is still unread (used to show the "Mark all as read" button)
 const hasUnread = notifications.some((n: any) => !n.read);
 
+// For new_follower notifications, check which actors the current user already follows back
+const newFollowerActorIds = notifications
+  .filter((n: any) => n.type === 'new_follower' && n.actor?.id)
+  .map((n: any) => n.actor.id);
+
+const followingBackIds = new Set<string>();
+if (newFollowerActorIds.length > 0) {
+  const { data: followBacks } = await db
+    .from('follows').select('following_id')
+    .eq('follower_id', profile.id)
+    .in('following_id', newFollowerActorIds);
+  for (const f of followBacks ?? []) followingBackIds.add(f.following_id);
+}
+
 // Mark all unread as read now that the user is viewing the page
 await db.from('notifications')
   .update({ read: true })
@@ -102,27 +116,40 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           const thumb = igdbThumb(game?.cover_img_url);
           const isWatchlist = n.type === 'watchlist_review';
           const isGroupInvite = n.type === 'group_invite';
+          const isNewFollower = n.type === 'new_follower';
+          const alreadyFollowingBack = isNewFollower && actor?.id && followingBackIds.has(actor.id);
 
-          const href = isGroupInvite
-            ? `/groups/${group?.id}`
-            : review ? `/reviews/${review.id}` : (game ? `/games/${game.slug}` : '#');
+          const href = isNewFollower
+            ? `/reviewers/${actor?.username ?? ''}`
+            : isGroupInvite
+              ? `/groups/${group?.id}`
+              : review ? `/reviews/${review.id}` : (game ? `/games/${game.slug}` : '#');
 
           return (
-            <a href={href} class={`notif-item${n.read ? '' : ' unread'}`}>
-              {/* Cover thumbnail / group icon */}
+            <a href={href} class={`notif-item${n.read ? '' : ' unread'}${isNewFollower ? ' notif-item-follower' : ''}`}>
+              {/* Cover thumbnail / actor avatar / group icon */}
               <div class="notif-cover">
-                {isGroupInvite
-                  ? <span>👥</span>
-                  : thumb
-                    ? <img src={thumb} alt={game?.title ?? ''} />
-                    : <span>🎮</span>
-                }
+                {isNewFollower ? (
+                  actor?.avatar_url
+                    ? <img src={actor.avatar_url} alt={actor.username} class="notif-actor-avatar" />
+                    : <span class="notif-actor-initials">{getInitials(actor?.username ?? '?')}</span>
+                ) : isGroupInvite ? (
+                  <span>👥</span>
+                ) : thumb ? (
+                  <img src={thumb} alt={game?.title ?? ''} />
+                ) : (
+                  <span>🎮</span>
+                )}
               </div>
 
               {/* Text */}
               <div class="notif-body">
                 <div class="notif-text">
-                  {isGroupInvite ? (
+                  {isNewFollower ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> started following you
+                    </>
+                  ) : isGroupInvite ? (
                     <>
                       <strong>@{actor?.username ?? 'Someone'}</strong> invited you to join
                       {' '}<strong>{group?.name ?? 'a group'}</strong>
@@ -146,12 +173,23 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                   )}
                 </div>
                 <div class="notif-meta">
-                  <span class={`notif-type-badge ${isGroupInvite ? 'badge-group' : isWatchlist ? 'badge-watchlist' : 'badge-follow'}`}>
-                    {isGroupInvite ? 'Group Invite' : isWatchlist ? 'Watchlist' : 'Following'}
+                  <span class={`notif-type-badge ${isNewFollower ? 'badge-new-follower' : isGroupInvite ? 'badge-group' : isWatchlist ? 'badge-watchlist' : 'badge-follow'}`}>
+                    {isNewFollower ? 'New Follower' : isGroupInvite ? 'Group Invite' : isWatchlist ? 'Watchlist' : 'Following'}
                   </span>
                   <span class="notif-time">{timeAgo(n.created_at)}</span>
                 </div>
               </div>
+
+              {isNewFollower && (
+                <button
+                  class={`follow-back-btn${alreadyFollowingBack ? ' following' : ''}`}
+                  data-profile-id={actor?.id}
+                  disabled={alreadyFollowingBack}
+                  onclick="event.preventDefault();event.stopPropagation();"
+                >
+                  {alreadyFollowingBack ? 'Following' : 'Follow Back'}
+                </button>
+              )}
 
               {!n.read && <div class="notif-dot"></div>}
             </a>
@@ -181,6 +219,51 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
       markAllBtn.textContent = 'All read';
     });
   }
+
+  function refreshNotifBadge(count: number) {
+    const badge = document.getElementById('notifBadge') as HTMLElement | null;
+    const dot = document.getElementById('mobileNotifDot') as HTMLElement | null;
+    if (count > 0) {
+      if (badge) { badge.textContent = count > 9 ? '9+' : String(count); badge.style.display = 'flex'; }
+      if (dot) dot.style.display = 'block';
+    } else {
+      if (badge) badge.style.display = 'none';
+      if (dot) dot.style.display = 'none';
+    }
+  }
+
+  document.querySelectorAll('.follow-back-btn').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const button = btn as HTMLButtonElement;
+      const profileId = button.dataset.profileId;
+      if (!profileId || button.disabled) return;
+      button.disabled = true;
+      button.textContent = 'Following…';
+      try {
+        const res = await fetch('/api/follows/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ following_id: profileId }),
+        });
+        if (res.ok) {
+          button.textContent = 'Following';
+          button.classList.add('following');
+          // Refresh the bell badge
+          const countRes = await fetch('/api/notifications/count');
+          const data = await countRes.json();
+          refreshNotifBadge(data.unread ?? 0);
+        } else {
+          button.disabled = false;
+          button.textContent = 'Follow Back';
+        }
+      } catch {
+        button.disabled = false;
+        button.textContent = 'Follow Back';
+      }
+    });
+  });
 </script>
 
 <style>
@@ -345,5 +428,57 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     background: var(--score-teal-bg);
     color: var(--score-teal);
     border: 1px solid rgba(45, 212, 191, 0.2);
+  }
+  .badge-new-follower {
+    background: rgba(251, 146, 60, 0.1);
+    color: #fb923c;
+    border: 1px solid rgba(251, 146, 60, 0.2);
+  }
+
+  .notif-item-follower {
+    align-items: center;
+  }
+  .notif-cover .notif-actor-avatar {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    border-radius: 50%;
+  }
+  .notif-cover .notif-actor-initials {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-secondary);
+  }
+  .notif-cover:has(.notif-actor-avatar),
+  .notif-cover:has(.notif-actor-initials) {
+    border-radius: 50%;
+    height: 40px;
+  }
+
+  .follow-back-btn {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    border: 1.5px solid var(--accent);
+    color: var(--accent);
+    background: transparent;
+    transition: background 0.12s, color 0.12s;
+    white-space: nowrap;
+  }
+  .follow-back-btn:hover:not(:disabled):not(.following) {
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+  .follow-back-btn.following,
+  .follow-back-btn:disabled {
+    border-color: var(--border);
+    color: var(--text-secondary);
+    cursor: default;
+    opacity: 0.7;
   }
 </style>

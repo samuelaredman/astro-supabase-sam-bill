@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
@@ -13,6 +13,23 @@ export const POST: APIRoute = async (context) => {
 
   const { error } = await (supabase as any).from('follows').insert({ follower_id: profile.id, following_id });
   if (error) return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "Content-Type": "application/json" } });
+
+  // Fire new_follower notification (non-blocking)
+  try {
+    const db = getSupabaseAdmin() as any;
+    const { data: existing } = await db.from('notifications')
+      .select('id').eq('profile_id', following_id).eq('actor_profile_id', profile.id)
+      .eq('type', 'new_follower').maybeSingle();
+    if (!existing) {
+      await db.from('notifications').insert({
+        profile_id: following_id,
+        actor_profile_id: profile.id,
+        type: 'new_follower',
+      });
+    }
+  } catch (e) {
+    console.error('[follows/toggle] notification error (non-fatal):', e);
+  }
 
   return new Response(JSON.stringify({ success: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 };
