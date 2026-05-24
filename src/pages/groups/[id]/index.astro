@@ -1030,15 +1030,28 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
     } catch { e.target.value = ''; return; }
   }
   const uploading = document.getElementById('bannerUploading');
-  if (uploading) { uploading.style.display = 'flex'; }
-  const form = new FormData();
-  form.append('banner', uploadFile);
-  form.append('group_id', groupId);
-  form.append('banner_position', bannerPosition);
-  const res = await fetch('/api/groups/banner', { method: 'POST', body: form });
-  if (uploading) { uploading.style.display = 'none'; }
-  if (res.ok) {
-    const data = await res.json();
+  if (uploading) uploading.style.display = 'flex';
+  try {
+    const presignRes = await fetch('/api/groups/banner-presign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileType: uploadFile.type, fileSize: uploadFile.size, groupId })
+    });
+    const presignData = await presignRes.json();
+    if (!presignRes.ok) throw new Error(presignData.error ?? 'Presign failed');
+    const uploadRes = await fetch(presignData.signedUrl, {
+      method: 'PUT',
+      body: uploadFile,
+      headers: { 'Content-Type': uploadFile.type }
+    });
+    if (!uploadRes.ok) throw new Error('Storage upload failed: ' + uploadRes.status);
+    const saveRes = await fetch('/api/groups/banner-save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: presignData.path, banner_position: bannerPosition, groupId })
+    });
+    const data = await saveRes.json();
+    if (!saveRes.ok) throw new Error(data.error ?? 'Save failed');
     const banner = document.getElementById('groupBanner');
     if (banner) {
       banner.style.backgroundImage = `url('${data.url}')`;
@@ -1046,9 +1059,10 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
       banner.style.backgroundPosition = bannerPosition;
       banner.querySelectorAll('.banner-glow,.banner-glow2').forEach(el => { el.style.display = 'none'; });
     }
-  } else {
-    const d = await res.json();
-    alert(d.error ?? 'Banner upload failed');
+  } catch (err) {
+    alert(err?.message ?? 'Banner upload failed');
+  } finally {
+    if (uploading) uploading.style.display = 'none';
   }
   e.target.value = '';
 });
