@@ -23,7 +23,17 @@ if (!isLoggedIn) {
 }
 Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 
-const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+// PST calendar-day boundaries (UTC-8 standard; within 1h of correct during DST)
+const PST_OFFSET_MS = 8 * 60 * 60 * 1000
+function getPstDayStart(daysAgo = 0): Date {
+  const pstNow = new Date(Date.now() - PST_OFFSET_MS)
+  return new Date(Date.UTC(
+    pstNow.getUTCFullYear(), pstNow.getUTCMonth(), pstNow.getUTCDate() - daysAgo,
+    8, 0, 0, 0  // midnight PST = 08:00 UTC
+  ))
+}
+const todayPstStart = getPstDayStart(0)
+const yesterdayPstStart = getPstDayStart(1)
 const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
 // ── Stage 2: all independent queries fire in parallel ────────────────────────
@@ -55,7 +65,7 @@ const [
     : Promise.resolve({ data: null }),
   db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
   db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(20),
-  db.from('reviews').select('game_id, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneDayAgo).limit(100),
+  db.from('reviews').select('game_id, published_at, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', yesterdayPstStart.toISOString()).limit(200),
   db.from('reviews').select('game_id, score, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
   db.from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
   db.from('games').select('*', { count: 'exact', head: true }),
@@ -78,16 +88,23 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// mostReviewedToday
-const todayMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
+// Most reviewed — prefer today (PST calendar day), fall back to yesterday
+type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>
+const todayMap: DayMap = {}
+const yesterdayMap: DayMap = {}
 for (const r of todayRawRes.data ?? []) {
   const g = (r as any).games
   if (!g) continue
-  if (!todayMap[g.id]) todayMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
-  todayMap[g.id].count++
+  const publishedAt = new Date((r as any).published_at)
+  const map = publishedAt >= todayPstStart ? todayMap : yesterdayMap
+  if (!map[g.id]) map[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
+  map[g.id].count++
 }
 const mostReviewedToday = Object.values(todayMap).sort((a, b) => b.count - a.count)[0] ?? null
-const featuredGame = mostReviewedToday
+const mostReviewedYesterday = Object.values(yesterdayMap).sort((a, b) => b.count - a.count)[0] ?? null
+const featuredGame = mostReviewedToday ?? mostReviewedYesterday
+const featuredLabel = mostReviewedToday ? 'Most Reviewed Today' : 'Most Reviewed Yesterday'
+const featuredPeriod = mostReviewedToday ? 'today' : 'yesterday'
 
 // Trending + topRated derived from the same week dataset (no second query)
 const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
@@ -206,11 +223,11 @@ function formatCount(n: number): string {
             : <div class="hero-cover-placeholder">🎮</div>
           }
           <div class="hero-info">
-            <div class="hero-label">Most Reviewed Today</div>
+            <div class="hero-label">{featuredLabel}</div>
             <div class="hero-title">{(featuredGame as any).title}</div>
             <div class="hero-score">
               <span class="hero-score-num">{(featuredGame as any).count}</span>
-              <span class="hero-score-label">{(featuredGame as any).count === 1 ? 'review' : 'reviews'} today</span>
+              <span class="hero-score-label">{(featuredGame as any).count === 1 ? 'review' : 'reviews'} {featuredPeriod}</span>
             </div>
             <a href={`/games/${(featuredGame as any).slug}`} class="hero-cta">Read reviews →</a>
           </div>
