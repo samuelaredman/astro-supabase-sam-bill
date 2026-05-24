@@ -1,0 +1,1 @@
+alter table review_comments drop constraint review_comments_body_check;
