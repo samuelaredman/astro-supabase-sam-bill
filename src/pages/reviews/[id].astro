@@ -27,12 +27,13 @@ const { data: review, error } = await (supabase as any)
 
 if (error || !review) return Astro.redirect('/404');
 
-const { data: commentsRaw } = await (supabase as any)
+const { data: commentsRaw, error: commentsError } = await (supabase as any)
   .from('review_comments')
-  .select('id, body, created_at, profiles ( id, username, avatar_url )')
+  .select('id, body, created_at, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id )')
   .eq('review_id', id)
   .order('created_at', { ascending: true });
 
+if (commentsError) console.error('[reviews/[id]] comments query error:', commentsError);
 const comments = commentsRaw ?? [];
 
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
@@ -79,6 +80,8 @@ function getVoteCounts(votes: any) {
 }
 
 const { up, down } = getVoteCounts(review.review_votes);
+const votesArr = Array.isArray(review.review_votes) ? review.review_votes : review.review_votes ? [review.review_votes] : [];
+const myVote = currentProfile ? (votesArr.find((v: any) => v.profile_id === currentProfile.id)?.vote ?? 0) : 0;
 const coverBig = igdbImage(review.games?.cover_img_url, 't_cover_big');
 const coverThumb = igdbImage(review.games?.cover_img_url, 't_thumb');
 
@@ -142,8 +145,8 @@ const { data: moreReviews } = await (supabase as any)
       </div>
 
       <div class="review-actions">
-        <button class="vote-btn" data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
-        <button class="vote-btn" data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
+        <button class={`vote-btn${myVote === 1 ? ' active-up' : ''}`} data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
+        <button class={`vote-btn${myVote === -1 ? ' active-down' : ''}`} data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
         {isLoggedIn && (
           <button class="report-trigger" onclick={`openReport('review','${review.id}')`} title="Report this review">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -167,26 +170,36 @@ const { data: moreReviews } = await (supabase as any)
       )}
 
       <div class="comment-list" id="commentList">
-        {comments.map((c: any) => (
-          <div class="comment">
-            <a href={`/reviewers/${c.profiles?.username}`} class="comment-avatar" style="flex-shrink:0">
-              {c.profiles?.avatar_url
-                ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
-                : <span>{getInitials(c.profiles?.username ?? '?')}</span>
-              }
-            </a>
-            <div class="comment-body">
-              <div class="comment-meta">
-                <a href={`/reviewers/${c.profiles?.username}`} class="comment-username">@{c.profiles?.username}</a>
-                <span class="comment-time">{timeAgo(c.created_at)}</span>
+        {comments.map((c: any) => {
+          const cvArr = Array.isArray(c.comment_votes) ? c.comment_votes : c.comment_votes ? [c.comment_votes] : [];
+          const cUp = cvArr.filter((v: any) => v.vote === 1).length;
+          const cDown = cvArr.filter((v: any) => v.vote === -1).length;
+          const cMyVote = currentProfile ? (cvArr.find((v: any) => v.profile_id === currentProfile.id)?.vote ?? 0) : 0;
+          return (
+            <div class="comment">
+              <a href={`/reviewers/${c.profiles?.username}`} class="comment-avatar" style="flex-shrink:0">
+                {c.profiles?.avatar_url
+                  ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
+                  : <span>{getInitials(c.profiles?.username ?? '?')}</span>
+                }
+              </a>
+              <div class="comment-body">
+                <div class="comment-meta">
+                  <a href={`/reviewers/${c.profiles?.username}`} class="comment-username">@{c.profiles?.username}</a>
+                  <span class="comment-time">{timeAgo(c.created_at)}</span>
+                </div>
+                <div class="comment-text">{c.body}</div>
+                <div class="comment-actions">
+                  <button class={`cvote-btn${cMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cUp}</button>
+                  <button class={`cvote-btn${cMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cDown}</button>
+                  {isLoggedIn && (
+                    <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`} title="Report comment">Report</button>
+                  )}
+                </div>
               </div>
-              <div class="comment-text">{c.body}</div>
-              {isLoggedIn && (
-                <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`} title="Report comment">Report</button>
-              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {isLoggedIn ? (
@@ -319,6 +332,35 @@ const { data: moreReviews } = await (supabase as any)
       });
     });
 
+    // Comment votes
+    document.addEventListener('click', async function(e) {
+      var btn = e.target.closest('.cvote-btn');
+      if (!btn) return;
+      if (btn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+      if (btn.disabled) return;
+      btn.disabled = true;
+      try {
+        var commentId = btn.dataset.commentId;
+        var vote = parseInt(btn.dataset.vote);
+        var res = await fetch('/api/comments/vote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ comment_id: commentId, vote }),
+        });
+        if (res.status === 401) { window.location.href = '/signin'; return; }
+        if (!res.ok) return;
+        var data = await res.json();
+        document.querySelectorAll('.cvote-btn[data-comment-id="' + commentId + '"]').forEach(function(b) {
+          var bVote = parseInt(b.dataset.vote);
+          b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (bVote === 1 ? data.up : data.down);
+          b.classList.toggle('cvote-up',   bVote === 1  && data.vote === 1);
+          b.classList.toggle('cvote-down', bVote === -1 && data.vote === -1);
+        });
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     // Comments
     const commentForm = document.getElementById('commentForm');
     const commentBody = document.getElementById('commentBody');
@@ -376,6 +418,10 @@ const { data: moreReviews } = await (supabase as any)
                 '<span class="comment-time">just now</span>' +
               '</div>' +
               '<div class="comment-text">' + (c?.body ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+              '<div class="comment-actions">' +
+                '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
+                '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+              '</div>' +
             '</div>';
           commentList.appendChild(div);
 
@@ -880,7 +926,6 @@ const { data: moreReviews } = await (supabase as any)
   .report-trigger:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
 
   .comment-report-btn {
-    margin-top: 4px;
     font-size: 11px;
     color: var(--text-tertiary);
     background: none;
@@ -892,4 +937,39 @@ const { data: moreReviews } = await (supabase as any)
     transition: color 0.15s, background 0.15s;
   }
   .comment-report-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+
+  .comment-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .cvote-btn {
+    font-size: 11px;
+    font-family: inherit;
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all 0.15s;
+    line-height: 1.4;
+  }
+  .cvote-btn:hover:not(.cvote-up):not(.cvote-down) {
+    border-color: var(--text-tertiary);
+    color: var(--text-secondary);
+  }
+  .cvote-btn.cvote-up {
+    background: var(--score-great-bg);
+    color: var(--score-great);
+    border-color: var(--score-great);
+    box-shadow: 0 0 6px rgba(74,222,128,0.18);
+  }
+  .cvote-btn.cvote-down {
+    background: var(--score-low-bg);
+    color: var(--score-low);
+    border-color: var(--score-low);
+    box-shadow: 0 0 6px rgba(248,113,113,0.18);
+  }
 </style>
