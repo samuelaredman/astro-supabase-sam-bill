@@ -1,0 +1,124 @@
+---
+// Image crop modal — exposes window.openImageCropper(file, opts) → Promise<Blob>
+// opts: { aspectRatio?, minWidth?, minHeight?, title? }
+// GIF files should be handled by the caller (skip cropping, validate dimensions manually)
+---
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.css" />
+
+<div id="cropModal" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.82);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:20px">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:20px;width:100%;max-width:780px;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.8);overflow:hidden">
+    <div style="padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span id="cropModalTitle" style="font-family:'DM Serif Display',serif;font-size:18px;letter-spacing:-.2px;color:var(--text-primary)">Crop Image</span>
+      <button id="cropCancelX" style="background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:4px 8px;font-size:24px;line-height:1;transition:color .15s">×</button>
+    </div>
+    <div style="padding:16px;overflow:hidden;max-height:62vh">
+      <img id="cropImage" src="" alt="" style="max-width:100%;display:block" />
+    </div>
+    <div style="padding:12px 20px 16px;display:flex;align-items:center;justify-content:flex-end;gap:10px;border-top:1px solid var(--border);flex-shrink:0">
+      <button id="cropCancelBtn" style="padding:7px 18px;border-radius:20px;font-size:13px;font-weight:500;font-family:'DM Sans',sans-serif;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text-secondary);transition:all .15s">Cancel</button>
+      <button id="cropConfirmBtn" style="padding:7px 18px;border-radius:20px;font-size:13px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;border:none;background:var(--accent);color:white;transition:opacity .15s">Crop & Use</button>
+    </div>
+  </div>
+</div>
+
+<script is:inline src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.2/cropper.min.js"></script>
+<script is:inline>
+(function () {
+  var _cropper = null;
+  var _resolve = null;
+  var _reject = null;
+
+  function cleanup(objectUrl) {
+    if (_cropper) { _cropper.destroy(); _cropper = null; }
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    var img = document.getElementById('cropImage');
+    if (img) img.src = '';
+    var modal = document.getElementById('cropModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  window.openImageCropper = function (file, opts) {
+    opts = opts || {};
+    return new Promise(function (resolve, reject) {
+      _resolve = resolve;
+      _reject = reject;
+
+      var modal = document.getElementById('cropModal');
+      var img = document.getElementById('cropImage');
+      var title = document.getElementById('cropModalTitle');
+      var confirmBtn = document.getElementById('cropConfirmBtn');
+      var cancelBtn = document.getElementById('cropCancelBtn');
+      var cancelX = document.getElementById('cropCancelX');
+
+      if (title) title.textContent = opts.title || 'Crop Image';
+
+      var objectUrl = URL.createObjectURL(file);
+      var mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+
+      img.src = objectUrl;
+      modal.style.display = 'flex';
+
+      img.onload = function () {
+        if (_cropper) { _cropper.destroy(); _cropper = null; }
+        _cropper = new Cropper(img, {
+          aspectRatio: opts.aspectRatio !== undefined ? opts.aspectRatio : NaN,
+          viewMode: 1,
+          dragMode: 'move',
+          autoCropArea: 0.85,
+          responsive: true,
+          restore: false,
+          guides: true,
+          center: true,
+          highlight: false,
+          cropBoxMovable: true,
+          cropBoxResizable: true,
+          toggleDragModeOnDblclick: false,
+          minCropBoxWidth: 60,
+          minCropBoxHeight: opts.aspectRatio === 1 ? 60 : 20,
+        });
+      };
+
+      function doConfirm() {
+        if (!_cropper) return;
+        var canvas = _cropper.getCroppedCanvas({
+          minWidth: opts.minWidth || 100,
+          minHeight: opts.minHeight || 100,
+          imageSmoothingEnabled: true,
+          imageSmoothingQuality: 'high',
+        });
+        var res = _resolve;
+        cleanup(objectUrl);
+        _resolve = null; _reject = null;
+        canvas.toBlob(function (blob) {
+          if (blob) res(blob);
+          else reject(new Error('Failed to crop'));
+        }, mimeType, 0.92);
+        removeListeners();
+      }
+
+      function doCancel() {
+        var rej = _reject;
+        cleanup(objectUrl);
+        _resolve = null; _reject = null;
+        rej(new Error('cancelled'));
+        removeListeners();
+      }
+
+      function onKey(e) { if (e.key === 'Escape') doCancel(); }
+
+      function removeListeners() {
+        confirmBtn.removeEventListener('click', doConfirm);
+        cancelBtn.removeEventListener('click', doCancel);
+        cancelX.removeEventListener('click', doCancel);
+        document.removeEventListener('keydown', onKey);
+      }
+
+      confirmBtn.addEventListener('click', doConfirm);
+      cancelBtn.addEventListener('click', doCancel);
+      cancelX.addEventListener('click', doCancel);
+      document.addEventListener('keydown', onKey);
+    });
+  };
+})();
+</script>

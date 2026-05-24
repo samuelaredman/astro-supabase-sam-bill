@@ -2,6 +2,7 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
+import CropModal from "../../../components/CropModal.astro";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
@@ -237,7 +238,7 @@ const memberListJson = JSON.stringify(memberList);
   .topnav-logo-dot{width:6px;height:6px;background:var(--accent);border-radius:50%;box-shadow:0 0 10px var(--accent)}
 
   /* ── Banner ── */
-  .group-banner{width:100%;height:200px;background:linear-gradient(135deg,#1a1030 0%,#0d1a2e 40%,#0a1a1a 100%);position:relative;overflow:hidden}
+  .group-banner{width:100%;height:280px;background:linear-gradient(135deg,#1a1030 0%,#0d1a2e 40%,#0a1a1a 100%);position:relative;overflow:hidden}
   [data-theme="light"] .group-banner{background:linear-gradient(135deg,#e8e4f8 0%,#dce8f5 40%,#daf0f0 100%)}
   .banner-glow{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,var(--accent) 0%,transparent 70%);opacity:.15;top:-120px;right:5%}
   .banner-glow2{position:absolute;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,#60a5fa 0%,transparent 70%);opacity:.1;top:-60px;left:20%}
@@ -476,7 +477,7 @@ const memberListJson = JSON.stringify(memberList);
     <div class="spinner" style="width:20px;height:20px"></div>
     <span style="font-size:13px;color:white;font-weight:500">Uploading…</span>
   </div>
-  <input type="file" id="bannerInput" accept="image/jpeg,image/png,image/webp" style="display:none" />
+  <input type="file" id="bannerInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" />
 </div>
 
 <!-- Group header -->
@@ -982,10 +983,15 @@ if (isAdminOrOwner) document.body.classList.add('group-admin');
 document.getElementById('avatarInput')?.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
+  let uploadFile;
+  try {
+    const blob = await window.openImageCropper(file, { aspectRatio: 1, minWidth: 200, minHeight: 200, title: 'Crop Avatar' });
+    uploadFile = new File([blob], 'avatar.' + (blob.type === 'image/png' ? 'png' : 'jpg'), { type: blob.type });
+  } catch { e.target.value = ''; return; }
   const uploading = document.getElementById('avatarUploading');
   if (uploading) { uploading.style.display = 'flex'; }
   const form = new FormData();
-  form.append('avatar', file);
+  form.append('avatar', uploadFile);
   form.append('group_id', groupId);
   const res = await fetch('/api/groups/avatar', { method: 'POST', body: form });
   if (uploading) { uploading.style.display = 'none'; }
@@ -994,16 +1000,33 @@ document.getElementById('avatarInput')?.addEventListener('change', async (e) => 
     const el = document.getElementById('avatarEl');
     if (el) el.innerHTML = `<img id="avatarImg" src="${data.url}" alt="" style="width:100%;height:100%;object-fit:cover" />`;
   }
+  e.target.value = '';
 });
 
 // ── Banner upload ──
 document.getElementById('bannerInput')?.addEventListener('change', async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
+  if (file.size > 6 * 1024 * 1024) { showToast('Banner must be under 6MB', 'error'); e.target.value = ''; return; }
+  let uploadFile = file;
+  if (file.type === 'image/gif') {
+    const valid = await new Promise(res => {
+      const img = new Image(), url = URL.createObjectURL(file);
+      img.onload = () => { URL.revokeObjectURL(url); res(img.width >= 1200 && img.height >= 300); };
+      img.onerror = () => { URL.revokeObjectURL(url); res(false); };
+      img.src = url;
+    });
+    if (!valid) { showToast('Banner must be at least 1200 × 300 px', 'error'); e.target.value = ''; return; }
+  } else {
+    try {
+      const blob = await window.openImageCropper(file, { minWidth: 1200, minHeight: 300, title: 'Crop Banner' });
+      uploadFile = new File([blob], 'banner.' + (blob.type === 'image/png' ? 'png' : 'jpg'), { type: blob.type });
+    } catch { e.target.value = ''; return; }
+  }
   const uploading = document.getElementById('bannerUploading');
   if (uploading) { uploading.style.display = 'flex'; }
   const form = new FormData();
-  form.append('banner', file);
+  form.append('banner', uploadFile);
   form.append('group_id', groupId);
   const res = await fetch('/api/groups/banner', { method: 'POST', body: form });
   if (uploading) { uploading.style.display = 'none'; }
@@ -1016,6 +1039,7 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
       banner.style.backgroundPosition = 'center';
     }
   }
+  e.target.value = '';
 });
 
 // ── Join / Leave ──
@@ -1190,4 +1214,5 @@ async function deleteSession(sessionId) {
 }
 window.deleteSession = deleteSession;
 </script>
+<CropModal />
 </Layout>

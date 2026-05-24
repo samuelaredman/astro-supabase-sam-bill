@@ -26,9 +26,9 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+  const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
   if (!allowed.includes(file.type)) {
-    return new Response(JSON.stringify({ error: 'Only JPEG, PNG, or WebP allowed' }), {
+    return new Response(JSON.stringify({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }), {
       status: 400, headers: { 'Content-Type': 'application/json' }
     });
   }
@@ -44,7 +44,7 @@ export const POST: APIRoute = async (context) => {
     await supabase.storage.from('banners').remove(paths);
   }
 
-  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
+  const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : file.type === 'image/gif' ? 'gif' : 'jpg';
   const path = `${user.id}/banner.${ext}`;
 
   const { error: uploadError } = await supabase.storage
