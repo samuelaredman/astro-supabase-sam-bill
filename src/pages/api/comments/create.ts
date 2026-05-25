@@ -10,7 +10,7 @@ export const POST: APIRoute = async (context) => {
   const { data: { user } } = await userClient.auth.getUser();
   if (!user) return json({ error: "You must be signed in to comment." }, 401);
 
-  const { review_id, body } = await context.request.json();
+  const { review_id, body, parent_id } = await context.request.json();
 
   if (!review_id || !body?.trim())
     return json({ error: "review_id and body are required." }, 400);
@@ -27,8 +27,8 @@ export const POST: APIRoute = async (context) => {
   // Insert the comment
   const { data: inserted, error: insertError } = await db
     .from('review_comments')
-    .insert({ review_id, profile_id: profile.id, body: body.trim() })
-    .select('id, body, created_at')
+    .insert({ review_id, profile_id: profile.id, body: body.trim(), parent_id: parent_id || null })
+    .select('id, body, created_at, parent_id')
     .single();
 
   if (insertError) {

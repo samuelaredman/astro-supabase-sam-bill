@@ -29,12 +29,20 @@ if (error || !review) return Astro.redirect('/404');
 
 const { data: commentsRaw, error: commentsError } = await (supabase as any)
   .from('review_comments')
-  .select('id, body, created_at, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id )')
+  .select('id, body, created_at, parent_id, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id )')
   .eq('review_id', id)
   .order('created_at', { ascending: true });
 
 if (commentsError) console.error('[reviews/[id]] comments query error:', commentsError);
-const comments = commentsRaw ?? [];
+const allComments = commentsRaw ?? [];
+const topLevelComments = allComments.filter((c: any) => !c.parent_id);
+const replyMap: Record<string, any[]> = {};
+for (const c of allComments) {
+  if (c.parent_id) {
+    if (!replyMap[c.parent_id]) replyMap[c.parent_id] = [];
+    replyMap[c.parent_id].push(c);
+  }
+}
 
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
 if (user) {
@@ -167,41 +175,96 @@ const { data: moreReviews } = await (supabase as any)
     <section class="comments-section">
       <h2 class="comments-heading">
         Comments
-        {comments.length > 0 && <span class="comment-count">{comments.length}</span>}
+        {allComments.length > 0 && <span class="comment-count">{allComments.length}</span>}
       </h2>
 
-      {comments.length === 0 && (
+      {allComments.length === 0 && (
         <div class="no-comments">No comments yet. {isLoggedIn ? 'Be the first!' : ''}</div>
       )}
 
       <div class="comment-list" id="commentList">
-        {comments.map((c: any) => {
+        {topLevelComments.map((c: any) => {
+          const threadReplies = replyMap[c.id] ?? [];
           const cvArr = Array.isArray(c.comment_votes) ? c.comment_votes : c.comment_votes ? [c.comment_votes] : [];
           const cUp = cvArr.filter((v: any) => v.vote === 1).length;
           const cDown = cvArr.filter((v: any) => v.vote === -1).length;
-          const cMyVote = currentProfile ? (cvArr.find((v: any) => v.profile_id === currentProfile.id)?.vote ?? 0) : 0;
+          const cMyVote = currentProfile ? (cvArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0) : 0;
           return (
-            <div class="comment">
-              <a href={`/reviewers/${c.profiles?.username}`} class="comment-avatar" style="flex-shrink:0">
-                {c.profiles?.avatar_url
-                  ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
-                  : <span>{getInitials(c.profiles?.username ?? '?')}</span>
-                }
-              </a>
-              <div class="comment-body">
-                <div class="comment-meta">
-                  <a href={`/reviewers/${c.profiles?.username}`} class="comment-username">@{c.profiles?.username}</a>
-                  <span class="comment-time">{timeAgo(c.created_at)}</span>
-                </div>
-                <div class="comment-text">{c.body}</div>
-                <div class="comment-actions">
-                  <button class={`cvote-btn${cMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cUp}</button>
-                  <button class={`cvote-btn${cMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cDown}</button>
-                  {isLoggedIn && (
-                    <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`} title="Report comment">Report</button>
-                  )}
+            <div class="comment-thread" data-thread-id={c.id}>
+              <div class="comment">
+                <a href={`/reviewers/${c.profiles?.username}`} class="comment-avatar">
+                  {c.profiles?.avatar_url
+                    ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
+                    : <span>{getInitials(c.profiles?.username ?? '?')}</span>
+                  }
+                </a>
+                <div class="comment-body">
+                  <div class="comment-meta">
+                    <a href={`/reviewers/${c.profiles?.username}`} class="comment-username">@{c.profiles?.username}</a>
+                    <span class="comment-time">{timeAgo(c.created_at)}</span>
+                  </div>
+                  <div class="comment-text">{c.body}</div>
+                  <div class="comment-actions">
+                    <button class={`cvote-btn${cMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cUp}</button>
+                    <button class={`cvote-btn${cMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cDown}</button>
+                    {isLoggedIn && <button class="comment-reply-btn" data-parent-id={c.id} type="button">↩ Reply</button>}
+                    {isLoggedIn && <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`}>Report</button>}
+                  </div>
                 </div>
               </div>
+
+              <div class="replies" data-replies-for={c.id}>
+                {threadReplies.map((r: any) => {
+                  const rArr = Array.isArray(r.comment_votes) ? r.comment_votes : r.comment_votes ? [r.comment_votes] : [];
+                  const rUp = rArr.filter((v: any) => v.vote === 1).length;
+                  const rDown = rArr.filter((v: any) => v.vote === -1).length;
+                  const rMyVote = currentProfile ? (rArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0) : 0;
+                  return (
+                    <div class="comment comment-reply" data-comment-id={r.id}>
+                      <a href={`/reviewers/${r.profiles?.username}`} class="comment-avatar comment-avatar-sm">
+                        {r.profiles?.avatar_url
+                          ? <img src={r.profiles.avatar_url} alt={r.profiles.username} />
+                          : <span>{getInitials(r.profiles?.username ?? '?')}</span>
+                        }
+                      </a>
+                      <div class="comment-body">
+                        <div class="comment-meta">
+                          <a href={`/reviewers/${r.profiles?.username}`} class="comment-username">@{r.profiles?.username}</a>
+                          <span class="comment-time">{timeAgo(r.created_at)}</span>
+                        </div>
+                        <div class="comment-text">{r.body}</div>
+                        <div class="comment-actions">
+                          <button class={`cvote-btn${rMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={r.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {rUp}</button>
+                          <button class={`cvote-btn${rMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={r.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {rDown}</button>
+                          {isLoggedIn && <button class="comment-reply-btn" data-parent-id={c.id} type="button">↩ Reply</button>}
+                          {isLoggedIn && <button class="comment-report-btn" onclick={`openReport('comment','${r.id}')`}>Report</button>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {isLoggedIn && (
+                <div class="reply-form-wrap" id={`reply-form-${c.id}`} style="display:none">
+                  <div class="reply-form-inner">
+                    <div class="comment-avatar comment-avatar-sm">
+                      {currentProfile?.avatar_url
+                        ? <img src={currentProfile.avatar_url} alt={currentProfile.username} />
+                        : <span>{getInitials(currentProfile?.username ?? '?')}</span>
+                      }
+                    </div>
+                    <div class="reply-input-wrap">
+                      <textarea class="reply-body" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>
+                      <div class="reply-form-footer">
+                        <span class="reply-char-count"><span class="reply-char-num">0</span> / 2000</span>
+                        <button class="reply-cancel-btn" type="button">Cancel</button>
+                        <button class="reply-submit-btn" type="button" data-parent-id={c.id} data-review-id={id}>Reply</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -299,45 +362,41 @@ const { data: moreReviews } = await (supabase as any)
   <ReportModal />
 
   <script is:inline>
-    // Spoiler reveal — click anywhere on the blurred body to reveal
-    const spoilerEl = document.querySelector('.review-body-full[data-spoiler="true"]');
+    // Spoiler reveal
+    var spoilerEl = document.querySelector('.review-body-full[data-spoiler="true"]');
     if (spoilerEl) {
       spoilerEl.addEventListener('click', function () {
         spoilerEl.classList.remove('spoiler-hidden');
       });
     }
 
-    // Votes
+    // Review votes
     document.querySelectorAll('.vote-btn').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         if (btn.disabled) return;
         btn.disabled = true;
         try {
-          const reviewId = btn.dataset.reviewId;
-          const vote = parseInt(btn.dataset.vote);
-          const res = await fetch('/api/reviews/vote', {
+          var reviewId = btn.dataset.reviewId;
+          var vote = parseInt(btn.dataset.vote);
+          var res = await fetch('/api/reviews/vote', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ review_id: reviewId, vote }),
           });
           if (res.status === 401) { window.location.href = '/signin'; return; }
           if (!res.ok) return;
-          const data = await res.json();
+          var data = await res.json();
           document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]').forEach(function (b) {
-            const bVote = parseInt(b.dataset.vote);
-            const count = bVote === 1 ? data.up : data.down;
-            b.dataset.count = count;
-            b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
+            var bVote = parseInt(b.dataset.vote);
+            b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (bVote === 1 ? data.up : data.down);
             b.classList.toggle('active-up',   bVote === 1  && data.vote === 1);
             b.classList.toggle('active-down', bVote === -1 && data.vote === -1);
           });
-        } finally {
-          btn.disabled = false;
-        }
+        } finally { btn.disabled = false; }
       });
     });
 
-    // Comment votes
+    // Comment votes (delegated)
     document.addEventListener('click', async function(e) {
       var btn = e.target.closest('.cvote-btn');
       if (!btn) return;
@@ -361,18 +420,110 @@ const { data: moreReviews } = await (supabase as any)
           b.classList.toggle('cvote-up',   bVote === 1  && data.vote === 1);
           b.classList.toggle('cvote-down', bVote === -1 && data.vote === -1);
         });
+      } finally { btn.disabled = false; }
+    });
+
+    // ── Reply interactions (delegated) ──────────────────────────────────────
+    document.addEventListener('click', async function(e) {
+      // Toggle reply form
+      var replyBtn = e.target.closest('.comment-reply-btn');
+      if (replyBtn) {
+        var parentId = replyBtn.dataset.parentId;
+        var wrap = document.getElementById('reply-form-' + parentId);
+        if (!wrap) return;
+        var isOpen = wrap.style.display !== 'none';
+        document.querySelectorAll('.reply-form-wrap').forEach(function(w) { w.style.display = 'none'; });
+        if (!isOpen) { wrap.style.display = 'block'; wrap.querySelector('textarea').focus(); }
+        return;
+      }
+
+      // Cancel reply form
+      var cancelBtn = e.target.closest('.reply-cancel-btn');
+      if (cancelBtn) {
+        cancelBtn.closest('.reply-form-wrap').style.display = 'none';
+        return;
+      }
+
+      // Submit reply
+      var submitBtn = e.target.closest('.reply-submit-btn');
+      if (!submitBtn) return;
+      var parentId = submitBtn.dataset.parentId;
+      var reviewId = submitBtn.dataset.reviewId;
+      var wrap = submitBtn.closest('.reply-form-wrap');
+      var ta = wrap.querySelector('textarea');
+      var body = ta.value.trim();
+      if (!body) return;
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Posting…';
+      try {
+        var res = await fetch('/api/comments/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: reviewId, parent_id: parentId, body }),
+        });
+        var data = await res.json();
+        if (!res.ok) { alert(data.error || 'Failed to post reply.'); return; }
+
+        var c = data.comment;
+        var p = c.profiles;
+        var initials = p?.username ? p.username.slice(0, 2).toUpperCase() : '?';
+        var avatarHtml = p?.avatar_url
+          ? '<img src="' + p.avatar_url + '" alt="" style="display:block;width:26px;height:26px;object-fit:cover;" />'
+          : '<span>' + initials + '</span>';
+
+        var replyEl = document.createElement('div');
+        replyEl.className = 'comment comment-reply';
+        replyEl.dataset.commentId = c.id;
+        replyEl.innerHTML =
+          '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-avatar comment-avatar-sm">' + avatarHtml + '</a>' +
+          '<div class="comment-body">' +
+            '<div class="comment-meta">' +
+              '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-username">@' + (p?.username ?? '') + '</a>' +
+              '<span class="comment-time">just now</span>' +
+            '</div>' +
+            '<div class="comment-text">' + (c?.body ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+            '<div class="comment-actions">' +
+              '<button class="cvote-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
+              '<button class="cvote-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+              '<button class="comment-reply-btn" data-parent-id="' + parentId + '" type="button">↩ Reply</button>' +
+            '</div>' +
+          '</div>';
+
+        var repliesContainer = document.querySelector('.replies[data-replies-for="' + parentId + '"]');
+        if (repliesContainer) repliesContainer.appendChild(replyEl);
+
+        wrap.style.display = 'none';
+        ta.value = '';
+        var counter = wrap.querySelector('.reply-char-num');
+        if (counter) counter.textContent = '0';
+
+        document.querySelector('.no-comments')?.remove();
+      } catch(err) {
+        alert('Something went wrong. Please try again.');
+        console.error('[reply submit]', err);
       } finally {
-        btn.disabled = false;
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Reply';
       }
     });
 
-    // Comments
-    const commentForm = document.getElementById('commentForm');
-    const commentBody = document.getElementById('commentBody');
-    const commentSubmit = document.getElementById('commentSubmit');
-    const commentError = document.getElementById('commentError');
-    const commentList = document.getElementById('commentList');
-    const commentCharCount = document.getElementById('commentCharCount');
+    // Reply textarea char count
+    document.addEventListener('input', function(e) {
+      if (!e.target.classList.contains('reply-body')) return;
+      var wrap = e.target.closest('.reply-form-wrap');
+      var counter = wrap && wrap.querySelector('.reply-char-num');
+      if (counter) counter.textContent = e.target.value.length;
+    });
+    // ────────────────────────────────────────────────────────────────────────
+
+    // Main comment form
+    var commentForm = document.getElementById('commentForm');
+    var commentBody = document.getElementById('commentBody');
+    var commentSubmit = document.getElementById('commentSubmit');
+    var commentError = document.getElementById('commentError');
+    var commentList = document.getElementById('commentList');
+    var commentCharCount = document.getElementById('commentCharCount');
 
     if (commentBody && commentCharCount) {
       commentBody.addEventListener('input', function () {
@@ -384,56 +535,71 @@ const { data: moreReviews } = await (supabase as any)
       commentForm.addEventListener('submit', async function (e) {
         e.preventDefault();
         commentError.style.display = 'none';
-        const body = commentBody.value.trim();
+        var body = commentBody.value.trim();
         if (!body) return;
 
         commentSubmit.disabled = true;
         commentSubmit.textContent = 'Posting…';
 
         try {
-          const res = await fetch('/api/comments/create', {
+          var reviewId = location.pathname.split('/').pop();
+          var res = await fetch('/api/comments/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ review_id: location.pathname.split('/').pop(), body }),
+            body: JSON.stringify({ review_id: reviewId, body }),
           });
 
-          const data = await res.json();
-
+          var data = await res.json();
           if (!res.ok) {
             commentError.textContent = data.error || 'Failed to post comment.';
             commentError.style.display = 'block';
             return;
           }
 
-          // Append new comment to list
-          const c = data.comment;
-          const p = c?.profiles;
-          const initials = p?.username ? p.username.slice(0, 2).toUpperCase() : '?';
-          const avatarHtml = p?.avatar_url
+          var c = data.comment;
+          var p = c?.profiles;
+          var initials = p?.username ? p.username.slice(0, 2).toUpperCase() : '?';
+          var avatarHtml = p?.avatar_url
             ? '<img src="' + p.avatar_url + '" alt="' + (p.username ?? '') + '" style="display:block;width:32px;height:32px;object-fit:cover;" />'
             : '<span>' + initials + '</span>';
 
-          const div = document.createElement('div');
-          div.className = 'comment';
-          div.innerHTML =
-            '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-avatar" style="flex-shrink:0;width:32px;height:32px;min-width:32px;min-height:32px;border-radius:50%;overflow:hidden;display:flex;align-items:center;justify-content:center;">' + avatarHtml + '</a>' +
-            '<div class="comment-body">' +
-              '<div class="comment-meta">' +
-                '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-username">@' + (p?.username ?? '') + '</a>' +
-                '<span class="comment-time">just now</span>' +
+          // Build thread wrapper (includes empty replies container + reply form)
+          var thread = document.createElement('div');
+          thread.className = 'comment-thread';
+          thread.dataset.threadId = c.id;
+          thread.innerHTML =
+            '<div class="comment">' +
+              '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-avatar">' + avatarHtml + '</a>' +
+              '<div class="comment-body">' +
+                '<div class="comment-meta">' +
+                  '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-username">@' + (p?.username ?? '') + '</a>' +
+                  '<span class="comment-time">just now</span>' +
+                '</div>' +
+                '<div class="comment-text">' + (c?.body ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+                '<div class="comment-actions">' +
+                  '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
+                  '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+                  '<button class="comment-reply-btn" data-parent-id="' + c.id + '" type="button">↩ Reply</button>' +
+                '</div>' +
               '</div>' +
-              '<div class="comment-text">' + (c?.body ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
-              '<div class="comment-actions">' +
-                '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
-                '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+            '</div>' +
+            '<div class="replies" data-replies-for="' + c.id + '"></div>' +
+            '<div class="reply-form-wrap" id="reply-form-' + c.id + '" style="display:none">' +
+              '<div class="reply-form-inner">' +
+                '<div class="comment-avatar comment-avatar-sm">' + avatarHtml.replace('32px', '26px') + '</div>' +
+                '<div class="reply-input-wrap">' +
+                  '<textarea class="reply-body" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>' +
+                  '<div class="reply-form-footer">' +
+                    '<span class="reply-char-count"><span class="reply-char-num">0</span> / 2000</span>' +
+                    '<button class="reply-cancel-btn" type="button">Cancel</button>' +
+                    '<button class="reply-submit-btn" type="button" data-parent-id="' + c.id + '" data-review-id="' + reviewId + '">Reply</button>' +
+                  '</div>' +
+                '</div>' +
               '</div>' +
             '</div>';
-          commentList.appendChild(div);
 
-          // Remove "no comments" placeholder if present
-          const noComments = document.querySelector('.no-comments');
-          if (noComments) noComments.remove();
-
+          commentList.appendChild(thread);
+          document.querySelector('.no-comments')?.remove();
           commentBody.value = '';
           if (commentCharCount) commentCharCount.textContent = '0';
 
@@ -959,12 +1125,135 @@ const { data: moreReviews } = await (supabase as any)
   }
   .comment-report-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
 
+  .comment-reply-btn {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .comment-reply-btn:hover { color: var(--accent); background: rgba(96, 80, 200, 0.08); }
+
   .comment-actions {
     display: flex;
     align-items: center;
     gap: 4px;
     margin-top: 6px;
   }
+
+  /* ── Threading ── */
+  .comment-thread {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .replies {
+    margin-left: 44px;
+    padding-left: 14px;
+    border-left: 2px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 10px;
+  }
+  .replies:empty { display: none; }
+
+  .comment-reply { }
+
+  .comment-avatar-sm {
+    width: 26px !important;
+    height: 26px !important;
+    min-width: 26px !important;
+    min-height: 26px !important;
+    font-size: 9px !important;
+  }
+  .comment-avatar-sm img { width: 26px; height: 26px; }
+
+  .reply-form-wrap {
+    margin-left: 44px;
+    padding-left: 14px;
+    border-left: 2px solid rgba(96, 80, 200, 0.4);
+    margin-top: 8px;
+    margin-bottom: 4px;
+  }
+
+  .reply-form-inner {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .reply-input-wrap {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .reply-input-wrap textarea {
+    width: 100%;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    resize: none;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    box-sizing: border-box;
+    line-height: 1.5;
+  }
+  .reply-input-wrap textarea::placeholder { color: var(--text-tertiary); }
+  .reply-input-wrap textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(96, 80, 200, 0.1);
+  }
+
+  .reply-form-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .reply-char-count {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-right: auto;
+  }
+
+  .reply-cancel-btn {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px 12px;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .reply-cancel-btn:hover { color: var(--text-secondary); }
+
+  .reply-submit-btn {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 4px 14px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .reply-submit-btn:hover { opacity: 0.88; }
+  .reply-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .cvote-btn {
     font-size: 11px;
     font-family: inherit;
