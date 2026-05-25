@@ -1,4 +1,6 @@
 ---
+import { EMOJI_CATEGORIES } from '../utils/reactions';
+
 interface Props {
   review: {
     id: string;
@@ -77,20 +79,20 @@ const myVote = currentProfileId
 
 const reactionsArr: { reaction_type: string; profile_id: string }[] =
   Array.isArray(review.review_reactions) ? review.review_reactions : [];
-function reactionInfo(type: string) {
-  return {
-    count: reactionsArr.filter(r => r.reaction_type === type).length,
-    active: !!(currentProfileId && reactionsArr.some(r => r.reaction_type === type && r.profile_id === currentProfileId)),
-  };
+
+// Build display reactions dynamically from actual reaction data
+const reactionCountMap: Record<string, { count: number; active: boolean }> = {};
+for (const r of reactionsArr) {
+  if (!reactionCountMap[r.reaction_type]) reactionCountMap[r.reaction_type] = { count: 0, active: false };
+  reactionCountMap[r.reaction_type].count++;
+  if (currentProfileId && r.profile_id === currentProfileId) reactionCountMap[r.reaction_type].active = true;
 }
-const soldR     = reactionInfo('sold');
-const heartR    = reactionInfo('heart');
-const facepalmR = reactionInfo('facepalm');
-const reactionDefs = [
-  { type: 'sold',     display: '$',  count: soldR.count,     active: soldR.active },
-  { type: 'heart',    display: '❤️', count: heartR.count,    active: heartR.active },
-  { type: 'facepalm', display: '🤦', count: facepalmR.count, active: facepalmR.active },
-];
+const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => ({
+  type,
+  display: type,
+  count: info.count,
+  active: info.active,
+}));
 
 const commentCount = Array.isArray(review.review_comments)
   ? review.review_comments.length
@@ -227,8 +229,8 @@ const showMenu = !isOwnProfile;
           <span class="rc-votes-sep"></span>
 
           {/* ── Reactions ── */}
-          <div class="rc-reaction-wrap">
-            {reactionDefs.map(r => (
+          <div class="rc-reaction-wrap" data-review-id={review.id}>
+            {displayReactions.map(r => (
               <button
                 class={`rc-reaction-btn rc-reaction-inline${r.active ? ' reaction-active' : ''}`}
                 data-review-id={review.id}
@@ -237,32 +239,11 @@ const showMenu = !isOwnProfile;
                 data-reacted={r.active ? 'true' : 'false'}
                 data-count={r.count}
                 data-logged-in={isLoggedIn ? 'true' : 'false'}
-                style={r.count === 0 ? 'display:none' : ''}
               >
                 {r.display} {r.count}
               </button>
             ))}
-            <button class="rc-reaction-toggle" data-panel-id={review.id} title="React">+</button>
-
-            {/* Floating reaction panel */}
-            <div class="rc-reaction-panel" id={`rrp-${review.id}`} style="display:none">
-              <div class="rc-reaction-panel-title">React</div>
-              <div class="rc-reaction-list">
-                {reactionDefs.map(r => (
-                  <button
-                    class={`rc-reaction-btn rc-reaction-panel-btn${r.active ? ' reaction-active' : ''}`}
-                    data-review-id={review.id}
-                    data-reaction={r.type}
-                    data-display={r.display}
-                    data-reacted={r.active ? 'true' : 'false'}
-                    data-count={r.count}
-                    data-logged-in={isLoggedIn ? 'true' : 'false'}
-                  >
-                    {r.display}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <button class="rc-reaction-toggle" data-toggle-review-id={review.id} data-logged-in={isLoggedIn ? 'true' : 'false'} title="React">+</button>
           </div>
 
           {!showReviewer && <span class="rc-vote-ts">{timeAgo(ts)}</span>}
@@ -272,14 +253,64 @@ const showMenu = !isOwnProfile;
   </div>
 </article>
 
-<script is:inline>
+<script is:inline define:vars={{ emojiCategories: EMOJI_CATEGORIES }}>
+  // ── Shared emoji picker — created once per page ────────────────────────────
+  if (!window.__rcPickerInit) {
+    window.__rcPickerInit = true;
+    var picker = document.createElement('div');
+    picker.id = 'rc-emoji-picker';
+    picker.style.cssText = 'display:none;position:fixed;z-index:1000';
+    var ph = '<div class="rc-emoji-title">React</div>';
+    emojiCategories.forEach(function(cat) {
+      ph += '<div class="rc-emoji-cat"><div class="rc-emoji-cat-label">' + cat.label + '</div><div class="rc-emoji-grid">';
+      cat.emojis.forEach(function(emoji) {
+        ph += '<button class="rc-emoji-pick" data-emoji="' + emoji + '">' + emoji + '</button>';
+      });
+      ph += '</div></div>';
+    });
+    picker.innerHTML = ph;
+    document.body.appendChild(picker);
+  }
+
   if (!window.__rcInit) {
     window.__rcInit = true;
 
     // ── Close all floating panels/dropdowns ──────────────────────────────────
     function closeAllRcPanels() {
-      document.querySelectorAll('.rc-reaction-panel').forEach(function(p) { p.style.display = 'none'; });
+      var picker = document.getElementById('rc-emoji-picker');
+      if (picker) picker.style.display = 'none';
       document.querySelectorAll('.rc-menu-dropdown').forEach(function(d) { d.style.display = 'none'; });
+    }
+
+    // ── Apply reaction state to all matching inline buttons ──────────────────
+    function applyReactionState(reviewId, reactionType, reacted, count, displayChar) {
+      var updated = false;
+      document.querySelectorAll('.rc-reaction-inline[data-review-id="' + reviewId + '"][data-reaction="' + reactionType + '"]').forEach(function(btn) {
+        btn.dataset.reacted = reacted ? 'true' : 'false';
+        btn.dataset.count   = String(count);
+        var display = displayChar || btn.dataset.display || reactionType;
+        btn.textContent = display + ' ' + count;
+        btn.classList.toggle('reaction-active', reacted);
+        btn.style.display = count > 0 ? '' : 'none';
+        updated = true;
+      });
+      // If no inline button exists yet and count > 0, create one before the toggle btn
+      if (!updated && count > 0) {
+        var wrap = document.querySelector('.rc-reaction-wrap[data-review-id="' + reviewId + '"]');
+        if (wrap) {
+          var toggleBtn = wrap.querySelector('.rc-reaction-toggle');
+          var newBtn = document.createElement('button');
+          newBtn.className = 'rc-reaction-btn rc-reaction-inline' + (reacted ? ' reaction-active' : '');
+          newBtn.dataset.reviewId  = reviewId;
+          newBtn.dataset.reaction  = reactionType;
+          newBtn.dataset.display   = displayChar || reactionType;
+          newBtn.dataset.reacted   = reacted ? 'true' : 'false';
+          newBtn.dataset.count     = String(count);
+          newBtn.dataset.loggedIn  = 'true';
+          newBtn.textContent = (displayChar || reactionType) + ' ' + count;
+          wrap.insertBefore(newBtn, toggleBtn);
+        }
+      }
     }
 
     document.addEventListener('click', function(e) {
@@ -320,51 +351,87 @@ const showMenu = !isOwnProfile;
         return;
       }
 
-      // ── Reaction panel toggle (› button) ────────────────────────────────
+      // ── Emoji picker toggle (+ button) ───────────────────────────────────
       var panelToggle = e.target.closest('.rc-reaction-toggle');
       if (panelToggle) {
-        var panelId = panelToggle.dataset.panelId;
-        var panel = document.getElementById('rrp-' + panelId);
-        if (!panel) return;
-        var isOpen = panel.style.display !== 'none';
+        var reviewId  = panelToggle.dataset.toggleReviewId;
+        var loggedIn  = panelToggle.dataset.loggedIn === 'true';
+        var picker    = document.getElementById('rc-emoji-picker');
+        if (!picker) return;
+        var isOpen = picker.style.display !== 'none' && picker.dataset.activeReviewId === reviewId;
         closeAllRcPanels();
-        if (!isOpen) panel.style.display = 'block';
+        if (!isOpen) {
+          picker.dataset.activeReviewId  = reviewId;
+          picker.dataset.activeLoggedIn  = loggedIn ? 'true' : 'false';
+          picker.style.display = 'block';
+          // Position after display so we have real dimensions
+          requestAnimationFrame(function() {
+            var rect  = panelToggle.getBoundingClientRect();
+            var pRect = picker.getBoundingClientRect();
+            var top   = rect.top - pRect.height - 8;
+            if (top < 8) top = rect.bottom + 8;
+            var left  = rect.left;
+            if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+            picker.style.top  = top  + 'px';
+            picker.style.left = left + 'px';
+            // Mark active emojis for this review
+            picker.querySelectorAll('.rc-emoji-pick').forEach(function(btn) {
+              var inlineBtn = document.querySelector('.rc-reaction-inline[data-review-id="' + reviewId + '"][data-reaction="' + btn.dataset.emoji + '"]');
+              btn.classList.toggle('rc-emoji-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
+            });
+          });
+        }
         return;
       }
 
-      // ── Reaction button click (inline and panel) ────────────────────────
+      // ── Emoji pick from shared picker ────────────────────────────────────
+      var emojiBtn = e.target.closest('.rc-emoji-pick');
+      if (emojiBtn) {
+        var picker    = document.getElementById('rc-emoji-picker');
+        var reviewId  = picker && picker.dataset.activeReviewId;
+        var loggedIn  = picker && picker.dataset.activeLoggedIn === 'true';
+        if (!reviewId) return;
+        if (!loggedIn) { window.location.href = '/signin'; return; }
+        var emoji     = emojiBtn.dataset.emoji;
+        var existing  = document.querySelector('.rc-reaction-inline[data-review-id="' + reviewId + '"][data-reaction="' + emoji + '"]');
+        var reacted   = existing ? existing.dataset.reacted === 'true' : false;
+        var count     = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+        var newReacted = !reacted;
+        var newCount   = newReacted ? count + 1 : Math.max(0, count - 1);
+        applyReactionState(reviewId, emoji, newReacted, newCount, emoji);
+        closeAllRcPanels();
+        fetch('/api/reviews/react', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: reviewId, reaction_type: emoji }),
+        }).then(function(res) {
+          if (res.status === 401) { window.location.href = '/signin'; return; }
+          return res.json();
+        }).then(function(data) {
+          if (!data) return;
+          applyReactionState(reviewId, emoji, data.reacted, data.count, emoji);
+          if (typeof gtag === 'function' && data.reacted) {
+            gtag('event', 'reaction_added', { review_id: reviewId, reaction_type: emoji });
+          }
+        }).catch(function() {
+          applyReactionState(reviewId, emoji, reacted, count, emoji);
+        });
+        return;
+      }
+
+      // ── Inline reaction button click (toggle existing reaction) ──────────
       var reactionBtn = e.target.closest('.rc-reaction-btn');
       if (reactionBtn) {
         var loggedIn = reactionBtn.dataset.loggedIn === 'true';
         if (!loggedIn) { window.location.href = '/signin'; return; }
-
         var reviewId = reactionBtn.dataset.reviewId;
         var reaction = reactionBtn.dataset.reaction;
+        var display  = reactionBtn.dataset.display || reaction;
         var reacted  = reactionBtn.dataset.reacted === 'true';
         var count    = parseInt(reactionBtn.dataset.count) || 0;
-
         var newReacted = !reacted;
         var newCount   = newReacted ? count + 1 : Math.max(0, count - 1);
-
-        function applyReactionState(reviewId, reactionType, reacted, count) {
-          document.querySelectorAll('.rc-reaction-btn[data-review-id="' + reviewId + '"][data-reaction="' + reactionType + '"]').forEach(function(btn) {
-            btn.dataset.reacted = reacted ? 'true' : 'false';
-            btn.dataset.count   = String(count);
-            var display = btn.dataset.display || reactionType;
-            // Panel buttons show emoji only; inline footer buttons show emoji + count
-            if (btn.classList.contains('rc-reaction-panel-btn')) {
-              btn.textContent = display;
-            } else {
-              btn.textContent = display + ' ' + count;
-            }
-            btn.classList.toggle('reaction-active', reacted);
-            if (btn.classList.contains('rc-reaction-inline')) {
-              btn.style.display = count > 0 ? '' : 'none';
-            }
-          });
-        }
-        applyReactionState(reviewId, reaction, newReacted, newCount);
-
+        applyReactionState(reviewId, reaction, newReacted, newCount, display);
         fetch('/api/reviews/react', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -374,12 +441,12 @@ const showMenu = !isOwnProfile;
           return res.json();
         }).then(function(data) {
           if (!data) return;
-          applyReactionState(reviewId, reaction, data.reacted, data.count);
+          applyReactionState(reviewId, reaction, data.reacted, data.count, display);
           if (typeof gtag === 'function' && data.reacted) {
             gtag('event', 'reaction_added', { review_id: reviewId, reaction_type: reaction });
           }
         }).catch(function() {
-          applyReactionState(reviewId, reaction, reacted, count);
+          applyReactionState(reviewId, reaction, reacted, count, display);
         });
         return;
       }
@@ -405,7 +472,7 @@ const showMenu = !isOwnProfile;
       }
 
       // Outside click: close all panels
-      if (!e.target.closest('.rc-reaction-wrap') && !e.target.closest('.rc-menu-wrap')) {
+      if (!e.target.closest('.rc-reaction-wrap') && !e.target.closest('.rc-menu-wrap') && !e.target.closest('#rc-emoji-picker')) {
         closeAllRcPanels();
       }
     });
@@ -771,18 +838,14 @@ const showMenu = !isOwnProfile;
     background: rgba(99, 102, 241, 0.08);
     box-shadow: 0 0 8px rgba(99, 102, 241, 0.15);
   }
-  /* Bigger version inside the panel */
-  .rc-reaction-panel-btn {
-    font-size: 13px;
-    padding: 5px 14px;
-  }
 
-  /* ── Reaction toggle (›) ── */
+  /* ── Reaction toggle (+ button) ── */
   .rc-reaction-wrap {
     position: relative;
     display: inline-flex;
     align-items: center;
     gap: 3px;
+    flex-wrap: wrap;
   }
   .rc-reaction-toggle {
     background: none;
@@ -803,34 +866,59 @@ const showMenu = !isOwnProfile;
     border-color: var(--text-tertiary);
   }
 
-  /* ── Reaction panel ── */
-  .rc-reaction-panel {
-    position: absolute;
-    bottom: calc(100% + 8px);
-    left: 0;
+  /* ── Shared emoji picker (position:fixed, created once per page) ── */
+  #rc-emoji-picker {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 12px;
-    padding: 12px 14px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.14);
-    min-width: 160px;
-    max-height: 220px;
+    padding: 10px 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+    max-height: 300px;
     overflow-y: auto;
-    z-index: 15;
+    min-width: 260px;
+    max-width: 320px;
+    scrollbar-width: thin;
   }
-  .rc-reaction-panel-title {
+  .rc-emoji-title {
     font-size: 10px;
     font-weight: 600;
     color: var(--text-tertiary);
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
   }
-  .rc-reaction-list {
+  .rc-emoji-cat { margin-bottom: 8px; }
+  .rc-emoji-cat:last-child { margin-bottom: 0; }
+  .rc-emoji-cat-label {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+    opacity: 0.6;
+  }
+  .rc-emoji-grid {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 1px;
   }
+  .rc-emoji-pick {
+    font-size: 17px;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.1s, transform 0.1s;
+    line-height: 1;
+  }
+  .rc-emoji-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
+  .rc-emoji-pick.rc-emoji-active { background: rgba(96, 80, 200, 0.12); outline: 1.5px solid var(--accent); }
 
   /* ── Owner actions (bottom-right of card) ── */
   .rc-owner-actions {
