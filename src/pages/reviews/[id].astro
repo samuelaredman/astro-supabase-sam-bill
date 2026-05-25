@@ -29,30 +29,22 @@ if (error || !review) return Astro.redirect('/404');
 
 const { data: commentsRaw, error: commentsError } = await (supabase as any)
   .from('review_comments')
-  .select('id, body, created_at, parent_id, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id )')
+  .select('id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id )')
   .eq('review_id', id)
   .order('created_at', { ascending: true });
 
 if (commentsError) console.error('[reviews/[id]] comments query error:', commentsError);
 const allComments = commentsRaw ?? [];
-const commentById: Record<string, any> = {};
-for (const c of allComments) commentById[c.id] = c;
-function getRootId(cid: string): string {
-  const c = commentById[cid];
-  if (!c || !c.parent_id) return cid;
-  return getRootId(c.parent_id);
-}
 function renderBody(text: string): string {
   const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   return esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="mention" href="/reviewers/$3">$2</a>');
 }
 const topLevelComments = allComments.filter((c: any) => !c.parent_id);
-const replyMap: Record<string, any[]> = {};
+const directReplyMap: Record<string, any[]> = {};
 for (const c of allComments) {
   if (c.parent_id) {
-    const rootId = getRootId(c.id);
-    if (!replyMap[rootId]) replyMap[rootId] = [];
-    replyMap[rootId].push(c);
+    if (!directReplyMap[c.parent_id]) directReplyMap[c.parent_id] = [];
+    directReplyMap[c.parent_id].push(c);
   }
 }
 
@@ -196,14 +188,15 @@ const { data: moreReviews } = await (supabase as any)
 
       <div class="comment-list" id="commentList">
         {topLevelComments.map((c: any) => {
-          const threadReplies = replyMap[c.id] ?? [];
+          const level1Replies = directReplyMap[c.id] ?? [];
           const cvArr = Array.isArray(c.comment_votes) ? c.comment_votes : c.comment_votes ? [c.comment_votes] : [];
           const cUp = cvArr.filter((v: any) => v.vote === 1).length;
           const cDown = cvArr.filter((v: any) => v.vote === -1).length;
           const cMyVote = currentProfile ? (cvArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0) : 0;
+          const isOwnC = currentProfile?.id === c.profiles?.id;
           return (
             <div class="comment-thread" data-thread-id={c.id}>
-              <div class="comment">
+              <div class="comment" data-comment-id={c.id}>
                 <a href={`/reviewers/${c.profiles?.username}`} class="comment-avatar">
                   {c.profiles?.avatar_url
                     ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
@@ -214,45 +207,92 @@ const { data: moreReviews } = await (supabase as any)
                   <div class="comment-meta">
                     <a href={`/reviewers/${c.profiles?.username}`} class="comment-username">@{c.profiles?.username}</a>
                     <span class="comment-time">{timeAgo(c.created_at)}</span>
+                    {c.updated_at && <span class="comment-edited">(edited)</span>}
                   </div>
-                  <div class="comment-text" set:html={renderBody(c.body)}></div>
+                  <div class="comment-text" data-raw-body={c.body} set:html={renderBody(c.body)}></div>
                   <div class="comment-actions">
                     <button class={`cvote-btn${cMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cUp}</button>
                     <button class={`cvote-btn${cMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cDown}</button>
                     {isLoggedIn && <button class="comment-reply-btn" data-parent-id={c.id} data-thread-id={c.id} data-reply-to={c.profiles?.username} type="button">↩ Reply</button>}
-                    {isLoggedIn && <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`}>Report</button>}
+                    {isLoggedIn && !isOwnC && <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`}>Report</button>}
+                    {isOwnC && <button class="comment-edit-btn" data-comment-id={c.id} type="button">Edit</button>}
+                    {isOwnC && <button class="comment-delete-btn" data-comment-id={c.id} type="button">Delete</button>}
                   </div>
                 </div>
               </div>
 
               <div class="replies" data-replies-for={c.id}>
-                {threadReplies.map((r: any) => {
+                {level1Replies.map((r: any) => {
+                  const level2Replies = directReplyMap[r.id] ?? [];
                   const rArr = Array.isArray(r.comment_votes) ? r.comment_votes : r.comment_votes ? [r.comment_votes] : [];
                   const rUp = rArr.filter((v: any) => v.vote === 1).length;
                   const rDown = rArr.filter((v: any) => v.vote === -1).length;
                   const rMyVote = currentProfile ? (rArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0) : 0;
+                  const isOwnR = currentProfile?.id === r.profiles?.id;
                   return (
-                    <div class="comment comment-reply" data-comment-id={r.id}>
-                      <a href={`/reviewers/${r.profiles?.username}`} class="comment-avatar comment-avatar-sm">
-                        {r.profiles?.avatar_url
-                          ? <img src={r.profiles.avatar_url} alt={r.profiles.username} />
-                          : <span>{getInitials(r.profiles?.username ?? '?')}</span>
-                        }
-                      </a>
-                      <div class="comment-body">
-                        <div class="comment-meta">
-                          <a href={`/reviewers/${r.profiles?.username}`} class="comment-username">@{r.profiles?.username}</a>
-                          <span class="comment-time">{timeAgo(r.created_at)}</span>
-                        </div>
-                        <div class="comment-text" set:html={renderBody(r.body)}></div>
-                        <div class="comment-actions">
-                          <button class={`cvote-btn${rMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={r.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {rUp}</button>
-                          <button class={`cvote-btn${rMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={r.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {rDown}</button>
-                          {isLoggedIn && <button class="comment-reply-btn" data-parent-id={r.id} data-thread-id={c.id} data-reply-to={r.profiles?.username} type="button">↩ Reply</button>}
-                          {isLoggedIn && <button class="comment-report-btn" onclick={`openReport('comment','${r.id}')`}>Report</button>}
+                    <Fragment>
+                      <div class="comment comment-reply" data-comment-id={r.id}>
+                        <a href={`/reviewers/${r.profiles?.username}`} class="comment-avatar comment-avatar-sm">
+                          {r.profiles?.avatar_url
+                            ? <img src={r.profiles.avatar_url} alt={r.profiles.username} />
+                            : <span>{getInitials(r.profiles?.username ?? '?')}</span>
+                          }
+                        </a>
+                        <div class="comment-body">
+                          <div class="comment-meta">
+                            <a href={`/reviewers/${r.profiles?.username}`} class="comment-username">@{r.profiles?.username}</a>
+                            <span class="comment-time">{timeAgo(r.created_at)}</span>
+                            {r.updated_at && <span class="comment-edited">(edited)</span>}
+                          </div>
+                          <div class="comment-text" data-raw-body={r.body} set:html={renderBody(r.body)}></div>
+                          <div class="comment-actions">
+                            <button class={`cvote-btn${rMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={r.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {rUp}</button>
+                            <button class={`cvote-btn${rMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={r.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {rDown}</button>
+                            {isLoggedIn && <button class="comment-reply-btn" data-parent-id={r.id} data-thread-id={c.id} data-reply-to={r.profiles?.username} type="button">↩ Reply</button>}
+                            {isLoggedIn && !isOwnR && <button class="comment-report-btn" onclick={`openReport('comment','${r.id}')`}>Report</button>}
+                            {isOwnR && <button class="comment-edit-btn" data-comment-id={r.id} type="button">Edit</button>}
+                            {isOwnR && <button class="comment-delete-btn" data-comment-id={r.id} type="button">Delete</button>}
+                          </div>
                         </div>
                       </div>
-                    </div>
+                      {level2Replies.length > 0 && (
+                        <div class="replies replies-deep" data-replies-for={r.id}>
+                          {level2Replies.map((dr: any) => {
+                            const drArr = Array.isArray(dr.comment_votes) ? dr.comment_votes : dr.comment_votes ? [dr.comment_votes] : [];
+                            const drUp = drArr.filter((v: any) => v.vote === 1).length;
+                            const drDown = drArr.filter((v: any) => v.vote === -1).length;
+                            const drMyVote = currentProfile ? (drArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0) : 0;
+                            const isOwnDr = currentProfile?.id === dr.profiles?.id;
+                            return (
+                              <div class="comment comment-reply" data-comment-id={dr.id}>
+                                <a href={`/reviewers/${dr.profiles?.username}`} class="comment-avatar comment-avatar-sm">
+                                  {dr.profiles?.avatar_url
+                                    ? <img src={dr.profiles.avatar_url} alt={dr.profiles.username} />
+                                    : <span>{getInitials(dr.profiles?.username ?? '?')}</span>
+                                  }
+                                </a>
+                                <div class="comment-body">
+                                  <div class="comment-meta">
+                                    <a href={`/reviewers/${dr.profiles?.username}`} class="comment-username">@{dr.profiles?.username}</a>
+                                    <span class="comment-time">{timeAgo(dr.created_at)}</span>
+                                    {dr.updated_at && <span class="comment-edited">(edited)</span>}
+                                  </div>
+                                  <div class="comment-text" data-raw-body={dr.body} set:html={renderBody(dr.body)}></div>
+                                  <div class="comment-actions">
+                                    <button class={`cvote-btn${drMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={dr.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {drUp}</button>
+                                    <button class={`cvote-btn${drMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={dr.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {drDown}</button>
+                                    {isLoggedIn && <button class="comment-reply-btn" data-parent-id={dr.id} data-thread-id={c.id} data-reply-to={dr.profiles?.username} type="button">↩ Reply</button>}
+                                    {isLoggedIn && !isOwnDr && <button class="comment-report-btn" onclick={`openReport('comment','${dr.id}')`}>Report</button>}
+                                    {isOwnDr && <button class="comment-edit-btn" data-comment-id={dr.id} type="button">Edit</button>}
+                                    {isOwnDr && <button class="comment-delete-btn" data-comment-id={dr.id} type="button">Delete</button>}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </Fragment>
                   );
                 })}
               </div>
@@ -435,7 +475,7 @@ const { data: moreReviews } = await (supabase as any)
       } finally { btn.disabled = false; }
     });
 
-    // ── Reply interactions (delegated) ──────────────────────────────────────
+    // ── Comment interactions (delegated) ────────────────────────────────────
     function renderBody(text) {
       var esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
       return esc.replace(/(^|\s)(@([\w]+))/g, function(m, pre, mention, username) {
@@ -444,7 +484,107 @@ const { data: moreReviews } = await (supabase as any)
     }
 
     document.addEventListener('click', async function(e) {
-      // Toggle reply form
+      // ── Edit button
+      var editBtn = e.target.closest('.comment-edit-btn');
+      if (editBtn) {
+        var commentId = editBtn.dataset.commentId;
+        var commentEl = document.querySelector('.comment[data-comment-id="' + commentId + '"]');
+        if (!commentEl) return;
+        var textEl = commentEl.querySelector('.comment-text');
+        var existing = commentEl.querySelector('.comment-edit-wrap');
+        if (existing) { existing.remove(); textEl.style.display = ''; return; }
+        var rawBody = textEl.dataset.rawBody || textEl.textContent;
+        textEl.style.display = 'none';
+        var editWrap = document.createElement('div');
+        editWrap.className = 'comment-edit-wrap';
+        editWrap.innerHTML =
+          '<textarea class="comment-edit-body" maxlength="2000" rows="3">' + rawBody.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea>' +
+          '<div class="comment-edit-footer">' +
+            '<span class="comment-edit-char"><span class="comment-edit-char-num">' + rawBody.length + '</span> / 2000</span>' +
+            '<button class="comment-edit-cancel-btn" type="button">Cancel</button>' +
+            '<button class="comment-edit-save-btn" type="button" data-comment-id="' + commentId + '">Save</button>' +
+          '</div>';
+        textEl.after(editWrap);
+        editWrap.querySelector('textarea').focus();
+        return;
+      }
+
+      // ── Edit cancel
+      var cancelEditBtn = e.target.closest('.comment-edit-cancel-btn');
+      if (cancelEditBtn) {
+        var editWrap = cancelEditBtn.closest('.comment-edit-wrap');
+        var commentEl = editWrap.closest('.comment');
+        commentEl.querySelector('.comment-text').style.display = '';
+        editWrap.remove();
+        return;
+      }
+
+      // ── Edit save
+      var saveBtn = e.target.closest('.comment-edit-save-btn');
+      if (saveBtn) {
+        var commentId = saveBtn.dataset.commentId;
+        var editWrap = saveBtn.closest('.comment-edit-wrap');
+        var ta = editWrap.querySelector('textarea');
+        var body = ta.value.trim();
+        if (!body) return;
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+        try {
+          var res = await fetch('/api/comments/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ comment_id: commentId, body }),
+          });
+          if (res.status === 401) { window.location.href = '/signin'; return; }
+          var data = await res.json();
+          if (!res.ok) { alert(data.error || 'Failed to update comment.'); return; }
+          var commentEl = document.querySelector('.comment[data-comment-id="' + commentId + '"]');
+          var textEl = commentEl.querySelector('.comment-text');
+          textEl.innerHTML = renderBody(body);
+          textEl.dataset.rawBody = body;
+          textEl.style.display = '';
+          editWrap.remove();
+          var metaEl = commentEl.querySelector('.comment-meta');
+          if (!metaEl.querySelector('.comment-edited')) {
+            var editedSpan = document.createElement('span');
+            editedSpan.className = 'comment-edited';
+            editedSpan.textContent = '(edited)';
+            metaEl.appendChild(editedSpan);
+          }
+        } finally {
+          if (saveBtn.isConnected) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+        }
+        return;
+      }
+
+      // ── Delete button
+      var deleteBtn = e.target.closest('.comment-delete-btn');
+      if (deleteBtn) {
+        if (!confirm('Delete this comment?')) return;
+        var commentId = deleteBtn.dataset.commentId;
+        deleteBtn.disabled = true;
+        try {
+          var res = await fetch('/api/comments/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ comment_id: commentId }),
+          });
+          if (res.status === 401) { window.location.href = '/signin'; return; }
+          var data = await res.json();
+          if (!res.ok) { alert(data.error || 'Failed to delete comment.'); return; }
+          var commentEl = document.querySelector('.comment[data-comment-id="' + commentId + '"]');
+          if (commentEl) {
+            var deepReplies = commentEl.parentElement && commentEl.parentElement.querySelector('.replies-deep[data-replies-for="' + commentId + '"]');
+            if (deepReplies) deepReplies.remove();
+            commentEl.remove();
+          }
+        } finally {
+          if (deleteBtn.isConnected) deleteBtn.disabled = false;
+        }
+        return;
+      }
+
+      // ── Toggle reply form
       var replyBtn = e.target.closest('.comment-reply-btn');
       if (replyBtn) {
         var parentId = replyBtn.dataset.parentId;
@@ -455,7 +595,6 @@ const { data: moreReviews } = await (supabase as any)
         var isOpen = wrap.style.display !== 'none';
         document.querySelectorAll('.reply-form-wrap').forEach(function(w) { w.style.display = 'none'; });
         if (!isOpen) {
-          // Point the submit button at the actual parent being replied to
           var sb = wrap.querySelector('.reply-submit-btn');
           if (sb) sb.dataset.parentId = parentId;
           wrap.style.display = 'block';
@@ -471,7 +610,7 @@ const { data: moreReviews } = await (supabase as any)
         return;
       }
 
-      // Cancel reply form
+      // ── Cancel reply form
       var cancelBtn = e.target.closest('.reply-cancel-btn');
       if (cancelBtn) {
         var wrap = cancelBtn.closest('.reply-form-wrap');
@@ -483,7 +622,7 @@ const { data: moreReviews } = await (supabase as any)
         return;
       }
 
-      // Submit reply
+      // ── Submit reply
       var submitBtn = e.target.closest('.reply-submit-btn');
       if (!submitBtn) return;
       var parentId = submitBtn.dataset.parentId;
@@ -522,16 +661,34 @@ const { data: moreReviews } = await (supabase as any)
               '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-username">@' + (p?.username ?? '') + '</a>' +
               '<span class="comment-time">just now</span>' +
             '</div>' +
-            '<div class="comment-text">' + renderBody(c?.body ?? '') + '</div>' +
+            '<div class="comment-text" data-raw-body="' + (c?.body ?? '').replace(/"/g,'&quot;') + '">' + renderBody(c?.body ?? '') + '</div>' +
             '<div class="comment-actions">' +
               '<button class="cvote-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
               '<button class="cvote-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
               '<button class="comment-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + threadId + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
+              '<button class="comment-edit-btn" data-comment-id="' + c.id + '" type="button">Edit</button>' +
+              '<button class="comment-delete-btn" data-comment-id="' + c.id + '" type="button">Delete</button>' +
             '</div>' +
           '</div>';
 
-        var repliesContainer = document.querySelector('.replies[data-replies-for="' + threadId + '"]');
-        if (repliesContainer) repliesContainer.appendChild(replyEl);
+        var container;
+        if (parentId === threadId) {
+          container = document.querySelector('.replies[data-replies-for="' + threadId + '"]:not(.replies-deep)');
+        } else {
+          container = document.querySelector('.replies-deep[data-replies-for="' + parentId + '"]');
+          if (!container) {
+            container = document.createElement('div');
+            container.className = 'replies replies-deep';
+            container.dataset.repliesFor = parentId;
+            var parentCommentEl = document.querySelector('.comment[data-comment-id="' + parentId + '"]');
+            if (parentCommentEl) {
+              parentCommentEl.after(container);
+            } else {
+              container = document.querySelector('.replies[data-replies-for="' + threadId + '"]:not(.replies-deep)');
+            }
+          }
+        }
+        if (container) container.appendChild(replyEl);
 
         wrap.style.display = 'none';
         ta.value = '';
@@ -548,12 +705,18 @@ const { data: moreReviews } = await (supabase as any)
       }
     });
 
-    // Reply textarea char count
+    // Char count for reply and edit textareas
     document.addEventListener('input', function(e) {
-      if (!e.target.classList.contains('reply-body')) return;
-      var wrap = e.target.closest('.reply-form-wrap');
-      var counter = wrap && wrap.querySelector('.reply-char-num');
-      if (counter) counter.textContent = e.target.value.length;
+      if (e.target.classList.contains('reply-body')) {
+        var wrap = e.target.closest('.reply-form-wrap');
+        var counter = wrap && wrap.querySelector('.reply-char-num');
+        if (counter) counter.textContent = e.target.value.length;
+      }
+      if (e.target.classList.contains('comment-edit-body')) {
+        var wrap = e.target.closest('.comment-edit-wrap');
+        var counter = wrap && wrap.querySelector('.comment-edit-char-num');
+        if (counter) counter.textContent = e.target.value.length;
+      }
     });
     // ────────────────────────────────────────────────────────────────────────
 
@@ -1203,6 +1366,13 @@ const { data: moreReviews } = await (supabase as any)
   }
   .replies:empty { display: none; }
 
+  .replies-deep {
+    margin-left: 38px;
+    padding-left: 12px;
+    border-left: 2px solid var(--border-subtle);
+    margin-top: 10px;
+  }
+
   .comment-reply { }
 
   .comment-avatar-sm {
@@ -1213,6 +1383,96 @@ const { data: moreReviews } = await (supabase as any)
     font-size: 9px !important;
   }
   .comment-avatar-sm img { width: 26px; height: 26px; }
+
+  .comment-edited {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  .comment-edit-btn {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .comment-edit-btn:hover { color: var(--accent); background: rgba(96, 80, 200, 0.08); }
+
+  .comment-delete-btn {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .comment-delete-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+
+  .comment-edit-wrap { margin-top: 6px; }
+
+  .comment-edit-body {
+    width: 100%;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    padding: 8px 12px;
+    resize: none;
+    outline: none;
+    box-sizing: border-box;
+    line-height: 1.6;
+  }
+
+  .comment-edit-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+  }
+
+  .comment-edit-char {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-right: auto;
+  }
+
+  .comment-edit-cancel-btn {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px 12px;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .comment-edit-cancel-btn:hover { color: var(--text-secondary); }
+
+  .comment-edit-save-btn {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 4px 14px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .comment-edit-save-btn:hover { opacity: 0.88; }
+  .comment-edit-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .reply-form-wrap {
     margin-left: 44px;
