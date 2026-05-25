@@ -35,12 +35,24 @@ const { data: commentsRaw, error: commentsError } = await (supabase as any)
 
 if (commentsError) console.error('[reviews/[id]] comments query error:', commentsError);
 const allComments = commentsRaw ?? [];
+const commentById: Record<string, any> = {};
+for (const c of allComments) commentById[c.id] = c;
+function getRootId(cid: string): string {
+  const c = commentById[cid];
+  if (!c || !c.parent_id) return cid;
+  return getRootId(c.parent_id);
+}
+function renderBody(text: string): string {
+  const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="mention" href="/reviewers/$3">$2</a>');
+}
 const topLevelComments = allComments.filter((c: any) => !c.parent_id);
 const replyMap: Record<string, any[]> = {};
 for (const c of allComments) {
   if (c.parent_id) {
-    if (!replyMap[c.parent_id]) replyMap[c.parent_id] = [];
-    replyMap[c.parent_id].push(c);
+    const rootId = getRootId(c.id);
+    if (!replyMap[rootId]) replyMap[rootId] = [];
+    replyMap[rootId].push(c);
   }
 }
 
@@ -203,11 +215,11 @@ const { data: moreReviews } = await (supabase as any)
                     <a href={`/reviewers/${c.profiles?.username}`} class="comment-username">@{c.profiles?.username}</a>
                     <span class="comment-time">{timeAgo(c.created_at)}</span>
                   </div>
-                  <div class="comment-text">{c.body}</div>
+                  <div class="comment-text" set:html={renderBody(c.body)}></div>
                   <div class="comment-actions">
                     <button class={`cvote-btn${cMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cUp}</button>
                     <button class={`cvote-btn${cMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cDown}</button>
-                    {isLoggedIn && <button class="comment-reply-btn" data-parent-id={c.id} type="button">↩ Reply</button>}
+                    {isLoggedIn && <button class="comment-reply-btn" data-parent-id={c.id} data-thread-id={c.id} data-reply-to={c.profiles?.username} type="button">↩ Reply</button>}
                     {isLoggedIn && <button class="comment-report-btn" onclick={`openReport('comment','${c.id}')`}>Report</button>}
                   </div>
                 </div>
@@ -232,11 +244,11 @@ const { data: moreReviews } = await (supabase as any)
                           <a href={`/reviewers/${r.profiles?.username}`} class="comment-username">@{r.profiles?.username}</a>
                           <span class="comment-time">{timeAgo(r.created_at)}</span>
                         </div>
-                        <div class="comment-text">{r.body}</div>
+                        <div class="comment-text" set:html={renderBody(r.body)}></div>
                         <div class="comment-actions">
                           <button class={`cvote-btn${rMyVote === 1 ? ' cvote-up' : ''}`} data-comment-id={r.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {rUp}</button>
                           <button class={`cvote-btn${rMyVote === -1 ? ' cvote-down' : ''}`} data-comment-id={r.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {rDown}</button>
-                          {isLoggedIn && <button class="comment-reply-btn" data-parent-id={c.id} type="button">↩ Reply</button>}
+                          {isLoggedIn && <button class="comment-reply-btn" data-parent-id={r.id} data-thread-id={c.id} data-reply-to={r.profiles?.username} type="button">↩ Reply</button>}
                           {isLoggedIn && <button class="comment-report-btn" onclick={`openReport('comment','${r.id}')`}>Report</button>}
                         </div>
                       </div>
@@ -424,23 +436,50 @@ const { data: moreReviews } = await (supabase as any)
     });
 
     // ── Reply interactions (delegated) ──────────────────────────────────────
+    function renderBody(text) {
+      var esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      return esc.replace(/(^|\s)(@([\w]+))/g, function(m, pre, mention, username) {
+        return pre + '<a class="mention" href="/reviewers/' + username + '">' + mention + '</a>';
+      });
+    }
+
     document.addEventListener('click', async function(e) {
       // Toggle reply form
       var replyBtn = e.target.closest('.comment-reply-btn');
       if (replyBtn) {
         var parentId = replyBtn.dataset.parentId;
-        var wrap = document.getElementById('reply-form-' + parentId);
+        var threadId = replyBtn.dataset.threadId || parentId;
+        var replyTo = replyBtn.dataset.replyTo;
+        var wrap = document.getElementById('reply-form-' + threadId);
         if (!wrap) return;
         var isOpen = wrap.style.display !== 'none';
         document.querySelectorAll('.reply-form-wrap').forEach(function(w) { w.style.display = 'none'; });
-        if (!isOpen) { wrap.style.display = 'block'; wrap.querySelector('textarea').focus(); }
+        if (!isOpen) {
+          // Point the submit button at the actual parent being replied to
+          var sb = wrap.querySelector('.reply-submit-btn');
+          if (sb) sb.dataset.parentId = parentId;
+          wrap.style.display = 'block';
+          var ta = wrap.querySelector('textarea');
+          if (ta) {
+            ta.value = replyTo ? '@' + replyTo + ' ' : '';
+            ta.focus();
+            ta.setSelectionRange(ta.value.length, ta.value.length);
+            var counter = wrap.querySelector('.reply-char-num');
+            if (counter) counter.textContent = ta.value.length;
+          }
+        }
         return;
       }
 
       // Cancel reply form
       var cancelBtn = e.target.closest('.reply-cancel-btn');
       if (cancelBtn) {
-        cancelBtn.closest('.reply-form-wrap').style.display = 'none';
+        var wrap = cancelBtn.closest('.reply-form-wrap');
+        wrap.style.display = 'none';
+        var ta = wrap.querySelector('textarea');
+        if (ta) { ta.value = ''; }
+        var counter = wrap.querySelector('.reply-char-num');
+        if (counter) counter.textContent = '0';
         return;
       }
 
@@ -450,6 +489,7 @@ const { data: moreReviews } = await (supabase as any)
       var parentId = submitBtn.dataset.parentId;
       var reviewId = submitBtn.dataset.reviewId;
       var wrap = submitBtn.closest('.reply-form-wrap');
+      var threadId = wrap.id.replace('reply-form-', '');
       var ta = wrap.querySelector('textarea');
       var body = ta.value.trim();
       if (!body) return;
@@ -482,15 +522,15 @@ const { data: moreReviews } = await (supabase as any)
               '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-username">@' + (p?.username ?? '') + '</a>' +
               '<span class="comment-time">just now</span>' +
             '</div>' +
-            '<div class="comment-text">' + (c?.body ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+            '<div class="comment-text">' + renderBody(c?.body ?? '') + '</div>' +
             '<div class="comment-actions">' +
               '<button class="cvote-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
               '<button class="cvote-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
-              '<button class="comment-reply-btn" data-parent-id="' + parentId + '" type="button">↩ Reply</button>' +
+              '<button class="comment-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + threadId + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
             '</div>' +
           '</div>';
 
-        var repliesContainer = document.querySelector('.replies[data-replies-for="' + parentId + '"]');
+        var repliesContainer = document.querySelector('.replies[data-replies-for="' + threadId + '"]');
         if (repliesContainer) repliesContainer.appendChild(replyEl);
 
         wrap.style.display = 'none';
@@ -575,11 +615,11 @@ const { data: moreReviews } = await (supabase as any)
                   '<a href="/reviewers/' + (p?.username ?? '') + '" class="comment-username">@' + (p?.username ?? '') + '</a>' +
                   '<span class="comment-time">just now</span>' +
                 '</div>' +
-                '<div class="comment-text">' + (c?.body ?? '').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>' +
+                '<div class="comment-text">' + renderBody(c?.body ?? '') + '</div>' +
                 '<div class="comment-actions">' +
                   '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
                   '<button class="cvote-btn" data-comment-id="' + (c?.id ?? '') + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
-                  '<button class="comment-reply-btn" data-parent-id="' + c.id + '" type="button">↩ Reply</button>' +
+                  '<button class="comment-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + c.id + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
                 '</div>' +
               '</div>' +
             '</div>' +
@@ -1254,6 +1294,13 @@ const { data: moreReviews } = await (supabase as any)
   }
   .reply-submit-btn:hover { opacity: 0.88; }
   .reply-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .mention {
+    color: var(--accent);
+    font-weight: 500;
+    text-decoration: none;
+  }
+  .mention:hover { text-decoration: underline; }
   .cvote-btn {
     font-size: 11px;
     font-family: inherit;
