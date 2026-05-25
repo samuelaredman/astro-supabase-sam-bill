@@ -26,7 +26,7 @@ export const POST: APIRoute = async (context) => {
     }
 
     const ext = fileType === 'image/png' ? 'png' : fileType === 'image/webp' ? 'webp' : fileType === 'image/gif' ? 'gif' : 'jpg';
-    const path = `${user.id}/banner.${ext}`;
+    const path = `${user.id}/banner-${Date.now()}.${ext}`;
 
     const { data: signedData, error: signError } = await db.storage
       .from('banners')

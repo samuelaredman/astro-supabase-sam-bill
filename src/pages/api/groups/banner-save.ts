@@ -42,7 +42,7 @@ export const POST: APIRoute = async (context) => {
       return json({ error: updateError.message }, 500);
     }
 
-    return json({ url: publicUrl + '?t=' + Date.now() });
+    return json({ url: publicUrl });
   } catch (err) {
     console.error('[groups/banner-save] unhandled error:', err);
     return json({ error: 'Internal server error' }, 500);

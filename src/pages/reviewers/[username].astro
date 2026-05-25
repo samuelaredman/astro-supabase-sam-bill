@@ -50,6 +50,25 @@ const avgScore = publishedReviews.length > 0
 const totalHours = publishedReviews.reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0)
 const avgHours = publishedReviews.length > 0 ? Math.round(totalHours / publishedReviews.length) : null
 
+// Tally upvotes + downvotes received on reviews
+let totalUpvotes = 0, totalDownvotes = 0
+for (const r of publishedReviews) {
+  const votes = Array.isArray(r.review_votes) ? r.review_votes : r.review_votes ? [r.review_votes] : []
+  for (const v of votes as any[]) {
+    if (v.vote === 1) totalUpvotes++
+    else if (v.vote === -1) totalDownvotes++
+  }
+}
+// Tally votes received on the reviewer's own comments
+const { data: reviewerComments } = await (supabase as any)
+  .from('review_comments').select('comment_votes(vote)').eq('profile_id', reviewer.id)
+for (const c of reviewerComments ?? []) {
+  for (const v of (c.comment_votes ?? []) as any[]) {
+    if (v.vote === 1) totalUpvotes++
+    else if (v.vote === -1) totalDownvotes++
+  }
+}
+
 const memberSince = reviewer.created_at
   ? new Date(reviewer.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
   : null;
@@ -385,11 +404,11 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     }
     html{scroll-behavior:smooth}
 
-    .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.85);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;gap:16px;backdrop-filter:blur(20px)}
+    .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.85);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;backdrop-filter:blur(20px)}
     [data-theme="light"] .topnav{background:rgba(245,244,242,.85)}
     .back-btn{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-tertiary);transition:color .15s;background:none;border:none;cursor:pointer;font-family:inherit;padding:0}
     .back-btn:hover{color:var(--text-primary)}
-    .logo{font-family:'Press Start 2P',monospace;font-size:13px;display:flex;align-items:center;gap:7px;margin-left:auto}
+    .logo{font-family:'Press Start 2P',monospace;font-size:13px;line-height:1;display:flex;align-items:center;gap:7px;margin-left:auto}
     .logo-dot{width:6px;height:6px;background:var(--accent);border-radius:50%;box-shadow:0 0 10px var(--accent)}
     .theme-btn{background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:6px;display:flex;margin-left:8px;transition:color .15s}
 
@@ -608,7 +627,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   </style>
 
 <nav class="topnav">
-  <button class="back-btn" onclick="history.length > 1 ? history.back() : (window.location.href='/')">
+  <button class="back-btn" onclick="(function(){var r=document.referrer;try{var u=new URL(r);if(u.hostname===location.hostname&&u.pathname!==location.pathname){window.location.assign(r);return}}catch(e){}window.location.href='/'})()">
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
     Back
   </button>
@@ -712,6 +731,15 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
           <div class="profile-stat">
             <span class="pstat-val">{totalHours}h</span>
             <span class="pstat-lbl">Hours logged</span>
+          </div>
+        )}
+        {(totalUpvotes > 0 || totalDownvotes > 0) && (
+          <div class="profile-stat">
+            <span class="pstat-val" style="display:flex;align-items:baseline;gap:6px">
+              <span style="color:#4ade80">↑{totalUpvotes}</span>
+              <span style="color:#f87171">↓{totalDownvotes}</span>
+            </span>
+            <span class="pstat-lbl">Votes received</span>
           </div>
         )}
         {memberSince && <div class="profile-since">Since {memberSince}</div>}
@@ -940,15 +968,19 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         {genreBreakdown.length > 0 && (
           <div class="card">
             <div class="card-title">Genres reviewed</div>
-            {genreBreakdown.map((g) => (
-              <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">
-                <span style="font-size:13px;color:var(--text-secondary);flex:1">{g.name}</span>
-                <div style="flex:0 0 60px;height:5px;background:var(--tag-bg);border-radius:3px;overflow:hidden">
-                  <div style={`height:100%;width:${g.pct}%;background:linear-gradient(to right,var(--accent)88,var(--accent));border-radius:3px`}></div>
+            {genreBreakdown.map((g, i) => {
+              const genreColors = ['#6050c8','#3b82f6','#10b981','#f59e0b','#ec4899','#06b6d4']
+              const c = genreColors[i % genreColors.length]
+              return (
+                <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border-subtle)">
+                  <span style="font-size:13px;color:var(--text-secondary);flex:1">{g.name}</span>
+                  <div style="flex:0 0 60px;height:5px;background:var(--tag-bg);border-radius:3px;overflow:hidden">
+                    <div style={`height:100%;width:${g.pct}%;background:linear-gradient(to right,${c}88,${c});border-radius:3px`}></div>
+                  </div>
+                  <span style={`font-size:13px;color:${c};font-weight:600;width:20px;text-align:right`}>{g.count}</span>
                 </div>
-                <span style="font-size:13px;color:var(--text-secondary);font-weight:600;width:20px;text-align:right">{g.count}</span>
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>
@@ -969,7 +1001,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         <button class="sort-tab" onclick="sortReviews('highest',this)">Highest</button>
         <button class="sort-tab" onclick="sortReviews('lowest',this)">Lowest</button>
         <button class="sort-tab" onclick="sortReviews('most_upvoted',this)">Most upvoted</button>
-        <button class="sort-tab" onclick="sortReviews('least_upvoted',this)">Least upvoted</button>
+        <button class="sort-tab" onclick="sortReviews('most_downvoted',this)">Most downvoted</button>
       </div>
       <div id="reviewsList">
         {publishedReviews.map((review: any) => (
@@ -1148,7 +1180,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
           body: uploadForm,
           headers: { 'x-upsert': 'true' }
         })
-        if (!uploadRes.ok) throw new Error('Storage upload failed: ' + uploadRes.status)
+        if (!uploadRes.ok) { var errText = await uploadRes.text(); throw new Error('Storage upload failed: ' + uploadRes.status + ' — ' + errText) }
         var saveRes = await fetch('/api/profile/banner-save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1599,7 +1631,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     if (type === 'highest') return parseInt(b.dataset.score) - parseInt(a.dataset.score)
     if (type === 'lowest') return parseInt(a.dataset.score) - parseInt(b.dataset.score)
     if (type === 'most_upvoted') return parseInt(b.dataset.upvotes) - parseInt(a.dataset.upvotes)
-    if (type === 'least_upvoted') return parseInt(a.dataset.upvotes) - parseInt(b.dataset.upvotes)
+    if (type === 'most_downvoted') return parseInt(b.dataset.downvotes) - parseInt(a.dataset.downvotes)
     return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime()
   })
   cards.forEach(function(card) { list.appendChild(card) })
@@ -2248,7 +2280,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active') })
       var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
       if (panel) panel.classList.add('active')
-      history.pushState({}, '', '?tab=' + tab)
+      history.replaceState({}, '', '?tab=' + tab)
       if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
     })
   })
