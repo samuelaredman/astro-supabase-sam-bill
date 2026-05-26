@@ -39,7 +39,11 @@ if (commentsError) console.error('[reviews/[id]] comments query error:', comment
 const allComments = commentsRaw ?? [];
 function renderBody(text: string): string {
   const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  return esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="mention" href="/reviewers/$3">$2</a>');
+  const withMentions = esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="mention" href="/reviewers/$3">$2</a>');
+  return withMentions.replace(/:([A-Za-z0-9_]+):/g, (_, key) => {
+    const path = IMAGE_EMOTE_MAP[key];
+    return path ? `<img src="${path}" class="comment-emote" alt=":${key}:" title=":${key}:">` : `:${key}:`;
+  });
 }
 const topLevelComments = allComments.filter((c: any) => !c.parent_id);
 const directReplyMap: Record<string, any[]> = {};
@@ -353,6 +357,9 @@ const { data: moreReviews } = await (supabase as any)
                       <div class="reply-form-footer">
                         <span class="reply-char-count"><span class="reply-char-num">0</span> / 2000</span>
                         <button class="reply-cancel-btn" type="button">Cancel</button>
+                        <button type="button" class="comment-emote-btn" title="Insert emote">
+                          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M5.5 10c.7.8 4.3.8 5 0"/><circle cx="6" cy="6.5" r=".7" fill="currentColor" stroke="none"/><circle cx="10" cy="6.5" r=".7" fill="currentColor" stroke="none"/></svg>
+                        </button>
                         <button class="reply-submit-btn" type="button" data-parent-id={c.id} data-review-id={id}>Reply</button>
                       </div>
                     </div>
@@ -382,6 +389,9 @@ const { data: moreReviews } = await (supabase as any)
               ></textarea>
               <div class="comment-form-footer">
                 <span class="comment-char-count"><span id="commentCharCount">0</span> / 2000</span>
+                <button type="button" class="comment-emote-btn" title="Insert emote">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M5.5 10c.7.8 4.3.8 5 0"/><circle cx="6" cy="6.5" r=".7" fill="currentColor" stroke="none"/><circle cx="10" cy="6.5" r=".7" fill="currentColor" stroke="none"/></svg>
+                </button>
                 <button type="submit" class="comment-submit" id="commentSubmit">Post comment</button>
               </div>
             </div>
@@ -514,6 +524,75 @@ const { data: moreReviews } = await (supabase as any)
         }
       }
     }
+
+    // Share emote map with the second inline script
+    window.__emoteMap = rvImageEmoteMap;
+
+    // ── Comment emote picker ──────────────────────────────────────────────────
+    if (!window.__cepInit) {
+      window.__cepInit = true;
+      var cep = document.createElement('div');
+      cep.id = 'cep';
+      cep.style.cssText = 'display:none;position:fixed;z-index:2000';
+      var cepHtml = '<div class="cep-label">Emotes</div><div class="cep-grid">';
+      rvImageEmotes.forEach(function(em) {
+        cepHtml += '<button class="cep-btn" data-key="' + em.key + '" title=":' + em.key + ':"><img src="' + em.path + '" alt="' + em.key + '"></button>';
+      });
+      cepHtml += '</div>';
+      cep.innerHTML = cepHtml;
+      document.body.appendChild(cep);
+    }
+
+    function closeCep() {
+      var p = document.getElementById('cep');
+      if (p) { p.style.display = 'none'; p._ta = null; }
+    }
+
+    document.addEventListener('click', function(e) {
+      var emoteBtn = e.target.closest('.comment-emote-btn');
+      if (emoteBtn) {
+        var p = document.getElementById('cep');
+        if (!p) return;
+        var wrap = emoteBtn.closest('.comment-input-wrap, .reply-input-wrap, .comment-edit-wrap');
+        var ta = wrap ? wrap.querySelector('textarea') : null;
+        var isOpen = p.style.display !== 'none' && p._ta === ta;
+        closeCep();
+        if (!isOpen && ta) {
+          p._ta = ta;
+          p.style.display = 'block';
+          requestAnimationFrame(function() {
+            var r = emoteBtn.getBoundingClientRect();
+            var pr = p.getBoundingClientRect();
+            var top = r.top - pr.height - 6;
+            if (top < 8) top = r.bottom + 6;
+            var left = r.left;
+            if (left + pr.width > window.innerWidth - 8) left = window.innerWidth - pr.width - 8;
+            p.style.top = top + 'px';
+            p.style.left = left + 'px';
+          });
+        }
+        return;
+      }
+
+      var cepBtn = e.target.closest('.cep-btn');
+      if (cepBtn) {
+        var p = document.getElementById('cep');
+        var ta = p && p._ta;
+        if (!ta) { closeCep(); return; }
+        var code = ':' + cepBtn.dataset.key + ':';
+        var start = ta.selectionStart;
+        ta.value = ta.value.slice(0, start) + code + ta.value.slice(ta.selectionEnd);
+        ta.selectionStart = ta.selectionEnd = start + code.length;
+        ta.focus();
+        ta.dispatchEvent(new Event('input'));
+        closeCep();
+        return;
+      }
+
+      if (!e.target.closest('#cep') && !e.target.closest('.comment-emote-btn')) {
+        closeCep();
+      }
+    });
 
     function rvClosePanel() {
       var p = document.getElementById('rc-emoji-picker');
@@ -681,10 +760,17 @@ const { data: moreReviews } = await (supabase as any)
     });
 
     // ── Comment interactions (delegated) ────────────────────────────────────
+    var EMOTE_BTN_HTML = '<button type="button" class="comment-emote-btn" title="Insert emote"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M5.5 10c.7.8 4.3.8 5 0"/><circle cx="6" cy="6.5" r=".7" fill="currentColor" stroke="none"/><circle cx="10" cy="6.5" r=".7" fill="currentColor" stroke="none"/></svg></button>';
+
     function renderBody(text) {
       var esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-      return esc.replace(/(^|\s)(@([\w]+))/g, function(m, pre, mention, username) {
+      var withMentions = esc.replace(/(^|\s)(@([\w]+))/g, function(m, pre, mention, username) {
         return pre + '<a class="mention" href="/reviewers/' + username + '">' + mention + '</a>';
+      });
+      var emoteMap = window.__emoteMap || {};
+      return withMentions.replace(/:([A-Za-z0-9_]+):/g, function(match, key) {
+        var path = emoteMap[key];
+        return path ? '<img src="' + path + '" class="comment-emote" alt=":' + key + ':" title=":' + key + ':">' : match;
       });
     }
 
@@ -707,6 +793,7 @@ const { data: moreReviews } = await (supabase as any)
           '<div class="comment-edit-footer">' +
             '<span class="comment-edit-char"><span class="comment-edit-char-num">' + rawBody.length + '</span> / 2000</span>' +
             '<button class="comment-edit-cancel-btn" type="button">Cancel</button>' +
+            EMOTE_BTN_HTML +
             '<button class="comment-edit-save-btn" type="button" data-comment-id="' + commentId + '">Save</button>' +
           '</div>';
         textEl.after(editWrap);
@@ -1000,6 +1087,7 @@ const { data: moreReviews } = await (supabase as any)
                   '<div class="reply-form-footer">' +
                     '<span class="reply-char-count"><span class="reply-char-num">0</span> / 2000</span>' +
                     '<button class="reply-cancel-btn" type="button">Cancel</button>' +
+                    EMOTE_BTN_HTML +
                     '<button class="reply-submit-btn" type="button" data-parent-id="' + c.id + '" data-review-id="' + reviewId + '">Reply</button>' +
                   '</div>' +
                 '</div>' +
@@ -1893,6 +1981,41 @@ const { data: moreReviews } = await (supabase as any)
     text-decoration: none;
   }
   .mention:hover { text-decoration: underline; }
+
+  /* Emote image inside comment text */
+  .comment-emote {
+    width: 20px; height: 20px; object-fit: contain;
+    vertical-align: middle; margin: 0 1px;
+  }
+
+  /* Emote toggle button next to textareas */
+  .comment-emote-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: none; border: none; cursor: pointer; color: var(--text-tertiary);
+    padding: 4px; border-radius: 6px; transition: color 0.15s, background 0.15s;
+    font-family: inherit;
+  }
+  .comment-emote-btn:hover { color: var(--accent); background: rgba(96, 80, 200, 0.08); }
+
+  /* Comment emote picker panel */
+  #cep {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 8px 10px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+    width: 224px; scrollbar-width: thin;
+  }
+  .cep-label {
+    font-size: 9px; font-weight: 600; color: var(--text-tertiary);
+    text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px;
+  }
+  .cep-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+  .cep-btn {
+    width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+    background: none; border: none; cursor: pointer; border-radius: 6px; padding: 3px;
+    transition: background 0.1s, transform 0.1s;
+  }
+  .cep-btn:hover { background: var(--bg-hover); transform: scale(1.15); }
+  .cep-btn img { width: 26px; height: 26px; object-fit: contain; display: block; }
   .cvote-btn {
     font-size: 11px;
     font-family: inherit;
