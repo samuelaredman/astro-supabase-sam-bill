@@ -47,5 +47,28 @@ export const POST: APIRoute = async (context) => {
     .eq('review_id', review_id)
     .eq('reaction_type', reaction_type);
 
+  // Fire notification when adding a reaction (not removing)
+  if (reacted) {
+    try {
+      const { data: review } = await db
+        .from('reviews')
+        .select('profile_id')
+        .eq('id', review_id)
+        .single();
+      // Don't notify if reacting to your own review
+      if (review && review.profile_id !== profile.id) {
+        await db.from('notifications').insert({
+          profile_id: review.profile_id,
+          actor_profile_id: profile.id,
+          type: 'review_reaction',
+          review_id,
+          reaction_type,
+        });
+      }
+    } catch (e) {
+      console.error('[react] notification error (non-fatal):', e);
+    }
+  }
+
   return json({ reacted, count: count ?? 0, reaction_type });
 };
