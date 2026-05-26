@@ -1,6 +1,7 @@
 ---
 export const prerender = false;
 import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/database';
+import { EMOJI_CATEGORIES, IMAGE_EMOTES, IMAGE_EMOTE_MAP } from '../../utils/reactions';
 import Layout from '../../components/Layout.astro';
 import ReportModal from '../../components/ReportModal.astro';
 
@@ -19,7 +20,8 @@ const { data: review, error } = await (supabase as any)
     played_on:platform_played_on ( id, name, slug ),
     games ( id, title, slug, cover_img_url ),
     profiles ( id, username, avatar_url ),
-    review_votes ( vote, profile_id )
+    review_votes ( vote, profile_id ),
+    review_reactions ( reaction_type, profile_id )
   `)
   .eq('id', id)
   .eq('status', 'published')
@@ -94,6 +96,23 @@ function getVoteCounts(votes: any) {
 const { up, down } = getVoteCounts(review.review_votes);
 const votesArr = Array.isArray(review.review_votes) ? review.review_votes : review.review_votes ? [review.review_votes] : [];
 const myVote = currentProfile ? (votesArr.find((v: any) => v.profile_id === currentProfile.id)?.vote ?? 0) : 0;
+
+const reactionsArr: { reaction_type: string; profile_id: string }[] =
+  Array.isArray((review as any).review_reactions) ? (review as any).review_reactions : [];
+const reactionCountMap: Record<string, { count: number; active: boolean }> = {};
+for (const r of reactionsArr) {
+  if (!reactionCountMap[r.reaction_type]) reactionCountMap[r.reaction_type] = { count: 0, active: false };
+  reactionCountMap[r.reaction_type].count++;
+  if (currentProfile && r.profile_id === currentProfile.id) reactionCountMap[r.reaction_type].active = true;
+}
+const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => ({
+  type,
+  display: type,
+  isImage: !!IMAGE_EMOTE_MAP[type],
+  path: IMAGE_EMOTE_MAP[type] ?? null,
+  count: info.count,
+  active: info.active,
+}));
 const coverBig = igdbImage(review.games?.cover_img_url, 't_cover_big');
 const coverThumb = igdbImage(review.games?.cover_img_url, 't_thumb');
 
@@ -164,6 +183,29 @@ const { data: moreReviews } = await (supabase as any)
       <div class="review-actions">
         <button class={`vote-btn${myVote === 1 ? ' active-up' : ''}`} data-review-id={review.id} data-vote="1" data-count={up}>▲ {up}</button>
         <button class={`vote-btn${myVote === -1 ? ' active-down' : ''}`} data-review-id={review.id} data-vote="-1" data-count={down}>▼ {down}</button>
+
+        <span class="rv-sep"></span>
+
+        <div class="rv-reaction-wrap" data-review-id={review.id}>
+          {displayReactions.map(r => (
+            <button
+              class={`rv-reaction-btn${r.active ? ' reaction-active' : ''}`}
+              data-review-id={review.id}
+              data-reaction={r.type}
+              data-display={r.display}
+              data-reacted={r.active ? 'true' : 'false'}
+              data-count={r.count}
+              data-logged-in={isLoggedIn ? 'true' : 'false'}
+              data-is-image={r.isImage ? 'true' : 'false'}
+            >
+              {r.isImage
+                ? <><img src={r.path!} class="rv-emote-img" alt={r.type} />{' '}{r.count}</>
+                : <>{r.display} {r.count}</>}
+            </button>
+          ))}
+          <button class="rv-reaction-toggle" data-toggle-review-id={review.id} data-logged-in={isLoggedIn ? 'true' : 'false'} title="React">+</button>
+        </div>
+
         {isLoggedIn && (
           <button class="report-trigger" onclick={`openReport('review','${review.id}')`} title="Report this review">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -412,6 +454,169 @@ const { data: moreReviews } = await (supabase as any)
   </div>
 
   <ReportModal />
+
+  <script is:inline define:vars={{ rvEmojiCategories: EMOJI_CATEGORIES, rvImageEmotes: IMAGE_EMOTES, rvImageEmoteMap: IMAGE_EMOTE_MAP }}>
+    // ── Emoji picker (shared with ReviewCard if present, otherwise created here) ──
+    if (!window.__rcPickerInit) {
+      window.__rcPickerInit = true;
+      var picker = document.createElement('div');
+      picker.id = 'rc-emoji-picker';
+      picker.style.cssText = 'display:none;position:fixed;z-index:1000';
+      var ph = '<div class="rc-emoji-title">React</div>';
+      ph += '<div class="rc-emoji-cat"><div class="rc-emoji-cat-label">Emotes</div><div class="rc-emoji-grid rc-emote-grid">';
+      rvImageEmotes.forEach(function(emote) {
+        ph += '<button class="rc-emoji-pick rc-emote-pick" data-emoji="' + emote.key + '" title="' + emote.key + '"><img src="' + emote.path + '" class="rc-emote-picker-img" alt="' + emote.key + '"></button>';
+      });
+      ph += '</div></div>';
+      rvEmojiCategories.forEach(function(cat) {
+        ph += '<div class="rc-emoji-cat"><div class="rc-emoji-cat-label">' + cat.label + '</div><div class="rc-emoji-grid">';
+        cat.emojis.forEach(function(emoji) {
+          ph += '<button class="rc-emoji-pick" data-emoji="' + emoji + '">' + emoji + '</button>';
+        });
+        ph += '</div></div>';
+      });
+      picker.innerHTML = ph;
+      document.body.appendChild(picker);
+    }
+
+    function rvEmoteHTML(key, count) {
+      var path = rvImageEmoteMap[key];
+      return '<img src="' + path + '" class="rv-emote-img" alt="' + key + '"> ' + count;
+    }
+
+    function rvApplyReaction(reviewId, reactionType, reacted, count) {
+      var isImage = !!rvImageEmoteMap[reactionType];
+      var updated = false;
+      document.querySelectorAll('.rv-reaction-btn[data-review-id="' + reviewId + '"][data-reaction="' + reactionType + '"]').forEach(function(btn) {
+        btn.dataset.reacted = reacted ? 'true' : 'false';
+        btn.dataset.count = String(count);
+        if (isImage) { btn.innerHTML = rvEmoteHTML(reactionType, count); }
+        else { btn.textContent = reactionType + ' ' + count; }
+        btn.classList.toggle('reaction-active', reacted);
+        btn.style.display = count > 0 ? '' : 'none';
+        updated = true;
+      });
+      if (!updated && count > 0) {
+        var wrap = document.querySelector('.rv-reaction-wrap[data-review-id="' + reviewId + '"]');
+        if (wrap) {
+          var toggleBtn = wrap.querySelector('.rv-reaction-toggle');
+          var newBtn = document.createElement('button');
+          newBtn.className = 'rv-reaction-btn' + (reacted ? ' reaction-active' : '');
+          newBtn.dataset.reviewId = reviewId;
+          newBtn.dataset.reaction = reactionType;
+          newBtn.dataset.reacted = reacted ? 'true' : 'false';
+          newBtn.dataset.count = String(count);
+          newBtn.dataset.loggedIn = 'true';
+          newBtn.dataset.isImage = isImage ? 'true' : 'false';
+          if (isImage) { newBtn.innerHTML = rvEmoteHTML(reactionType, count); }
+          else { newBtn.textContent = reactionType + ' ' + count; }
+          wrap.insertBefore(newBtn, toggleBtn);
+        }
+      }
+    }
+
+    function rvClosePanel() {
+      var p = document.getElementById('rc-emoji-picker');
+      if (p) p.style.display = 'none';
+    }
+
+    document.addEventListener('click', function(e) {
+      // + toggle button
+      var toggleBtn = e.target.closest('.rv-reaction-toggle');
+      if (toggleBtn) {
+        var reviewId = toggleBtn.dataset.toggleReviewId;
+        var loggedIn = toggleBtn.dataset.loggedIn === 'true';
+        var picker = document.getElementById('rc-emoji-picker');
+        if (!picker) return;
+        var isOpen = picker.style.display !== 'none' && picker.dataset.activeReviewId === reviewId;
+        rvClosePanel();
+        if (!isOpen) {
+          picker.dataset.activeReviewId = reviewId;
+          picker.dataset.activeLoggedIn = loggedIn ? 'true' : 'false';
+          picker.dataset.activeSource = 'rv';
+          picker.style.display = 'block';
+          requestAnimationFrame(function() {
+            var rect = toggleBtn.getBoundingClientRect();
+            var pRect = picker.getBoundingClientRect();
+            var top = rect.top - pRect.height - 8;
+            if (top < 8) top = rect.bottom + 8;
+            var left = rect.left;
+            if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+            picker.style.top = top + 'px';
+            picker.style.left = left + 'px';
+            picker.querySelectorAll('.rc-emoji-pick').forEach(function(btn) {
+              var inlineBtn = document.querySelector('.rv-reaction-btn[data-review-id="' + reviewId + '"][data-reaction="' + btn.dataset.emoji + '"]');
+              btn.classList.toggle('rc-emoji-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
+            });
+          });
+        }
+        return;
+      }
+
+      // Pick from picker (only handle if opened from this page's toggle)
+      var emojiBtn = e.target.closest('.rc-emoji-pick');
+      if (emojiBtn) {
+        var picker = document.getElementById('rc-emoji-picker');
+        if (!picker || picker.dataset.activeSource !== 'rv') return;
+        var reviewId = picker.dataset.activeReviewId;
+        var loggedIn = picker.dataset.activeLoggedIn === 'true';
+        if (!reviewId) return;
+        if (!loggedIn) { window.location.href = '/signin'; return; }
+        var emoji = emojiBtn.dataset.emoji;
+        var existing = document.querySelector('.rv-reaction-btn[data-review-id="' + reviewId + '"][data-reaction="' + emoji + '"]');
+        var reacted = existing ? existing.dataset.reacted === 'true' : false;
+        var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+        var newReacted = !reacted;
+        var newCount = newReacted ? count + 1 : Math.max(0, count - 1);
+        rvApplyReaction(reviewId, emoji, newReacted, newCount);
+        rvClosePanel();
+        fetch('/api/reviews/react', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: reviewId, reaction_type: emoji }),
+        }).then(function(res) {
+          if (res.status === 401) { window.location.href = '/signin'; return; }
+          return res.json();
+        }).then(function(data) {
+          if (data) rvApplyReaction(reviewId, emoji, data.reacted, data.count);
+        }).catch(function() {
+          rvApplyReaction(reviewId, emoji, reacted, count);
+        });
+        return;
+      }
+
+      // Inline reaction button click
+      var reactionBtn = e.target.closest('.rv-reaction-btn');
+      if (reactionBtn) {
+        if (reactionBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+        var reviewId = reactionBtn.dataset.reviewId;
+        var reaction = reactionBtn.dataset.reaction;
+        var reacted = reactionBtn.dataset.reacted === 'true';
+        var count = parseInt(reactionBtn.dataset.count) || 0;
+        var newReacted = !reacted;
+        var newCount = newReacted ? count + 1 : Math.max(0, count - 1);
+        rvApplyReaction(reviewId, reaction, newReacted, newCount);
+        fetch('/api/reviews/react', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: reviewId, reaction_type: reaction }),
+        }).then(function(res) {
+          if (res.status === 401) { window.location.href = '/signin'; return; }
+          return res.json();
+        }).then(function(data) {
+          if (data) rvApplyReaction(reviewId, reaction, data.reacted, data.count);
+        }).catch(function() {
+          rvApplyReaction(reviewId, reaction, reacted, count);
+        });
+        return;
+      }
+
+      // Outside click: close picker
+      if (!e.target.closest('.rv-reaction-wrap') && !e.target.closest('#rc-emoji-picker')) {
+        rvClosePanel();
+      }
+    });
+  </script>
 
   <script is:inline>
     // Spoiler reveal
@@ -1297,6 +1502,126 @@ const { data: moreReviews } = await (supabase as any)
     overflow: hidden;
   }
   .sidebar-reviewer-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+  /* ── Reaction row on review detail ── */
+  .rv-sep {
+    width: 1px;
+    height: 14px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+  .rv-reaction-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: wrap;
+    position: relative;
+  }
+  .rv-reaction-btn {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.18s;
+    white-space: nowrap;
+    line-height: 1.5;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .rv-reaction-btn:hover:not(.reaction-active) {
+    border-color: var(--text-tertiary);
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+  }
+  .rv-reaction-btn.reaction-active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(99, 102, 241, 0.08);
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.15);
+  }
+  .rv-reaction-toggle {
+    background: none;
+    border: 1.5px solid var(--border);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 6px;
+    line-height: 1.4;
+    font-family: inherit;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+  .rv-reaction-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border-color: var(--text-tertiary);
+  }
+  .rv-emote-img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+    vertical-align: middle;
+  }
+
+  /* ── Emoji picker (global — needed when ReviewCard is not on the page) ── */
+  #rc-emoji-picker {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+    max-height: 300px;
+    overflow-y: auto;
+    min-width: 260px;
+    max-width: 320px;
+    scrollbar-width: thin;
+  }
+  .rc-emoji-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+  }
+  .rc-emoji-cat { margin-bottom: 8px; }
+  .rc-emoji-cat:last-child { margin-bottom: 0; }
+  .rc-emoji-cat-label {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+    opacity: 0.6;
+  }
+  .rc-emoji-grid { display: flex; flex-wrap: wrap; gap: 1px; }
+  .rc-emote-grid { gap: 2px; }
+  .rc-emoji-pick {
+    font-size: 17px;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.1s, transform 0.1s;
+    line-height: 1;
+  }
+  .rc-emote-pick { width: 36px; height: 36px; padding: 2px; }
+  .rc-emote-picker-img { width: 28px; height: 28px; object-fit: contain; display: block; }
+  .rc-emoji-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
+  .rc-emoji-pick.rc-emoji-active { background: rgba(96, 80, 200, 0.12); outline: 1.5px solid var(--accent); }
 
   .report-trigger {
     margin-left: auto;
