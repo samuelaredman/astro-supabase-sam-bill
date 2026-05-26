@@ -31,7 +31,7 @@ if (error || !review) return Astro.redirect('/404');
 
 const { data: commentsRaw, error: commentsError } = await (supabase as any)
   .from('review_comments')
-  .select('id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id )')
+  .select('id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id ), comment_reactions ( reaction_type, profile_id )')
   .eq('review_id', id)
   .order('created_at', { ascending: true });
 
@@ -95,6 +95,25 @@ function getVoteCounts(votes: any) {
   const up = arr.filter((v: any) => v.vote === 1).length;
   const down = arr.filter((v: any) => v.vote === -1).length;
   return { up, down };
+}
+
+function getCommentReactions(comment: any) {
+  const arr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(comment.comment_reactions) ? comment.comment_reactions : [];
+  const map: Record<string, { count: number; active: boolean }> = {};
+  for (const r of arr) {
+    if (!map[r.reaction_type]) map[r.reaction_type] = { count: 0, active: false };
+    map[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) map[r.reaction_type].active = true;
+  }
+  return Object.entries(map).map(([type, info]) => ({
+    type,
+    display: type,
+    isImage: !!IMAGE_EMOTE_MAP[type],
+    path: IMAGE_EMOTE_MAP[type] ?? null,
+    count: info.count,
+    active: info.active,
+  }));
 }
 
 const { up, down } = getVoteCounts(review.review_votes);
@@ -264,6 +283,26 @@ const { data: moreReviews } = await (supabase as any)
                     {isOwnC && <button class="comment-edit-btn" data-comment-id={c.id} type="button" title="Edit comment"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>}
                     {isOwnC && <button class="comment-delete-btn" data-comment-id={c.id} type="button" title="Delete comment"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>}
                   </div>
+                  {(getCommentReactions(c).length > 0 || isLoggedIn) && (
+                    <div class="crx-wrap" data-comment-id={c.id}>
+                      {getCommentReactions(c).map((rx: any) => (
+                        <button
+                          class={`crx-btn${rx.active ? ' crx-active' : ''}`}
+                          data-comment-id={c.id}
+                          data-reaction={rx.type}
+                          data-reacted={rx.active ? 'true' : 'false'}
+                          data-count={rx.count}
+                          data-logged-in={isLoggedIn ? 'true' : 'false'}
+                          data-is-image={rx.isImage ? 'true' : 'false'}
+                        >
+                          {rx.isImage
+                            ? <><img src={rx.path!} class="crx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                            : <>{rx.display} {rx.count}</>}
+                        </button>
+                      ))}
+                      {isLoggedIn && <button class="crx-toggle" data-toggle-comment-id={c.id} data-logged-in="true" title="React">+</button>}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -299,6 +338,26 @@ const { data: moreReviews } = await (supabase as any)
                             {isOwnR && <button class="comment-edit-btn" data-comment-id={r.id} type="button" title="Edit comment"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>}
                             {isOwnR && <button class="comment-delete-btn" data-comment-id={r.id} type="button" title="Delete comment"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>}
                           </div>
+                          {(getCommentReactions(r).length > 0 || isLoggedIn) && (
+                            <div class="crx-wrap" data-comment-id={r.id}>
+                              {getCommentReactions(r).map((rx: any) => (
+                                <button
+                                  class={`crx-btn${rx.active ? ' crx-active' : ''}`}
+                                  data-comment-id={r.id}
+                                  data-reaction={rx.type}
+                                  data-reacted={rx.active ? 'true' : 'false'}
+                                  data-count={rx.count}
+                                  data-logged-in={isLoggedIn ? 'true' : 'false'}
+                                  data-is-image={rx.isImage ? 'true' : 'false'}
+                                >
+                                  {rx.isImage
+                                    ? <><img src={rx.path!} class="crx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                    : <>{rx.display} {rx.count}</>}
+                                </button>
+                              ))}
+                              {isLoggedIn && <button class="crx-toggle" data-toggle-comment-id={r.id} data-logged-in="true" title="React">+</button>}
+                            </div>
+                          )}
                         </div>
                       </div>
                       {level2Replies.length > 0 && (
@@ -332,6 +391,26 @@ const { data: moreReviews } = await (supabase as any)
                                     {isOwnDr && <button class="comment-edit-btn" data-comment-id={dr.id} type="button" title="Edit comment"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>}
                                     {isOwnDr && <button class="comment-delete-btn" data-comment-id={dr.id} type="button" title="Delete comment"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>}
                                   </div>
+                                  {(getCommentReactions(dr).length > 0 || isLoggedIn) && (
+                                    <div class="crx-wrap" data-comment-id={dr.id}>
+                                      {getCommentReactions(dr).map((rx: any) => (
+                                        <button
+                                          class={`crx-btn${rx.active ? ' crx-active' : ''}`}
+                                          data-comment-id={dr.id}
+                                          data-reaction={rx.type}
+                                          data-reacted={rx.active ? 'true' : 'false'}
+                                          data-count={rx.count}
+                                          data-logged-in={isLoggedIn ? 'true' : 'false'}
+                                          data-is-image={rx.isImage ? 'true' : 'false'}
+                                        >
+                                          {rx.isImage
+                                            ? <><img src={rx.path!} class="crx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                            : <>{rx.display} {rx.count}</>}
+                                        </button>
+                                      ))}
+                                      {isLoggedIn && <button class="crx-toggle" data-toggle-comment-id={dr.id} data-logged-in="true" title="React">+</button>}
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             );
@@ -525,6 +604,43 @@ const { data: moreReviews } = await (supabase as any)
       }
     }
 
+    function crxEmoteHTML(key, count) {
+      var path = rvImageEmoteMap[key];
+      return '<img src="' + path + '" class="crx-emote-img" alt="' + key + '"> ' + count;
+    }
+
+    function crxApplyReaction(commentId, reactionType, reacted, count) {
+      var isImage = !!rvImageEmoteMap[reactionType];
+      var updated = false;
+      document.querySelectorAll('.crx-btn[data-comment-id="' + commentId + '"][data-reaction="' + reactionType + '"]').forEach(function(btn) {
+        btn.dataset.reacted = reacted ? 'true' : 'false';
+        btn.dataset.count = String(count);
+        if (isImage) { btn.innerHTML = crxEmoteHTML(reactionType, count); }
+        else { btn.textContent = reactionType + ' ' + count; }
+        btn.classList.toggle('crx-active', reacted);
+        btn.style.display = count > 0 ? '' : 'none';
+        updated = true;
+      });
+      if (!updated && count > 0) {
+        var wrap = document.querySelector('.crx-wrap[data-comment-id="' + commentId + '"]');
+        if (wrap) {
+          var toggleBtn = wrap.querySelector('.crx-toggle');
+          var newBtn = document.createElement('button');
+          newBtn.className = 'crx-btn' + (reacted ? ' crx-active' : '');
+          newBtn.dataset.commentId = commentId;
+          newBtn.dataset.reaction = reactionType;
+          newBtn.dataset.reacted = reacted ? 'true' : 'false';
+          newBtn.dataset.count = String(count);
+          newBtn.dataset.loggedIn = 'true';
+          newBtn.dataset.isImage = isImage ? 'true' : 'false';
+          if (isImage) { newBtn.innerHTML = crxEmoteHTML(reactionType, count); }
+          else { newBtn.textContent = reactionType + ' ' + count; }
+          if (toggleBtn) { wrap.insertBefore(newBtn, toggleBtn); }
+          else { wrap.appendChild(newBtn); }
+        }
+      }
+    }
+
     // Share emote map with the second inline script
     window.__emoteMap = rvImageEmoteMap;
 
@@ -632,35 +748,98 @@ const { data: moreReviews } = await (supabase as any)
         return;
       }
 
-      // Pick from picker (only handle if opened from this page's toggle)
+      // + toggle button for comment reactions
+      var crxToggleBtn = e.target.closest('.crx-toggle');
+      if (crxToggleBtn) {
+        var commentId = crxToggleBtn.dataset.toggleCommentId;
+        var loggedIn = crxToggleBtn.dataset.loggedIn === 'true';
+        var picker = document.getElementById('rc-emoji-picker');
+        if (!picker) return;
+        var isOpen = picker.style.display !== 'none' && picker.dataset.activeCommentId === commentId && picker.dataset.activeSource === 'crx';
+        rvClosePanel();
+        if (!isOpen) {
+          picker.dataset.activeCommentId = commentId;
+          picker.dataset.activeLoggedIn = loggedIn ? 'true' : 'false';
+          picker.dataset.activeSource = 'crx';
+          picker.style.display = 'block';
+          requestAnimationFrame(function() {
+            var rect = crxToggleBtn.getBoundingClientRect();
+            var pRect = picker.getBoundingClientRect();
+            var top = rect.top - pRect.height - 8;
+            if (top < 8) top = rect.bottom + 8;
+            var left = rect.left;
+            if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+            picker.style.top = top + 'px';
+            picker.style.left = left + 'px';
+            picker.querySelectorAll('.rc-emoji-pick').forEach(function(btn) {
+              var inlineBtn = document.querySelector('.crx-btn[data-comment-id="' + commentId + '"][data-reaction="' + btn.dataset.emoji + '"]');
+              btn.classList.toggle('rc-emoji-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
+            });
+          });
+        }
+        return;
+      }
+
+      // Pick from picker (handles rv and crx sources)
       var emojiBtn = e.target.closest('.rc-emoji-pick');
       if (emojiBtn) {
         var picker = document.getElementById('rc-emoji-picker');
-        if (!picker || picker.dataset.activeSource !== 'rv') return;
-        var reviewId = picker.dataset.activeReviewId;
-        var loggedIn = picker.dataset.activeLoggedIn === 'true';
-        if (!reviewId) return;
-        if (!loggedIn) { window.location.href = '/signin'; return; }
-        var emoji = emojiBtn.dataset.emoji;
-        var existing = document.querySelector('.rv-reaction-btn[data-review-id="' + reviewId + '"][data-reaction="' + emoji + '"]');
-        var reacted = existing ? existing.dataset.reacted === 'true' : false;
-        var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
-        var newReacted = !reacted;
-        var newCount = newReacted ? count + 1 : Math.max(0, count - 1);
-        rvApplyReaction(reviewId, emoji, newReacted, newCount);
-        rvClosePanel();
-        fetch('/api/reviews/react', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ review_id: reviewId, reaction_type: emoji }),
-        }).then(function(res) {
-          if (res.status === 401) { window.location.href = '/signin'; return; }
-          return res.json();
-        }).then(function(data) {
-          if (data) rvApplyReaction(reviewId, emoji, data.reacted, data.count);
-        }).catch(function() {
-          rvApplyReaction(reviewId, emoji, reacted, count);
-        });
+        if (!picker) return;
+        var source = picker.dataset.activeSource;
+        if (source === 'rv') {
+          var reviewId = picker.dataset.activeReviewId;
+          var loggedIn = picker.dataset.activeLoggedIn === 'true';
+          if (!reviewId) return;
+          if (!loggedIn) { window.location.href = '/signin'; return; }
+          var emoji = emojiBtn.dataset.emoji;
+          var existing = document.querySelector('.rv-reaction-btn[data-review-id="' + reviewId + '"][data-reaction="' + emoji + '"]');
+          var reacted = existing ? existing.dataset.reacted === 'true' : false;
+          var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+          var newReacted = !reacted;
+          var newCount = newReacted ? count + 1 : Math.max(0, count - 1);
+          rvApplyReaction(reviewId, emoji, newReacted, newCount);
+          rvClosePanel();
+          fetch('/api/reviews/react', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ review_id: reviewId, reaction_type: emoji }),
+          }).then(function(res) {
+            if (res.status === 401) { window.location.href = '/signin'; return; }
+            return res.json();
+          }).then(function(data) {
+            if (data) rvApplyReaction(reviewId, emoji, data.reacted, data.count);
+          }).catch(function() {
+            rvApplyReaction(reviewId, emoji, reacted, count);
+          });
+          return;
+        }
+        if (source === 'crx') {
+          var commentId = picker.dataset.activeCommentId;
+          var loggedIn = picker.dataset.activeLoggedIn === 'true';
+          if (!commentId) return;
+          if (!loggedIn) { window.location.href = '/signin'; return; }
+          var emoji = emojiBtn.dataset.emoji;
+          var existing = document.querySelector('.crx-btn[data-comment-id="' + commentId + '"][data-reaction="' + emoji + '"]');
+          var reacted = existing ? existing.dataset.reacted === 'true' : false;
+          var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+          var newReacted = !reacted;
+          var newCount = newReacted ? count + 1 : Math.max(0, count - 1);
+          crxApplyReaction(commentId, emoji, newReacted, newCount);
+          rvClosePanel();
+          fetch('/api/comments/react', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ comment_id: commentId, reaction_type: emoji }),
+          }).then(function(res) {
+            if (res.status === 401) { window.location.href = '/signin'; return; }
+            return res.json();
+          }).then(function(data) {
+            if (data) crxApplyReaction(commentId, emoji, data.reacted, data.count);
+          }).catch(function() {
+            crxApplyReaction(commentId, emoji, reacted, count);
+          });
+          return;
+        }
         return;
       }
 
@@ -690,8 +869,34 @@ const { data: moreReviews } = await (supabase as any)
         return;
       }
 
+      // Inline comment reaction button click
+      var crxBtn = e.target.closest('.crx-btn');
+      if (crxBtn) {
+        if (crxBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+        var commentId = crxBtn.dataset.commentId;
+        var reaction = crxBtn.dataset.reaction;
+        var reacted = crxBtn.dataset.reacted === 'true';
+        var count = parseInt(crxBtn.dataset.count) || 0;
+        var newReacted = !reacted;
+        var newCount = newReacted ? count + 1 : Math.max(0, count - 1);
+        crxApplyReaction(commentId, reaction, newReacted, newCount);
+        fetch('/api/comments/react', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ comment_id: commentId, reaction_type: reaction }),
+        }).then(function(res) {
+          if (res.status === 401) { window.location.href = '/signin'; return; }
+          return res.json();
+        }).then(function(data) {
+          if (data) crxApplyReaction(commentId, reaction, data.reacted, data.count);
+        }).catch(function() {
+          crxApplyReaction(commentId, reaction, reacted, count);
+        });
+        return;
+      }
+
       // Outside click: close picker
-      if (!e.target.closest('.rv-reaction-wrap') && !e.target.closest('#rc-emoji-picker')) {
+      if (!e.target.closest('.rv-reaction-wrap') && !e.target.closest('#rc-emoji-picker') && !e.target.closest('.crx-wrap')) {
         rvClosePanel();
       }
     });
@@ -2016,6 +2221,68 @@ const { data: moreReviews } = await (supabase as any)
   }
   .cep-btn:hover { background: var(--bg-hover); transform: scale(1.15); }
   .cep-btn img { width: 26px; height: 26px; object-fit: contain; display: block; }
+
+  /* ── Comment reactions ── */
+  .crx-wrap {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: wrap;
+    margin-top: 5px;
+  }
+  .crx-btn {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.18s;
+    white-space: nowrap;
+    line-height: 1.5;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .crx-btn:hover:not(.crx-active) {
+    border-color: var(--text-tertiary);
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+  }
+  .crx-btn.crx-active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(99, 102, 241, 0.08);
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.15);
+  }
+  .crx-toggle {
+    background: none;
+    border: 1.5px solid var(--border);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 6px;
+    line-height: 1.4;
+    font-family: inherit;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+  .crx-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border-color: var(--text-tertiary);
+  }
+  .crx-emote-img {
+    width: 16px;
+    height: 16px;
+    object-fit: contain;
+    vertical-align: middle;
+  }
+
   .cvote-btn {
     font-size: 11px;
     font-family: inherit;
