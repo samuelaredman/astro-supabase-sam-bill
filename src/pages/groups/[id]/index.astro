@@ -1,6 +1,6 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
 import CropModal from "../../../components/CropModal.astro";
 
@@ -17,7 +17,11 @@ if (user) {
   currentProfile = cp;
 }
 
-let { data: group, error: groupError } = await (supabase as any)
+// Use admin client for the group query so non-members can view private group info
+// (needed for the join-request wall — RLS would otherwise block non-members)
+const db = getSupabaseAdmin() as any;
+
+let { data: group, error: groupError } = await db
   .from("groups")
   .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at")
   .eq("id", id)
@@ -25,7 +29,7 @@ let { data: group, error: groupError } = await (supabase as any)
 
 // banner_url column may not exist yet if migration hasn't been applied — fall back without it
 if (!group && groupError) {
-  const { data: fallback } = await (supabase as any)
+  const { data: fallback } = await db
     .from("groups")
     .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at")
     .eq("id", id)
@@ -46,10 +50,34 @@ const isMember = !!membership;
 const isAdminOrOwner = ["owner", "admin"].includes(membership?.role);
 const isOwner = membership?.role === "owner";
 
-if (group.visibility === "private" && !isMember) {
-  if (!joinCode || joinCode.toUpperCase() !== group.invite_code) {
-    return Astro.redirect("/groups");
-  }
+// Private groups: non-members need a valid invite code to see the page
+const canViewPrivate = isMember || (joinCode && joinCode.toUpperCase() === group.invite_code);
+if (group.visibility === "private" && !canViewPrivate) {
+  // Don't redirect — render a join-request wall below (handled in HTML)
+}
+
+// Has this user already submitted a join request?
+let existingJoinRequest: any = null;
+if (currentProfile && !isMember && group.visibility === "private") {
+  const { data: jr } = await db
+    .from("group_join_requests")
+    .select("id, status")
+    .eq("group_id", id)
+    .eq("profile_id", currentProfile.id)
+    .maybeSingle();
+  existingJoinRequest = jr;
+}
+
+// Pending join requests visible to admins
+let pendingJoinRequests: any[] = [];
+if (isAdminOrOwner) {
+  const { data: jrs } = await db
+    .from("group_join_requests")
+    .select("id, message, created_at, profiles ( id, username, avatar_url )")
+    .eq("group_id", id)
+    .eq("status", "pending")
+    .order("created_at", { ascending: true });
+  pendingJoinRequests = jrs ?? [];
 }
 
 const { data: members } = await (supabase as any)
@@ -277,6 +305,7 @@ const memberListJson = JSON.stringify(memberList);
   .btn-ghost{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);padding:9px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
   .btn-ghost:hover{border-color:var(--text-tertiary)}
   .btn-danger{background:#300e0e;color:#f87171;border:none;padding:8px 16px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer}
+  .badge-pending-action{font-size:12px;padding:7px 14px;border-radius:22px;background:rgba(251,191,36,0.1);color:#fbbf24;font-weight:600;border:1px solid rgba(251,191,36,0.25);display:inline-flex;align-items:center}
 
   /* ── Tab nav (card style) ── */
   .page{max-width:980px;margin:0 auto;padding:20px 28px 80px}
@@ -543,15 +572,32 @@ const memberListJson = JSON.stringify(memberList);
     </div>
 
     <div class="group-actions">
-      {!user && group.visibility === "public" && (
+      {/* Not logged in */}
+      {!user && (group.visibility === "public" || group.visibility === "community") && (
         <a href="/signin" class="btn-primary">Sign in to join</a>
       )}
-      {user && !isMember && group.visibility === "public" && (
+      {!user && group.visibility === "private" && (
+        <a href="/signin" class="btn-primary">Sign in to request access</a>
+      )}
+
+      {/* Logged in, not a member */}
+      {user && !isMember && (group.visibility === "public" || group.visibility === "community") && (
         <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
       )}
-      {user && !isMember && joinCode && (
+      {user && !isMember && group.visibility === "private" && joinCode && (
         <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
       )}
+      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "pending" && (
+        <span class="badge-pending-action">Request pending</span>
+      )}
+      {user && !isMember && group.visibility === "private" && !joinCode && !existingJoinRequest && (
+        <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request to Join</button>
+      )}
+      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "rejected" && (
+        <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request Again</button>
+      )}
+
+      {/* Members */}
       {isMember && isAdminOrOwner && (
         <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
       )}
@@ -559,12 +605,43 @@ const memberListJson = JSON.stringify(memberList);
         <button class="btn-ghost" id="leave-btn" onclick="leaveGroup()">Leave</button>
       )}
     </div>
+
+    {/* Join request form — shown inline below actions when opened */}
+    {/* Renders for: no prior request, OR a rejected request (allowing re-application) */}
+    {user && !isMember && group.visibility === "private" && !joinCode && (!existingJoinRequest || existingJoinRequest?.status === "rejected") && (
+      <div id="join-request-form" style="display:none;margin-top:14px;padding:16px 20px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;max-width:420px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px">Request to join {group.name}</div>
+        <textarea id="join-request-msg" placeholder="Add a message (optional)" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input,var(--bg-card));color:var(--text-primary);font-size:13px;font-family:inherit;resize:vertical;min-height:68px;outline:none" maxlength="300"></textarea>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn-primary" id="submit-request-btn" onclick="submitJoinRequest()" style="font-size:13px;padding:8px 18px">Send Request</button>
+          <button onclick="closeJoinRequestForm()" style="background:none;border:none;cursor:pointer;font-size:13px;color:var(--text-tertiary);font-family:inherit">Cancel</button>
+        </div>
+        <div id="join-request-err" style="font-size:12px;color:#f87171;margin-top:6px;display:none"></div>
+      </div>
+    )}
   </div>
 </div>
 
 <!-- Main content -->
 <div class="page">
 
+  {/* Private group wall for non-members without a valid invite code */}
+  {group.visibility === "private" && !canViewPrivate && (
+    <div style="max-width:480px;margin:48px auto;padding:0 20px;text-align:center">
+      <div style="font-size:40px;margin-bottom:16px">🔒</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:22px;margin-bottom:8px">{group.name} is private</div>
+      <p style="font-size:14px;color:var(--text-secondary);line-height:1.6;margin-bottom:0">
+        {existingJoinRequest?.status === "pending"
+          ? "Your join request is pending review by the group admins."
+          : existingJoinRequest?.status === "rejected"
+          ? "Your previous request was not approved. You can send another request."
+          : "This group is invite-only. You can request to join and an admin will review your request."}
+      </p>
+    </div>
+  )}
+
+  {/* Full tab nav — only shown to members or non-private groups */}
+  {(isMember || group.visibility !== "private") && (
   <nav class="tab-nav">
     <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>
       <div class="tab-icon">
@@ -842,6 +919,32 @@ const memberListJson = JSON.stringify(memberList);
             </div>
           )}
 
+          {/* Pending join requests — admins/owners only, private groups */}
+          {isAdminOrOwner && group.visibility === "private" && pendingJoinRequests.length > 0 && (
+            <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border-subtle)">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);margin-bottom:8px">
+                Join Requests ({pendingJoinRequests.length})
+              </div>
+              {pendingJoinRequests.map((jr: any) => (
+                <div class="member-item" style="align-items:flex-start;gap:10px;padding:8px 0" data-jr-id={jr.id}>
+                  <div class="member-avatar" style="flex-shrink:0">
+                    {jr.profiles?.avatar_url
+                      ? <img src={jr.profiles.avatar_url} alt={jr.profiles?.username} />
+                      : getInitials(jr.profiles?.username ?? "?")}
+                  </div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13px;font-weight:600">@{jr.profiles?.username}</div>
+                    {jr.message && <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;line-height:1.4">{jr.message}</div>}
+                  </div>
+                  <div style="display:flex;gap:6px;flex-shrink:0">
+                    <button onclick={`respondJoinRequest('${jr.id}', 'accept')`} style="background:var(--accent);color:#fff;border:none;padding:5px 10px;border-radius:12px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer">Accept</button>
+                    <button onclick={`respondJoinRequest('${jr.id}', 'reject')`} style="background:var(--tag-bg);color:var(--text-secondary);border:none;padding:5px 10px;border-radius:12px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer">Reject</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {memberList.map((m: any) => (
             <div class="member-item" data-profile-id={m.id}>
               <div class="member-avatar">
@@ -970,9 +1073,11 @@ const memberListJson = JSON.stringify(memberList);
     }
   </div>
 
+  )} {/* end isMember || non-private tab nav */}
+
 </div>
 
-<script define:vars={{ groupDataJson, memberListJson, inviteUrl, isAdminOrOwner, groupId: group.id }}>
+<script define:vars={{ groupDataJson, memberListJson, inviteUrl: isAdminOrOwner ? inviteUrl : null, isAdminOrOwner, groupId: group.id }}>
 const groupData = JSON.parse(groupDataJson);
 const memberList = JSON.parse(memberListJson);
 
@@ -1089,6 +1194,69 @@ async function joinGroupByCode() {
   else { const d = await res.json(); alert(d.error ?? 'Could not join'); if (btn) btn.disabled = false; }
 }
 window.joinGroupByCode = joinGroupByCode;
+
+// ── Join request (private groups) ──
+function openJoinRequestForm() {
+  const form = document.getElementById('join-request-form');
+  const btn = document.getElementById('join-request-btn');
+  if (form) { form.style.display = 'block'; if (btn) btn.style.display = 'none'; }
+}
+window.openJoinRequestForm = openJoinRequestForm;
+
+function closeJoinRequestForm() {
+  const form = document.getElementById('join-request-form');
+  const btn = document.getElementById('join-request-btn');
+  if (form) { form.style.display = 'none'; if (btn) btn.style.display = ''; }
+}
+window.closeJoinRequestForm = closeJoinRequestForm;
+
+async function submitJoinRequest() {
+  const submitBtn = document.getElementById('submit-request-btn');
+  const msgEl = document.getElementById('join-request-msg');
+  const errEl = document.getElementById('join-request-err');
+  if (submitBtn) submitBtn.disabled = true;
+  if (errEl) errEl.style.display = 'none';
+  const message = msgEl ? msgEl.value.trim() : '';
+  const res = await fetch('/api/groups/join-request/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, message: message || null }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    // Replace the action area with a pending badge
+    const form = document.getElementById('join-request-form');
+    if (form) form.style.display = 'none';
+    const actionsEl = document.querySelector('.group-actions');
+    if (actionsEl) {
+      actionsEl.innerHTML = '<span class="badge-pending-action">Request pending</span>';
+    }
+  } else {
+    if (errEl) { errEl.textContent = data.error ?? 'Could not send request'; errEl.style.display = 'block'; }
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+window.submitJoinRequest = submitJoinRequest;
+
+async function respondJoinRequest(requestId, action) {
+  const row = document.querySelector(`[data-jr-id="${requestId}"]`);
+  if (row) { row.style.opacity = '0.5'; row.querySelectorAll('button').forEach(b => b.disabled = true); }
+  const res = await fetch('/api/groups/join-request/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_id: requestId, action }),
+  });
+  if (res.ok) {
+    if (row) row.remove();
+    // If accepted, reload so the new member appears
+    if (action === 'accept') window.location.reload();
+  } else {
+    const d = await res.json();
+    alert(d.error ?? 'Error');
+    if (row) { row.style.opacity = '1'; row.querySelectorAll('button').forEach(b => b.disabled = false); }
+  }
+}
+window.respondJoinRequest = respondJoinRequest;
 
 async function leaveGroup() {
   if (!confirm('Leave this group?')) return;

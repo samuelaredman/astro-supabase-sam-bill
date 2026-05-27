@@ -15,7 +15,7 @@ export const POST: APIRoute = async (context) => {
 
   const db = getSupabaseAdmin() as any;
 
-  // Resolve the group — by id (public) or invite_code (private)
+  // Resolve the group — by id or invite_code
   let groupQuery = db.from("groups").select("id, visibility, invite_code");
   if (invite_code) {
     groupQuery = groupQuery.eq("invite_code", invite_code.toUpperCase());
@@ -28,8 +28,11 @@ export const POST: APIRoute = async (context) => {
   const { data: group } = await groupQuery.single();
   if (!group) return json({ error: "Group not found" }, 404);
 
-  if (group.visibility === "private" && group.invite_code !== invite_code?.toUpperCase()) {
-    return json({ error: "Invalid invite code" }, 403);
+  // Private groups: only joinable via a valid admin-sent invite code
+  if (group.visibility === "private") {
+    if (!invite_code || group.invite_code !== invite_code.toUpperCase()) {
+      return json({ error: "This group is private. Request to join or use an invite link.", code: "PRIVATE_GROUP" }, 403);
+    }
   }
 
   const { data: existing } = await db.from("group_members")
@@ -41,9 +44,12 @@ export const POST: APIRoute = async (context) => {
     profile_id: profile.id,
     role: "member",
   });
-  if (error) return json({ error: error.message }, 500);
+  if (error) {
+    console.error("[groups/join] error:", JSON.stringify(error));
+    return json({ error: error.message }, 500);
+  }
 
-  // If joining via direct invite, mark it accepted
+  // Mark the direct invite as accepted if one exists
   if (invite_code) {
     await db.from("group_invites")
       .update({ status: "accepted" })
