@@ -18,15 +18,28 @@ const { data: group } = await db
   .from("groups").select("id, name, visibility").eq("id", id).single();
 if (!group) return Astro.redirect("/groups");
 
-const { data: membership } = await db.from("group_members")
-  .select("role, custom_role_id").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
+// Resilient membership query — fall back to role-only if custom_role_id column doesn't exist yet
+let membership: any = null;
+{
+  const { data: m, error: mErr } = await db.from("group_members")
+    .select("role, custom_role_id").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
+  if (mErr) {
+    const { data: m2 } = await db.from("group_members")
+      .select("role").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
+    membership = m2;
+  } else {
+    membership = m;
+  }
+}
 
 // Determine access: owner, admin, or custom role with can_remove_members
 let canManage = membership && ["owner", "admin"].includes(membership.role);
 if (!canManage && membership?.custom_role_id) {
-  const { data: cr } = await db.from("group_roles")
-    .select("can_remove_members").eq("id", membership.custom_role_id).maybeSingle();
-  if (cr?.can_remove_members) canManage = true;
+  try {
+    const { data: cr } = await db.from("group_roles")
+      .select("can_remove_members").eq("id", membership.custom_role_id).maybeSingle();
+    if (cr?.can_remove_members) canManage = true;
+  } catch {}
 }
 if (!canManage) return Astro.redirect(`/groups/${id}`);
 
