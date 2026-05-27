@@ -29,17 +29,30 @@ export const POST: APIRoute = async (context) => {
 
   let watching: boolean;
   if (existing?.status === 'want_to_play') {
-    await db.from('user_game_status').delete()
+    // Already on want-to-play — toggle it off
+    const { error: delError } = await db.from('user_game_status').delete()
       .eq('profile_id', profile.id).eq('game_id', game_id);
+    if (delError) {
+      console.error('[watchlist/toggle] delete error:', JSON.stringify(delError));
+      return json({ error: 'Failed to remove from watchlist.' }, 500);
+    }
     watching = false;
-  } else {
-    await db.from('user_game_status').upsert({
+  } else if (!existing) {
+    // No status yet — set want_to_play
+    const { error: insertError } = await db.from('user_game_status').insert({
       profile_id: profile.id,
       game_id,
       status: 'want_to_play',
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'profile_id,game_id' });
+    });
+    if (insertError) {
+      console.error('[watchlist/toggle] insert error:', JSON.stringify(insertError));
+      return json({ error: 'Failed to add to watchlist.' }, 500);
+    }
     watching = true;
+  } else {
+    // User already has a different status (playing/completed/dropped) — don't overwrite it
+    return json({ error: 'Game is already tracked with a different status. Use the track buttons on the game page to change it.' }, 409);
   }
 
   const { count } = await db

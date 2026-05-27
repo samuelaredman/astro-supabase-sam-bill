@@ -24,10 +24,14 @@ export const POST: APIRoute = async (context) => {
 
   // null status = remove tracking entirely
   if (status === null || status === undefined) {
-    await db.from("user_game_status")
+    const { error: delError } = await db.from("user_game_status")
       .delete()
       .eq("profile_id", profile.id)
       .eq("game_id", game_id);
+    if (delError) {
+      console.error("[user-game-status/set] delete error:", JSON.stringify(delError));
+      return json({ error: "Failed to remove status" }, 500);
+    }
     return json({ status: null });
   }
 
