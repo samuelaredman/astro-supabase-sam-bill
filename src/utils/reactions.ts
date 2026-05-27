@@ -57,6 +57,17 @@ export const IMAGE_EMOTES: ImageEmote[] = [
   { key: 'PepegaCredit', path: '/emotes/PepegaCredit.webp' },
   { key: 'POGGERS',      path: '/emotes/POGGERS.webp' },
   { key: 'Sadge',        path: '/emotes/Sadge.webp' },
+  { key: 'pressF',        path: '/emotes/pressF.webp' },
+  { key: 'POLICE',        path: '/emotes/POLICE.webp' },
+  { key: 'AYAYA',        path: '/emotes/AYAYA.webp' },
+  { key: 'pikaOMG',        path: '/emotes/pikaOMG.webp' },
+  { key: 'Prayge',        path: '/emotes/Prayge.webp' },
+  { key: 'ThisIsFine',        path: '/emotes/ThisIsFine.webp' },
+  { key: 'jjkStress',        path: '/emotes/jjkStress.webp' },
+  { key: 'LOLL',        path: '/emotes/LOLL.webp' },
+  { key: 'ppDrool',        path: '/emotes/ppDrool.webp' },
+  { key: 'PenguinR',        path: '/emotes/PenguinR.webp' },
+  { key: 'clubPls',        path: '/emotes/clubPls.webp' },
 ];
 
 export const IMAGE_EMOTE_MAP: Record<string, string> = Object.fromEntries(
