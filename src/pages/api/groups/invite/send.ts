@@ -22,12 +22,22 @@ export const POST: APIRoute = async (context) => {
   if (!group_id) return json({ error: "group_id required" }, 400);
   if (!invited_username?.trim()) return json({ error: "Username required" }, 400);
 
-  // Caller must be owner or admin
+  // Caller must be owner, admin, or have a custom role with can_invite=true
   const { data: membership } = await db.from("group_members")
-    .select("role").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
-  if (!membership || !["owner", "admin"].includes(membership.role)) {
-    return json({ error: "Not authorized" }, 403);
+    .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
+  if (!membership) return json({ error: "Not authorized" }, 403);
+
+  const isOwner = membership.role === "owner";
+  const isAdmin = membership.role === "admin";
+
+  let hasInvite = isOwner || isAdmin;
+  if (!hasInvite && membership.custom_role_id) {
+    const { data: cr } = await db.from("group_roles")
+      .select("can_invite").eq("id", membership.custom_role_id).maybeSingle();
+    hasInvite = !!cr?.can_invite;
   }
+
+  if (!hasInvite) return json({ error: "Not authorized" }, 403);
 
   const cleanUsername = invited_username.trim().replace(/^@/, "").replace(/[%_]/g, "\\$&");
   const { data: invitee } = await db.from("profiles")

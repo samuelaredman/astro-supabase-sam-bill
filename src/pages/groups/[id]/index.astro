@@ -23,7 +23,7 @@ const db = getSupabaseAdmin() as any;
 
 let { data: group, error: groupError } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
   .eq("id", id)
   .single();
 
@@ -31,7 +31,7 @@ let { data: group, error: groupError } = await db
 if (!group && groupError) {
   const { data: fallback } = await db
     .from("groups")
-    .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at")
+    .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
     .eq("id", id)
     .single();
   if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center' };
@@ -102,12 +102,57 @@ const { data: members } = await (supabase as any)
 const memberList = (members ?? []).map((m: any) => ({ ...m.profiles, role: m.role, joined_at: m.joined_at }));
 const memberProfileIds = memberList.map((m: any) => m.id);
 
+// ── Stats config (with defaults) ──
+const defaultStats = {
+  show_top_games: true, show_top_rated: true, show_hot_take: true,
+  show_critic_spectrum: true, show_recent_reviews: true,
+  show_score_compare: true, show_sessions: true, show_watchlist: true,
+  focus_genre_id: null as string | null, focus_platform_id: null as string | null,
+};
+const statsConf = { ...defaultStats, ...(group.stats_config ?? {}) };
+
+// ── Custom roles — graceful fallback if migration not yet applied ──
+let groupRoles: any[] = [];
+try {
+  const { data: gr } = await db.from("group_roles").select("id, name, color").eq("group_id", id);
+  groupRoles = gr ?? [];
+} catch { groupRoles = []; }
+const roleMap: Record<string, any> = {};
+for (const r of groupRoles) roleMap[r.id] = r;
+
+// Custom role assignments per member
+const memberCustomRoles: Record<string, string | null> = {};
+try {
+  const { data: mcr } = await db.from("group_members")
+    .select("profile_id, custom_role_id").eq("group_id", id);
+  for (const cr of mcr ?? []) memberCustomRoles[cr.profile_id] = cr.custom_role_id ?? null;
+} catch { /* column may not exist yet */ }
+
+// ── Genre / platform focus filter ──
+let allowedGameIds: string[] | null = null;
+let focusLabel: string | null = null;
+if (statsConf.focus_genre_id) {
+  const { data: genreGames } = await db.from("game_genres").select("game_id").eq("genre_id", statsConf.focus_genre_id);
+  allowedGameIds = (genreGames ?? []).map((g: any) => g.game_id);
+  if (allowedGameIds.length === 0) allowedGameIds = ["00000000-0000-0000-0000-000000000000"];
+  const { data: gn } = await db.from("genres").select("name").eq("id", statsConf.focus_genre_id).maybeSingle();
+  focusLabel = gn?.name ? `${gn.name} focus` : null;
+} else if (statsConf.focus_platform_id) {
+  const { data: platGames } = await db.from("game_platforms").select("game_id").eq("platform_id", statsConf.focus_platform_id);
+  allowedGameIds = (platGames ?? []).map((g: any) => g.game_id);
+  if (allowedGameIds.length === 0) allowedGameIds = ["00000000-0000-0000-0000-000000000000"];
+  const { data: pl } = await db.from("platforms").select("name").eq("id", statsConf.focus_platform_id).maybeSingle();
+  focusLabel = pl?.name ? `${pl.name} focus` : null;
+}
+
 // Accurate full stats — lightweight query, no limit
-const { data: allReviewStats } = await (supabase as any)
+let allReviewStatsQuery = (supabase as any)
   .from("reviews")
   .select("game_id, score, play_time_hours, profile_id")
   .in("profile_id", memberProfileIds.length ? memberProfileIds : ["00000000-0000-0000-0000-000000000000"])
   .eq("status", "published");
+if (allowedGameIds) allReviewStatsQuery = allReviewStatsQuery.in("game_id", allowedGameIds);
+const { data: allReviewStats } = await allReviewStatsQuery;
 const totalReviews = (allReviewStats ?? []).length;
 const uniqueGamesCount = new Set((allReviewStats ?? []).map((r: any) => r.game_id)).size;
 const allGroupScores = (allReviewStats ?? []).map((r: any) => r.score);
@@ -136,11 +181,13 @@ const { data: sessionsData } = await (supabase as any)
 
 let sharedGames: any[] = [];
 if (memberProfileIds.length >= 2) {
-  const { data: memberReviews } = await (supabase as any)
+  let memberReviewsQuery = (supabase as any)
     .from("reviews")
     .select("profile_id, game_id, score, games ( id, title, slug, cover_img_url )")
     .in("profile_id", memberProfileIds)
     .eq("status", "published");
+  if (allowedGameIds) memberReviewsQuery = memberReviewsQuery.in("game_id", allowedGameIds);
+  const { data: memberReviews } = await memberReviewsQuery;
 
   const gameReviewMap: Record<string, any> = {};
   for (const r of memberReviews ?? []) {
@@ -153,13 +200,15 @@ if (memberProfileIds.length >= 2) {
     .slice(0, 30);
 }
 
-const { data: activityReviews } = await (supabase as any)
+let activityQuery = (supabase as any)
   .from("reviews")
   .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
   .in("profile_id", memberProfileIds.length ? memberProfileIds : ['00000000-0000-0000-0000-000000000000'])
   .eq("status", "published")
   .order("published_at", { ascending: false })
   .limit(50);
+if (allowedGameIds) activityQuery = activityQuery.in("game_id", allowedGameIds);
+const { data: activityReviews } = await activityQuery;
 
 const gameCounts: Record<string, { game: any; count: number; avgScore: number; scores: number[] }> = {};
 for (const r of activityReviews ?? []) {
@@ -550,6 +599,7 @@ const memberListJson = JSON.stringify(memberList);
       <div class="group-meta-badges">
         <span class="badge">{group.visibility}</span>
         {membership && <span class="badge badge-accent">{membership.role}</span>}
+        {focusLabel && <span class="badge" style="background:rgba(96,80,200,.12);color:var(--accent)">🎯 {focusLabel}</span>}
       </div>
       <div class="group-stats-row">
         <div class="gstat">
@@ -627,7 +677,10 @@ const memberListJson = JSON.stringify(memberList);
     {user && !isMember && group.visibility === "private" && !joinCode && (!existingJoinRequest || existingJoinRequest?.status === "rejected") && (
       <div id="join-request-form" style="display:none;margin-top:14px;padding:16px 20px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;max-width:420px">
         <div style="font-size:13px;font-weight:600;margin-bottom:8px">Request to join {group.name}</div>
-        <textarea id="join-request-msg" placeholder="Add a message (optional)" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input,var(--bg-card));color:var(--text-primary);font-size:13px;font-family:inherit;resize:vertical;min-height:68px;outline:none" maxlength="300"></textarea>
+        {group.join_prompt && (
+          <div style="font-size:13px;color:var(--text-secondary);background:var(--bg-hover);padding:10px 12px;border-radius:8px;border-left:2px solid var(--accent);margin-bottom:10px;line-height:1.5">{group.join_prompt}</div>
+        )}
+        <textarea id="join-request-msg" placeholder={group.join_prompt ? "Your response…" : "Add a message (optional)"} style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input,var(--bg-card));color:var(--text-primary);font-size:13px;font-family:inherit;resize:vertical;min-height:68px;outline:none" maxlength="300"></textarea>
         <div style="display:flex;gap:8px;margin-top:10px">
           <button class="btn-primary" id="submit-request-btn" onclick="submitJoinRequest()" style="font-size:13px;padding:8px 18px">Send Request</button>
           <button onclick="closeJoinRequestForm()" style="background:none;border:none;cursor:pointer;font-size:13px;color:var(--text-tertiary);font-family:inherit">Cancel</button>
@@ -658,7 +711,7 @@ const memberListJson = JSON.stringify(memberList);
 
   {/* Full tab nav — only shown to members or non-private groups */}
   {(isMember || group.visibility !== "private") && (
-  <nav class="tab-nav">
+  <nav class="tab-nav" style={`grid-template-columns: repeat(${1 + (statsConf.show_sessions ? 1 : 0) + (statsConf.show_score_compare ? 1 : 0)}, 1fr)`}>
     <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>
       <div class="tab-icon">
         <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -669,6 +722,7 @@ const memberListJson = JSON.stringify(memberList);
       <div class="tab-label">Overview</div>
       <div class="tab-meta">Stats &amp; activity</div>
     </a>
+    {statsConf.show_sessions && (
     <a href={`/groups/${group.id}?tab=sessions`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
       {(sessionsData ?? []).length > 0 && <span class="tab-badge">{(sessionsData ?? []).length}</span>}
       <div class="tab-icon">
@@ -679,6 +733,8 @@ const memberListJson = JSON.stringify(memberList);
       <div class="tab-label">Sessions</div>
       <div class="tab-meta">{(sessionsData ?? []).length} game nights</div>
     </a>
+    )}
+    {statsConf.show_score_compare && (
     <a href={`/groups/${group.id}?tab=compare`} class={`tab-link${activeTab === "compare" ? " active" : ""}`}>
       {sharedGames.length > 0 && <span class="tab-badge">{sharedGames.length}</span>}
       <div class="tab-icon">
@@ -689,6 +745,7 @@ const memberListJson = JSON.stringify(memberList);
       <div class="tab-label">Stats</div>
       <div class="tab-meta">{sharedGames.length} shared games</div>
     </a>
+    )}
   </nav>
 
   <!-- Overview tab -->
@@ -696,7 +753,7 @@ const memberListJson = JSON.stringify(memberList);
     <div class="two-col">
       <!-- Left: top games + podium -->
       <div>
-        {topGames.length > 0 && (
+        {statsConf.show_top_games && topGames.length > 0 && (
           <div>
             <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
               <span>Most Played by Group</span>
@@ -716,7 +773,7 @@ const memberListJson = JSON.stringify(memberList);
           </div>
         )}
 
-        {topRatedGames.length > 0 && (
+        {statsConf.show_top_rated && topRatedGames.length > 0 && (
           <div style="margin-top:24px">
             <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
               <span>Top Rated by Group</span>
@@ -761,7 +818,7 @@ const memberListJson = JSON.stringify(memberList);
           </div>
         )}
 
-        {hotTake && (
+        {statsConf.show_hot_take && hotTake && (
           <div class="card" style="margin-top:24px">
             <div class="card-title">Group's Hot Take</div>
             <a class="hot-take-inner" href={`/games/${hotTake.game.slug}`}>
@@ -790,7 +847,7 @@ const memberListJson = JSON.stringify(memberList);
           </div>
         )}
 
-        {memberAvgScores.length >= 2 && (
+        {statsConf.show_critic_spectrum && memberAvgScores.length >= 2 && (
           <div class="card" style="margin-top:14px">
             <div class="card-title">Critic Spectrum</div>
             <div class="spectrum-wrap">
@@ -826,7 +883,7 @@ const memberListJson = JSON.stringify(memberList);
       <!-- Right sidebar -->
       <div class="sidebar">
         <!-- Recent reviews -->
-        {(activityReviews ?? []).length > 0 && (
+        {statsConf.show_recent_reviews && (activityReviews ?? []).length > 0 && (
           <div class="card">
             <div class="card-title">Recent Reviews</div>
             {(activityReviews ?? []).slice(0, 5).map((r: any) => (
@@ -878,7 +935,7 @@ const memberListJson = JSON.stringify(memberList);
         )}
 
         <!-- Want to Play -->
-        <div class="card">
+        {statsConf.show_watchlist && <div class="card">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
             <span>Want to Play</span>
             {isMember && (
@@ -910,7 +967,7 @@ const memberListJson = JSON.stringify(memberList);
           {(watchlistData ?? []).length > 8 && (
             <div style="font-size:12px;color:var(--text-tertiary);padding-top:8px;text-align:center">+{(watchlistData ?? []).length - 8} more</div>
           )}
-        </div>
+        </div>}
 
         <!-- Members -->
         <div class="card">
@@ -972,7 +1029,10 @@ const memberListJson = JSON.stringify(memberList);
                 }
               </div>
               <a class="member-name" href={`/reviewers/${m.username}`} style="color:inherit;text-decoration:none">@{m.username}</a>
-              <span class={`member-role-tag${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
+              {memberCustomRoles[m.id] && roleMap[memberCustomRoles[m.id]!]
+                ? <span class="member-role-tag" style={`background:${roleMap[memberCustomRoles[m.id]!].color}22;color:${roleMap[memberCustomRoles[m.id]!].color};border:1px solid ${roleMap[memberCustomRoles[m.id]!].color}44`}>{roleMap[memberCustomRoles[m.id]!].name}</span>
+                : <span class={`member-role-tag${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
+              }
               {isAdminOrOwner && currentProfile && m.id !== currentProfile.id && m.role !== "owner" && (
                 <div class="member-actions-row">
                   {isOwner && (
@@ -991,7 +1051,7 @@ const memberListJson = JSON.stringify(memberList);
   </div>
 
   <!-- Stats tab -->
-  <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
+  {statsConf.show_score_compare && <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
     <div class="stats-section-header">
       <span>Score Comparison</span>
       <span class="stats-section-count">{sharedGames.length} shared game{sharedGames.length !== 1 ? "s" : ""}</span>
@@ -1031,10 +1091,10 @@ const memberListJson = JSON.stringify(memberList);
           );
         })
     }
-  </div>
+  </div>}
 
   <!-- Sessions tab -->
-  <div class={`tab-panel${activeTab === "sessions" ? " active" : ""}`} id="tab-sessions">
+  {statsConf.show_sessions && <div class={`tab-panel${activeTab === "sessions" ? " active" : ""}`} id="tab-sessions">
     {isMember && (
       <div class="log-form">
         <div class="log-form-title">Log a Game Night</div>
@@ -1089,7 +1149,7 @@ const memberListJson = JSON.stringify(memberList);
           );
         })
     }
-  </div>
+  </div>}
 
   )} {/* end isMember || non-private tab nav */}
 
@@ -1196,14 +1256,14 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
 // ── Join / Leave ──
 async function acceptInvite() {
   const btn = document.getElementById('accept-invite-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Joining…'; }
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
   const res = await fetch('/api/groups/invite/respond', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ group_id: groupData.id, action: 'accept' }),
   });
   if (res.ok) window.location.reload();
-  else { const d = await res.json(); alert(d.error ?? 'Could not accept invite'); if (btn) { btn.disabled = false; btn.textContent = 'Accept Invite'; } }
+  else { const d = await res.json(); alert(d.error ?? 'Could not accept invite'); if (btn) { btn.disabled = false; btn.style.opacity = '1'; } }
 }
 window.acceptInvite = acceptInvite;
 
@@ -1322,8 +1382,7 @@ async function sendInvite() {
   if (!username) return;
 
   btn.disabled = true;
-  btn.textContent = 'Sending…';
-  btn.style.opacity = '0.7';
+  btn.style.opacity = '0.5';
   btn.style.cursor = 'default';
   msg.textContent = '';
 
@@ -1338,14 +1397,12 @@ async function sendInvite() {
       msg.textContent = `✓ Invite sent to @${data.username}`;
       msg.style.color = '#4ade80';
       input.value = '';
-      btn.textContent = 'Send';
+      // Keep dimmed/disabled until user types a new name (syncBtn re-enables)
       btn.style.opacity = '0.45';
       btn.style.cursor = 'default';
-      // btn stays disabled until input changes (syncBtn handles re-enable)
     } else {
       msg.textContent = data.error ?? 'Something went wrong';
       msg.style.color = '#f87171';
-      btn.textContent = 'Send';
       btn.disabled = false;
       btn.style.opacity = '1';
       btn.style.cursor = 'pointer';
@@ -1353,7 +1410,6 @@ async function sendInvite() {
   } catch {
     msg.textContent = 'Network error — please try again';
     msg.style.color = '#f87171';
-    btn.textContent = 'Send';
     btn.disabled = false;
     btn.style.opacity = '1';
     btn.style.cursor = 'pointer';

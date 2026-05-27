@@ -6,14 +6,14 @@ export const POST: APIRoute = async (context) => {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return json({ error: "Unauthorized" }, 401);
 
-  const { data: profile } = await (supabase as any)
+  const db = getSupabaseAdmin() as any;
+
+  const { data: profile } = await db
     .from("profiles").select("id").eq("auth_user_id", user.id).single();
   if (!profile) return json({ error: "Profile not found" }, 404);
 
   const { group_id, target_profile_id, role } = await context.request.json();
   if (!["admin", "member"].includes(role)) return json({ error: "role must be admin or member" }, 400);
-
-  const db = getSupabaseAdmin() as any;
 
   const { data: callerMembership } = await db.from("group_members")
     .select("role").eq("group_id", group_id).eq("profile_id", profile.id).single();

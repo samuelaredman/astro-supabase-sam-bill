@@ -1,0 +1,209 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import Layout from "../../../components/Layout.astro";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+if (!user) return Astro.redirect("/signin");
+
+const { id } = Astro.params;
+const db = getSupabaseAdmin() as any;
+
+const { data: profile } = await db
+  .from("profiles").select("id, is_group_admin").eq("auth_user_id", user.id).single();
+if (!profile) return Astro.redirect("/signin");
+
+const { data: group } = await db
+  .from("groups").select("id, name, visibility").eq("id", id).single();
+if (!group) return Astro.redirect("/groups");
+
+const { data: membership } = await db.from("group_members")
+  .select("role, custom_role_id").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
+
+// Determine access: owner, admin, or custom role with can_remove_members
+let canManage = membership && ["owner", "admin"].includes(membership.role);
+if (!canManage && membership?.custom_role_id) {
+  const { data: cr } = await db.from("group_roles")
+    .select("can_remove_members").eq("id", membership.custom_role_id).maybeSingle();
+  if (cr?.can_remove_members) canManage = true;
+}
+if (!canManage) return Astro.redirect(`/groups/${id}`);
+
+// Pending join requests
+const { data: joinRequests } = await db
+  .from("group_join_requests")
+  .select("id, message, created_at, profiles ( id, username, avatar_url )")
+  .eq("group_id", id)
+  .eq("status", "pending")
+  .order("created_at", { ascending: true });
+
+// Pending sent invites
+const { data: pendingInvites } = await db
+  .from("group_invites")
+  .select("id, created_at, expires_at, invited_profile:invited_profile_id ( id, username, avatar_url ), inviter:invited_by ( id, username )")
+  .eq("group_id", id)
+  .eq("status", "pending")
+  .order("created_at", { ascending: false });
+
+function timeAgo(d: string) {
+  const diff = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return `${Math.floor(diff / 604800)}w ago`;
+}
+function getInitials(u: string) { return (u ?? "?").slice(0, 2).toUpperCase(); }
+---
+
+<Layout title={`Requests — ${group.name} — Chekpoint`} isLoggedIn={true} currentProfile={profile} variant="centered">
+<style is:global>
+  .req-wrap { max-width:600px; margin:40px auto; padding:0 20px; }
+  .req-back { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--text-tertiary); margin-bottom:20px; text-decoration:none; }
+  .req-back:hover { color:var(--text-primary); }
+  .req-title { font-family:'DM Serif Display',serif; font-size:24px; margin-bottom:6px; }
+  .req-subtitle { font-size:13px; color:var(--text-secondary); margin-bottom:28px; }
+  .req-section { background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:16px; }
+  .req-section-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); margin-bottom:16px; display:flex; align-items:center; gap:8px; }
+  .req-count { background:var(--accent); color:#fff; font-size:10px; font-weight:700; padding:1px 7px; border-radius:10px; }
+  .req-empty { font-size:13px; color:var(--text-tertiary); padding:8px 0; }
+  .req-item { display:flex; align-items:flex-start; gap:12px; padding:12px 0; border-bottom:1px solid var(--border-subtle); }
+  .req-item:last-child { border-bottom:none; padding-bottom:0; }
+  .req-avatar { width:38px; height:38px; border-radius:50%; background:var(--accent-subtle); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; color:var(--accent); flex-shrink:0; overflow:hidden; }
+  .req-avatar img { width:100%; height:100%; object-fit:cover; }
+  .req-info { flex:1; min-width:0; }
+  .req-username { font-size:13px; font-weight:600; margin-bottom:2px; }
+  .req-message { font-size:12px; color:var(--text-secondary); line-height:1.5; margin-bottom:6px; background:var(--bg-hover); padding:8px 10px; border-radius:8px; border-left:2px solid var(--border); }
+  .req-meta { font-size:11px; color:var(--text-tertiary); }
+  .req-actions { display:flex; gap:6px; flex-shrink:0; }
+  .btn-accept { background:var(--accent); color:#fff; border:none; padding:6px 14px; border-radius:20px; font-size:12px; font-weight:600; font-family:inherit; cursor:pointer; transition:opacity .15s; }
+  .btn-accept:hover { opacity:.85; }
+  .btn-reject { background:var(--tag-bg); color:var(--text-secondary); border:none; padding:6px 12px; border-radius:20px; font-size:12px; font-weight:600; font-family:inherit; cursor:pointer; transition:opacity .15s; }
+  .btn-reject:hover { opacity:.75; }
+  .btn-cancel { background:#300e0e; color:#f87171; border:none; padding:6px 12px; border-radius:20px; font-size:12px; font-weight:500; font-family:inherit; cursor:pointer; }
+  .btn-cancel:hover { background:#3d1010; }
+  .invite-inviter { font-size:11px; color:var(--text-tertiary); margin-top:3px; }
+  .invite-expiry { font-size:11px; color:var(--score-orange); margin-top:2px; }
+</style>
+
+<div>
+  <div class="req-wrap">
+    <a class="req-back" href={`/groups/${group.id}/settings`}>← Back to Settings</a>
+    <h1 class="req-title">Requests &amp; Invites</h1>
+    <p class="req-subtitle">{group.name}</p>
+
+    <!-- Join Requests -->
+    <div class="req-section">
+      <div class="req-section-title">
+        Join Requests
+        {(joinRequests ?? []).length > 0 && <span class="req-count">{(joinRequests ?? []).length}</span>}
+      </div>
+      {(joinRequests ?? []).length === 0
+        ? <div class="req-empty">No pending join requests.</div>
+        : (joinRequests ?? []).map((jr: any) => (
+          <div class="req-item" data-jr-id={jr.id}>
+            <div class="req-avatar">
+              {jr.profiles?.avatar_url
+                ? <img src={jr.profiles.avatar_url} alt={jr.profiles.username} />
+                : getInitials(jr.profiles?.username ?? "?")}
+            </div>
+            <div class="req-info">
+              <div class="req-username">@{jr.profiles?.username}</div>
+              {jr.message && <div class="req-message">"{jr.message}"</div>}
+              <div class="req-meta">{timeAgo(jr.created_at)}</div>
+            </div>
+            <div class="req-actions">
+              <button class="btn-accept" onclick={`respondRequest('${jr.id}', '${jr.profiles?.id}', 'accept')`}>Accept</button>
+              <button class="btn-reject" onclick={`respondRequest('${jr.id}', '${jr.profiles?.id}', 'reject')`}>Reject</button>
+            </div>
+          </div>
+        ))
+      }
+    </div>
+
+    <!-- Pending Invites -->
+    <div class="req-section">
+      <div class="req-section-title">
+        Pending Invites
+        {(pendingInvites ?? []).length > 0 && <span class="req-count">{(pendingInvites ?? []).length}</span>}
+      </div>
+      {(pendingInvites ?? []).length === 0
+        ? <div class="req-empty">No pending invites.</div>
+        : (pendingInvites ?? []).map((inv: any) => {
+            const expiresAt = inv.expires_at ? new Date(inv.expires_at) : null;
+            const expired = expiresAt && expiresAt < new Date();
+            const expiresIn = expiresAt && !expired
+              ? `Expires ${timeAgo(inv.expires_at).replace(" ago", " left")}`
+              : expired ? "Expired" : null;
+            return (
+              <div class="req-item" data-inv-id={inv.id} data-invitee-id={inv.invited_profile?.id}>
+                <div class="req-avatar">
+                  {inv.invited_profile?.avatar_url
+                    ? <img src={inv.invited_profile.avatar_url} alt={inv.invited_profile.username} />
+                    : getInitials(inv.invited_profile?.username ?? "?")}
+                </div>
+                <div class="req-info">
+                  <div class="req-username">@{inv.invited_profile?.username}</div>
+                  {inv.inviter && <div class="invite-inviter">Invited by @{inv.inviter.username}</div>}
+                  {expiresIn && <div class="invite-expiry">{expiresIn}</div>}
+                  <div class="req-meta">{timeAgo(inv.created_at)}</div>
+                </div>
+                <div class="req-actions">
+                  <button class="btn-cancel" onclick={`cancelInvite('${inv.invited_profile?.id}')`}>Cancel</button>
+                </div>
+              </div>
+            );
+          })
+      }
+    </div>
+  </div>
+</div>
+</Layout>
+
+<script define:vars={{ groupId: group.id }}>
+async function respondRequest(requestId, requesterProfileId, action) {
+  const row = document.querySelector(`[data-jr-id="${requestId}"]`);
+  if (row) { row.style.opacity = '0.5'; row.querySelectorAll('button').forEach(b => b.disabled = true); }
+  const res = await fetch('/api/groups/join-request/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, requester_profile_id: requesterProfileId, action }),
+  });
+  if (res.ok) {
+    if (row) {
+      row.style.transition = 'opacity 0.3s';
+      row.style.opacity = '0';
+      setTimeout(() => row.remove(), 320);
+    }
+  } else {
+    const d = await res.json();
+    alert(d.error ?? 'Error');
+    if (row) { row.style.opacity = '1'; row.querySelectorAll('button').forEach(b => b.disabled = false); }
+  }
+}
+window.respondRequest = respondRequest;
+
+async function cancelInvite(invitedProfileId) {
+  if (!confirm('Cancel this invite?')) return;
+  const row = document.querySelector(`[data-invitee-id="${invitedProfileId}"]`);
+  if (row) { row.style.opacity = '0.5'; row.querySelectorAll('button').forEach(b => b.disabled = true); }
+  const res = await fetch('/api/groups/invite/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, invited_profile_id: invitedProfileId }),
+  });
+  if (res.ok) {
+    if (row) {
+      row.style.transition = 'opacity 0.3s';
+      row.style.opacity = '0';
+      setTimeout(() => row.remove(), 320);
+    }
+  } else {
+    const d = await res.json();
+    alert(d.error ?? 'Error');
+    if (row) { row.style.opacity = '1'; row.querySelectorAll('button').forEach(b => b.disabled = false); }
+  }
+}
+window.cancelInvite = cancelInvite;
+</script>
