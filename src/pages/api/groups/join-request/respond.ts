@@ -43,15 +43,13 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "Not authorized" }, 403);
   }
 
-  const newStatus = action === "accept" ? "accepted" : "rejected";
-
-  // Update the request
-  const { error: updateErr } = await db.from("group_join_requests")
-    .update({ status: newStatus, reviewed_by: profile.id, reviewed_at: new Date().toISOString() })
+  // Delete the join request row — it's served its purpose
+  const { error: deleteErr } = await db.from("group_join_requests")
+    .delete()
     .eq("id", req.id);
-  if (updateErr) {
-    console.error("[join-request/respond] update error:", JSON.stringify(updateErr));
-    return json({ error: "Failed to update request." }, 500);
+  if (deleteErr) {
+    console.error("[join-request/respond] delete error:", JSON.stringify(deleteErr));
+    return json({ error: "Failed to process request." }, 500);
   }
 
   // If accepted, add the user to the group
@@ -67,7 +65,7 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  // Notify the requester
+  // Notify the requester and clean up the join-request notifications sent to admins
   try {
     await db.from("notifications").insert({
       profile_id: req.profile_id,
@@ -79,5 +77,17 @@ export const POST: APIRoute = async (context) => {
     console.error("[join-request/respond] notification error (non-fatal):", e);
   }
 
-  return json({ success: true, status: newStatus });
+  // Delete the group_join_request notifications that were sent to all admins for this requester.
+  // Non-fatal — if this fails the only consequence is stale Accept/Reject buttons in the UI.
+  try {
+    await db.from("notifications")
+      .delete()
+      .eq("type", "group_join_request")
+      .eq("group_id", req.group_id)
+      .eq("actor_profile_id", req.profile_id);
+  } catch (e) {
+    console.error("[join-request/respond] notification cleanup error (non-fatal):", e);
+  }
+
+  return json({ success: true, action });
 };
