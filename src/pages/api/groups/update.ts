@@ -29,7 +29,14 @@ export const POST: APIRoute = async (context) => {
   if (name !== undefined) updates.name = name.trim();
   if (description !== undefined) updates.description = description?.trim() || null;
   if (visibility !== undefined) {
-    if (!["public", "private"].includes(visibility)) return json({ error: "Invalid visibility" }, 400);
+    if (!["public", "private", "community"].includes(visibility)) {
+      return json({ error: "Invalid visibility" }, 400);
+    }
+    // Only admins can set or change to community visibility
+    if (visibility === "community") {
+      const { data: prof } = await db.from("profiles").select("is_group_admin").eq("id", profile.id).single();
+      if (!prof?.is_group_admin) return json({ error: "Only admins can set Community visibility" }, 403);
+    }
     updates.visibility = visibility;
     if (visibility === "private") {
       const { data: g } = await db.from("groups").select("invite_code").eq("id", group_id).single();

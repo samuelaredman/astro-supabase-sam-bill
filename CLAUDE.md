@@ -496,6 +496,17 @@ console.error('[route-name] operation error:', JSON.stringify(error));
 `YYYYMMDDHHMMSS_description-kebab-case.sql`
 Same-day migrations use sequential suffixes: `_000000`, `_000001`, etc.
 
+### Schema migrations vs data migrations
+
+**Schema migrations** (new tables, columns, constraints, RLS policies, functions, triggers)
+→ Write as a `.sql` file in `supabase/migrations/`, commit it with the feature branch.
+   This is the permanent record of how the DB reached its current state.
+
+**Data migrations** (one-off backfills, renaming existing values, deleting bad data)
+→ Write as a SQL code block in the chat only. The developer pastes it into the
+   Supabase SQL Editor and runs it manually. Do NOT create a `.sql` file for these —
+   they have no business being committed to the repo.
+
 ---
 
 ## Component patterns
