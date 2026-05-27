@@ -56,6 +56,19 @@ if (group.visibility === "private" && !canViewPrivate) {
   // Don't redirect — render a join-request wall below (handled in HTML)
 }
 
+// Does this user have a pending invite to this group?
+let pendingInvite: any = null;
+if (currentProfile && !isMember) {
+  const { data: inv } = await db
+    .from("group_invites")
+    .select("id")
+    .eq("group_id", id)
+    .eq("invited_profile_id", currentProfile.id)
+    .eq("status", "pending")
+    .maybeSingle();
+  pendingInvite = inv;
+}
+
 // Has this user already submitted a join request?
 let existingJoinRequest: any = null;
 if (currentProfile && !isMember && group.visibility === "private") {
@@ -581,10 +594,13 @@ const memberListJson = JSON.stringify(memberList);
       )}
 
       {/* Logged in, not a member */}
-      {user && !isMember && (group.visibility === "public" || group.visibility === "community") && (
+      {user && !isMember && pendingInvite && (
+        <button class="btn-primary" id="accept-invite-btn" onclick="acceptInvite()">Accept Invite</button>
+      )}
+      {user && !isMember && !pendingInvite && (group.visibility === "public" || group.visibility === "community") && (
         <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
       )}
-      {user && !isMember && group.visibility === "private" && joinCode && (
+      {user && !isMember && !pendingInvite && group.visibility === "private" && joinCode && (
         <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
       )}
       {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "pending" && (
@@ -1178,6 +1194,19 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
 });
 
 // ── Join / Leave ──
+async function acceptInvite() {
+  const btn = document.getElementById('accept-invite-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Joining…'; }
+  const res = await fetch('/api/groups/invite/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, action: 'accept' }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Could not accept invite'); if (btn) { btn.disabled = false; btn.textContent = 'Accept Invite'; } }
+}
+window.acceptInvite = acceptInvite;
+
 async function joinGroup() {
   const btn = document.getElementById('join-btn');
   if (btn) btn.disabled = true;
@@ -1287,17 +1316,47 @@ window.copyInvite = copyInvite;
 
 async function sendInvite() {
   const input = document.getElementById('invite-username-input');
+  const btn = document.getElementById('invite-send-btn');
   const msg = document.getElementById('invite-msg');
   const username = input.value.trim().replace(/^@/, '');
   if (!username) return;
-  const res = await fetch('/api/groups/invite/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, invited_username: username }) });
-  const data = await res.json();
-  msg.textContent = res.ok ? `Invite sent to @${data.username}` : (data.error ?? 'Error');
-  msg.style.color = res.ok ? 'var(--score-great)' : '#f87171';
-  if (res.ok) {
-    input.value = '';
-    const sendBtn = document.getElementById('invite-send-btn');
-    if (sendBtn) { sendBtn.disabled = true; sendBtn.style.opacity = '0.45'; sendBtn.style.cursor = 'default'; }
+
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+  btn.style.opacity = '0.7';
+  btn.style.cursor = 'default';
+  msg.textContent = '';
+
+  try {
+    const res = await fetch('/api/groups/invite/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: groupData.id, invited_username: username }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      msg.textContent = `✓ Invite sent to @${data.username}`;
+      msg.style.color = '#4ade80';
+      input.value = '';
+      btn.textContent = 'Send';
+      btn.style.opacity = '0.45';
+      btn.style.cursor = 'default';
+      // btn stays disabled until input changes (syncBtn handles re-enable)
+    } else {
+      msg.textContent = data.error ?? 'Something went wrong';
+      msg.style.color = '#f87171';
+      btn.textContent = 'Send';
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      btn.style.cursor = 'pointer';
+    }
+  } catch {
+    msg.textContent = 'Network error — please try again';
+    msg.style.color = '#f87171';
+    btn.textContent = 'Send';
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
   }
 }
 window.sendInvite = sendInvite;

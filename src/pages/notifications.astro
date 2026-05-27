@@ -51,10 +51,25 @@ if (joinRequestNotifs.length > 0) {
   }
 }
 
+// Cross-reference group_invite notifications against live pending invites for this user
+const inviteNotifs = rawNotifList.filter((n: any) => n.type === 'group_invite');
+const liveInviteGroupIds = new Set<string>();
+
+if (inviteNotifs.length > 0) {
+  const inviteGroupIds = [...new Set(inviteNotifs.map((n: any) => n.groups?.id).filter(Boolean))] as string[];
+  const { data: liveInvites } = await db
+    .from('group_invites')
+    .select('group_id')
+    .eq('invited_profile_id', profile.id)
+    .eq('status', 'pending')
+    .in('group_id', inviteGroupIds);
+  for (const inv of liveInvites ?? []) liveInviteGroupIds.add(inv.group_id);
+}
+
 const notifications = rawNotifList.filter((n: any) => {
-  if (n.type !== 'group_join_request') return true;
-  // Keep only if a live pending request exists for this group + actor
-  return liveRequestKeys.has(`${n.groups?.id}:${n.actor?.id}`);
+  if (n.type === 'group_join_request') return liveRequestKeys.has(`${n.groups?.id}:${n.actor?.id}`);
+  if (n.type === 'group_invite') return liveInviteGroupIds.has(n.groups?.id);
+  return true;
 });
 
 // Whether any notification is still unread (used to show the "Mark all as read" button)
@@ -303,6 +318,28 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                 </div>
               )}
 
+              {isGroupInvite && (
+                <div class="join-request-actions" onclick="event.preventDefault();event.stopPropagation();">
+                  <button
+                    class="join-accept-btn"
+                    data-group-id={group?.id}
+                    onclick="event.preventDefault();event.stopPropagation();handleGroupInvite(this,'accept')"
+                  >Accept</button>
+                  <button
+                    class="join-reject-btn"
+                    data-group-id={group?.id}
+                    onclick="event.preventDefault();event.stopPropagation();handleGroupInvite(this,'decline')"
+                  >Decline</button>
+                </div>
+              )}
+
+              <button
+                class="notif-delete-btn"
+                data-notif-id={n.id}
+                onclick="event.preventDefault();event.stopPropagation();deleteNotif(this)"
+                title="Dismiss"
+              >×</button>
+
               {!n.read && <div class="notif-dot"></div>}
             </a>
           );
@@ -409,6 +446,65 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     }
   }
   (window as any).handleJoinRequest = handleJoinRequest;
+
+  async function handleGroupInvite(btn: HTMLElement, action: string) {
+    const groupId = (btn as HTMLElement).dataset.groupId;
+    const actionsDiv = btn.closest('.join-request-actions') as HTMLElement | null;
+    if (!groupId || !actionsDiv) return;
+
+    actionsDiv.querySelectorAll('button').forEach((b) => { (b as HTMLButtonElement).disabled = true; });
+
+    try {
+      const res = await fetch('/api/groups/invite/respond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: groupId, action }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Something went wrong');
+      actionsDiv.innerHTML = `<span style="font-size:12px;color:var(--text-tertiary);font-style:italic">${action === 'accept' ? '✓ Joined!' : '✗ Declined'}</span>`;
+      const notifItem = btn.closest('.notif-item') as HTMLElement | null;
+      if (notifItem) {
+        setTimeout(() => {
+          notifItem.style.transition = 'opacity 0.3s';
+          notifItem.style.opacity = '0';
+          setTimeout(() => notifItem.remove(), 320);
+        }, 1200);
+      }
+      if (action === 'accept') {
+        // Redirect to the group after a brief pause
+        setTimeout(() => {
+          window.location.href = `/groups/${groupId}`;
+        }, 1600);
+      }
+    } catch (e) {
+      actionsDiv.querySelectorAll('button').forEach((b) => { (b as HTMLButtonElement).disabled = false; });
+      alert((e instanceof Error ? e.message : null) || 'Could not process invite. Try from the group page.');
+    }
+  }
+  (window as any).handleGroupInvite = handleGroupInvite;
+
+  async function deleteNotif(btn: HTMLElement) {
+    const notifId = (btn as HTMLElement).dataset.notifId;
+    if (!notifId) return;
+    const notifItem = btn.closest('.notif-item') as HTMLElement | null;
+    // Optimistically remove from DOM
+    if (notifItem) {
+      notifItem.style.transition = 'opacity 0.2s';
+      notifItem.style.opacity = '0';
+      setTimeout(() => notifItem.remove(), 220);
+    }
+    try {
+      await fetch('/api/notifications/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notification_id: notifId }),
+      });
+    } catch (e) {
+      // Best-effort — if it fails the item is already gone from the DOM
+    }
+  }
+  (window as any).deleteNotif = deleteNotif;
 </script>
 
 <style>
@@ -671,4 +767,21 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
   .join-accept-btn:hover:not(:disabled) { opacity: 0.85; }
   .join-reject-btn:hover:not(:disabled) { opacity: 0.85; }
   .join-accept-btn:disabled, .join-reject-btn:disabled { opacity: 0.5; cursor: default; }
+
+  .notif-delete-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    font-size: 18px;
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: 6px;
+    opacity: 0;
+    transition: opacity 0.12s, color 0.12s, background 0.12s;
+    align-self: center;
+  }
+  .notif-item:hover .notif-delete-btn { opacity: 1; }
+  .notif-delete-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.1); }
 </style>
