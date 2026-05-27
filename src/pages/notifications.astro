@@ -33,7 +33,29 @@ const { data: rawNotifs } = await db
   .order('created_at', { ascending: false })
   .limit(50);
 
-const notifications = rawNotifs ?? [];
+// Cross-reference group_join_request notifications against live rows in group_join_requests.
+// If the underlying request was already processed (deleted), filter the notification out
+// so stale Accept/Reject buttons never render.
+const rawNotifList = rawNotifs ?? [];
+const joinRequestNotifs = rawNotifList.filter((n: any) => n.type === 'group_join_request');
+const liveRequestKeys = new Set<string>();
+
+if (joinRequestNotifs.length > 0) {
+  const groupIds = [...new Set(joinRequestNotifs.map((n: any) => n.groups?.id).filter(Boolean))] as string[];
+  const { data: liveReqs } = await db
+    .from('group_join_requests')
+    .select('group_id, profile_id')
+    .in('group_id', groupIds);
+  for (const r of liveReqs ?? []) {
+    liveRequestKeys.add(`${r.group_id}:${r.profile_id}`);
+  }
+}
+
+const notifications = rawNotifList.filter((n: any) => {
+  if (n.type !== 'group_join_request') return true;
+  // Keep only if a live pending request exists for this group + actor
+  return liveRequestKeys.has(`${n.groups?.id}:${n.actor?.id}`);
+});
 
 // Whether any notification is still unread (used to show the "Mark all as read" button)
 const hasUnread = notifications.some((n: any) => !n.read);
