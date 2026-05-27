@@ -1,6 +1,6 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from '../../utils/database';
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../utils/database';
 import Layout from '../../components/Layout.astro';
 import ReportModal from '../../components/ReportModal.astro';
 import EditModal from '../../components/EditModal.astro';
@@ -17,7 +17,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
   .from('profiles')
   .select(`
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
-    favorite_game_id, showcase_games,
+    favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
     ),
@@ -187,13 +187,45 @@ if (reviewedGameIds.length > 0) {
 
 const recentGames = publishedReviews.slice(0, 6).map((r: any) => r.games).filter(Boolean)
 
-// ── WATCHLIST ──
-const { data: watchlistData } = await (supabase as any)
-  .from('watchlist')
-  .select('game_id, games(id, title, slug, cover_img_url)')
+// ── LIBRARY (user_game_status) ──
+// Check mutual follow so we can apply 'friends' privacy level
+let isMutualFollow = false;
+if (currentProfile && !isOwnProfile) {
+  const [{ data: fwd }, { data: rev }] = await Promise.all([
+    (supabase as any).from('follows').select('id')
+      .eq('follower_id', currentProfile.id).eq('following_id', reviewer.id).maybeSingle(),
+    (supabase as any).from('follows').select('id')
+      .eq('follower_id', reviewer.id).eq('following_id', currentProfile.id).maybeSingle(),
+  ]);
+  isMutualFollow = !!(fwd && rev);
+}
+
+const db = getSupabaseAdmin() as any;
+const { data: libraryData } = await db
+  .from('user_game_status')
+  .select('status, updated_at, games(id, title, slug, cover_img_url)')
   .eq('profile_id', reviewer.id)
-  .order('created_at', { ascending: false });
-const watchlistGames = (watchlistData ?? []).map((w: any) => w.games).filter(Boolean);
+  .order('updated_at', { ascending: false });
+
+// Apply privacy filtering
+const canSeeWantToPlay = isOwnProfile
+  || reviewer.want_to_play_privacy === 'public'
+  || (reviewer.want_to_play_privacy === 'friends' && isMutualFollow);
+const canSeeDropped = isOwnProfile
+  || reviewer.dropped_privacy === 'public'
+  || (reviewer.dropped_privacy === 'friends' && isMutualFollow);
+
+const allLibraryItems = (libraryData ?? []).filter((item: any) => {
+  if (item.status === 'want_to_play') return canSeeWantToPlay;
+  if (item.status === 'dropped') return canSeeDropped;
+  return true; // playing + completed always public
+});
+
+// Group by status for filter pills
+const libraryByStatus: Record<string, any[]> = { playing: [], want_to_play: [], completed: [], dropped: [] };
+for (const item of allLibraryItems) {
+  if (libraryByStatus[item.status]) libraryByStatus[item.status].push(item.games);
+}
 
 // ── CHART DATA ──
 // We reuse communityScores fetched above — build gameAvgMap here for chart use too
@@ -578,6 +610,25 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .watchlist-cover img{width:100%;height:100%;object-fit:cover;display:block}
     .watchlist-title{font-size:11px;font-weight:500;color:var(--text-secondary);margin-top:6px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 
+    /* LIBRARY */
+    .lib-filter-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}
+    .lib-pill{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:6px 14px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:5px}
+    .lib-pill.active{background:var(--accent);color:white;border-color:transparent}
+    .lib-pill .pill-count{font-size:11px;opacity:.75;font-weight:600}
+    .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:14px;padding:20px 0}
+    .lib-item{display:block;text-decoration:none;position:relative}
+    .lib-cover{width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15);position:relative}
+    .lib-item:hover .lib-cover{transform:translateY(-3px);box-shadow:0 8px 20px rgba(0,0,0,.3)}
+    .lib-cover img{width:100%;height:100%;object-fit:cover;display:block}
+    .lib-title{font-size:11px;font-weight:500;color:var(--text-secondary);margin-top:6px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .lib-dot{position:absolute;bottom:5px;right:5px;width:10px;height:10px;border-radius:50%;border:1.5px solid rgba(0,0,0,.45);box-shadow:0 1px 3px rgba(0,0,0,.5);z-index:1}
+    .lib-dot.playing{background:#60a5fa}
+    .lib-dot.want_to_play{background:#f59e0b}
+    .lib-dot.completed{background:#4ade80}
+    .lib-dot.dropped{background:#f87171}
+    .lib-legend{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:4px;margin-top:-6px}
+    .lib-legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary)}
+
     /* VOTES FOR REVIEWS */
     .vote-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
     .vote-btn { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); background: none; font-size: 12px; font-family: inherit; color: var(--text-secondary); cursor: pointer; transition: all 0.15s; }
@@ -943,10 +994,10 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
             <span class="sidebar-list-count">{publishedReviews.length}</span>
             Games reviewed
           </a>
-          <a href={`/reviewers/${reviewer.username}?tab=watchlist`} class="sidebar-list-btn">
-            <svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v12l-5-2.7L4 15V3z"/></svg>
-            <span class="sidebar-list-count">{watchlistGames.length}</span>
-            Want to play
+          <a href={`/reviewers/${reviewer.username}?tab=library`} class="sidebar-list-btn">
+            <svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="4" height="14" rx="1"/><rect x="7" y="4" width="4" height="12" rx="1"/><rect x="12" y="6" width="4" height="10" rx="1"/></svg>
+            <span class="sidebar-list-count">{allLibraryItems.length}</span>
+            Library
           </a>
         </div>
 
@@ -1019,27 +1070,66 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   )}
 </div>
 
-  <!-- ── WANT TO PLAY TAB ── -->
-  <div class={`tab-panel ${activeTab === 'watchlist' ? 'active' : ''}`} data-tab="watchlist">
-    {watchlistGames.length === 0 ? (
+  <!-- ── LIBRARY TAB ── -->
+  <div class={`tab-panel ${activeTab === 'library' ? 'active' : ''}`} data-tab="library">
+    {allLibraryItems.length === 0 ? (
       <div class="empty-state">
-        <div class="empty-title">Nothing saved yet</div>
-        <p style="font-size:14px;color:var(--text-tertiary)">Games added to the want-to-play list show up here.</p>
+        <div class="empty-title">No games tracked yet</div>
+        <p style="font-size:14px;color:var(--text-tertiary)">
+          {isOwnProfile
+            ? 'Track your games from any game page — mark them as Playing, Want to Play, Completed, or Dropped.'
+            : `@${reviewer.username} hasn't tracked any games yet.`
+          }
+        </p>
       </div>
     ) : (
-      <div class="watchlist-grid">
-        {watchlistGames.map((game: any) => (
-          <a href={`/games/${game.slug}`} class="watchlist-card">
-            <div class="watchlist-cover">
-              {game.cover_img_url
-                ? <img src={igdbCover(game.cover_img_url, 't_cover_big') ?? ''} alt={game.title} loading="lazy" />
-                : <span>🎮</span>
-              }
-            </div>
-            <div class="watchlist-title">{game.title}</div>
-          </a>
-        ))}
-      </div>
+      <>
+        <div class="lib-filter-row" id="libFilterRow">
+          <button class="lib-pill active" data-filter="all" onclick="filterLib(this,'all')">
+            All <span class="pill-count">{allLibraryItems.length}</span>
+          </button>
+          {libraryByStatus.completed.length > 0 && (
+            <button class="lib-pill" data-filter="completed" onclick="filterLib(this,'completed')">
+              ✓ Completed <span class="pill-count">{libraryByStatus.completed.length}</span>
+            </button>
+          )}
+          {libraryByStatus.playing.length > 0 && (
+            <button class="lib-pill" data-filter="playing" onclick="filterLib(this,'playing')">
+              🎮 Playing <span class="pill-count">{libraryByStatus.playing.length}</span>
+            </button>
+          )}
+          {libraryByStatus.want_to_play.length > 0 && (
+            <button class="lib-pill" data-filter="want_to_play" onclick="filterLib(this,'want_to_play')">
+              🔖 Want to Play <span class="pill-count">{libraryByStatus.want_to_play.length}</span>
+            </button>
+          )}
+          {libraryByStatus.dropped.length > 0 && (
+            <button class="lib-pill" data-filter="dropped" onclick="filterLib(this,'dropped')">
+              ✗ Dropped <span class="pill-count">{libraryByStatus.dropped.length}</span>
+            </button>
+          )}
+        </div>
+        <div class="lib-legend">
+          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#4ade80;flex-shrink:0"></div>Completed</div>
+          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#60a5fa;flex-shrink:0"></div>Playing</div>
+          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0"></div>Want to Play</div>
+          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#f87171;flex-shrink:0"></div>Dropped</div>
+        </div>
+        <div class="lib-grid" id="libGrid">
+          {allLibraryItems.map((item: any) => (
+            <a href={`/games/${item.games?.slug}`} class="lib-item" data-status={item.status}>
+              <div class="lib-cover">
+                {item.games?.cover_img_url
+                  ? <img src={igdbCover(item.games.cover_img_url, 't_cover_big') ?? ''} alt={item.games?.title} loading="lazy" />
+                  : <span>🎮</span>
+                }
+                <div class={`lib-dot ${item.status}`}></div>
+              </div>
+              <div class="lib-title">{item.games?.title}</div>
+            </a>
+          ))}
+        </div>
+      </>
     )}
   </div>
 
@@ -1637,6 +1727,16 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   cards.forEach(function(card) { list.appendChild(card) })
 }
   window.sortReviews = sortReviews
+
+  // ── LIBRARY FILTER ──
+  function filterLib(btn, filter) {
+    document.querySelectorAll('.lib-pill').forEach(function(p) { p.classList.remove('active') })
+    btn.classList.add('active')
+    document.querySelectorAll('#libGrid .lib-item').forEach(function(item) {
+      item.style.display = (filter === 'all' || item.dataset.status === filter) ? '' : 'none'
+    })
+  }
+  window.filterLib = filterLib
 
   // ── STATS TAB ──
   function scoreCol(score) {

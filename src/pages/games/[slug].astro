@@ -1,7 +1,7 @@
 ---
 export const prerender = false;
 
-import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/database'
+import { getSupabase, createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../utils/database'
 const supabase = getSupabase();
 import { igdbFetch } from '../../utils/igdb'
 import Layout from '../../components/Layout.astro'
@@ -51,17 +51,85 @@ if (user) {
   currentProfileId = cp?.id ?? null;
 }
 
-// Watchlist count (public) + current user's watch status
-const { count: watchlistCount } = await (supabase as any)
-  .from('watchlist').select('*', { count: 'exact', head: true }).eq('game_id', game.id);
+// Game status counts (public) + current user's status
+const db = getSupabaseAdmin() as any;
 
-let isWatching = false;
+const { count: wantToPlayCount } = await db
+  .from('user_game_status').select('*', { count: 'exact', head: true })
+  .eq('game_id', game.id).eq('status', 'want_to_play');
+
+let currentGameStatus: string | null = null;
 if (currentProfileId) {
-  const { data: wRow } = await (supabase as any)
-    .from('watchlist').select('id')
+  const { data: statusRow } = await db
+    .from('user_game_status').select('status')
     .eq('profile_id', currentProfileId).eq('game_id', game.id).maybeSingle();
-  isWatching = !!wRow;
+  currentGameStatus = statusRow?.status ?? null;
 }
+
+// ── SOCIAL TRACKING — people the current user follows who have tracked this game ──
+type FriendStatusGroups = { playing: any[]; want_to_play: any[]; completed: any[]; dropped: any[] };
+let friendStatusGroups: FriendStatusGroups = { playing: [], want_to_play: [], completed: [], dropped: [] };
+let hasFriendActivity = false;
+
+if (currentProfileId) {
+  // Step 1: fetch everyone who has tracked THIS game (bounded by game popularity, not follow count).
+  // Exclude the viewer themselves, cap at 200 rows — more than enough to find 5 per status group.
+  const { data: gameTrackers } = await db
+    .from('user_game_status')
+    .select('status, profile_id, profiles(id, username, avatar_url, want_to_play_privacy, dropped_privacy)')
+    .eq('game_id', game.id)
+    .neq('profile_id', currentProfileId)
+    .order('updated_at', { ascending: false })
+    .limit(200);
+
+  const trackerIds: string[] = (gameTrackers ?? []).map((r: any) => r.profile_id);
+
+  if (trackerIds.length > 0) {
+    // Step 2: which of those does the current user follow? IN clause is bounded by tracker count.
+    const { data: followedRows } = await db
+      .from('follows').select('following_id')
+      .eq('follower_id', currentProfileId)
+      .in('following_id', trackerIds);
+    const followedSet = new Set<string>((followedRows ?? []).map((r: any) => r.following_id));
+
+    // Only keep trackers the current user follows
+    const friendStatuses = (gameTrackers ?? []).filter((item: any) => followedSet.has(item.profile_id));
+
+    if (friendStatuses.length > 0) {
+      // Mutual follows — only needed to enforce 'friends' privacy tier
+      const { data: followerRows } = await db
+        .from('follows').select('follower_id')
+        .eq('following_id', currentProfileId)
+        .in('follower_id', trackerIds);
+      const mutualIds = new Set<string>((followerRows ?? []).map((r: any) => r.follower_id));
+
+      for (const item of friendStatuses) {
+        const p = item.profiles;
+        if (!p) continue;
+        if (item.status === 'want_to_play') {
+          if (p.want_to_play_privacy === 'private') continue;
+          if (p.want_to_play_privacy === 'friends' && !mutualIds.has(item.profile_id)) continue;
+        }
+        if (item.status === 'dropped') {
+          if (p.dropped_privacy === 'private') continue;
+          if (p.dropped_privacy === 'friends' && !mutualIds.has(item.profile_id)) continue;
+        }
+        if (friendStatusGroups[item.status as keyof FriendStatusGroups]) {
+          friendStatusGroups[item.status as keyof FriendStatusGroups].push(p);
+        }
+      }
+      hasFriendActivity = (Object.values(friendStatusGroups) as any[][]).some(arr => arr.length > 0);
+    }
+  }
+}
+
+const SOCIAL_STATUS_META: Record<string, { label: string; color: string }> = {
+  playing:      { label: '🎮 Playing',      color: '#60a5fa' },
+  completed:    { label: '✓ Completed',     color: '#4ade80' },
+  want_to_play: { label: '🔖 Want to Play', color: '#f59e0b' },
+  dropped:      { label: '✗ Dropped',       color: '#f87171' },
+};
+const SOCIAL_STATUS_ORDER = ['playing', 'completed', 'want_to_play', 'dropped'] as const;
 
 const reviewList = reviews ?? []
 
@@ -443,11 +511,37 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .write-review-btn{background:var(--game-accent);color:white;border:none;border-radius:22px;padding:10px 20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity .15s,transform .15s;white-space:nowrap;box-shadow:0 4px 24px rgba(96,80,200,.4);position:relative;z-index:1}
     .write-review-btn:hover{opacity:.9;transform:translateY(-1px)}
     .game-action-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-    .watch-btn{display:inline-flex;align-items:center;gap:6px;padding:9px 16px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;white-space:nowrap;border:1.5px solid var(--border);background:var(--bg-card);color:var(--text-secondary)}
-    .watch-btn:hover{border-color:var(--text-tertiary);color:var(--text-primary)}
-    .watch-btn.watching{background:rgba(245,158,11,.1);border-color:#f59e0b;color:#f59e0b}
-    .watch-btn.watching:hover{background:rgba(245,158,11,.15)}
-    .watch-count{font-size:11px;font-weight:600;background:var(--tag-bg);padding:1px 6px;border-radius:10px;color:var(--text-tertiary)}
+    .track-section{margin:18px 0 4px;padding:16px 20px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px}
+    .track-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    .track-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary)}
+    .track-hint{font-size:11px;color:var(--text-tertiary);font-style:italic}
+
+    /* SOCIAL TRACKING */
+    .social-tracking{margin:10px 0 4px;padding:14px 18px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px}
+    .social-tracking-hdr{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);margin-bottom:10px;display:flex;align-items:center;gap:6px}
+    .social-group{display:flex;align-items:flex-start;gap:10px;padding:7px 0;border-bottom:1px solid var(--border-subtle)}
+    .social-group:last-child{border-bottom:none;padding-bottom:0}
+    .social-group:first-child{padding-top:0}
+    .social-group-lbl{font-size:11px;font-weight:600;min-width:104px;flex-shrink:0;padding-top:3px}
+    .social-members{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+    .social-member{display:flex;align-items:center;gap:5px;text-decoration:none;background:var(--tag-bg);border:1px solid var(--border);border-radius:20px;padding:2px 8px 2px 3px;transition:border-color .15s}
+    .social-member:hover{border-color:var(--game-accent)}
+    .social-av{width:20px;height:20px;border-radius:50%;overflow:hidden;background:var(--bg-hover);display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:var(--text-secondary);flex-shrink:0}
+    .social-av img{width:100%;height:100%;object-fit:cover;display:block}
+    .social-uname{font-size:11px;font-weight:500;color:var(--text-primary)}
+    .social-overflow{font-size:11px;color:var(--text-tertiary);padding:2px 6px;background:var(--tag-bg);border:1px solid var(--border);border-radius:20px}
+    .track-pills{display:flex;gap:8px;flex-wrap:wrap}
+    .track-pill{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:20px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;white-space:nowrap;border:1.5px solid var(--border);background:var(--bg-card);color:var(--text-secondary)}
+    .track-pill:hover{border-color:var(--text-tertiary);color:var(--text-primary)}
+    .track-pill[data-status="playing"].active{background:rgba(59,130,246,.12);border-color:#3b82f6;color:#3b82f6}
+    .track-pill[data-status="want_to_play"].active{background:rgba(245,158,11,.1);border-color:#f59e0b;color:#f59e0b}
+    .track-pill[data-status="completed"].active{background:rgba(34,197,94,.1);border-color:#22c55e;color:#22c55e}
+    .track-pill[data-status="dropped"].active{background:rgba(239,68,68,.08);border-color:#ef4444;color:#ef4444}
+    .review-nudge{display:none;margin-top:12px;padding:10px 14px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);border-radius:10px;font-size:12px;color:var(--text-secondary);display:none;align-items:center;justify-content:space-between;gap:10px}
+    .review-nudge-text{line-height:1.4}
+    .review-nudge-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+    .review-nudge-btn{background:var(--accent);color:#fff;border:none;padding:5px 12px;border-radius:12px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer}
+    .review-nudge-dismiss{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:14px;padding:2px;line-height:1}
 
     .tab-panel{display:none}
     .tab-panel.active{display:block}
@@ -649,19 +743,6 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         </div>
         <div class="game-action-row">
           <button class="write-review-btn" onclick="openGameComposer()">+ Write a review</button>
-          <button
-            class={`watch-btn${isWatching ? ' watching' : ''}`}
-            id="watchBtn"
-            data-game-id={game.id}
-            data-watching={isWatching ? 'true' : 'false'}
-            data-logged-in={isLoggedIn ? 'true' : 'false'}
-          >
-            <svg width="14" height="14" viewBox="0 0 18 18" fill={isWatching ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M4 3a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v12l-5-2.7L4 15V3z"/>
-            </svg>
-            <span id="watchLabel">{isWatching ? 'On list' : 'Want to play'}</span>
-            <span class="watch-count" id="watchCount">{(watchlistCount ?? 0) > 0 ? watchlistCount : ''}</span>
-          </button>
         </div>
       </div>
     ) : (
@@ -672,20 +753,82 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         </div>
         <div class="game-action-row">
           <button class="write-review-btn" onclick="openGameComposer()">+ Write a review</button>
+        </div>
+      </div>
+    )}
+
+    <!-- Track this game -->
+    <div class="track-section">
+      <div class="track-header">
+        <span class="track-label">Track this game</span>
+        {!currentGameStatus && (
+          <span class="track-hint">Saves to your library</span>
+        )}
+      </div>
+      <div class="track-pills" id="trackPills">
+        {(['playing', 'want_to_play', 'completed', 'dropped'] as const).map(s => (
           <button
-            class={`watch-btn${isWatching ? ' watching' : ''}`}
-            id="watchBtn"
+            class={`track-pill${currentGameStatus === s ? ' active' : ''}`}
+            data-status={s}
             data-game-id={game.id}
-            data-watching={isWatching ? 'true' : 'false'}
             data-logged-in={isLoggedIn ? 'true' : 'false'}
           >
-            <svg width="14" height="14" viewBox="0 0 18 18" fill={isWatching ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M4 3a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v12l-5-2.7L4 15V3z"/>
-            </svg>
-            <span id="watchLabel">{isWatching ? 'On list' : 'Want to play'}</span>
-            <span class="watch-count" id="watchCount">{(watchlistCount ?? 0) > 0 ? watchlistCount : ''}</span>
+            {s === 'playing' && '🎮'}
+            {s === 'want_to_play' && '🔖'}
+            {s === 'completed' && '✓'}
+            {s === 'dropped' && '✗'}
+            {s === 'playing' ? 'Playing' : s === 'want_to_play' ? 'Want to Play' : s === 'completed' ? 'Completed' : 'Dropped'}
+            {s === 'want_to_play' && (wantToPlayCount ?? 0) > 0 && (
+              <span style="font-size:10px;opacity:.6;margin-left:2px">{wantToPlayCount}</span>
+            )}
           </button>
+        ))}
+      </div>
+      <div class="review-nudge" id="reviewNudge">
+        <span class="review-nudge-text">Nice! Want to share your thoughts on <strong>{game.title}</strong>?</span>
+        <div class="review-nudge-actions">
+          <button class="review-nudge-btn" onclick="openGameComposer()">Write a review</button>
+          <button class="review-nudge-dismiss" onclick="document.getElementById('reviewNudge').style.display='none'" aria-label="Dismiss">✕</button>
         </div>
+      </div>
+    </div>
+
+    <!-- SOCIAL TRACKING — people you follow who have tracked this game -->
+    {hasFriendActivity && (
+      <div class="social-tracking">
+        <div class="social-tracking-hdr">
+          <svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="6" cy="5" r="2.5"/><path d="M1 16c0-3 2-4.5 5-4.5s5 1.5 5 4.5"/>
+            <circle cx="13" cy="5" r="2"/><path d="M13 11c1.7.1 3 1.2 3 3.5"/>
+          </svg>
+          People you follow
+        </div>
+        {SOCIAL_STATUS_ORDER.map(status => {
+          const people = friendStatusGroups[status];
+          if (!people || people.length === 0) return null;
+          const { label, color } = SOCIAL_STATUS_META[status];
+          const visible = people.slice(0, 5);
+          const extra = people.length - visible.length;
+          return (
+            <div class="social-group">
+              <div class="social-group-lbl" style={`color:${color}`}>{label}</div>
+              <div class="social-members">
+                {visible.map((p: any) => (
+                  <a href={`/reviewers/${p.username}`} class="social-member" title={`View @${p.username}'s profile`}>
+                    <div class="social-av">
+                      {p.avatar_url
+                        ? <img src={p.avatar_url} alt={p.username} loading="lazy" />
+                        : p.username.slice(0, 2).toUpperCase()
+                      }
+                    </div>
+                    <span class="social-uname">@{p.username}</span>
+                  </a>
+                ))}
+                {extra > 0 && <span class="social-overflow">+{extra} more</span>}
+              </div>
+            </div>
+          );
+        })}
       </div>
     )}
 
@@ -926,7 +1069,48 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox() })
     window.openLightbox = openLightbox; window.closeLightbox = closeLightbox
 
-    // ── Watch button ──────────────────────────────────────────────────────────
+    // ── Status pills (Track this game) ───────────────────────────────────────
+    var trackPills = document.getElementById('trackPills');
+    if (trackPills) {
+      trackPills.addEventListener('click', async function(e) {
+        var pill = e.target.closest('.track-pill');
+        if (!pill) return;
+
+        var loggedIn = pill.dataset.loggedIn === 'true';
+        if (!loggedIn) { window.location.href = '/signin'; return; }
+
+        var clickedStatus = pill.dataset.status;
+        var isActive = pill.classList.contains('active');
+        // Clicking the active pill removes the status; clicking another sets it
+        var newStatus = isActive ? null : clickedStatus;
+
+        // Optimistic UI
+        trackPills.querySelectorAll('.track-pill').forEach(function(p) { p.classList.remove('active'); });
+        if (newStatus) pill.classList.add('active');
+
+        // Show review nudge when completing
+        var nudge = document.getElementById('reviewNudge');
+        if (nudge) nudge.style.display = newStatus === 'completed' ? 'flex' : 'none';
+
+        try {
+          var res = await fetch('/api/user-game-status/set', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ game_id: pill.dataset.gameId, status: newStatus }),
+          });
+          if (!res.ok) throw new Error();
+        } catch(e) {
+          // Revert on failure
+          trackPills.querySelectorAll('.track-pill').forEach(function(p) {
+            p.classList.toggle('active', p.dataset.status === clickedStatus && !isActive);
+          });
+          if (nudge) nudge.style.display = 'none';
+          alert('Could not update status. Please try again.');
+        }
+      });
+    }
+
+    // ── Legacy watch button fallback (keeps old inline calls working) ─────────
     var watchBtn = document.getElementById('watchBtn');
     if (watchBtn) {
       watchBtn.addEventListener('click', async function() {
@@ -938,12 +1122,10 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         var label    = document.getElementById('watchLabel');
         var countEl  = document.getElementById('watchCount');
 
-        // Optimistic
         var newWatching = !watching;
         watchBtn.dataset.watching = newWatching ? 'true' : 'false';
         watchBtn.classList.toggle('watching', newWatching);
         if (label) label.textContent = newWatching ? 'On list' : 'Want to play';
-        watchBtn.querySelector('svg').setAttribute('fill', newWatching ? 'currentColor' : 'none');
 
         try {
           var res = await fetch('/api/watchlist/toggle', {
@@ -956,13 +1138,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
           watchBtn.dataset.watching = data.watching ? 'true' : 'false';
           watchBtn.classList.toggle('watching', data.watching);
           if (label) label.textContent = data.watching ? 'On list' : 'Want to play';
-          watchBtn.querySelector('svg').setAttribute('fill', data.watching ? 'currentColor' : 'none');
           if (countEl) countEl.textContent = data.count > 0 ? String(data.count) : '';
-          if (typeof gtag === 'function') {
-            gtag('event', data.watching ? 'add_to_watchlist' : 'remove_from_watchlist', {
-              game_id: gameId,
-            });
-          }
         } catch(e) {
           // Revert
           watchBtn.dataset.watching = watching ? 'true' : 'false';
