@@ -28,6 +28,10 @@ export const POST: APIRoute = async (context) => {
   }
 
   await db.from("group_members").delete().eq("group_id", group_id).eq("profile_id", target_profile_id);
+
+  // Clean up any outstanding invite for this user so they can be reinvited cleanly
+  await db.from("group_invites").delete().eq("group_id", group_id).eq("invited_profile_id", target_profile_id);
+
   return json({ success: true });
 };
 
