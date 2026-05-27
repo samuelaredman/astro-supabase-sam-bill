@@ -1,13 +1,15 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from "../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../utils/database";
 import Layout from "../../components/Layout.astro";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
 if (!user) return Astro.redirect("/signin");
 
-const { data: profile } = await (supabase as any)
+const db = getSupabaseAdmin() as any;
+
+const { data: profile } = await db
   .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
 if (!profile) return Astro.redirect("/signin");
 
@@ -38,11 +40,11 @@ const { data: pendingInvites } = await (supabase as any)
   .eq("invited_profile_id", profile.id)
   .eq("status", "pending");
 
-// Discover public + community groups (not already a member)
-const { data: discoverGroups } = await (supabase as any)
+// Discover all groups the user isn't already a member of (including private — users can apply to join)
+const { data: discoverGroups } = await db
   .from("groups")
   .select("id, name, description, avatar_url, visibility, created_at")
-  .in("visibility", ["public", "community"])
+  .in("visibility", ["public", "private", "community"])
   .not("id", "in", `(${groupIds.length > 0 ? groupIds.join(",") : "00000000-0000-0000-0000-000000000000"})`)
   .order("created_at", { ascending: false })
   .limit(20);
@@ -50,7 +52,7 @@ const { data: discoverGroups } = await (supabase as any)
 const discoverMemberCounts: Record<string, number> = {};
 if ((discoverGroups ?? []).length > 0) {
   const discIds = (discoverGroups ?? []).map((g: any) => g.id);
-  const { data: discCounts } = await (supabase as any)
+  const { data: discCounts } = await db
     .from("group_members").select("group_id").in("group_id", discIds);
   for (const row of discCounts ?? []) {
     discoverMemberCounts[row.group_id] = (discoverMemberCounts[row.group_id] ?? 0) + 1;
@@ -176,6 +178,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
         {(discoverGroups ?? []).map((g: any) => {
           const isPending = pendingRequestGroupIds.has(g.id);
           const isCommunity = g.visibility === "community";
+          const isPrivate = g.visibility === "private";
           return (
             <a class="group-card" href={`/groups/${g.id}`}>
               <div class="group-avatar">
@@ -183,16 +186,19 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
               </div>
               <div class="group-info">
                 <div class="group-name">
-                  {isCommunity && <span style="margin-right:5px">🏠</span>}{g.name}
+                  {isCommunity && <span style="margin-right:5px">🏠</span>}
+                  {isPrivate && <span style="margin-right:5px">🔒</span>}
+                  {g.name}
                 </div>
                 <div class="group-meta">
                   <span>{discoverMemberCounts[g.id] ?? 0} member{(discoverMemberCounts[g.id] ?? 0) !== 1 ? "s" : ""}</span>
                   {isCommunity && <span class="badge-community">Community</span>}
+                  {isPrivate && <span class="visibility-badge">Private</span>}
                 </div>
               </div>
               {isPending
                 ? <span class="badge-pending">Request pending</span>
-                : <span class="join-link">View →</span>
+                : <span class="join-link">{isPrivate ? "Request →" : "View →"}</span>
               }
             </a>
           );
