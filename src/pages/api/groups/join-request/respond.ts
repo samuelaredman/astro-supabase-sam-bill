@@ -23,13 +23,13 @@ export const POST: APIRoute = async (context) => {
 
   // Fetch the request
   const { data: req } = await db.from("group_join_requests")
-    .select("id, group_id, profile_id, status").eq("id", request_id).single();
+    .select("id, group_id, profile_id, status").eq("id", request_id).maybeSingle();
   if (!req) return json({ error: "Request not found" }, 404);
   if (req.status !== "pending") return json({ error: "Request already resolved" }, 409);
 
   // Caller must be an admin or owner of that group
   const { data: membership } = await db.from("group_members")
-    .select("role").eq("group_id", req.group_id).eq("profile_id", profile.id).single();
+    .select("role").eq("group_id", req.group_id).eq("profile_id", profile.id).maybeSingle();
   if (!membership || !["owner", "admin"].includes(membership.role)) {
     return json({ error: "Not authorized" }, 403);
   }
