@@ -68,7 +68,7 @@ export const IMAGE_EMOTES: ImageEmote[] = [
   { key: 'ppDrool',        path: '/emotes/ppDrool.webp' },
   { key: 'PenguinR',        path: '/emotes/PenguinR.webp' },
   { key: 'clubPls',        path: '/emotes/clubPls.webp' },
-];
+]; 
 
 export const IMAGE_EMOTE_MAP: Record<string, string> = Object.fromEntries(
   IMAGE_EMOTES.map(e => [e.key, e.path])
