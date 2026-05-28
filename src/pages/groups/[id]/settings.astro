@@ -1,6 +1,6 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
@@ -8,38 +8,115 @@ const { data: { user } } = await supabase.auth.getUser();
 if (!user) return Astro.redirect("/signin");
 
 const { id } = Astro.params;
+const db = getSupabaseAdmin() as any;
 
-const { data: profile } = await (supabase as any)
+const { data: profile } = await db
   .from("profiles").select("id, is_group_admin").eq("auth_user_id", user.id).single();
 if (!profile) return Astro.redirect("/signin");
 const isAdmin = !!(profile as any).is_group_admin;
 
-const { data: group } = await (supabase as any)
+const { data: group } = await (db as any)
   .from("groups").select("*").eq("id", id).single();
 if (!group) return Astro.redirect("/404");
 
-const { data: membership } = await (supabase as any)
-  .from("group_members").select("role").eq("group_id", id).eq("profile_id", profile.id).single();
-if (!membership || !["owner", "admin"].includes(membership.role)) {
-  return Astro.redirect(`/groups/${id}`);
+const { data: membership } = await db
+  .from("group_members").select("role, custom_role_id").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
+
+const isOwner = membership?.role === "owner";
+const isAdminBuiltin = membership?.role === "admin";
+
+// Resolve caller's custom role for hierarchy checks
+let callerCustomRole: any = null;
+let callerEffectiveRank = 9999;
+let hasManageRoles = false;
+let hasEditGroup = false;
+if (membership?.custom_role_id) {
+  try {
+    const { data: cr } = await db.from("group_roles")
+      .select("id, role_rank, can_manage_roles, can_edit_group")
+      .eq("id", membership.custom_role_id).maybeSingle();
+    callerCustomRole = cr;
+    callerEffectiveRank = cr?.role_rank ?? 9999;
+    hasManageRoles = !!cr?.can_manage_roles;
+    hasEditGroup = !!cr?.can_edit_group;
+  } catch {}
 }
 
-const isOwner = membership.role === "owner";
+const canAccessSettings = isOwner || isAdminBuiltin || hasManageRoles || hasEditGroup;
+if (!membership || !canAccessSettings) return Astro.redirect(`/groups/${id}`);
+
+// What this caller can do in role management
+const canManageRoles = isOwner || isAdminBuiltin || hasManageRoles;
+// Admins have no rank constraint; custom role holders are bound by callerEffectiveRank
+const rankConstraint: number | null = (isOwner || isAdminBuiltin) ? null : (hasManageRoles ? callerEffectiveRank : null);
+// Min rank a caller can create/assign (1 for owner/admin, callerEffectiveRank+1 for custom role)
+const minAllowedRank = rankConstraint === null ? 1 : rankConstraint + 1;
+
+// Custom roles (after migration)
+let groupRoles: any[] = [];
+try {
+  const { data: roles } = await db.from("group_roles")
+    .select("id, name, color, role_rank, can_manage_roles, can_invite, can_remove_members, can_edit_group, can_manage_sessions, can_manage_watchlist, is_view_only")
+    .eq("group_id", id).order("role_rank", { ascending: true });
+  groupRoles = roles ?? [];
+} catch { /* migration may not be applied yet */ }
+
+// Members (for role assignment display)
+const { data: members } = await db.from("group_members")
+  .select("profile_id, role, profiles ( id, username, avatar_url )")
+  .eq("group_id", id).neq("role", "owner").order("joined_at");
+const memberList = (members ?? []).map((m: any) => ({ ...m.profiles, role: m.role, profile_id: m.profile_id }));
+
+// Pending counts (for the requests link)
+let pendingJoinCount = 0, pendingInviteCount = 0;
+try {
+  const [{ count: jc }, { count: ic }] = await Promise.all([
+    db.from("group_join_requests").select("id", { count: "exact", head: true }).eq("group_id", id).eq("status", "pending"),
+    db.from("group_invites").select("id", { count: "exact", head: true }).eq("group_id", id).eq("status", "pending"),
+  ]);
+  pendingJoinCount = jc ?? 0;
+  pendingInviteCount = ic ?? 0;
+} catch {}
+const totalPending = pendingJoinCount + pendingInviteCount;
+
+// Genres + platforms for stats config filter dropdowns
+const [{ data: genres }, { data: platforms }] = await Promise.all([
+  db.from("genres").select("id, name").order("name"),
+  db.from("platforms").select("id, name").order("name"),
+]);
+
+// Stats config with defaults
+const defaultStats = {
+  show_top_games: true, show_top_rated: true, show_hot_take: true,
+  show_critic_spectrum: true, show_recent_reviews: true,
+  show_score_compare: true, show_sessions: true, show_watchlist: true,
+  focus_genre_id: null, focus_platform_id: null,
+};
+const statsConfig = { ...defaultStats, ...(group.stats_config ?? {}) };
+
+const inviteUrl = group.invite_code
+  ? `${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`
+  : null;
+
+// Role colors available to pick
+const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa","#60a5fa","#e879f9"];
 ---
 
 <Layout title={`Settings — ${group.name} — Chekpoint`} isLoggedIn={true} currentProfile={profile} variant="centered">
 <style is:global>
-  .settings-wrap { max-width:520px; margin:40px auto; padding:0 20px; }
-  .settings-back { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--text-tertiary); margin-bottom:20px; text-decoration:none; }
+  .settings-wrap { max-width:560px; margin:40px auto; padding:0 20px 80px; }
+  .settings-back { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--text-tertiary); text-decoration:none; }
   .settings-back:hover { color:var(--text-primary); }
-  .settings-title { font-family:'DM Serif Display',serif; font-size:24px; margin-bottom:28px; }
+  .settings-header { display:flex; align-items:center; justify-content:space-between; margin:16px 0 28px; }
+  .settings-title { font-family:'DM Serif Display',serif; font-size:24px; margin:0; }
   .settings-section { background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:16px; }
-  .settings-section-title { font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); margin-bottom:16px; }
+  .settings-section-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--text-tertiary); margin-bottom:16px; }
   .form-group { margin-bottom:16px; }
   .form-label { display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px; }
-  .form-input { width:100%; padding:9px 13px; border-radius:9px; border:1px solid var(--border); background:var(--bg); color:var(--text-primary); font-size:14px; font-family:inherit; outline:none; transition:border-color .15s; }
+  .form-input { width:100%; padding:9px 13px; border-radius:9px; border:1px solid var(--border); background:var(--bg); color:var(--text-primary); font-size:14px; font-family:inherit; outline:none; transition:border-color .15s; box-sizing:border-box; }
   .form-input:focus { border-color:var(--accent); }
-  textarea.form-input { resize:vertical; min-height:72px; }
+  textarea.form-input { resize:vertical; min-height:80px; }
+  select.form-input { appearance:none; cursor:pointer; }
   .visibility-options { display:flex; gap:10px; }
   .vis-option { flex:1; border:2px solid var(--border); border-radius:10px; padding:12px; cursor:pointer; transition:border-color .15s; }
   .vis-option.selected { border-color:var(--accent); background:var(--accent-subtle); }
@@ -49,12 +126,62 @@ const isOwner = membership.role === "owner";
   .btn-primary { background:var(--accent); color:#fff; border:none; padding:10px 22px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; }
   .btn-primary:hover { opacity:.85; }
   .btn-primary:disabled { opacity:.5; cursor:not-allowed; }
-  .btn-ghost { background:var(--tag-bg); color:var(--text-secondary); border:none; padding:10px 18px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; }
+  .btn-ghost { background:var(--tag-bg); color:var(--text-secondary); border:none; padding:10px 18px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }
   .btn-danger { background:#300e0e; color:#f87171; border:1px solid #5a1a1a; padding:10px 18px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; }
   .btn-danger:hover { background:#3d1010; }
+  .btn-sm { padding:6px 12px; font-size:12px; border-radius:14px; }
   .form-msg { font-size:13px; margin-top:10px; display:none; }
   .form-msg.ok { color:#4ade80; }
   .form-msg.err { color:#f87171; }
+
+  /* Requests link */
+  .requests-link { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; background:var(--bg-hover); border-radius:10px; text-decoration:none; color:inherit; transition:background .15s; margin-bottom:4px; }
+  .requests-link:hover { background:var(--border); }
+  .requests-link-label { font-size:13px; font-weight:600; }
+  .requests-link-meta { font-size:12px; color:var(--text-tertiary); }
+  .pending-badge { background:var(--accent); color:#fff; font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px; }
+
+  /* Stats config toggles */
+  .stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px; }
+  .toggle-row { display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); transition:border-color .15s; }
+  .toggle-row:has(input:checked) { border-color:var(--accent); background:var(--accent-subtle); }
+  .toggle-row input { accent-color:var(--accent); width:14px; height:14px; cursor:pointer; }
+
+  /* Role list */
+  .role-list { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; }
+  .role-item { border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .role-item-header { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .role-dot { width:12px; height:12px; border-radius:50%; flex-shrink:0; }
+  .role-name { font-size:14px; font-weight:600; flex:1; }
+  .role-perms { display:flex; flex-wrap:wrap; gap:4px; }
+  .perm-chip { font-size:10px; font-weight:600; padding:2px 7px; border-radius:6px; background:var(--tag-bg); color:var(--tag-text); }
+  .perm-chip.active { background:var(--accent-subtle); color:var(--accent); }
+  .role-actions { display:flex; gap:6px; margin-top:8px; }
+  .btn-xs { font-size:11px; padding:4px 10px; border-radius:8px; border:none; cursor:pointer; font-family:inherit; font-weight:500; }
+  .btn-xs-ghost { background:var(--tag-bg); color:var(--text-secondary); }
+  .btn-xs-ghost:hover { color:var(--text-primary); }
+  .btn-xs-danger { background:#300e0e; color:#f87171; }
+
+  /* New role form */
+  .new-role-form { border:1px solid var(--border); border-radius:10px; padding:14px; background:var(--bg); margin-top:4px; }
+  .new-role-form-title { font-size:12px; font-weight:700; color:var(--text-secondary); margin-bottom:12px; }
+  .color-swatches { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+  .color-swatch { width:22px; height:22px; border-radius:50%; cursor:pointer; border:2px solid transparent; transition:border-color .12s, transform .12s; }
+  .color-swatch.selected { border-color:white; transform:scale(1.2); }
+  .perm-checks { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:12px; }
+  .perm-check-row { display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; }
+  .perm-check-row input { accent-color:var(--accent); }
+  .role-form-actions { display:flex; gap:8px; }
+
+  /* Member role assign */
+  .member-role-row { display:flex; align-items:center; gap:8px; padding:7px 0; border-bottom:1px solid var(--border-subtle); }
+  .member-role-row:last-child { border-bottom:none; }
+  .member-role-avatar { width:28px; height:28px; border-radius:50%; background:var(--accent-subtle); display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; color:var(--accent); overflow:hidden; flex-shrink:0; }
+  .member-role-avatar img { width:100%; height:100%; object-fit:cover; }
+  .member-role-name { font-size:13px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .member-role-select { font-size:12px; padding:4px 8px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text-primary); font-family:inherit; cursor:pointer; }
+
+  /* Invite link */
   .invite-row { display:flex; gap:8px; }
   .invite-code-display { flex:1; padding:9px 13px; border-radius:9px; border:1px solid var(--border); background:var(--bg); color:var(--text-secondary); font-size:13px; font-family:monospace; }
 </style>
@@ -62,9 +189,15 @@ const isOwner = membership.role === "owner";
 <div>
   <div class="settings-wrap">
     <a class="settings-back" href={`/groups/${group.id}`}>← Back to group</a>
-    <h1 class="settings-title">Group Settings</h1>
+    <div class="settings-header">
+      <h1 class="settings-title">Group Settings</h1>
+      <a href={`/groups/${group.id}/requests`} class="btn-ghost btn-sm">
+        Requests &amp; Invites
+        {totalPending > 0 && <span class="pending-badge">{totalPending}</span>}
+      </a>
+    </div>
 
-    <!-- General -->
+    <!-- ── General ──────────────────────────────────────────────── -->
     <div class="settings-section">
       <div class="settings-section-title">General</div>
       <div class="form-group">
@@ -101,18 +234,13 @@ const isOwner = membership.role === "owner";
       <p class="form-msg" id="general-msg"></p>
     </div>
 
-    <!-- Invite link (only for private groups or owner/admin) -->
+    <!-- ── Invite Link ──────────────────────────────────────────── -->
     {group.invite_code && (
       <div class="settings-section">
         <div class="settings-section-title">Invite Link</div>
         <div class="invite-row">
-          <input
-            class="invite-code-display"
-            id="invite-code-display"
-            type="text"
-            readonly
-            value={`${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`}
-          />
+          <input class="invite-code-display" id="invite-code-display" type="text" readonly
+            value={`${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`} />
           <button class="btn-ghost" onclick="copyInviteLink()">Copy</button>
         </div>
         <div style="margin-top:10px">
@@ -122,7 +250,245 @@ const isOwner = membership.role === "owner";
       </div>
     )}
 
-    <!-- Danger zone (owner only) -->
+    <!-- ── Applications ─────────────────────────────────────────── -->
+    <div class="settings-section">
+      <div class="settings-section-title">Applications</div>
+
+      <a href={`/groups/${group.id}/requests`} class="requests-link">
+        <div>
+          <div class="requests-link-label">View Pending Requests &amp; Invites</div>
+          <div class="requests-link-meta">
+            {pendingJoinCount} join request{pendingJoinCount !== 1 ? "s" : ""} · {pendingInviteCount} pending invite{pendingInviteCount !== 1 ? "s" : ""}
+          </div>
+        </div>
+        {totalPending > 0
+          ? <span class="pending-badge">{totalPending}</span>
+          : <span style="font-size:12px;color:var(--text-tertiary)">→</span>
+        }
+      </a>
+
+      <div class="form-group" style="margin-top:16px">
+        <label class="form-label">Join Request Prompt <span style="font-weight:400;color:var(--text-tertiary)">(optional)</span></label>
+        <textarea id="setting-join-prompt" class="form-input" maxlength="500"
+          placeholder="e.g. Tell us about yourself and what games you're into. How did you hear about us?"
+        >{group.join_prompt ?? ""}</textarea>
+        <div style="font-size:11px;color:var(--text-tertiary);margin-top:5px">
+          This message is shown to users when they request to join. Leave blank to use the default form.
+        </div>
+      </div>
+      <button class="btn-primary" onclick="saveApplication()">Save</button>
+      <p class="form-msg" id="app-msg"></p>
+    </div>
+
+    <!-- ── Custom Roles ──────────────────────────────────────────── -->
+    {canManageRoles && (
+      <div class="settings-section">
+        <div class="settings-section-title" style="display:flex;align-items:center;justify-content:space-between">
+          <span>Custom Roles</span>
+          <button class="btn-xs btn-xs-ghost" onclick="toggleNewRoleForm()">+ New Role</button>
+        </div>
+
+        {groupRoles.length > 0 && (
+          <div class="role-list" id="role-list">
+            {groupRoles.map((r: any) => {
+              // Can this caller edit/delete this role?
+              const isSelfRole = callerCustomRole?.id === r.id;
+              const canEditRole = isOwner
+                || (isAdminBuiltin && !isSelfRole)
+                || (!isOwner && !isAdminBuiltin && hasManageRoles && r.role_rank > callerEffectiveRank && !isSelfRole);
+              return (
+              <div class="role-item" data-role-id={r.id}>
+                <div class="role-item-header">
+                  <div class="role-dot" style={`background:${r.color}`}></div>
+                  <div class="role-name">{r.name}</div>
+                  <span style="font-size:10px;font-weight:700;color:var(--text-tertiary);margin-left:auto;background:var(--tag-bg);padding:2px 7px;border-radius:6px">Rank {r.role_rank}</span>
+                </div>
+                <div class="role-perms">
+                  {r.can_manage_roles && <span class="perm-chip active">Manage roles</span>}
+                  <span class={`perm-chip${r.is_view_only ? " active" : ""}`}>View only</span>
+                  <span class={`perm-chip${r.can_invite ? " active" : ""}`}>Can invite</span>
+                  <span class={`perm-chip${r.can_remove_members ? " active" : ""}`}>Can remove</span>
+                  <span class={`perm-chip${r.can_edit_group ? " active" : ""}`}>Can edit group</span>
+                  <span class={`perm-chip${r.can_manage_sessions ? " active" : ""}`}>Sessions</span>
+                  <span class={`perm-chip${r.can_manage_watchlist ? " active" : ""}`}>Watchlist</span>
+                </div>
+                {isSelfRole && <div style="font-size:11px;color:var(--text-tertiary);margin-top:6px">← Your current role</div>}
+                {canEditRole && (
+                  <div class="role-actions">
+                    <button class="btn-xs btn-xs-ghost" onclick={`editRole('${r.id}')`}>Edit</button>
+                    <button class="btn-xs btn-xs-danger" onclick={`deleteRole('${r.id}', '${r.name}')`}>Delete</button>
+                  </div>
+                )}
+                <!-- Inline edit form (hidden by default) -->
+                {canEditRole && (
+                <div id={`edit-form-${r.id}`} style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border-subtle)">
+                  <div style="display:flex;gap:8px;margin-bottom:8px">
+                    <input class="form-input" id={`edit-name-${r.id}`} type="text" value={r.name} maxlength="40" placeholder="Role name" style="flex:1" />
+                    <div style="display:flex;flex-direction:column;gap:3px;flex-shrink:0">
+                      <label style="font-size:11px;font-weight:600;color:var(--text-tertiary)">Rank</label>
+                      <input class="form-input" id={`edit-rank-${r.id}`} type="number" value={r.role_rank}
+                        min={minAllowedRank} max="999" style="width:70px;padding:7px 10px;font-size:13px" />
+                    </div>
+                  </div>
+                  <div class="color-swatches" id={`edit-colors-${r.id}`}>
+                    {ROLE_COLORS.map(c => (
+                      <div class={`color-swatch${r.color === c ? " selected" : ""}`} style={`background:${c}`}
+                        data-color={c} onclick={`selectColor('edit-colors-${r.id}', '${c}')`}></div>
+                    ))}
+                  </div>
+                  <div class="perm-checks">
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-view-${r.id}`} checked={r.is_view_only} onchange={`toggleViewOnly('${r.id}', 'edit')`} /> View only</label>
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-invite-${r.id}`} checked={r.can_invite} /> Can invite</label>
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-remove-${r.id}`} checked={r.can_remove_members} /> Can remove members</label>
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-editgrp-${r.id}`} checked={r.can_edit_group} /> Can edit group</label>
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-sessions-${r.id}`} checked={r.can_manage_sessions} /> Manage sessions</label>
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-watchlist-${r.id}`} checked={r.can_manage_watchlist} /> Manage watchlist</label>
+                    {isOwner && <label class="perm-check-row"><input type="checkbox" id={`edit-manageroles-${r.id}`} checked={r.can_manage_roles} /> Can manage roles</label>}
+                  </div>
+                  <div style="display:flex;gap:8px">
+                    <button class="btn-primary btn-sm" onclick={`saveRoleEdit('${r.id}')`}>Save</button>
+                    <button class="btn-ghost btn-sm" onclick={`editRole('${r.id}')`}>Cancel</button>
+                  </div>
+                  <p class="form-msg" id={`edit-msg-${r.id}`}></p>
+                </div>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        )}
+
+        <!-- New role form -->
+        <div class="new-role-form" id="new-role-form" style="display:none">
+          <div class="new-role-form-title">New Role</div>
+          <div style="display:flex;gap:8px;margin-bottom:10px">
+            <input id="new-role-name" class="form-input" type="text" placeholder="Role name" maxlength="40" style="flex:1" />
+            <div style="display:flex;flex-direction:column;gap:3px;flex-shrink:0">
+              <label style="font-size:11px;font-weight:600;color:var(--text-tertiary)">Rank</label>
+              <input id="new-role-rank" class="form-input" type="number" value={minAllowedRank}
+                min={minAllowedRank} max="999" style="width:70px;padding:7px 10px;font-size:13px"
+                title="Lower number = more authority. Must be higher than your own rank." />
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:10px">
+            Rank controls authority — lower number means more authority.
+            {rankConstraint !== null && ` Your rank is ${callerEffectiveRank}, so new roles must be rank ≥ ${minAllowedRank}.`}
+          </div>
+          <div class="color-swatches" id="new-role-colors">
+            {ROLE_COLORS.map((c, i) => (
+              <div class={`color-swatch${i === 0 ? " selected" : ""}`} style={`background:${c}`}
+                data-color={c} onclick={`selectColor('new-role-colors', '${c}')`}></div>
+            ))}
+          </div>
+          <div class="perm-checks">
+            <label class="perm-check-row"><input type="checkbox" id="new-view-only" onchange="toggleViewOnly(null, 'new')" /> View only</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-can-invite" /> Can invite</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-can-remove" /> Can remove members</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-can-edit" /> Can edit group</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-manage-sessions" checked /> Manage sessions</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-manage-watchlist" checked /> Manage watchlist</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-manage-roles" /> Can manage roles</label>
+          </div>
+          <div class="role-form-actions">
+            <button class="btn-primary btn-sm" onclick="createRole()">Create Role</button>
+            <button class="btn-ghost btn-sm" onclick="toggleNewRoleForm()">Cancel</button>
+          </div>
+          <p class="form-msg" id="new-role-msg"></p>
+        </div>
+
+        <!-- Assign roles to members -->
+        {memberList.length > 0 && groupRoles.length > 0 && (
+          <div style="margin-top:20px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);margin-bottom:10px">Assign Roles to Members</div>
+            {memberList.map((m: any) => (
+              <div class="member-role-row" data-profile-id={m.id}>
+                <div class="member-role-avatar">
+                  {m.avatar_url
+                    ? <img src={m.avatar_url} alt={m.username} />
+                    : m.username?.slice(0,2).toUpperCase()}
+                </div>
+                <div class="member-role-name">@{m.username}</div>
+                <select class="member-role-select" onchange={`assignRole('${m.id}', this.value)`} data-profile-id={m.id}>
+                  <option value="">— no custom role —</option>
+                  {groupRoles.map((r: any) => (
+                    <option value={r.id}>{r.name}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+            <p class="form-msg" id="assign-msg"></p>
+          </div>
+        )}
+      </div>
+    )}
+
+    <!-- ── Stats & Display ───────────────────────────────────────── -->
+    <div class="settings-section">
+      <div class="settings-section-title">Stats &amp; Display</div>
+      <p style="font-size:12px;color:var(--text-tertiary);margin-bottom:14px">
+        Choose which sections appear on your group's overview page.
+      </p>
+
+      <div class="stats-grid">
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-top-games" checked={statsConfig.show_top_games} />
+          Most Played
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-top-rated" checked={statsConfig.show_top_rated} />
+          Top Rated
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-hot-take" checked={statsConfig.show_hot_take} />
+          Hot Take
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-spectrum" checked={statsConfig.show_critic_spectrum} />
+          Critic Spectrum
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-reviews" checked={statsConfig.show_recent_reviews} />
+          Recent Reviews
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-compare" checked={statsConfig.show_score_compare} />
+          Score Compare tab
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-sessions" checked={statsConfig.show_sessions} />
+          Sessions tab
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-watchlist" checked={statsConfig.show_watchlist} />
+          Want to Play
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Focus: Genre <span style="font-weight:400;color:var(--text-tertiary)">(filters all stats to this genre)</span></label>
+        <select id="sc-genre" class="form-input">
+          <option value="">All genres</option>
+          {(genres ?? []).map((g: any) => (
+            <option value={g.id} selected={statsConfig.focus_genre_id === g.id}>{g.name}</option>
+          ))}
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Focus: Platform <span style="font-weight:400;color:var(--text-tertiary)">(filters all stats to this platform)</span></label>
+        <select id="sc-platform" class="form-input">
+          <option value="">All platforms</option>
+          {(platforms ?? []).map((p: any) => (
+            <option value={p.id} selected={statsConfig.focus_platform_id === p.id}>{p.name}</option>
+          ))}
+        </select>
+      </div>
+
+      <button class="btn-primary" onclick="saveStatsConfig()">Save Display Settings</button>
+      <p class="form-msg" id="stats-msg"></p>
+    </div>
+
+    <!-- ── Danger Zone ───────────────────────────────────────────── -->
     {isOwner && (
       <div class="settings-section" style="border-color:#5a1a1a">
         <div class="settings-section-title" style="color:#f87171">Danger Zone</div>
@@ -137,7 +503,8 @@ const isOwner = membership.role === "owner";
 </div>
 </Layout>
 
-<script define:vars={{ groupId: group.id }}>
+<script define:vars={{ groupId: group.id, minAllowedRank, isOwner }}>
+// ── Visibility radios ────────────────────────────────────────────────────
 document.querySelectorAll('.vis-option').forEach(opt => {
   opt.addEventListener('click', () => {
     document.querySelectorAll('.vis-option').forEach(o => o.classList.remove('selected'));
@@ -145,43 +512,39 @@ document.querySelectorAll('.vis-option').forEach(opt => {
   });
 });
 
+function showMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'form-msg ' + (ok ? 'ok' : 'err');
+  el.style.display = 'block';
+  if (ok) setTimeout(() => { el.style.display = 'none'; }, 3000);
+}
+
+// ── General ──────────────────────────────────────────────────────────────
 async function saveGeneral() {
   const name = document.getElementById('setting-name').value;
   const description = document.getElementById('setting-desc').value;
   const visibility = document.querySelector('input[name="visibility"]:checked')?.value;
-  const msg = document.getElementById('general-msg');
-  msg.style.display = 'none';
-
   const res = await fetch('/api/groups/update', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ group_id: groupId, name, description, visibility }),
   });
   const data = await res.json();
-  msg.style.display = 'block';
-  if (res.ok) {
-    msg.className = 'form-msg ok';
-    msg.textContent = 'Saved!';
-    if (data.invite_code) {
-      const display = document.getElementById('invite-code-display');
-      if (display) display.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
-    }
-  } else {
-    msg.className = 'form-msg err';
-    msg.textContent = data.error ?? 'Error saving';
+  showMsg('general-msg', res.ok ? 'Saved!' : (data.error ?? 'Error saving'), res.ok);
+  if (res.ok && data.invite_code) {
+    const d = document.getElementById('invite-code-display');
+    if (d) d.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
   }
 }
 window.saveGeneral = saveGeneral;
 
+// ── Invite link ──────────────────────────────────────────────────────────
 function copyInviteLink() {
   const field = document.getElementById('invite-code-display');
   if (!field) return;
   navigator.clipboard.writeText(field.value).then(() => {
-    const msg = document.getElementById('invite-msg');
-    msg.style.display = 'block';
-    msg.className = 'form-msg ok';
-    msg.textContent = 'Copied to clipboard!';
-    setTimeout(() => msg.style.display = 'none', 2000);
+    showMsg('invite-msg', 'Copied to clipboard!', true);
   });
 }
 window.copyInviteLink = copyInviteLink;
@@ -189,32 +552,187 @@ window.copyInviteLink = copyInviteLink;
 async function regenerateInvite() {
   if (!confirm('Regenerate the invite link? The old link will stop working.')) return;
   const res = await fetch('/api/groups/update', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ group_id: groupId, regenerate_invite: true }),
   });
   const data = await res.json();
-  const msg = document.getElementById('invite-msg');
-  msg.style.display = 'block';
   if (res.ok && data.invite_code) {
-    const newUrl = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
     const field = document.getElementById('invite-code-display');
-    if (field) field.value = newUrl;
-    msg.className = 'form-msg ok';
-    msg.textContent = 'New link generated!';
+    if (field) field.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
+    showMsg('invite-msg', 'New link generated!', true);
   } else {
-    msg.className = 'form-msg err';
-    msg.textContent = data.error ?? 'Error';
+    showMsg('invite-msg', data.error ?? 'Error', false);
   }
 }
 window.regenerateInvite = regenerateInvite;
 
+// ── Applications ─────────────────────────────────────────────────────────
+async function saveApplication() {
+  const join_prompt = document.getElementById('setting-join-prompt').value;
+  const res = await fetch('/api/groups/update', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, join_prompt }),
+  });
+  const data = await res.json();
+  showMsg('app-msg', res.ok ? 'Saved!' : (data.error ?? 'Error saving'), res.ok);
+}
+window.saveApplication = saveApplication;
+
+// ── Stats config ─────────────────────────────────────────────────────────
+async function saveStatsConfig() {
+  const get = id => document.getElementById(id);
+  const stats_config = {
+    show_top_games:       get('sc-top-games')?.checked ?? true,
+    show_top_rated:       get('sc-top-rated')?.checked ?? true,
+    show_hot_take:        get('sc-hot-take')?.checked ?? true,
+    show_critic_spectrum: get('sc-spectrum')?.checked ?? true,
+    show_recent_reviews:  get('sc-reviews')?.checked ?? true,
+    show_score_compare:   get('sc-compare')?.checked ?? true,
+    show_sessions:        get('sc-sessions')?.checked ?? true,
+    show_watchlist:       get('sc-watchlist')?.checked ?? true,
+    focus_genre_id:       get('sc-genre')?.value || null,
+    focus_platform_id:    get('sc-platform')?.value || null,
+  };
+  const res = await fetch('/api/groups/update', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, stats_config }),
+  });
+  const data = await res.json();
+  showMsg('stats-msg', res.ok ? 'Display settings saved!' : (data.error ?? 'Error'), res.ok);
+}
+window.saveStatsConfig = saveStatsConfig;
+
+// ── Roles ────────────────────────────────────────────────────────────────
+function toggleNewRoleForm() {
+  const form = document.getElementById('new-role-form');
+  if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+window.toggleNewRoleForm = toggleNewRoleForm;
+
+function selectColor(containerId, color) {
+  document.querySelectorAll(`#${containerId} .color-swatch`).forEach(s => s.classList.remove('selected'));
+  const swatch = document.querySelector(`#${containerId} [data-color="${color}"]`);
+  if (swatch) swatch.classList.add('selected');
+}
+window.selectColor = selectColor;
+
+function getSelectedColor(containerId) {
+  const sel = document.querySelector(`#${containerId} .color-swatch.selected`);
+  return sel?.dataset.color ?? '#6050c8';
+}
+
+function toggleViewOnly(roleId, prefix) {
+  const viewOnly = document.getElementById(prefix === 'new' ? 'new-view-only' : `edit-view-${roleId}`)?.checked;
+  const writeIds = prefix === 'new'
+    ? ['new-can-invite','new-can-remove','new-can-edit','new-manage-sessions','new-manage-watchlist','new-manage-roles']
+    : [`edit-invite-${roleId}`,`edit-remove-${roleId}`,`edit-editgrp-${roleId}`,`edit-sessions-${roleId}`,`edit-watchlist-${roleId}`,`edit-manageroles-${roleId}`];
+  writeIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.disabled = viewOnly; if (viewOnly) el.checked = false; }
+  });
+}
+window.toggleViewOnly = toggleViewOnly;
+
+function editRole(roleId) {
+  const form = document.getElementById(`edit-form-${roleId}`);
+  if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+window.editRole = editRole;
+
+async function createRole() {
+  const name = document.getElementById('new-role-name')?.value?.trim();
+  if (!name) return showMsg('new-role-msg', 'Role name required', false);
+  const rankVal = parseInt(document.getElementById('new-role-rank')?.value ?? String(minAllowedRank), 10);
+  if (isNaN(rankVal) || rankVal < minAllowedRank)
+    return showMsg('new-role-msg', `Rank must be at least ${minAllowedRank}`, false);
+  const color = getSelectedColor('new-role-colors');
+  const body = {
+    group_id: groupId, action: 'create', name, color,
+    role_rank:            rankVal,
+    can_manage_roles:     document.getElementById('new-manage-roles')?.checked,
+    can_invite:           document.getElementById('new-can-invite')?.checked,
+    can_remove_members:   document.getElementById('new-can-remove')?.checked,
+    can_edit_group:       document.getElementById('new-can-edit')?.checked,
+    can_manage_sessions:  document.getElementById('new-manage-sessions')?.checked,
+    can_manage_watchlist: document.getElementById('new-manage-watchlist')?.checked,
+    is_view_only:         document.getElementById('new-view-only')?.checked,
+  };
+  const res = await fetch('/api/groups/roles/manage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    showMsg('new-role-msg', 'Role created!', true);
+    setTimeout(() => window.location.reload(), 800);
+  } else {
+    showMsg('new-role-msg', data.error ?? 'Error creating role', false);
+  }
+}
+window.createRole = createRole;
+
+async function saveRoleEdit(roleId) {
+  const name = document.getElementById(`edit-name-${roleId}`)?.value?.trim();
+  if (!name) return showMsg(`edit-msg-${roleId}`, 'Name required', false);
+  const rankInput = document.getElementById(`edit-rank-${roleId}`);
+  const rankVal = rankInput ? parseInt(rankInput.value, 10) : null;
+  if (rankVal !== null && (isNaN(rankVal) || rankVal < minAllowedRank))
+    return showMsg(`edit-msg-${roleId}`, `Rank must be at least ${minAllowedRank}`, false);
+  const color = getSelectedColor(`edit-colors-${roleId}`);
+  const body = {
+    group_id: groupId, action: 'update', role_id: roleId, name, color,
+    ...(rankVal !== null ? { role_rank: rankVal } : {}),
+    can_manage_roles:     isOwner ? (document.getElementById(`edit-manageroles-${roleId}`)?.checked ?? false) : undefined,
+    can_invite:           document.getElementById(`edit-invite-${roleId}`)?.checked,
+    can_remove_members:   document.getElementById(`edit-remove-${roleId}`)?.checked,
+    can_edit_group:       document.getElementById(`edit-editgrp-${roleId}`)?.checked,
+    can_manage_sessions:  document.getElementById(`edit-sessions-${roleId}`)?.checked,
+    can_manage_watchlist: document.getElementById(`edit-watchlist-${roleId}`)?.checked,
+    is_view_only:         document.getElementById(`edit-view-${roleId}`)?.checked,
+  };
+  const res = await fetch('/api/groups/roles/manage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    showMsg(`edit-msg-${roleId}`, 'Saved!', true);
+    setTimeout(() => window.location.reload(), 800);
+  } else {
+    showMsg(`edit-msg-${roleId}`, data.error ?? 'Error saving', false);
+  }
+}
+window.saveRoleEdit = saveRoleEdit;
+
+async function deleteRole(roleId, roleName) {
+  if (!confirm(`Delete the "${roleName}" role? Members with this role will lose it.`)) return;
+  const res = await fetch('/api/groups/roles/manage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, action: 'delete', role_id: roleId }),
+  });
+  if (res.ok) {
+    document.querySelector(`[data-role-id="${roleId}"]`)?.remove();
+  } else {
+    const d = await res.json();
+    alert(d.error ?? 'Error deleting role');
+  }
+}
+window.deleteRole = deleteRole;
+
+async function assignRole(profileId, customRoleId) {
+  const res = await fetch('/api/groups/roles/assign', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, target_profile_id: profileId, custom_role_id: customRoleId || null }),
+  });
+  const data = await res.json();
+  showMsg('assign-msg', res.ok ? 'Role assigned!' : (data.error ?? 'Error'), res.ok);
+}
+window.assignRole = assignRole;
+
+// ── Danger Zone ──────────────────────────────────────────────────────────
 async function deleteGroup() {
   const name = document.getElementById('setting-name')?.value;
   if (!confirm(`Delete "${name}"? This is permanent.`)) return;
   const res = await fetch('/api/groups/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ group_id: groupId }),
   });
   if (res.ok) window.location.href = '/groups';

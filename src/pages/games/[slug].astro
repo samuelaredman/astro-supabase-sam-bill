@@ -74,22 +74,26 @@ let hasFriendActivity = false;
 if (currentProfileId) {
   // Step 1: fetch everyone who has tracked THIS game (bounded by game popularity, not follow count).
   // Exclude the viewer themselves, cap at 200 rows — more than enough to find 5 per status group.
-  const { data: gameTrackers } = await db
+  const { data: gameTrackers, error: trackersError } = await db
     .from('user_game_status')
     .select('status, profile_id, profiles(id, username, avatar_url, want_to_play_privacy, dropped_privacy)')
     .eq('game_id', game.id)
     .neq('profile_id', currentProfileId)
     .order('updated_at', { ascending: false })
     .limit(200);
+  if (trackersError) console.error('[social-tracking] gameTrackers error:', JSON.stringify(trackersError));
+  console.log('[social-tracking] viewer:', currentProfileId, 'game:', game.id, 'trackers found:', gameTrackers?.length ?? 0);
 
   const trackerIds: string[] = (gameTrackers ?? []).map((r: any) => r.profile_id);
 
   if (trackerIds.length > 0) {
     // Step 2: which of those does the current user follow? IN clause is bounded by tracker count.
-    const { data: followedRows } = await db
+    const { data: followedRows, error: followsError } = await db
       .from('follows').select('following_id')
       .eq('follower_id', currentProfileId)
       .in('following_id', trackerIds);
+    if (followsError) console.error('[social-tracking] followedRows error:', JSON.stringify(followsError));
+    console.log('[social-tracking] followed trackers:', followedRows?.length ?? 0, followedRows);
     const followedSet = new Set<string>((followedRows ?? []).map((r: any) => r.following_id));
 
     // Only keep trackers the current user follows
@@ -106,6 +110,8 @@ if (currentProfileId) {
       for (const item of friendStatuses) {
         const p = item.profiles;
         if (!p) continue;
+        // Undefined/null privacy → treat as 'public' (default). Skip only when
+        // explicitly 'private' or 'friends' without a mutual follow.
         if (item.status === 'want_to_play') {
           if (p.want_to_play_privacy === 'private') continue;
           if (p.want_to_play_privacy === 'friends' && !mutualIds.has(item.profile_id)) continue;

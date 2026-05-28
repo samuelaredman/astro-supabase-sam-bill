@@ -1,28 +1,44 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../../utils/database";
 
+const json = (body: object, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return json({ error: "Unauthorized" }, 401);
 
-  const { data: profile } = await (supabase as any)
+  const db = getSupabaseAdmin() as any;
+
+  const { data: profile } = await db
     .from("profiles").select("id").eq("auth_user_id", user.id).single();
   if (!profile) return json({ error: "Profile not found" }, 404);
 
   const { group_id, game_id, played_at, notes, attendee_ids } = await context.request.json();
-  if (!group_id || !game_id || !played_at) return json({ error: "group_id, game_id, and played_at are required" }, 400);
-
-  const db = getSupabaseAdmin() as any;
+  if (!group_id || !game_id || !played_at)
+    return json({ error: "group_id, game_id, and played_at are required" }, 400);
 
   const { data: membership } = await db.from("group_members")
-    .select("id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
+    .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
   if (!membership) return json({ error: "Not a member of this group" }, 403);
+
+  // Members with a custom role must have can_manage_sessions=true (and not be view-only).
+  // Plain members (no custom role) retain the original unrestricted access.
+  if (membership.custom_role_id) {
+    const { data: cr } = await db.from("group_roles")
+      .select("can_manage_sessions, is_view_only").eq("id", membership.custom_role_id).maybeSingle();
+    if (!cr?.can_manage_sessions || cr?.is_view_only)
+      return json({ error: "Your role does not have permission to manage sessions" }, 403);
+  }
 
   const { data: session, error } = await db.from("group_sessions").insert({
     group_id, game_id, played_at, notes: notes?.trim() || null, created_by: profile.id,
   }).select("id").single();
-  if (error) return json({ error: error.message }, 500);
+  if (error) {
+    console.error("[groups/sessions/create] error:", JSON.stringify(error));
+    return json({ error: "Failed to create session" }, 500);
+  }
 
   // Add attendees — always include the creator; filter to group members only
   const ids: string[] = Array.isArray(attendee_ids) ? attendee_ids : [];
@@ -40,10 +56,3 @@ export const POST: APIRoute = async (context) => {
 
   return json({ id: session.id });
 };
-
-function json(body: object, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}

@@ -16,16 +16,25 @@ export const POST: APIRoute = async (context) => {
   if (!profile) return json({ error: "Profile not found" }, 404);
 
   const body = await context.request.json();
-  const { request_id, action } = body; // action: 'accept' | 'reject'
-  if (!request_id || !["accept", "reject"].includes(action)) {
-    return json({ error: "request_id and action ('accept'|'reject') are required" }, 400);
+  const { request_id, group_id, requester_profile_id, action } = body; // action: 'accept' | 'reject'
+
+  if (!["accept", "reject"].includes(action)) {
+    return json({ error: "action must be 'accept' or 'reject'" }, 400);
+  }
+  // Accept either request_id OR (group_id + requester_profile_id)
+  if (!request_id && !(group_id && requester_profile_id)) {
+    return json({ error: "Provide either request_id, or both group_id and requester_profile_id" }, 400);
   }
 
-  // Fetch the request
-  const { data: req } = await db.from("group_join_requests")
-    .select("id, group_id, profile_id, status").eq("id", request_id).maybeSingle();
-  if (!req) return json({ error: "Request not found" }, 404);
-  if (req.status !== "pending") return json({ error: "Request already resolved" }, 409);
+  // Fetch the request — look up by id or by (group_id, profile_id)
+  let reqQuery = db.from("group_join_requests").select("id, group_id, profile_id, status").eq("status", "pending");
+  if (request_id) {
+    reqQuery = reqQuery.eq("id", request_id);
+  } else {
+    reqQuery = reqQuery.eq("group_id", group_id).eq("profile_id", requester_profile_id);
+  }
+  const { data: req } = await reqQuery.maybeSingle();
+  if (!req) return json({ error: "Pending request not found" }, 404);
 
   // Caller must be an admin or owner of that group
   const { data: membership } = await db.from("group_members")
@@ -34,15 +43,15 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "Not authorized" }, 403);
   }
 
-  const newStatus = action === "accept" ? "accepted" : "rejected";
-
-  // Update the request
+  // Update status to accepted/rejected — keeps a history and makes the
+  // index.astro "status === rejected" check functional so rejected applicants
+  // can re-apply (the create endpoint upserts back to pending on re-submit)
   const { error: updateErr } = await db.from("group_join_requests")
-    .update({ status: newStatus, reviewed_by: profile.id, reviewed_at: new Date().toISOString() })
-    .eq("id", request_id);
+    .update({ status: action === "accept" ? "accepted" : "rejected", reviewed_by: profile.id, reviewed_at: new Date().toISOString() })
+    .eq("id", req.id);
   if (updateErr) {
     console.error("[join-request/respond] update error:", JSON.stringify(updateErr));
-    return json({ error: "Failed to update request." }, 500);
+    return json({ error: "Failed to process request." }, 500);
   }
 
   // If accepted, add the user to the group
@@ -58,7 +67,7 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  // Notify the requester
+  // Notify the requester and clean up the join-request notifications sent to admins
   try {
     await db.from("notifications").insert({
       profile_id: req.profile_id,
@@ -70,5 +79,17 @@ export const POST: APIRoute = async (context) => {
     console.error("[join-request/respond] notification error (non-fatal):", e);
   }
 
-  return json({ success: true, status: newStatus });
+  // Delete the group_join_request notifications that were sent to all admins for this requester.
+  // Non-fatal — if this fails the only consequence is stale Accept/Reject buttons in the UI.
+  try {
+    await db.from("notifications")
+      .delete()
+      .eq("type", "group_join_request")
+      .eq("group_id", req.group_id)
+      .eq("actor_profile_id", req.profile_id);
+  } catch (e) {
+    console.error("[join-request/respond] notification cleanup error (non-fatal):", e);
+  }
+
+  return json({ success: true, action });
 };

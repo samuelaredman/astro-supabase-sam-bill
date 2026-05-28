@@ -1,47 +1,80 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../../utils/database";
 
+const json = (body: object, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return json({ error: "Unauthorized" }, 401);
 
-  const { data: profile } = await (supabase as any)
+  // Always use admin client for DB operations
+  const db = getSupabaseAdmin() as any;
+
+  const { data: profile } = await db
     .from("profiles").select("id").eq("auth_user_id", user.id).single();
   if (!profile) return json({ error: "Profile not found" }, 404);
 
-  const { group_id, action } = await context.request.json();
+  const body = await context.request.json();
+  const { group_id, action } = body;
+
+  if (!group_id) return json({ error: "group_id required" }, 400);
   if (!["accept", "decline"].includes(action)) return json({ error: "action must be accept or decline" }, 400);
 
-  const db = getSupabaseAdmin() as any;
-
   const { data: invite } = await db.from("group_invites")
-    .select("id, expires_at").eq("group_id", group_id).eq("invited_profile_id", profile.id)
-    .eq("status", "pending").single();
+    .select("id, expires_at")
+    .eq("group_id", group_id)
+    .eq("invited_profile_id", profile.id)
+    .eq("status", "pending")
+    .maybeSingle();
+
   if (!invite) return json({ error: "No pending invite found" }, 404);
 
   if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
     await db.from("group_invites").update({ status: "declined" }).eq("id", invite.id);
+    // Clean up the stale notification
+    try {
+      await db.from("notifications")
+        .delete()
+        .eq("profile_id", profile.id)
+        .eq("type", "group_invite")
+        .eq("group_id", group_id);
+    } catch {}
     return json({ error: "Invite has expired" }, 410);
   }
 
-  await db.from("group_invites").update({ status: action === "accept" ? "accepted" : "declined" }).eq("id", invite.id);
+  const { error: updateErr } = await db.from("group_invites")
+    .update({ status: action === "accept" ? "accepted" : "declined" })
+    .eq("id", invite.id);
+  if (updateErr) {
+    console.error("[groups/invite/respond] update error:", JSON.stringify(updateErr));
+    return json({ error: "Failed to process invite" }, 500);
+  }
 
   if (action === "accept") {
     const { data: existing } = await db.from("group_members")
       .select("id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
     if (!existing) {
-      await db.from("group_members").insert({ group_id, profile_id: profile.id, role: "member" });
+      const { error: memberErr } = await db.from("group_members")
+        .insert({ group_id, profile_id: profile.id, role: "member" });
+      if (memberErr && !memberErr.message?.includes("duplicate")) {
+        console.error("[groups/invite/respond] member insert error:", JSON.stringify(memberErr));
+        return json({ error: "Failed to add you to the group" }, 500);
+      }
     }
-    return json({ success: true, joined: true });
   }
 
-  return json({ success: true, joined: false });
-};
+  // Delete the group_invite notification — request is resolved
+  try {
+    await db.from("notifications")
+      .delete()
+      .eq("profile_id", profile.id)
+      .eq("type", "group_invite")
+      .eq("group_id", group_id);
+  } catch (e) {
+    console.error("[groups/invite/respond] notification cleanup error (non-fatal):", e);
+  }
 
-function json(body: object, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+  return json({ success: true, joined: action === "accept" });
+};
