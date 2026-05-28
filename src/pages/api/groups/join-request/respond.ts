@@ -43,12 +43,14 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "Not authorized" }, 403);
   }
 
-  // Delete the join request row — it's served its purpose
-  const { error: deleteErr } = await db.from("group_join_requests")
-    .delete()
+  // Update status to accepted/rejected — keeps a history and makes the
+  // index.astro "status === rejected" check functional so rejected applicants
+  // can re-apply (the create endpoint upserts back to pending on re-submit)
+  const { error: updateErr } = await db.from("group_join_requests")
+    .update({ status: action === "accept" ? "accepted" : "rejected", reviewed_by: profile.id, reviewed_at: new Date().toISOString() })
     .eq("id", req.id);
-  if (deleteErr) {
-    console.error("[join-request/respond] delete error:", JSON.stringify(deleteErr));
+  if (updateErr) {
+    console.error("[join-request/respond] update error:", JSON.stringify(updateErr));
     return json({ error: "Failed to process request." }, 500);
   }
 
