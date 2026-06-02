@@ -1,6 +1,6 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
 import CropModal from "../../../components/CropModal.astro";
 
@@ -17,17 +17,21 @@ if (user) {
   currentProfile = cp;
 }
 
-let { data: group, error: groupError } = await (supabase as any)
+// Use admin client for the group query so non-members can view private group info
+// (needed for the join-request wall — RLS would otherwise block non-members)
+const db = getSupabaseAdmin() as any;
+
+let { data: group, error: groupError } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
   .eq("id", id)
   .single();
 
 // banner_url column may not exist yet if migration hasn't been applied — fall back without it
 if (!group && groupError) {
-  const { data: fallback } = await (supabase as any)
+  const { data: fallback } = await db
     .from("groups")
-    .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at")
+    .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
     .eq("id", id)
     .single();
   if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center' };
@@ -46,10 +50,47 @@ const isMember = !!membership;
 const isAdminOrOwner = ["owner", "admin"].includes(membership?.role);
 const isOwner = membership?.role === "owner";
 
-if (group.visibility === "private" && !isMember) {
-  if (!joinCode || joinCode.toUpperCase() !== group.invite_code) {
-    return Astro.redirect("/groups");
-  }
+// Private groups: non-members need a valid invite code to see the page
+const canViewPrivate = isMember || (joinCode && joinCode.toUpperCase() === group.invite_code);
+if (group.visibility === "private" && !canViewPrivate) {
+  // Don't redirect — render a join-request wall below (handled in HTML)
+}
+
+// Does this user have a pending invite to this group?
+let pendingInvite: any = null;
+if (currentProfile && !isMember) {
+  const { data: inv } = await db
+    .from("group_invites")
+    .select("id")
+    .eq("group_id", id)
+    .eq("invited_profile_id", currentProfile.id)
+    .eq("status", "pending")
+    .maybeSingle();
+  pendingInvite = inv;
+}
+
+// Has this user already submitted a join request?
+let existingJoinRequest: any = null;
+if (currentProfile && !isMember && group.visibility === "private") {
+  const { data: jr } = await db
+    .from("group_join_requests")
+    .select("id, status")
+    .eq("group_id", id)
+    .eq("profile_id", currentProfile.id)
+    .maybeSingle();
+  existingJoinRequest = jr;
+}
+
+// Pending join requests visible to admins
+let pendingJoinRequests: any[] = [];
+if (isAdminOrOwner) {
+  const { data: jrs } = await db
+    .from("group_join_requests")
+    .select("id, message, created_at, profiles:profiles!profile_id ( id, username, avatar_url )")
+    .eq("group_id", id)
+    .eq("status", "pending")
+    .order("created_at", { ascending: true });
+  pendingJoinRequests = jrs ?? [];
 }
 
 const { data: members } = await (supabase as any)
@@ -61,12 +102,57 @@ const { data: members } = await (supabase as any)
 const memberList = (members ?? []).map((m: any) => ({ ...m.profiles, role: m.role, joined_at: m.joined_at }));
 const memberProfileIds = memberList.map((m: any) => m.id);
 
+// ── Stats config (with defaults) ──
+const defaultStats = {
+  show_top_games: true, show_top_rated: true, show_hot_take: true,
+  show_critic_spectrum: true, show_recent_reviews: true,
+  show_score_compare: true, show_sessions: true, show_watchlist: true,
+  focus_genre_id: null as string | null, focus_platform_id: null as string | null,
+};
+const statsConf = { ...defaultStats, ...(group.stats_config ?? {}) };
+
+// ── Custom roles — graceful fallback if migration not yet applied ──
+let groupRoles: any[] = [];
+try {
+  const { data: gr } = await db.from("group_roles").select("id, name, color").eq("group_id", id);
+  groupRoles = gr ?? [];
+} catch { groupRoles = []; }
+const roleMap: Record<string, any> = {};
+for (const r of groupRoles) roleMap[r.id] = r;
+
+// Custom role assignments per member
+const memberCustomRoles: Record<string, string | null> = {};
+try {
+  const { data: mcr } = await db.from("group_members")
+    .select("profile_id, custom_role_id").eq("group_id", id);
+  for (const cr of mcr ?? []) memberCustomRoles[cr.profile_id] = cr.custom_role_id ?? null;
+} catch { /* column may not exist yet */ }
+
+// ── Genre / platform focus filter ──
+let allowedGameIds: string[] | null = null;
+let focusLabel: string | null = null;
+if (statsConf.focus_genre_id) {
+  const { data: genreGames } = await db.from("game_genres").select("game_id").eq("genre_id", statsConf.focus_genre_id);
+  const genreIds = (genreGames ?? []).map((g: any) => g.game_id) as string[];
+  allowedGameIds = genreIds.length === 0 ? ["00000000-0000-0000-0000-000000000000"] : genreIds;
+  const { data: gn } = await db.from("genres").select("name").eq("id", statsConf.focus_genre_id).maybeSingle();
+  focusLabel = gn?.name ? `${gn.name} focus` : null;
+} else if (statsConf.focus_platform_id) {
+  const { data: platGames } = await db.from("game_platforms").select("game_id").eq("platform_id", statsConf.focus_platform_id);
+  const platIds = (platGames ?? []).map((g: any) => g.game_id) as string[];
+  allowedGameIds = platIds.length === 0 ? ["00000000-0000-0000-0000-000000000000"] : platIds;
+  const { data: pl } = await db.from("platforms").select("name").eq("id", statsConf.focus_platform_id).maybeSingle();
+  focusLabel = pl?.name ? `${pl.name} focus` : null;
+}
+
 // Accurate full stats — lightweight query, no limit
-const { data: allReviewStats } = await (supabase as any)
+let allReviewStatsQuery = (supabase as any)
   .from("reviews")
   .select("game_id, score, play_time_hours, profile_id")
   .in("profile_id", memberProfileIds.length ? memberProfileIds : ["00000000-0000-0000-0000-000000000000"])
   .eq("status", "published");
+if (allowedGameIds) allReviewStatsQuery = allReviewStatsQuery.in("game_id", allowedGameIds);
+const { data: allReviewStats } = await allReviewStatsQuery;
 const totalReviews = (allReviewStats ?? []).length;
 const uniqueGamesCount = new Set((allReviewStats ?? []).map((r: any) => r.game_id)).size;
 const allGroupScores = (allReviewStats ?? []).map((r: any) => r.score);
@@ -95,11 +181,13 @@ const { data: sessionsData } = await (supabase as any)
 
 let sharedGames: any[] = [];
 if (memberProfileIds.length >= 2) {
-  const { data: memberReviews } = await (supabase as any)
+  let memberReviewsQuery = (supabase as any)
     .from("reviews")
     .select("profile_id, game_id, score, games ( id, title, slug, cover_img_url )")
     .in("profile_id", memberProfileIds)
     .eq("status", "published");
+  if (allowedGameIds) memberReviewsQuery = memberReviewsQuery.in("game_id", allowedGameIds);
+  const { data: memberReviews } = await memberReviewsQuery;
 
   const gameReviewMap: Record<string, any> = {};
   for (const r of memberReviews ?? []) {
@@ -112,13 +200,15 @@ if (memberProfileIds.length >= 2) {
     .slice(0, 30);
 }
 
-const { data: activityReviews } = await (supabase as any)
+let activityQuery = (supabase as any)
   .from("reviews")
   .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
   .in("profile_id", memberProfileIds.length ? memberProfileIds : ['00000000-0000-0000-0000-000000000000'])
   .eq("status", "published")
   .order("published_at", { ascending: false })
   .limit(50);
+if (allowedGameIds) activityQuery = activityQuery.in("game_id", allowedGameIds);
+const { data: activityReviews } = await activityQuery;
 
 const gameCounts: Record<string, { game: any; count: number; avgScore: number; scores: number[] }> = {};
 for (const r of activityReviews ?? []) {
@@ -277,6 +367,7 @@ const memberListJson = JSON.stringify(memberList);
   .btn-ghost{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);padding:9px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
   .btn-ghost:hover{border-color:var(--text-tertiary)}
   .btn-danger{background:#300e0e;color:#f87171;border:none;padding:8px 16px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer}
+  .badge-pending-action{font-size:12px;padding:7px 14px;border-radius:22px;background:rgba(251,191,36,0.1);color:#fbbf24;font-weight:600;border:1px solid rgba(251,191,36,0.25);display:inline-flex;align-items:center}
 
   /* ── Tab nav (card style) ── */
   .page{max-width:980px;margin:0 auto;padding:20px 28px 80px}
@@ -399,14 +490,14 @@ const memberListJson = JSON.stringify(memberList);
   .wl-remove{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:16px;padding:2px;transition:color .15s}
   .wl-remove:hover{color:#f87171}
 
-  .member-item{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-subtle)}
+  .member-item{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-subtle);flex-wrap:wrap}
   .member-item:last-child{border-bottom:none}
   .member-avatar{width:34px;height:34px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--accent);flex-shrink:0;overflow:hidden}
   .member-avatar img{width:100%;height:100%;object-fit:cover}
-  .member-name{font-size:13px;font-weight:500;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .member-name{font-size:13px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .member-role-tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:8px;background:var(--accent-subtle);color:var(--accent);text-transform:capitalize;flex-shrink:0}
   .member-role-tag.owner{background:#271e00;color:#fbbf24}
-  .member-actions-row{display:flex;gap:5px;flex-shrink:0}
+  .member-actions-row{flex-basis:100%;display:flex;gap:5px;padding-left:44px}
   .btn-xs{font-size:11px;padding:3px 9px;border-radius:7px;border:none;cursor:pointer;font-family:inherit;font-weight:500}
   .btn-xs-ghost{background:var(--tag-bg);color:var(--text-secondary)}
   .btn-xs-danger{background:#300e0e;color:#f87171}
@@ -508,6 +599,7 @@ const memberListJson = JSON.stringify(memberList);
       <div class="group-meta-badges">
         <span class="badge">{group.visibility}</span>
         {membership && <span class="badge badge-accent">{membership.role}</span>}
+        {focusLabel && <span class="badge" style="background:rgba(96,80,200,.12);color:var(--accent)">🎯 {focusLabel}</span>}
       </div>
       <div class="group-stats-row">
         <div class="gstat">
@@ -543,15 +635,35 @@ const memberListJson = JSON.stringify(memberList);
     </div>
 
     <div class="group-actions">
-      {!user && group.visibility === "public" && (
+      {/* Not logged in */}
+      {!user && (group.visibility === "public" || group.visibility === "community") && (
         <a href="/signin" class="btn-primary">Sign in to join</a>
       )}
-      {user && !isMember && group.visibility === "public" && (
+      {!user && group.visibility === "private" && (
+        <a href="/signin" class="btn-primary">Sign in to request access</a>
+      )}
+
+      {/* Logged in, not a member */}
+      {user && !isMember && pendingInvite && (
+        <button class="btn-primary" id="accept-invite-btn" onclick="acceptInvite()">Accept Invite</button>
+      )}
+      {user && !isMember && !pendingInvite && (group.visibility === "public" || group.visibility === "community") && (
         <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
       )}
-      {user && !isMember && joinCode && (
+      {user && !isMember && !pendingInvite && group.visibility === "private" && joinCode && (
         <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
       )}
+      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "pending" && (
+        <span class="badge-pending-action">Request pending</span>
+      )}
+      {user && !isMember && group.visibility === "private" && !joinCode && !existingJoinRequest && (
+        <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request to Join</button>
+      )}
+      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "rejected" && (
+        <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request Again</button>
+      )}
+
+      {/* Members */}
       {isMember && isAdminOrOwner && (
         <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
       )}
@@ -559,13 +671,47 @@ const memberListJson = JSON.stringify(memberList);
         <button class="btn-ghost" id="leave-btn" onclick="leaveGroup()">Leave</button>
       )}
     </div>
+
+    {/* Join request form — shown inline below actions when opened */}
+    {/* Renders for: no prior request, OR a rejected request (allowing re-application) */}
+    {user && !isMember && group.visibility === "private" && !joinCode && (!existingJoinRequest || existingJoinRequest?.status === "rejected") && (
+      <div id="join-request-form" style="display:none;margin-top:14px;padding:16px 20px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;max-width:420px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px">Request to join {group.name}</div>
+        {group.join_prompt && (
+          <div style="font-size:13px;color:var(--text-secondary);background:var(--bg-hover);padding:10px 12px;border-radius:8px;border-left:2px solid var(--accent);margin-bottom:10px;line-height:1.5">{group.join_prompt}</div>
+        )}
+        <textarea id="join-request-msg" placeholder={group.join_prompt ? "Your response…" : "Add a message (optional)"} style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-input,var(--bg-card));color:var(--text-primary);font-size:13px;font-family:inherit;resize:vertical;min-height:68px;outline:none" maxlength="300"></textarea>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn-primary" id="submit-request-btn" onclick="submitJoinRequest()" style="font-size:13px;padding:8px 18px">Send Request</button>
+          <button onclick="closeJoinRequestForm()" style="background:none;border:none;cursor:pointer;font-size:13px;color:var(--text-tertiary);font-family:inherit">Cancel</button>
+        </div>
+        <div id="join-request-err" style="font-size:12px;color:#f87171;margin-top:6px;display:none"></div>
+      </div>
+    )}
   </div>
 </div>
 
 <!-- Main content -->
 <div class="page">
 
-  <nav class="tab-nav">
+  {/* Private group wall for non-members without a valid invite code */}
+  {group.visibility === "private" && !canViewPrivate && (
+    <div style="max-width:480px;margin:48px auto;padding:0 20px;text-align:center">
+      <div style="font-size:40px;margin-bottom:16px">🔒</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:22px;margin-bottom:8px">{group.name} is private</div>
+      <p style="font-size:14px;color:var(--text-secondary);line-height:1.6;margin-bottom:0">
+        {existingJoinRequest?.status === "pending"
+          ? "Your join request is pending review by the group admins."
+          : existingJoinRequest?.status === "rejected"
+          ? "Your previous request was not approved. You can send another request."
+          : "This group is invite-only. You can request to join and an admin will review your request."}
+      </p>
+    </div>
+  )}
+
+  {/* Full tab nav — only shown to members or non-private groups */}
+  {(isMember || group.visibility !== "private") && (
+  <nav class="tab-nav" style={`grid-template-columns: repeat(${1 + (statsConf.show_sessions ? 1 : 0) + (statsConf.show_score_compare ? 1 : 0)}, 1fr)`}>
     <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>
       <div class="tab-icon">
         <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -576,6 +722,7 @@ const memberListJson = JSON.stringify(memberList);
       <div class="tab-label">Overview</div>
       <div class="tab-meta">Stats &amp; activity</div>
     </a>
+    {statsConf.show_sessions && (
     <a href={`/groups/${group.id}?tab=sessions`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
       {(sessionsData ?? []).length > 0 && <span class="tab-badge">{(sessionsData ?? []).length}</span>}
       <div class="tab-icon">
@@ -586,6 +733,8 @@ const memberListJson = JSON.stringify(memberList);
       <div class="tab-label">Sessions</div>
       <div class="tab-meta">{(sessionsData ?? []).length} game nights</div>
     </a>
+    )}
+    {statsConf.show_score_compare && (
     <a href={`/groups/${group.id}?tab=compare`} class={`tab-link${activeTab === "compare" ? " active" : ""}`}>
       {sharedGames.length > 0 && <span class="tab-badge">{sharedGames.length}</span>}
       <div class="tab-icon">
@@ -596,6 +745,7 @@ const memberListJson = JSON.stringify(memberList);
       <div class="tab-label">Stats</div>
       <div class="tab-meta">{sharedGames.length} shared games</div>
     </a>
+    )}
   </nav>
 
   <!-- Overview tab -->
@@ -603,7 +753,7 @@ const memberListJson = JSON.stringify(memberList);
     <div class="two-col">
       <!-- Left: top games + podium -->
       <div>
-        {topGames.length > 0 && (
+        {statsConf.show_top_games && topGames.length > 0 && (
           <div>
             <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
               <span>Most Played by Group</span>
@@ -623,7 +773,7 @@ const memberListJson = JSON.stringify(memberList);
           </div>
         )}
 
-        {topRatedGames.length > 0 && (
+        {statsConf.show_top_rated && topRatedGames.length > 0 && (
           <div style="margin-top:24px">
             <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
               <span>Top Rated by Group</span>
@@ -668,7 +818,7 @@ const memberListJson = JSON.stringify(memberList);
           </div>
         )}
 
-        {hotTake && (
+        {statsConf.show_hot_take && hotTake && (
           <div class="card" style="margin-top:24px">
             <div class="card-title">Group's Hot Take</div>
             <a class="hot-take-inner" href={`/games/${hotTake.game.slug}`}>
@@ -697,7 +847,7 @@ const memberListJson = JSON.stringify(memberList);
           </div>
         )}
 
-        {memberAvgScores.length >= 2 && (
+        {statsConf.show_critic_spectrum && memberAvgScores.length >= 2 && (
           <div class="card" style="margin-top:14px">
             <div class="card-title">Critic Spectrum</div>
             <div class="spectrum-wrap">
@@ -733,7 +883,7 @@ const memberListJson = JSON.stringify(memberList);
       <!-- Right sidebar -->
       <div class="sidebar">
         <!-- Recent reviews -->
-        {(activityReviews ?? []).length > 0 && (
+        {statsConf.show_recent_reviews && (activityReviews ?? []).length > 0 && (
           <div class="card">
             <div class="card-title">Recent Reviews</div>
             {(activityReviews ?? []).slice(0, 5).map((r: any) => (
@@ -785,7 +935,7 @@ const memberListJson = JSON.stringify(memberList);
         )}
 
         <!-- Want to Play -->
-        <div class="card">
+        {statsConf.show_watchlist && <div class="card">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
             <span>Want to Play</span>
             {isMember && (
@@ -817,28 +967,56 @@ const memberListJson = JSON.stringify(memberList);
           {(watchlistData ?? []).length > 8 && (
             <div style="font-size:12px;color:var(--text-tertiary);padding-top:8px;text-align:center">+{(watchlistData ?? []).length - 8} more</div>
           )}
-        </div>
+        </div>}
 
         <!-- Members -->
         <div class="card">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
             <span>Members</span>
-            {isAdminOrOwner && group.invite_code && (
+            {isAdminOrOwner && (
               <button onclick="openInvitePanel()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ Invite</button>
             )}
           </div>
 
-          {isAdminOrOwner && group.invite_code && (
+          {isAdminOrOwner && (
             <div id="invite-panel" style="display:none;margin-bottom:12px">
-              <div class="invite-url-row">
-                <input class="invite-url-input" id="invite-url-field" type="text" readonly value={inviteUrl ?? ""} />
-                <button class="btn-copy" onclick="copyInvite()" style="font-size:11px;padding:6px 10px">Copy</button>
-              </div>
+              {group.invite_code && (
+                <div class="invite-url-row" style="margin-bottom:8px">
+                  <input class="invite-url-input" id="invite-url-field" type="text" readonly value={inviteUrl ?? ""} />
+                  <button class="btn-copy" onclick="copyInvite()" style="font-size:11px;padding:6px 10px">Copy</button>
+                </div>
+              )}
               <div class="invite-send-row">
                 <input id="invite-username-input" class="invite-user-input" style="font-size:12px;padding:6px 10px" type="text" placeholder="@username" />
-                <button class="btn-copy" onclick="sendInvite()" style="background:var(--tag-bg);color:var(--text-secondary);font-size:11px;padding:6px 10px">Send</button>
+                <button id="invite-send-btn" class="btn-copy" onclick="sendInvite()" style="font-size:11px;padding:6px 10px;opacity:0.45;cursor:default" disabled>Send</button>
               </div>
               <div id="invite-msg" style="font-size:11px;color:var(--text-tertiary);margin-top:5px;"></div>
+            </div>
+          )}
+
+          {/* Pending join requests — admins/owners only, private groups */}
+          {isAdminOrOwner && group.visibility === "private" && pendingJoinRequests.length > 0 && (
+            <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border-subtle)">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);margin-bottom:8px">
+                Join Requests ({pendingJoinRequests.length})
+              </div>
+              {pendingJoinRequests.map((jr: any) => (
+                <div class="member-item" style="align-items:flex-start;gap:10px;padding:8px 0" data-jr-id={jr.id}>
+                  <div class="member-avatar" style="flex-shrink:0">
+                    {jr.profiles?.avatar_url
+                      ? <img src={jr.profiles.avatar_url} alt={jr.profiles?.username} />
+                      : getInitials(jr.profiles?.username ?? "?")}
+                  </div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13px;font-weight:600">@{jr.profiles?.username}</div>
+                    {jr.message && <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;line-height:1.4">{jr.message}</div>}
+                  </div>
+                  <div style="display:flex;gap:6px;flex-shrink:0">
+                    <button onclick={`respondJoinRequest('${jr.id}', 'accept')`} style="background:var(--accent);color:#fff;border:none;padding:5px 10px;border-radius:12px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer">Accept</button>
+                    <button onclick={`respondJoinRequest('${jr.id}', 'reject')`} style="background:var(--tag-bg);color:var(--text-secondary);border:none;padding:5px 10px;border-radius:12px;font-size:11px;font-weight:600;font-family:inherit;cursor:pointer">Reject</button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 
@@ -851,7 +1029,10 @@ const memberListJson = JSON.stringify(memberList);
                 }
               </div>
               <a class="member-name" href={`/reviewers/${m.username}`} style="color:inherit;text-decoration:none">@{m.username}</a>
-              <span class={`member-role-tag${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
+              {memberCustomRoles[m.id] && roleMap[memberCustomRoles[m.id]!]
+                ? <span class="member-role-tag" style={`background:${roleMap[memberCustomRoles[m.id]!].color}22;color:${roleMap[memberCustomRoles[m.id]!].color};border:1px solid ${roleMap[memberCustomRoles[m.id]!].color}44`}>{roleMap[memberCustomRoles[m.id]!].name}</span>
+                : <span class={`member-role-tag${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
+              }
               {isAdminOrOwner && currentProfile && m.id !== currentProfile.id && m.role !== "owner" && (
                 <div class="member-actions-row">
                   {isOwner && (
@@ -870,7 +1051,7 @@ const memberListJson = JSON.stringify(memberList);
   </div>
 
   <!-- Stats tab -->
-  <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
+  {statsConf.show_score_compare && <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
     <div class="stats-section-header">
       <span>Score Comparison</span>
       <span class="stats-section-count">{sharedGames.length} shared game{sharedGames.length !== 1 ? "s" : ""}</span>
@@ -910,10 +1091,10 @@ const memberListJson = JSON.stringify(memberList);
           );
         })
     }
-  </div>
+  </div>}
 
   <!-- Sessions tab -->
-  <div class={`tab-panel${activeTab === "sessions" ? " active" : ""}`} id="tab-sessions">
+  {statsConf.show_sessions && <div class={`tab-panel${activeTab === "sessions" ? " active" : ""}`} id="tab-sessions">
     {isMember && (
       <div class="log-form">
         <div class="log-form-title">Log a Game Night</div>
@@ -968,11 +1149,13 @@ const memberListJson = JSON.stringify(memberList);
           );
         })
     }
-  </div>
+  </div>}
+
+  )} {/* end isMember || non-private tab nav */}
 
 </div>
 
-<script define:vars={{ groupDataJson, memberListJson, inviteUrl, isAdminOrOwner, groupId: group.id }}>
+<script define:vars={{ groupDataJson, memberListJson, inviteUrl: isAdminOrOwner ? inviteUrl : null, isAdminOrOwner, groupId: group.id }}>
 const groupData = JSON.parse(groupDataJson);
 const memberList = JSON.parse(memberListJson);
 
@@ -1071,6 +1254,19 @@ document.getElementById('bannerInput')?.addEventListener('change', async (e) => 
 });
 
 // ── Join / Leave ──
+async function acceptInvite() {
+  const btn = document.getElementById('accept-invite-btn');
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+  const res = await fetch('/api/groups/invite/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, action: 'accept' }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Could not accept invite'); if (btn) { btn.disabled = false; btn.style.opacity = '1'; } }
+}
+window.acceptInvite = acceptInvite;
+
 async function joinGroup() {
   const btn = document.getElementById('join-btn');
   if (btn) btn.disabled = true;
@@ -1089,6 +1285,69 @@ async function joinGroupByCode() {
   else { const d = await res.json(); alert(d.error ?? 'Could not join'); if (btn) btn.disabled = false; }
 }
 window.joinGroupByCode = joinGroupByCode;
+
+// ── Join request (private groups) ──
+function openJoinRequestForm() {
+  const form = document.getElementById('join-request-form');
+  const btn = document.getElementById('join-request-btn');
+  if (form) { form.style.display = 'block'; if (btn) btn.style.display = 'none'; }
+}
+window.openJoinRequestForm = openJoinRequestForm;
+
+function closeJoinRequestForm() {
+  const form = document.getElementById('join-request-form');
+  const btn = document.getElementById('join-request-btn');
+  if (form) { form.style.display = 'none'; if (btn) btn.style.display = ''; }
+}
+window.closeJoinRequestForm = closeJoinRequestForm;
+
+async function submitJoinRequest() {
+  const submitBtn = document.getElementById('submit-request-btn');
+  const msgEl = document.getElementById('join-request-msg');
+  const errEl = document.getElementById('join-request-err');
+  if (submitBtn) submitBtn.disabled = true;
+  if (errEl) errEl.style.display = 'none';
+  const message = msgEl ? msgEl.value.trim() : '';
+  const res = await fetch('/api/groups/join-request/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, message: message || null }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    // Replace the action area with a pending badge
+    const form = document.getElementById('join-request-form');
+    if (form) form.style.display = 'none';
+    const actionsEl = document.querySelector('.group-actions');
+    if (actionsEl) {
+      actionsEl.innerHTML = '<span class="badge-pending-action">Request pending</span>';
+    }
+  } else {
+    if (errEl) { errEl.textContent = data.error ?? 'Could not send request'; errEl.style.display = 'block'; }
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+window.submitJoinRequest = submitJoinRequest;
+
+async function respondJoinRequest(requestId, action) {
+  const row = document.querySelector(`[data-jr-id="${requestId}"]`);
+  if (row) { row.style.opacity = '0.5'; row.querySelectorAll('button').forEach(b => b.disabled = true); }
+  const res = await fetch('/api/groups/join-request/respond', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_id: requestId, action }),
+  });
+  if (res.ok) {
+    if (row) row.remove();
+    // If accepted, reload so the new member appears
+    if (action === 'accept') window.location.reload();
+  } else {
+    const d = await res.json();
+    alert(d.error ?? 'Error');
+    if (row) { row.style.opacity = '1'; row.querySelectorAll('button').forEach(b => b.disabled = false); }
+  }
+}
+window.respondJoinRequest = respondJoinRequest;
 
 async function leaveGroup() {
   if (!confirm('Leave this group?')) return;
@@ -1117,17 +1376,59 @@ window.copyInvite = copyInvite;
 
 async function sendInvite() {
   const input = document.getElementById('invite-username-input');
+  const btn = document.getElementById('invite-send-btn');
   const msg = document.getElementById('invite-msg');
   const username = input.value.trim().replace(/^@/, '');
   if (!username) return;
-  const res = await fetch('/api/groups/invite/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: groupData.id, invited_username: username }) });
-  const data = await res.json();
-  msg.textContent = res.ok ? `Invite sent to @${data.username}` : (data.error ?? 'Error');
-  msg.style.color = res.ok ? 'var(--score-great)' : '#f87171';
-  if (res.ok) input.value = '';
+
+  btn.disabled = true;
+  btn.style.opacity = '0.5';
+  btn.style.cursor = 'default';
+  msg.textContent = '';
+
+  try {
+    const res = await fetch('/api/groups/invite/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: groupData.id, invited_username: username }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      msg.textContent = `✓ Invite sent to @${data.username}`;
+      msg.style.color = '#4ade80';
+      input.value = '';
+      // Keep dimmed/disabled until user types a new name (syncBtn re-enables)
+      btn.style.opacity = '0.45';
+      btn.style.cursor = 'default';
+    } else {
+      msg.textContent = data.error ?? 'Something went wrong';
+      msg.style.color = '#f87171';
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      btn.style.cursor = 'pointer';
+    }
+  } catch {
+    msg.textContent = 'Network error — please try again';
+    msg.style.color = '#f87171';
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
+  }
 }
 window.sendInvite = sendInvite;
-document.getElementById('invite-username-input')?.addEventListener('keydown', e => { if (e.key === 'Enter') sendInvite(); });
+(function() {
+  const inp = document.getElementById('invite-username-input');
+  const btn = document.getElementById('invite-send-btn');
+  if (!inp || !btn) return;
+  function syncBtn() {
+    const hasText = inp.value.trim().length > 0;
+    btn.disabled = !hasText;
+    btn.style.opacity = hasText ? '1' : '0.45';
+    btn.style.cursor = hasText ? 'pointer' : 'default';
+  }
+  inp.addEventListener('input', syncBtn);
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter' && !btn.disabled) sendInvite(); });
+})();
 
 // ── Member management ──
 async function removeMember(profileId) {

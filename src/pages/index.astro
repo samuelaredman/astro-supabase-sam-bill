@@ -8,13 +8,9 @@ import ReviewCard from "../components/ReviewCard.astro";
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
 
-// ── Stage 1: auth (must come first) ─────────────────────────────────────────
 const { data: { user } } = await serverClient.auth.getUser();
 const isLoggedIn = !!user;
 
-// Cache the public (logged-out) view at Netlify's CDN edge for 5 minutes.
-// Bots are always unauthenticated, so they hit the cache instead of Supabase.
-// Logged-in users always get a fresh, personalised response.
 if (!isLoggedIn) {
   Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
   Astro.response.headers.set('Cache-Control', 'no-store');
@@ -23,20 +19,18 @@ if (!isLoggedIn) {
 }
 Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 
-// PST calendar-day boundaries (UTC-8 standard; within 1h of correct during DST)
 const PST_OFFSET_MS = 8 * 60 * 60 * 1000
 function getPstDayStart(daysAgo = 0): Date {
   const pstNow = new Date(Date.now() - PST_OFFSET_MS)
   return new Date(Date.UTC(
     pstNow.getUTCFullYear(), pstNow.getUTCMonth(), pstNow.getUTCDate() - daysAgo,
-    8, 0, 0, 0  // midnight PST = 08:00 UTC
+    8, 0, 0, 0
   ))
 }
 const todayPstStart = getPstDayStart(0)
 const yesterdayPstStart = getPstDayStart(1)
 const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
-// ── Stage 2: all independent queries fire in parallel ────────────────────────
 const REVIEW_FIELDS = `
   id, score, title, body, play_time_hours,
   contains_spoilers, status, published_at, created_at,
@@ -53,7 +47,6 @@ const [
   platformsRes,
   rawReviewsRes,
   todayRawRes,
-  // weekReviews powers both "Trending this week" AND "Top rated" — one query, two uses
   weekReviewsRes,
   reviewCountRes,
   gameCountRes,
@@ -73,7 +66,6 @@ const [
   db.from('genres').select('id, name, slug').order('name'),
 ])
 
-// Unpack results
 const currentProfile = profileRes.data ?? null
 const { data: platforms } = platformsRes
 
@@ -88,7 +80,6 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// Most reviewed — prefer today (PST calendar day), fall back to yesterday
 type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>
 const todayMap: DayMap = {}
 const yesterdayMap: DayMap = {}
@@ -106,7 +97,6 @@ const featuredGame = mostReviewedToday ?? mostReviewedYesterday
 const featuredLabel = mostReviewedToday ? 'Most Reviewed Today' : 'Most Reviewed Yesterday'
 const featuredPeriod = mostReviewedToday ? 'today' : 'yesterday'
 
-// Trending + topRated derived from the same week dataset (no second query)
 const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
 const weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {}
 for (const r of weekReviewsRes.data ?? []) {
@@ -128,18 +118,15 @@ const topRated = Object.entries(weekGameMap)
   .sort((a: any, b: any) => b.avg_score - a.avg_score)
   .slice(0, 12)
 
-// Site stats
 const totalReviews = reviewCountRes.count ?? 0
 const totalGames = gameCountRes.count ?? 0
 const totalReviewers = profileCountRes.count ?? 0
 
 const { data: genres } = genresRes
 
-// ── Stage 3: user-specific queries (depends on profile) ──────────────────────
 let followingReviews: any[] = []
 let lastReview: any = null
 if (user && currentProfile) {
-  // lastReview and follows are independent of each other — run in parallel
   const [lastReviewRes, followRowsRes] = await Promise.all([
     db.from('reviews')
       .select('id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url )')
@@ -163,7 +150,6 @@ if (user && currentProfile) {
     followingReviews = (fRevs ?? []) as any[]
   }
 }
-
 
 function igdbImage(url: string | null, size = 't_cover_big') {
   if (!url) return null
@@ -194,7 +180,6 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-// Infinite scroll — cursor is the published_at of the last SSR-rendered review
 const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
 const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
 const initialRecentCursor = lastRecentReview?.published_at ?? lastRecentReview?.created_at ?? null
@@ -270,7 +255,6 @@ const initialFollowingDone = followingReviews.length < 20
       </div>
     )}
 
-
     {isLoggedIn && (
       <div class="feed-tabs">
         <button class="feed-tab active" data-tab="recent">Recent</button>
@@ -305,9 +289,7 @@ const initialFollowingDone = followingReviews.length < 20
       <div id="tab-following" style="display:none">
         {followingReviews.length === 0 ? (
           <div class="empty-state">
-            <div class="empty-state-title">
-              {followingReviews.length === 0 ? "Nothing here yet" : "Your feed is empty"}
-            </div>
+            <div class="empty-state-title">Nothing here yet</div>
             <p>Follow reviewers to see their latest reviews here.</p>
             <a href="/search?tab=reviewers" class="empty-cta" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 24px;border-radius:22px;font-size:14px;font-weight:500;margin-top:16px">Find reviewers</a>
           </div>
@@ -333,24 +315,19 @@ const initialFollowingDone = followingReviews.length < 20
     )}
   </main>
 
-  <!-- Composer overlay -->
   <div id="composerOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:150"></div>
 
-  <!-- Composer modal -->
   <div id="composer" style="display:none;position:fixed;top:80px;left:50%;transform:translateX(-50%);width:520px;max-width:calc(100vw - 32px);background:var(--bg-card);border:1px solid var(--border);border-radius:16px;z-index:160;padding:24px;max-height:calc(100dvh - 100px);overflow-y:auto">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div id="composerTitle" style="font-size:17px;font-weight:500;letter-spacing:-0.2px">Write a review</div>
       <button id="cancelComposer" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-tertiary);line-height:1;padding:4px">×</button>
     </div>
 
-    <!-- ── Post-review reveal card (hidden until submit succeeds) ── -->
     <div id="reviewResult" style="display:none;text-align:center;padding:8px 0 20px;animation:resultFadeIn 0.3s ease">
       <div id="resultCover" style="display:none;margin-bottom:14px">
         <img id="resultCoverImg" src="" alt="" style="width:64px;height:88px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" />
       </div>
       <div id="resultGameTitle" style="font-size:15px;font-weight:500;color:var(--text-primary);margin-bottom:20px"></div>
-
-      <!-- Score comparison row -->
       <div id="resultScoreRow" style="display:flex;align-items:center;justify-content:center;gap:0;margin-bottom:24px">
         <div style="text-align:center;padding:0 28px">
           <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-tertiary);margin-bottom:8px">Your score</div>
@@ -366,17 +343,13 @@ const initialFollowingDone = followingReviews.length < 20
           <div id="resultReviewCount" style="font-size:12px;color:var(--text-tertiary);margin-top:5px"></div>
         </div>
       </div>
-
-      <!-- First-reviewer message (replaces score row when no prior reviews) -->
       <div id="resultFirstMsg" style="display:none;font-size:14px;color:var(--text-secondary);margin-bottom:24px;line-height:1.6;padding:0 8px"></div>
-
       <div style="display:flex;gap:8px;justify-content:center">
         <button id="resultClose" style="padding:10px 20px;border:1px solid var(--border);border-radius:10px;background:transparent;color:var(--text-secondary);font-size:14px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity 0.15s">Close</button>
         <a id="resultGameLink" href="#" style="padding:10px 20px;border-radius:10px;background:var(--accent);color:var(--accent-text);font-size:14px;font-weight:500;text-decoration:none;transition:opacity 0.15s">See all reviews →</a>
       </div>
     </div>
 
-    <!-- ── Composer form (hidden after submit succeeds) ── -->
     <div id="composerFormContent">
     <div class="composer-field">
       <label class="composer-label">Game</label>
@@ -427,7 +400,7 @@ const initialFollowingDone = followingReviews.length < 20
       </div>
     </div>
     <div class="composer-error" id="composerError"></div>
-    </div><!-- /composerFormContent -->
+    </div>
   </div>
 
   <script is:inline define:vars={{ isLoggedIn }}>
@@ -437,14 +410,12 @@ const initialFollowingDone = followingReviews.length < 20
       document.getElementById('gameSearch').focus()
       if (window.__lockScroll) window.__lockScroll()
     }
-
     function closeComposer() {
       document.getElementById('composer').style.display = 'none'
       document.getElementById('composerOverlay').style.display = 'none'
       if (window.__unlockScroll) window.__unlockScroll()
       resetComposer()
     }
-
     function resetComposer() {
       document.getElementById('gameSearch').value = ''
       document.getElementById('gameId').value = ''
@@ -459,12 +430,10 @@ const initialFollowingDone = followingReviews.length < 20
       document.getElementById('charCount').style.color = 'var(--text-tertiary)'
       document.getElementById('gameResults').classList.remove('open')
     }
-
     document.getElementById('openComposer').addEventListener('click', () => {
       if (!isLoggedIn) { window.location.href = '/signin'; return; }
       openComposer()
     })
-
     document.querySelectorAll('.feed-tab').forEach(function(btn) {
       btn.addEventListener('click', function() {
         document.querySelectorAll('.feed-tab').forEach(function(b) { b.classList.remove('active') })
@@ -475,27 +444,21 @@ const initialFollowingDone = followingReviews.length < 20
         if (followingEl) followingEl.style.display = tab === 'following' ? '' : 'none'
       })
     })
-
     document.getElementById('cancelComposer').addEventListener('click', closeComposer)
     document.getElementById('composerOverlay').addEventListener('click', closeComposer)
-
-    // Auto-open when redirected from another page with ?compose=1
     if (isLoggedIn && new URLSearchParams(window.location.search).get('compose') === '1') {
       history.replaceState(null, '', '/')
       openComposer()
     }
-
     document.getElementById('reviewBody').addEventListener('input', function() {
       const count = this.value.length
       const el = document.getElementById('charCount')
       el.textContent = count + ' / 5000'
       el.style.color = count > 4500 ? (count >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
     })
-
     document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(el => {
       el.addEventListener('click', () => el.classList.remove('spoiler-hidden'))
     })
-
     let searchTimeout
     document.getElementById('gameSearch').addEventListener('input', (e) => {
       clearTimeout(searchTimeout)
@@ -503,13 +466,11 @@ const initialFollowingDone = followingReviews.length < 20
       if (q.length < 2) { document.getElementById('gameResults').classList.remove('open'); return; }
       searchTimeout = setTimeout(() => searchGames(q), 150)
     })
-
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.autocomplete-wrap')) {
         document.getElementById('gameResults').classList.remove('open')
       }
     })
-
     async function searchGames(q) {
       const res = await fetch('/api/games/search?q=' + encodeURIComponent(q))
       const games = await res.json()
@@ -538,17 +499,14 @@ const initialFollowingDone = followingReviews.length < 20
                 .then(async r => {
                   const data = await r.json()
                   if (!r.ok) {
-                    document.getElementById('composerError').textContent =
-                      data.error ?? 'Failed to import game, try again.'
+                    document.getElementById('composerError').textContent = data.error ?? 'Failed to import game, try again.'
                     return
                   }
                   document.getElementById('gameId').value = data.id
                   document.getElementById('composerError').textContent = ''
                   fetchGamePlatforms(data.id)
                 })
-                .catch(() => {
-                  document.getElementById('composerError').textContent = 'Failed to import game, try again.'
-                })
+                .catch(() => { document.getElementById('composerError').textContent = 'Failed to import game, try again.' })
             } else {
               document.getElementById('gameId').value = game.id
               fetchGamePlatforms(game.id)
@@ -559,7 +517,6 @@ const initialFollowingDone = followingReviews.length < 20
       }
       results.classList.add('open')
     }
-
     async function fetchGamePlatforms(gameId) {
       const select = document.getElementById('platformSelect')
       select.innerHTML = '<option value="">Loading...</option>'
@@ -572,7 +529,6 @@ const initialFollowingDone = followingReviews.length < 20
           platforms.map(p => `<option value="${p.id}">${p.name}</option>`).join('')
       }
     }
-
     document.getElementById('submitReview').addEventListener('click', async () => {
       const gameId = document.getElementById('gameId').value
       const score = document.getElementById('scoreVal').value
@@ -582,7 +538,6 @@ const initialFollowingDone = followingReviews.length < 20
       const hours = document.getElementById('hoursPlayed').value
       const spoilers = document.getElementById('spoilerCheck').checked
       const errorEl = document.getElementById('composerError')
-
       errorEl.textContent = ''
       if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
       if (!score || parseFloat(score) < 0.1 || parseFloat(score) > 10) { errorEl.textContent = 'Please enter a score between 0.1 and 10.'; return; }
@@ -590,25 +545,21 @@ const initialFollowingDone = followingReviews.length < 20
       if (!body) { errorEl.textContent = 'Please write a review.'; return; }
       if (body.length > 5000) { errorEl.textContent = 'Review must be at most 5000 characters.'; return; }
       if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) { errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return; }
-
       const btn = document.getElementById('submitReview')
       btn.disabled = true
       btn.textContent = 'Posting...'
-
       const res = await fetch('/api/reviews/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           game_id: gameId,
           score: parseFloat(score),
-          title,
-          body,
+          title, body,
           platform_played_on: platformId || null,
           play_time_hours: hours ? parseInt(hours) : null,
           contains_spoilers: spoilers,
         }),
       })
-
       const data = await res.json()
       if (!res.ok) {
         errorEl.textContent = data.error ?? 'Something went wrong.'
@@ -616,54 +567,29 @@ const initialFollowingDone = followingReviews.length < 20
         btn.textContent = 'Post review'
       } else {
         if (typeof gtag === 'function') {
-          gtag('event', 'review_posted', {
-            game_title: document.getElementById('gameSearch').value,
-            score: parseFloat(score),
-          });
+          gtag('event', 'review_posted', { game_title: document.getElementById('gameSearch').value, score: parseFloat(score) });
         }
-
-        // ── Show post-review reveal card ──
         const userScore = parseFloat(score)
         const gameTitle = document.getElementById('gameSearch').value
         const { gameSlug, gameCover, communityAvg, reviewCount } = data
-
-        // Populate card
         document.getElementById('resultGameTitle').textContent = gameTitle
         const scoreEl = document.getElementById('resultUserScore')
-        const scoreWrap = document.getElementById('resultScoreNumWrap')
         scoreEl.textContent = userScore.toFixed(1)
         if (gameSlug) document.getElementById('resultGameLink').href = '/games/' + gameSlug
-
-        // Score color
         const scoreColorMap = {
-          'score-perfect': 'var(--score-perfect)',
-          'score-great':   'var(--score-great)',
-          'score-teal':    'var(--score-teal)',
-          'score-good':    'var(--score-good)',
-          'score-mid':     'var(--score-mid)',
-          'score-orange':  'var(--score-orange)',
-          'score-low':     'var(--score-low)',
+          'score-perfect':'var(--score-perfect)','score-great':'var(--score-great)',
+          'score-teal':'var(--score-teal)','score-good':'var(--score-good)',
+          'score-mid':'var(--score-mid)','score-orange':'var(--score-orange)','score-low':'var(--score-low)',
         }
         function clientScoreClass(s) {
-          if (s === 10) return 'score-perfect'
-          if (s >= 9)   return 'score-great'
-          if (s >= 8)   return 'score-teal'
-          if (s >= 7)   return 'score-good'
-          if (s >= 5)   return 'score-mid'
-          if (s >= 3)   return 'score-orange'
-          return 'score-low'
+          if (s === 10) return 'score-perfect'; if (s >= 9) return 'score-great';
+          if (s >= 8) return 'score-teal'; if (s >= 7) return 'score-good';
+          if (s >= 5) return 'score-mid'; if (s >= 3) return 'score-orange'; return 'score-low';
         }
         scoreEl.style.color = scoreColorMap[clientScoreClass(userScore)]
-
-        // Score-based animations
-        if (userScore === 10) {
-          scoreEl.classList.add('score-perfect-pop')
-        } else if (userScore >= 9) {
-          scoreEl.classList.add('score-stellar')
-        } else if (userScore <= 3) {
-          scoreEl.classList.add('score-crumble')
-        }
-
+        if (userScore === 10) { scoreEl.classList.add('score-perfect-pop') }
+        else if (userScore >= 9) { scoreEl.classList.add('score-stellar') }
+        else if (userScore <= 3) { scoreEl.classList.add('score-crumble') }
         if (gameCover) {
           const img = document.getElementById('resultCoverImg')
           img.src = gameCover.startsWith('//') ? 'https:' + gameCover : gameCover
@@ -671,73 +597,78 @@ const initialFollowingDone = followingReviews.length < 20
           img.alt = gameTitle
           document.getElementById('resultCover').style.display = 'block'
         }
-
         if (reviewCount > 1) {
-          // Show comparison
           document.getElementById('resultCommunityScore').textContent = communityAvg.toFixed(1)
-          document.getElementById('resultReviewCount').textContent =
-            'from ' + reviewCount + ' review' + (reviewCount !== 1 ? 's' : '')
+          document.getElementById('resultReviewCount').textContent = 'from ' + reviewCount + ' review' + (reviewCount !== 1 ? 's' : '')
         } else {
-          // First reviewer — hide comparison, show message
           document.getElementById('resultScoreRow').style.justifyContent = 'center'
           document.getElementById('resultDivider').style.display = 'none'
           document.getElementById('resultCommunityCol').style.display = 'none'
           document.getElementById('resultFirstMsg').style.display = 'block'
-          // Weighted random picker — increase a weight to make that line appear more often. Set weight to 0 to "retire" line without deleting it, for stats or future reuse.
-        const firstReviewerSuffixes = [
-          { text: 'Nice.',                                              weight: 1 },
-          { text: 'Achievement unlocked.',                              weight: 1 },
-          { text: 'Save point established.',                            weight: 1 },
-          { text: 'Pioneer behavior.',                                  weight: 1 },
-          { text: 'You set the benchmark.',                             weight: 1 },
-          { text: 'Someone had to go first.',                           weight: 1 },
-          { text: 'History is written by the first reviewer. Probably.',weight: 1 },
-          { text: 'Is anyone out there?',                               weight: 1 },
-          { text: 'The record shows it.',                               weight: 1 },
-          { text: 'It is written.',                                     weight: 1 },
-          { text: 'Here I am. Here I remain.',                          weight: 1 },
-          { text: 'The reviews must flow.',                             weight: 1 },
-          { text: 'Never tell me the odds.',                            weight: 1 },
-          { text: 'Stay a while and listen.',                           weight: 1 },
-          { text: 'Gorp gorp gorp.',                                    weight: 1 },
-          { text: 'So it begins.',                                      weight: 1 },
-        ]
-        function pickWeighted(items) {
-          const total = items.reduce((sum, m) => sum + m.weight, 0)
-          let r = Math.random() * total
-          for (const m of items) { r -= m.weight; if (r <= 0) return m.text }
-          return items[items.length - 1].text
+          const firstReviewerSuffixes = [
+            { text: 'Nice.', weight: 1 },
+            { text: 'Achievement unlocked.', weight: 1 },
+            { text: 'Save point established.', weight: 1 },
+            { text: 'Pioneer behavior.', weight: 1 },
+            { text: 'You set the benchmark.', weight: 1 },
+            { text: 'Someone had to go first.', weight: 1 },
+            { text: 'History is written by the first reviewer. Probably.', weight: 1 },
+            { text: 'Is anyone out there?', weight: 1 },
+            { text: 'The record shows it.', weight: 1 },
+            { text: 'It is written.', weight: 1 },
+            { text: 'Here I am. Here I remain.', weight: 1 },
+            { text: 'The reviews must flow.', weight: 1 },
+            { text: 'Never tell me the odds.', weight: 1 },
+            { text: 'Stay a while and listen.', weight: 1 },
+            { text: 'Gorp gorp gorp.', weight: 1 },
+            { text: 'So it begins.', weight: 1 },
+          ]
+          function pickWeighted(items) {
+            const total = items.reduce((sum, m) => sum + m.weight, 0)
+            let r = Math.random() * total
+            for (const m of items) { r -= m.weight; if (r <= 0) return m.text }
+            return items[items.length - 1].text
+          }
+          document.getElementById('resultFirstMsg').textContent = 'You\'re the first person to review ' + gameTitle + ' on Chekpoint. ' + pickWeighted(firstReviewerSuffixes)
         }
-        const suffix = pickWeighted(firstReviewerSuffixes)
-        document.getElementById('resultFirstMsg').textContent =
-            'You\'re the first person to review ' + gameTitle + ' on Chekpoint. ' + suffix
-        }
-
-        // Swap form for result card, hide the "Write a review" title
         document.getElementById('composerTitle').style.display = 'none'
         document.getElementById('composerFormContent').style.display = 'none'
         document.getElementById('reviewResult').style.display = 'block'
-
-        // Prefetch the current page in the background so Close feels instant
         fetch(window.location.href).catch(() => {})
-
-        // Wire up close button — reload feed on dismiss
-        document.getElementById('resultClose').addEventListener('click', () => {
-          closeComposer()
-          window.location.reload()
-        })
-        // Navigating to game page also counts as a clean exit
-        document.getElementById('resultGameLink').addEventListener('click', () => {
-          if (window.__unlockScroll) window.__unlockScroll()
-        })
+        document.getElementById('resultClose').addEventListener('click', () => { closeComposer(); window.location.reload() })
+        document.getElementById('resultGameLink').addEventListener('click', () => { if (window.__unlockScroll) window.__unlockScroll() })
       }
     })
-
-
   </script>
 
   <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursor, initialFollowingCursor, initialRecentDone, initialFollowingDone }}>
   (function () {
+    // ── Image emote map — keep in sync with src/data/reactions.ts ─────────────
+    // Add new emote keys here whenever you add them to IMAGE_EMOTES in reactions.ts
+    var IMAGE_EMOTE_MAP = {
+      '5Head':true,'catJam':true,'Clap':true,'COPIUM':true,
+      'ddHuh':true,'DonoWall':true,'EZ':true,'gachiBASS':true,
+      'gachiHyper':true,'GIGACHAD':true,'KEKW':true,'LULW':true,
+      'MLADY':true,'monkaW':true,'MonkaS':true,'NODDERS':true,
+      'NOPERS':true,'OMEGALUL':true,'OOOO':true,'PartyKirby':true,
+      'peepoClap':true,'peepoLeave':true,'PeepoNoob':true,
+      'pepeD':true,'PepeHands':true,'pepeJAM':true,
+      'PepeLaugh':true,'Pepega':true,'PepegaCredit':true,
+      'POGGERS':true,'Sadge':true,'pressF':true,'POLICE':true,
+      'AYAYA':true,'pikaOMG':true,'Prayge':true,'ThisIsFine':true,
+      'jjkStress':true,'LOLL':true,'ppDrool':true,
+      'PenguinR':true,'clubPls':true,
+    };
+
+    // Renders image emotes as <img>, regular emoji as escaped text
+    function renderReactionDisplay(type) {
+      if (IMAGE_EMOTE_MAP[type]) {
+        return '<img src="/emotes/' + type + '.webp" alt="' + esc(type) + '" '
+             + 'style="width:18px;height:18px;object-fit:contain;vertical-align:middle;margin-right:2px">';
+      }
+      return esc(type);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
     function esc(s) {
       return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -794,7 +725,6 @@ const initialFollowingDone = followingReviews.length < 20
 
       var h = '<article class="rc" data-score="' + esc(r.score) + '" data-date="' + esc(ts) + '" data-upvotes="' + up + '">';
 
-      // Three-dot menu (non-own)
       if (!isOwn) {
         h += '<div class="rc-menu-wrap">'
            + '<button class="rc-menu-btn" data-menu-id="' + esc(r.id) + '" aria-label="More options">⋯</button>'
@@ -803,7 +733,6 @@ const initialFollowingDone = followingReviews.length < 20
            + '</div></div>';
       }
 
-      // Owner actions
       if (isLoggedIn && isOwn) {
         h += '<div class="rc-owner-actions">'
            + '<button class="rc-edit-btn" data-review-id="' + esc(r.id) + '" data-game-id="' + esc(g.id||'') + '" data-game-title="' + esc(g.title||'') + '" data-score="' + esc(r.score) + '" data-review-title="' + esc(r.title||'') + '" data-body="' + esc(r.body) + '" data-platform-id="' + esc((r.played_on||{}).id||'') + '" data-hours="' + esc(r.play_time_hours||'') + '" data-spoilers="' + (r.contains_spoilers?'true':'false') + '" title="Edit review">'
@@ -818,7 +747,6 @@ const initialFollowingDone = followingReviews.length < 20
            + '</div>';
       }
 
-      // Reviewer row
       h += '<div class="rc-reviewer">'
          + '<a href="/reviewers/' + esc(p.username) + '" class="rc-avatar">'
          + (p.avatar_url ? '<img src="' + esc(p.avatar_url) + '" alt="' + esc(p.username) + '" />' : '<span>' + esc(initials(p.username)) + '</span>')
@@ -828,7 +756,6 @@ const initialFollowingDone = followingReviews.length < 20
          + '<span class="rc-ts">' + esc(timeAgo(ts)) + '</span>'
          + '</div>';
 
-      // Main row
       h += '<div class="rc-main">'
          + '<a href="/games/' + esc(g.slug) + '" class="rc-cover">'
          + (thumb ? '<img src="' + esc(thumb) + '" alt="' + esc(g.title||'') + '" loading="lazy" />' : '<span>🎮</span>')
@@ -849,7 +776,6 @@ const initialFollowingDone = followingReviews.length < 20
          + esc(r.body)
          + '</div>';
 
-      // Footer
       h += '<div class="rc-footer"><div class="rc-chips">';
       if (r.played_on) h += '<span class="rc-chip">' + esc(r.played_on.name) + '</span>';
       if ((r.play_time_hours || 0) > 0) h += '<span class="rc-chip">' + esc(r.play_time_hours) + 'h</span>';
@@ -859,25 +785,26 @@ const initialFollowingDone = followingReviews.length < 20
          + commentCount
          + '</a></div>';
 
-      // Votes + reactions
       h += '<div class="rc-votes">'
          + '<button class="vote-btn' + (myV === 1 ? ' active-up' : '') + '" data-review-id="' + esc(r.id) + '" data-vote="1" data-count="' + up + '">▲ ' + up + '</button>'
          + '<button class="vote-btn' + (myV === -1 ? ' active-down' : '') + '" data-review-id="' + esc(r.id) + '" data-vote="-1" data-count="' + down + '">▼ ' + down + '</button>'
          + '<span class="rc-votes-sep"></span>'
          + '<div class="rc-reaction-wrap" data-review-id="' + esc(r.id) + '">';
 
+      // ── FIX: use renderReactionDisplay() so image emotes render as <img> ──
       rxDefs.forEach(function(rx) {
         h += '<button class="rc-reaction-btn rc-reaction-inline' + (rx.active ? ' reaction-active' : '') + '"'
            + ' data-review-id="' + esc(r.id) + '" data-reaction="' + esc(rx.type) + '" data-display="' + esc(rx.display) + '"'
            + ' data-reacted="' + (rx.active ? 'true' : 'false') + '" data-count="' + rx.count + '" data-logged-in="' + li + '">'
-           + esc(rx.display) + ' ' + rx.count + '</button>';
+           + renderReactionDisplay(rx.type) + ' ' + rx.count
+           + '</button>';
       });
 
       h += '<button class="rc-reaction-toggle" data-toggle-review-id="' + esc(r.id) + '" data-logged-in="' + li + '" title="React">+</button>'
-         + '</div>'                      // rc-reaction-wrap
+         + '</div>'
          + '<span class="rc-vote-ts">' + esc(timeAgo(ts)) + '</span>'
-         + '</div>'                      // rc-votes
-         + '</div></div>'               // rc-content, rc-main
+         + '</div>'
+         + '</div></div>'
          + '</article>';
 
       return h;
@@ -889,34 +816,26 @@ const initialFollowingDone = followingReviews.length < 20
       following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone }
     };
 
-    // ── Load next page for a tab ───────────────────────────────────────────────
     async function loadMore(tab) {
       var s = state[tab];
       if (s.loading || s.done) return;
       s.loading = true;
-
       var sentinel = document.getElementById('sentinel-' + tab);
       var loader   = document.getElementById('loader-' + tab);
       var endEl    = document.getElementById('end-' + tab);
-
       if (loader) loader.style.display = 'block';
-
       try {
         var url = '/api/reviews/feed?tab=' + tab + '&limit=20';
         if (s.cursor) url += '&cursor=' + encodeURIComponent(s.cursor);
-
         var res = await fetch(url);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var reviews = await res.json();
-
         if (!Array.isArray(reviews) || reviews.length === 0) {
           s.done = true;
           if (endEl) endEl.style.display = 'block';
           if (sentinel) sentinel.remove();
           return;
         }
-
-        // Insert new cards before the sentinel
         var tmp = document.createElement('div');
         reviews.forEach(function(review) {
           tmp.innerHTML = buildCard(review);
@@ -924,11 +843,8 @@ const initialFollowingDone = followingReviews.length < 20
             sentinel.parentNode.insertBefore(tmp.firstChild, sentinel);
           }
         });
-
-        // Advance cursor to last returned review's published_at
         var last = reviews[reviews.length - 1];
         s.cursor = last.published_at || last.created_at;
-
         if (reviews.length < 20) {
           s.done = true;
           if (endEl) endEl.style.display = 'block';
@@ -942,7 +858,6 @@ const initialFollowingDone = followingReviews.length < 20
       }
     }
 
-    // ── IntersectionObserver — fires 300px before sentinel enters viewport ─────
     var observer = new IntersectionObserver(function(entries) {
       entries.forEach(function(entry) {
         if (!entry.isIntersecting) return;
@@ -953,18 +868,10 @@ const initialFollowingDone = followingReviews.length < 20
 
     var sentinelRecent    = document.getElementById('sentinel-recent');
     var sentinelFollowing = document.getElementById('sentinel-following');
-
-    // Only observe if there's content to load
     if (sentinelRecent    && !initialRecentDone)    observer.observe(sentinelRecent);
     if (sentinelFollowing && !initialFollowingDone) observer.observe(sentinelFollowing);
-
-    // Show end message immediately if the initial batch was already complete
-    if (initialRecentDone && document.getElementById('end-recent')) {
-      document.getElementById('end-recent').style.display = 'block';
-    }
-    if (initialFollowingDone && document.getElementById('end-following')) {
-      document.getElementById('end-following').style.display = 'block';
-    }
+    if (initialRecentDone    && document.getElementById('end-recent'))    document.getElementById('end-recent').style.display = 'block';
+    if (initialFollowingDone && document.getElementById('end-following')) document.getElementById('end-following').style.display = 'block';
   })();
   </script>
 
@@ -1030,13 +937,11 @@ const initialFollowingDone = followingReviews.length < 20
         <span class="stat-value">{formatCount(totalReviewers)}</span>
       </div>
     </div>
-
   </div>
 
 </Layout>
 
 <style>
-  /* ─── Hero ──────────────────────────────────────────────────────────────── */
   .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
   .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.4; filter: blur(2px) saturate(1.4); transform: scale(1.05); }
   .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.6) 50%, rgba(10,10,10,0.2) 100%); }
@@ -1051,8 +956,6 @@ const initialFollowingDone = followingReviews.length < 20
   .hero-score-label { font-size: 12px; color: rgba(255,255,255,0.5); }
   .hero-cta { display: inline-block; margin-top: 10px; background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.2); border-radius: 20px; padding: 6px 14px; font-size: 13px; backdrop-filter: blur(8px); transition: background 0.15s; }
   .hero-cta:hover { background: rgba(255,255,255,0.25); }
-
-  /* ─── Top Rated section ─────────────────────────────────────────────────── */
   .section-block { padding: 20px 20px 0; border-bottom: 1px solid var(--border-subtle); background: var(--accent-subtle); position: relative; }
   .section-block::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(to right, transparent, var(--accent), transparent); opacity: 0.3; }
   .section-block-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -1076,39 +979,13 @@ const initialFollowingDone = followingReviews.length < 20
   .top-rated-badge.score-low    { background: rgba(48,14,14,.88); color: #f87171; border: 1px solid rgba(248,113,113,.4); }
   .top-rated-info { margin-top: 6px; }
   .top-rated-title { font-size: 11px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
-
-  /* ─── Feed tabs ─────────────────────────────────────────────────────────── */
-  .feed-tabs {
-    display: flex;
-    gap: 6px;
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--border-subtle);
-    background: var(--bg-card);
-    position: sticky;
-    top: 73px;
-    z-index: 9;
-  }
-  .feed-tab {
-    padding: 6px 16px;
-    border-radius: 20px;
-    font-size: 13px;
-    font-weight: 500;
-    font-family: inherit;
-    color: var(--text-secondary);
-    background: var(--tag-bg);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: all 0.15s;
-  }
+  .feed-tabs { display: flex; gap: 6px; padding: 12px 20px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-card); position: sticky; top: 73px; z-index: 9; }
+  .feed-tab { padding: 6px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; color: var(--text-secondary); background: var(--tag-bg); border: 1px solid var(--border); cursor: pointer; transition: all 0.15s; }
   .feed-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
   .feed-tab.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-
-  /* ─── Genre pills (sidebar) ──────────────────────────────────────────────── */
   .genre-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .genre-pill { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; border: 1px solid transparent; }
   .genre-pill:hover { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent); opacity: 1; }
-
-  /* ─── Trending widget ────────────────────────────────────────────────────── */
   .trending-item { display: flex; align-items: flex-start; gap: 10px; padding: 8px; margin: 0 -8px; border-bottom: 1px solid var(--border-subtle); transition: background 0.15s; border-radius: 8px; }
   .trending-item:last-child { border-bottom: none; }
   .trending-item:hover { background: var(--bg-hover); }
@@ -1119,59 +996,33 @@ const initialFollowingDone = followingReviews.length < 20
   .trending-info { flex: 1; min-width: 0; }
   .trending-game { font-size: 13px; font-weight: 500; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .trending-count { font-size: 12px; color: var(--text-tertiary); margin-top: 3px; }
-
-  /* ─── Post-review reveal card ───────────────────────────────────────────── */
-  @keyframes resultFadeIn {
-    from { opacity: 0; transform: translateY(6px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
+  @keyframes resultFadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   #resultClose:hover, #resultGameLink:hover { opacity: 0.8; }
-
-  /* ── High score: gold shimmer text + rotating sun rays ── */
-  .score-perfect-pop {
-    display: inline-block;
-    text-shadow: 0 0 20px currentColor, 0 0 44px currentColor, 0 0 80px currentColor;
-    animation: happyBounce 1.4s ease-in-out 1;
-  }
-  .score-stellar {
-    display: inline-block;
-    text-shadow: 0 0 16px currentColor, 0 0 36px currentColor;
-    animation: happyBounce 1.4s ease-in-out 1;
-  }
-
-  /* ── Low score: stone texture + one-shot shake on appear ── */
-  /* Sad, heavy shake — drifts downward with gravity, slumps at the end */
+  .score-perfect-pop { display: inline-block; text-shadow: 0 0 20px currentColor, 0 0 44px currentColor, 0 0 80px currentColor; animation: happyBounce 1.4s ease-in-out 1; }
+  .score-stellar { display: inline-block; text-shadow: 0 0 16px currentColor, 0 0 36px currentColor; animation: happyBounce 1.4s ease-in-out 1; }
   @keyframes stoneSad {
-    0%   { transform: translate(0,    0)   rotate( 0.0deg); }
-    10%  { transform: translate(-8px, 2px) rotate(-3.0deg); }
-    22%  { transform: translate( 7px, 5px) rotate( 2.5deg); }
-    34%  { transform: translate(-6px, 9px) rotate(-2.0deg); }
-    46%  { transform: translate( 5px,12px) rotate( 1.5deg); }
-    58%  { transform: translate(-4px,15px) rotate(-1.0deg); }
-    70%  { transform: translate( 3px,17px) rotate( 0.6deg); }
+    0%   { transform: translate(0,0) rotate(0deg); }
+    10%  { transform: translate(-8px,2px) rotate(-3deg); }
+    22%  { transform: translate(7px,5px) rotate(2.5deg); }
+    34%  { transform: translate(-6px,9px) rotate(-2deg); }
+    46%  { transform: translate(5px,12px) rotate(1.5deg); }
+    58%  { transform: translate(-4px,15px) rotate(-1deg); }
+    70%  { transform: translate(3px,17px) rotate(0.6deg); }
     82%  { transform: translate(-2px,18px) rotate(-0.4deg); }
-    92%  { transform: translate( 1px,19px) rotate( 0.1deg); }
-    100% { transform: translate( 0,   5px) rotate(-1.2deg); }
+    92%  { transform: translate(1px,19px) rotate(0.1deg); }
+    100% { transform: translate(0,5px) rotate(-1.2deg); }
   }
-  .score-crumble {
-    display: inline-block;
-    text-shadow: 0 0 12px currentColor, 0 0 28px currentColor;
-    animation: stoneSad 1.2s cubic-bezier(.25,.46,.45,.94) 1 forwards;
-  }
-
-  /* Happy bounce — 3 bounces then settles back to rest */
+  .score-crumble { display: inline-block; text-shadow: 0 0 12px currentColor, 0 0 28px currentColor; animation: stoneSad 1.2s cubic-bezier(.25,.46,.45,.94) 1 forwards; }
   @keyframes happyBounce {
-    0%   { transform: translateY(  0)   rotate( 0.0deg) scale(1.00); }
-    14%  { transform: translateY(-16px) rotate(-3.0deg) scale(1.07); }
-    28%  { transform: translateY( -3px) rotate( 1.5deg) scale(0.96); }
-    44%  { transform: translateY(-14px) rotate( 2.5deg) scale(1.05); }
-    58%  { transform: translateY( -2px) rotate(-1.0deg) scale(0.97); }
-    72%  { transform: translateY(-13px) rotate(-2.0deg) scale(1.04); }
-    86%  { transform: translateY( -2px) rotate( 0.5deg) scale(0.99); }
-    100% { transform: translateY(  0)   rotate( 0.0deg) scale(1.00); }
+    0%   { transform: translateY(0) rotate(0deg) scale(1); }
+    14%  { transform: translateY(-16px) rotate(-3deg) scale(1.07); }
+    28%  { transform: translateY(-3px) rotate(1.5deg) scale(0.96); }
+    44%  { transform: translateY(-14px) rotate(2.5deg) scale(1.05); }
+    58%  { transform: translateY(-2px) rotate(-1deg) scale(0.97); }
+    72%  { transform: translateY(-13px) rotate(-2deg) scale(1.04); }
+    86%  { transform: translateY(-2px) rotate(0.5deg) scale(0.99); }
+    100% { transform: translateY(0) rotate(0deg) scale(1); }
   }
-
-  /* ─── Composer modal ─────────────────────────────────────────────────────── */
   .composer-field { display: flex; flex-direction: column; gap: 6px; }
   .composer-row { display: flex; gap: 12px; align-items: flex-end; }
   .composer-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }

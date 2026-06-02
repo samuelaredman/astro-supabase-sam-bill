@@ -33,7 +33,44 @@ const { data: rawNotifs } = await db
   .order('created_at', { ascending: false })
   .limit(50);
 
-const notifications = rawNotifs ?? [];
+// Cross-reference group_join_request notifications against live rows in group_join_requests.
+// If the underlying request was already processed (deleted), filter the notification out
+// so stale Accept/Reject buttons never render.
+const rawNotifList = rawNotifs ?? [];
+const joinRequestNotifs = rawNotifList.filter((n: any) => n.type === 'group_join_request');
+const liveRequestKeys = new Set<string>();
+
+if (joinRequestNotifs.length > 0) {
+  const groupIds = [...new Set(joinRequestNotifs.map((n: any) => n.groups?.id).filter(Boolean))] as string[];
+  const { data: liveReqs } = await db
+    .from('group_join_requests')
+    .select('group_id, profile_id')
+    .in('group_id', groupIds);
+  for (const r of liveReqs ?? []) {
+    liveRequestKeys.add(`${r.group_id}:${r.profile_id}`);
+  }
+}
+
+// Cross-reference group_invite notifications against live pending invites for this user
+const inviteNotifs = rawNotifList.filter((n: any) => n.type === 'group_invite');
+const liveInviteGroupIds = new Set<string>();
+
+if (inviteNotifs.length > 0) {
+  const inviteGroupIds = [...new Set(inviteNotifs.map((n: any) => n.groups?.id).filter(Boolean))] as string[];
+  const { data: liveInvites } = await db
+    .from('group_invites')
+    .select('group_id')
+    .eq('invited_profile_id', profile.id)
+    .eq('status', 'pending')
+    .in('group_id', inviteGroupIds);
+  for (const inv of liveInvites ?? []) liveInviteGroupIds.add(inv.group_id);
+}
+
+const notifications = rawNotifList.filter((n: any) => {
+  if (n.type === 'group_join_request') return liveRequestKeys.has(`${n.groups?.id}:${n.actor?.id}`);
+  if (n.type === 'group_invite') return liveInviteGroupIds.has(n.groups?.id);
+  return true;
+});
 
 // Whether any notification is still unread (used to show the "Mark all as read" button)
 const hasUnread = notifications.some((n: any) => !n.read);
@@ -121,6 +158,9 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           const thumb = igdbThumb(game?.cover_img_url);
           const isWatchlist = n.type === 'watchlist_review';
           const isGroupInvite = n.type === 'group_invite';
+          const isGroupJoinRequest = n.type === 'group_join_request';
+          const isGroupJoinAccepted = n.type === 'group_join_accepted';
+          const isGroupJoinRejected = n.type === 'group_join_rejected';
           const isNewFollower = n.type === 'new_follower';
           const isUpvote = n.type === 'review_upvote';
           const isDownvote = n.type === 'review_downvote';
@@ -136,8 +176,8 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           const commentReviewId = comment?.review_id ?? review?.id;
           const href = isNewFollower
             ? `/reviewers/${actor?.username ?? ''}`
-            : isGroupInvite
-              ? `/groups/${group?.id}`
+            : isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected
+              ? (group?.id ? `/groups/${group.id}` : '#')
               : (isCommentUpvote || isCommentDownvote)
                 ? (commentReviewId ? `/reviews/${commentReviewId}` : '#')
                 : review ? `/reviews/${review.id}` : (game ? `/games/${game.slug}` : '#');
@@ -146,11 +186,11 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
             <a href={href} class={`notif-item${n.read ? '' : ' unread'}${isNewFollower ? ' notif-item-follower' : ''}`}>
               {/* Cover thumbnail / actor avatar / group icon */}
               <div class="notif-cover">
-                {isNewFollower ? (
+                {isNewFollower || isGroupJoinRequest ? (
                   actor?.avatar_url
                     ? <img src={actor.avatar_url} alt={actor.username} class="notif-actor-avatar" />
                     : <span class="notif-actor-initials">{getInitials(actor?.username ?? '?')}</span>
-                ) : isGroupInvite ? (
+                ) : isGroupInvite || isGroupJoinAccepted || isGroupJoinRejected ? (
                   <span>👥</span>
                 ) : thumb ? (
                   <img src={thumb} alt={game?.title ?? ''} />
@@ -191,6 +231,19 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                       <strong>@{actor?.username ?? 'Someone'}</strong> invited you to join
                       {' '}<strong>{group?.name ?? 'a group'}</strong>
                     </>
+                  ) : isGroupJoinRequest ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> requested to join
+                      {' '}<strong>{group?.name ?? 'your group'}</strong>
+                    </>
+                  ) : isGroupJoinAccepted ? (
+                    <>
+                      Your request to join <strong>{group?.name ?? 'a group'}</strong> was accepted
+                    </>
+                  ) : isGroupJoinRejected ? (
+                    <>
+                      Your request to join <strong>{group?.name ?? 'a group'}</strong> was not accepted
+                    </>
                   ) : isReaction ? (
                     <>
                       <strong>@{actor?.username ?? 'Someone'}</strong> reacted{' '}
@@ -230,8 +283,8 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                   )}
                 </div>
                 <div class="notif-meta">
-                  <span class={`notif-type-badge ${isNewFollower ? 'badge-new-follower' : isUpvote ? 'badge-upvote' : isDownvote ? 'badge-downvote' : isCommentUpvote ? 'badge-upvote' : isCommentDownvote ? 'badge-downvote' : isGroupInvite ? 'badge-group' : isWatchlist ? 'badge-watchlist' : (isReaction || isCommentReaction) ? 'badge-reaction' : 'badge-follow'}`}>
-                    {isNewFollower ? 'New Follower' : isUpvote ? 'Upvote' : isDownvote ? 'Downvote' : isCommentUpvote ? 'Comment Upvote' : isCommentDownvote ? 'Comment Downvote' : isGroupInvite ? 'Group Invite' : isWatchlist ? 'Watchlist' : isReaction ? 'Reaction' : isCommentReaction ? 'Comment Reaction' : 'Following'}
+                  <span class={`notif-type-badge ${isNewFollower ? 'badge-new-follower' : isUpvote ? 'badge-upvote' : isDownvote ? 'badge-downvote' : isCommentUpvote ? 'badge-upvote' : isCommentDownvote ? 'badge-downvote' : (isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected) ? 'badge-group' : isWatchlist ? 'badge-watchlist' : (isReaction || isCommentReaction) ? 'badge-reaction' : 'badge-follow'}`}>
+                    {isNewFollower ? 'New Follower' : isUpvote ? 'Upvote' : isDownvote ? 'Downvote' : isCommentUpvote ? 'Comment Upvote' : isCommentDownvote ? 'Comment Downvote' : isGroupInvite ? 'Group Invite' : isGroupJoinRequest ? 'Join Request' : isGroupJoinAccepted ? 'Joined!' : isGroupJoinRejected ? 'Not Accepted' : isWatchlist ? 'Watchlist' : isReaction ? 'Reaction' : isCommentReaction ? 'Comment Reaction' : 'Following'}
                   </span>
                   <span class="notif-time">{timeAgo(n.created_at)}</span>
                 </div>
@@ -247,6 +300,45 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                   {alreadyFollowingBack ? 'Following' : 'Follow Back'}
                 </button>
               )}
+
+              {isGroupJoinRequest && (
+                <div class="join-request-actions" onclick="event.preventDefault();event.stopPropagation();">
+                  <button
+                    class="join-accept-btn"
+                    data-group-id={group?.id}
+                    data-requester-id={actor?.id}
+                    onclick="event.preventDefault();event.stopPropagation();handleJoinRequest(this,'accept')"
+                  >Accept</button>
+                  <button
+                    class="join-reject-btn"
+                    data-group-id={group?.id}
+                    data-requester-id={actor?.id}
+                    onclick="event.preventDefault();event.stopPropagation();handleJoinRequest(this,'reject')"
+                  >Reject</button>
+                </div>
+              )}
+
+              {isGroupInvite && (
+                <div class="join-request-actions" onclick="event.preventDefault();event.stopPropagation();">
+                  <button
+                    class="join-accept-btn"
+                    data-group-id={group?.id}
+                    onclick="event.preventDefault();event.stopPropagation();handleGroupInvite(this,'accept')"
+                  >Accept</button>
+                  <button
+                    class="join-reject-btn"
+                    data-group-id={group?.id}
+                    onclick="event.preventDefault();event.stopPropagation();handleGroupInvite(this,'decline')"
+                  >Decline</button>
+                </div>
+              )}
+
+              <button
+                class="notif-delete-btn"
+                data-notif-id={n.id}
+                onclick="event.preventDefault();event.stopPropagation();deleteNotif(this)"
+                title="Dismiss"
+              >×</button>
 
               {!n.read && <div class="notif-dot"></div>}
             </a>
@@ -321,6 +413,98 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
       }
     });
   });
+
+  async function handleJoinRequest(btn: HTMLElement, action: string) {
+    const groupId = (btn as HTMLElement).dataset.groupId;
+    const requesterId = (btn as HTMLElement).dataset.requesterId;
+    const actionsDiv = btn.closest('.join-request-actions') as HTMLElement | null;
+    if (!groupId || !requesterId || !actionsDiv) return;
+
+    actionsDiv.querySelectorAll('button').forEach((b) => { (b as HTMLButtonElement).disabled = true; });
+
+    try {
+      const res = await fetch('/api/groups/join-request/respond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: groupId, requester_profile_id: requesterId, action }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Something went wrong');
+      actionsDiv.innerHTML = `<span style="font-size:12px;color:var(--text-tertiary);font-style:italic">${action === 'accept' ? '✓ Accepted' : '✗ Rejected'}</span>`;
+      // Remove the entire notification row after a brief moment — request is resolved
+      const notifItem = btn.closest('.notif-item') as HTMLElement | null;
+      if (notifItem) {
+        setTimeout(() => {
+          notifItem.style.transition = 'opacity 0.3s';
+          notifItem.style.opacity = '0';
+          setTimeout(() => notifItem.remove(), 320);
+        }, 1000);
+      }
+    } catch (e) {
+      actionsDiv.querySelectorAll('button').forEach((b) => { (b as HTMLButtonElement).disabled = false; });
+      alert((e instanceof Error ? e.message : null) || 'Could not process request. Try from the group page.');
+    }
+  }
+  (window as any).handleJoinRequest = handleJoinRequest;
+
+  async function handleGroupInvite(btn: HTMLElement, action: string) {
+    const groupId = (btn as HTMLElement).dataset.groupId;
+    const actionsDiv = btn.closest('.join-request-actions') as HTMLElement | null;
+    if (!groupId || !actionsDiv) return;
+
+    actionsDiv.querySelectorAll('button').forEach((b) => { (b as HTMLButtonElement).disabled = true; });
+
+    try {
+      const res = await fetch('/api/groups/invite/respond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: groupId, action }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Something went wrong');
+      actionsDiv.innerHTML = `<span style="font-size:12px;color:var(--text-tertiary);font-style:italic">${action === 'accept' ? '✓ Joined!' : '✗ Declined'}</span>`;
+      const notifItem = btn.closest('.notif-item') as HTMLElement | null;
+      if (notifItem) {
+        setTimeout(() => {
+          notifItem.style.transition = 'opacity 0.3s';
+          notifItem.style.opacity = '0';
+          setTimeout(() => notifItem.remove(), 320);
+        }, 1200);
+      }
+      if (action === 'accept') {
+        // Redirect to the group after a brief pause
+        setTimeout(() => {
+          window.location.href = `/groups/${groupId}`;
+        }, 1600);
+      }
+    } catch (e) {
+      actionsDiv.querySelectorAll('button').forEach((b) => { (b as HTMLButtonElement).disabled = false; });
+      alert((e instanceof Error ? e.message : null) || 'Could not process invite. Try from the group page.');
+    }
+  }
+  (window as any).handleGroupInvite = handleGroupInvite;
+
+  async function deleteNotif(btn: HTMLElement) {
+    const notifId = (btn as HTMLElement).dataset.notifId;
+    if (!notifId) return;
+    const notifItem = btn.closest('.notif-item') as HTMLElement | null;
+    // Optimistically remove from DOM
+    if (notifItem) {
+      notifItem.style.transition = 'opacity 0.2s';
+      notifItem.style.opacity = '0';
+      setTimeout(() => notifItem.remove(), 220);
+    }
+    try {
+      await fetch('/api/notifications/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notification_id: notifId }),
+      });
+    } catch (e) {
+      // Best-effort — if it fails the item is already gone from the DOM
+    }
+  }
+  (window as any).deleteNotif = deleteNotif;
 </script>
 
 <style>
@@ -560,4 +744,44 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     cursor: default;
     opacity: 0.7;
   }
+
+  .join-request-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    align-items: center;
+  }
+  .join-accept-btn, .join-reject-btn {
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    border: none;
+    white-space: nowrap;
+    transition: opacity 0.12s;
+  }
+  .join-accept-btn { background: var(--accent); color: #fff; }
+  .join-reject-btn { background: var(--tag-bg); color: var(--text-secondary); }
+  .join-accept-btn:hover:not(:disabled) { opacity: 0.85; }
+  .join-reject-btn:hover:not(:disabled) { opacity: 0.85; }
+  .join-accept-btn:disabled, .join-reject-btn:disabled { opacity: 0.5; cursor: default; }
+
+  .notif-delete-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    font-size: 18px;
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: 6px;
+    opacity: 0;
+    transition: opacity 0.12s, color 0.12s, background 0.12s;
+    align-self: center;
+  }
+  .notif-item:hover .notif-delete-btn { opacity: 1; }
+  .notif-delete-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.1); }
 </style>

@@ -1,21 +1,35 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../../utils/database";
 
+const json = (body: object, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return json({ error: "Unauthorized" }, 401);
 
-  const { data: profile } = await (supabase as any)
+  const db = getSupabaseAdmin() as any;
+
+  const { data: profile } = await db
     .from("profiles").select("id").eq("auth_user_id", user.id).single();
   if (!profile) return json({ error: "Profile not found" }, 404);
 
   const { group_id, game_id } = await context.request.json();
-  const db = getSupabaseAdmin() as any;
+  if (!group_id || !game_id) return json({ error: "group_id and game_id required" }, 400);
 
   const { data: membership } = await db.from("group_members")
-    .select("id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
+    .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
   if (!membership) return json({ error: "Not a member of this group" }, 403);
+
+  // Members with a custom role must have can_manage_watchlist=true (and not be view-only).
+  // Plain members (no custom role) retain the original unrestricted access.
+  if (membership.custom_role_id) {
+    const { data: cr } = await db.from("group_roles")
+      .select("can_manage_watchlist, is_view_only").eq("id", membership.custom_role_id).maybeSingle();
+    if (!cr?.can_manage_watchlist || cr?.is_view_only)
+      return json({ error: "Your role does not have permission to manage the watchlist" }, 403);
+  }
 
   const { data: existing } = await db.from("group_watchlist")
     .select("id").eq("group_id", group_id).eq("game_id", game_id).maybeSingle();
@@ -25,13 +39,12 @@ export const POST: APIRoute = async (context) => {
     return json({ added: false });
   }
 
-  await db.from("group_watchlist").insert({ group_id, game_id, added_by: profile.id });
+  const { error } = await db.from("group_watchlist")
+    .insert({ group_id, game_id, added_by: profile.id });
+  if (error) {
+    console.error("[groups/watchlist/toggle] insert error:", JSON.stringify(error));
+    return json({ error: "Failed to update watchlist" }, 500);
+  }
+
   return json({ added: true });
 };
-
-function json(body: object, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}

@@ -78,10 +78,10 @@ export const POST: APIRoute = async (context) => {
   try {
     const db = getSupabaseAdmin() as any;
 
-    // People who watchlisted this game (excluding the reviewer)
+    // People actively tracking this game (want_to_play or playing), excluding the reviewer
     const { data: watchers } = await db
-      .from('watchlist').select('profile_id')
-      .eq('game_id', game_id).neq('profile_id', profile.id);
+      .from('user_game_status').select('profile_id')
+      .eq('game_id', game_id).in('status', ['want_to_play', 'playing']).neq('profile_id', profile.id);
 
     // People who follow the reviewer with notify = true (excluding the reviewer)
     const { data: notifyFollowers } = await db

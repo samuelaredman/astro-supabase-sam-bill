@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
@@ -7,6 +7,23 @@ export const POST: APIRoute = async (context) => {
 
   if (!email || !password || !username) {
     return new Response(JSON.stringify({ error: "All fields are required." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Check username availability before attempting signup so a duplicate
+  // doesn't surface as the cryptic "database error saving new user" from
+  // the handle_new_user trigger.
+  const db = getSupabaseAdmin() as any;
+  const { data: existing } = await db
+    .from("profiles")
+    .select("id")
+    .ilike("username", username)
+    .maybeSingle();
+
+  if (existing) {
+    return new Response(JSON.stringify({ error: "Username is already taken." }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
