@@ -1,48 +1,26 @@
 import type { APIRoute } from 'astro';
-import { getSupabase } from '../utils/database';
 
 export const prerender = false;
 
 export const GET: APIRoute = async () => {
-  const supabase = getSupabase() as any;
   const base = 'https://chekpoint.gg';
 
-  const { data: games } = await supabase
-    .from('games')
-    .select('slug, updated_at')
-    .order('updated_at', { ascending: false });
-
-  type SitemapEntry = {
-    url: string;
-    changefreq: string;
-    priority: string;
-    lastmod?: string;
-  };
-
-  const staticPages: SitemapEntry[] = [
-    { url: base + '/',           changefreq: 'daily',   priority: '1.0' },
-    { url: base + '/hot-takes',  changefreq: 'daily',   priority: '0.9' },
-    { url: base + '/search',     changefreq: 'weekly',  priority: '0.8' },
-    { url: base + '/signin',     changefreq: 'monthly', priority: '0.3' },
-    { url: base + '/signup',     changefreq: 'monthly', priority: '0.3' },
-    { url: base + '/privacy',    changefreq: 'monthly', priority: '0.2' },
-    { url: base + '/terms',      changefreq: 'monthly', priority: '0.2' },
-    { url: base + '/contact',    changefreq: 'monthly', priority: '0.2' },
+  const staticPages = [
+    { url: base + '/',          changefreq: 'daily',   priority: '1.0' },
+    { url: base + '/hot-takes', changefreq: 'daily',   priority: '0.9' },
+    { url: base + '/discover',  changefreq: 'daily',   priority: '0.8' },
+    { url: base + '/rankings',  changefreq: 'daily',   priority: '0.8' },
+    { url: base + '/search',    changefreq: 'weekly',  priority: '0.8' },
+    { url: base + '/groups',    changefreq: 'weekly',  priority: '0.6' },
+    { url: base + '/signin',    changefreq: 'monthly', priority: '0.3' },
+    { url: base + '/signup',    changefreq: 'monthly', priority: '0.3' },
+    { url: base + '/privacy',   changefreq: 'monthly', priority: '0.2' },
+    { url: base + '/terms',     changefreq: 'monthly', priority: '0.2' },
+    { url: base + '/contact',   changefreq: 'monthly', priority: '0.2' },
   ];
 
-  const gamePages: SitemapEntry[] = (games ?? []).map((g: any) => ({
-    url: `${base}/games/${g.slug}`,
-    changefreq: 'weekly',
-    priority: '0.9',
-    lastmod: g.updated_at ? g.updated_at.slice(0, 10) : undefined,
-  }));
-
-  // Reviewer profiles are intentionally excluded — users have not
-  // explicitly consented to search-engine indexing of their profiles.
-  const allPages = [...staticPages, ...gamePages];
-
-  const urlEntries = allPages.map(p => `  <url>
-    <loc>${p.url}</loc>${p.lastmod ? `\n    <lastmod>${p.lastmod}</lastmod>` : ''}
+  const urlEntries = staticPages.map(p => `  <url>
+    <loc>${p.url}</loc>
     <changefreq>${p.changefreq}</changefreq>
     <priority>${p.priority}</priority>
   </url>`).join('\n');
@@ -55,9 +33,7 @@ ${urlEntries}
   return new Response(xml, {
     headers: {
       'Content-Type': 'application/xml; charset=utf-8',
-      // Browser/proxy: cache 1 hour
       'Cache-Control': 'public, max-age=3600, s-maxage=86400',
-      // Netlify Edge CDN: cache 24 hours, serve stale for up to 7 days while revalidating
       'Netlify-CDN-Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
     },
   });
