@@ -22,7 +22,7 @@ export const POST: APIRoute = async (context) => {
   if (!igdb_id) return json({ error: 'Missing igdb_id' }, 400);
 
   // All DB operations use the admin client to bypass RLS on the games table
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
 
   // Check if already imported
   const { data: existing } = await db

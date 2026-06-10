@@ -1,9 +1,7 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+import { json } from '../../../utils/api';
 
 export const POST: APIRoute = async (context) => {
   try {
@@ -18,7 +16,7 @@ export const POST: APIRoute = async (context) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
     if (!allowed.includes(fileType)) return json({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }, 400);
 
-    const db = getSupabaseAdmin() as any;
+    const db = getSupabaseAdmin();
 
     const { data: existing } = await db.storage.from('banners').list(user.id);
     if (existing?.length) {

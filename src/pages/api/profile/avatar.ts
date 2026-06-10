@@ -1,45 +1,49 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
-import { createSupabaseServerClientFromContext } from '../../../utils/database';
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
+import { json } from '../../../utils/api';
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return new Response('Unauthorized', { status: 401 });
+  const userClient = createSupabaseServerClientFromContext(context);
+  const { data: { user } } = await userClient.auth.getUser();
+  if (!user) return json({ error: 'Unauthorized' }, 401);
 
   const form = await context.request.formData();
   const file = form.get('avatar') as File;
-  if (!file) return new Response('No file', { status: 400 });
+  if (!file) return json({ error: 'No file provided.' }, 400);
 
-  if (file.size > 5 * 1024 * 1024) {
-    return new Response(JSON.stringify({ error: 'File must be under 5MB' }), {
-      status: 400, headers: { 'Content-Type': 'application/json' }
-    });
-  }
+  if (file.size > 5 * 1024 * 1024)
+    return json({ error: 'File must be under 5MB.' }, 400);
 
   const ext = file.name.split('.').pop()?.toLowerCase() ?? 'jpg';
   const path = `${user.id}/avatar.${ext}`;
 
-  const { error: uploadError } = await supabase.storage
+  // Use admin client for storage and DB writes
+  const db = getSupabaseAdmin();
+
+  const { error: uploadError } = await db.storage
     .from('avatars')
     .upload(path, file, { upsert: true, contentType: file.type });
 
-  if (uploadError) return new Response(uploadError.message, { status: 500 });
+  if (uploadError) {
+    console.error('[profile/avatar] upload error:', JSON.stringify(uploadError));
+    return json({ error: uploadError.message }, 500);
+  }
 
-  const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(path);
+  const { data: { publicUrl } } = db.storage.from('avatars').getPublicUrl(path);
 
-  const { data: profile, error: profileError } = await (supabase as any)
+  const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();
 
-  if (profileError || !profile) return new Response('Profile not found', { status: 404 });
+  if (!profile) return json({ error: 'Profile not found.' }, 404);
 
-  const { error: updateError } = await (supabase as any)
+  const { error: updateError } = await db
     .from('profiles').update({ avatar_url: publicUrl }).eq('id', profile.id);
 
-  if (updateError) return new Response(updateError.message, { status: 500 });
+  if (updateError) {
+    console.error('[profile/avatar] update error:', JSON.stringify(updateError));
+    return json({ error: updateError.message }, 500);
+  }
 
-  return new Response(JSON.stringify({ url: publicUrl + '?t=' + Date.now() }), {
-    status: 200, headers: { 'Content-Type': 'application/json' }
-  });
+  return json({ url: publicUrl + '?t=' + Date.now() });
 };

@@ -1,22 +1,13 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+import { requireAuth, json } from "../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  const userClient = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await userClient.auth.getUser();
-  if (!user) return json({ error: "Unauthorized" }, 401);
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
   const { comment_id, vote } = await context.request.json();
   if (!comment_id || ![1, -1].includes(vote)) return json({ error: "Invalid request." }, 400);
-
-  const db = getSupabaseAdmin() as any;
-
-  const { data: profile } = await db
-    .from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return json({ error: "Profile not found." }, 404);
 
   const { data: existing } = await db
     .from('comment_votes')

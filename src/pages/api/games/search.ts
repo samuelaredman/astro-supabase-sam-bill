@@ -12,7 +12,7 @@ export const GET: APIRoute = async ({ request }) => {
     });
   }
 
-  const supabase = getSupabase() as any;
+  const supabase = getSupabase();
 
   // Run fuzzy DB search and IGDB fetch in parallel
   const [rpcRes, igdbRes] = await Promise.all([

@@ -1,22 +1,18 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { requireAuth, json } from "../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { "Content-Type": "application/json" } });
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
   const { following_id } = await context.request.json();
 
-  const { data: profile } = await (supabase as any).from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return new Response(JSON.stringify({ error: "Profile not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
-
-  const { error } = await (supabase as any).from('follows').insert({ follower_id: profile.id, following_id });
-  if (error) return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "Content-Type": "application/json" } });
+  const { error } = await db.from('follows').insert({ follower_id: profile.id, following_id });
+  if (error) return json({ error: error.message }, 400);
 
   // Fire new_follower notification (non-blocking)
   try {
-    const db = getSupabaseAdmin() as any;
     const { data: existing } = await db.from('notifications')
       .select('id').eq('profile_id', following_id).eq('actor_profile_id', profile.id)
       .eq('type', 'new_follower').maybeSingle();
@@ -31,21 +27,18 @@ export const POST: APIRoute = async (context) => {
     console.error('[follows/toggle] notification error (non-fatal):', e);
   }
 
-  return new Response(JSON.stringify({ success: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  return json({ success: true });
 };
 
 export const DELETE: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { "Content-Type": "application/json" } });
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
   const { following_id } = await context.request.json();
 
-  const { data: profile } = await (supabase as any).from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return new Response(JSON.stringify({ error: "Profile not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+  const { error } = await db.from('follows').delete().eq('follower_id', profile.id).eq('following_id', following_id);
+  if (error) return json({ error: error.message }, 400);
 
-  const { error } = await (supabase as any).from('follows').delete().eq('follower_id', profile.id).eq('following_id', following_id);
-  if (error) return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "Content-Type": "application/json" } });
-
-  return new Response(JSON.stringify({ success: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  return json({ success: true });
 };

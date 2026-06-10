@@ -15,7 +15,7 @@ export const POST: APIRoute = async (context) => {
   // Check username availability before attempting signup so a duplicate
   // doesn't surface as the cryptic "database error saving new user" from
   // the handle_new_user trigger.
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
   const { data: existing } = await db
     .from("profiles")
     .select("id")

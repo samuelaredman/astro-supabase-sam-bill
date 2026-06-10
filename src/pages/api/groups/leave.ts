@@ -1,17 +1,12 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { requireAuth, json } from "../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return json({ error: "Unauthorized" }, 401);
-
-  const { data: profile } = await (supabase as any)
-    .from("profiles").select("id").eq("auth_user_id", user.id).single();
-  if (!profile) return json({ error: "Profile not found" }, 404);
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
   const { group_id } = await context.request.json();
-  const db = getSupabaseAdmin() as any;
 
   const { data: membership } = await db.from("group_members")
     .select("id, role").eq("group_id", group_id).eq("profile_id", profile.id).single();
@@ -20,7 +15,7 @@ export const POST: APIRoute = async (context) => {
   if (membership.role === "owner") {
     const { count } = await db.from("group_members")
       .select("*", { count: "exact", head: true }).eq("group_id", group_id);
-    if (count > 1) {
+    if ((count ?? 0) > 1) {
       return json({ error: "Transfer ownership before leaving, or remove all members first." }, 400);
     }
     // Last member — delete the whole group
@@ -31,10 +26,3 @@ export const POST: APIRoute = async (context) => {
   await db.from("group_members").delete().eq("id", membership.id);
   return json({ success: true });
 };
-
-function json(body: object, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
