@@ -548,14 +548,6 @@ Wraps all non-standalone pages. Provides nav, theme CSS vars, and OG meta.
 | `ogImage` | No | Root-relative or absolute URL. Omits to use site default. |
 | `description` | No | Meta description |
 
-### Standalone auth pages
-
-`signin.astro`, `signup.astro`, `forgot-password.astro`, `reset-password-confirm.astro`
-do NOT use Layout.astro and define their own CSS scope.
-
-⚠️ **`var(--accent)` resolves to the wrong color on these pages.**
-Always hardcode `#6050c8` directly for purple on any standalone page.
-
 ### Inline scripts (`is:inline`)
 
 - Pass server values with `define:vars={{ key: value }}`
@@ -605,7 +597,6 @@ Currently duplicated in `ReviewCard.astro` and `games/[slug].astro`.
 |---------|----------------------|
 | `select('col')` on a non-existent column | Returns `data: null`, code treats as "no row found" and proceeds incorrectly |
 | Anon client for DB writes | RLS blocks it, returns empty data with no JS error |
-| `var(--accent)` on standalone auth pages | Resolves to wrong color, no visual error at dev time |
 | `single()` when row may not exist | Throws, causes unhandled 500 |
 | `.eq('col', null)` after a failed select | Matches nothing or everything depending on PostgREST version |
 | `(supabase as any)` casts | Workaround for stale types only — does NOT confirm the column exists |
