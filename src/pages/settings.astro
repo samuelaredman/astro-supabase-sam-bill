@@ -11,9 +11,11 @@ if (!user) return Astro.redirect('/signin');
 const db = getSupabaseAdmin() as any;
 const { data: profile } = await db
   .from('profiles')
-  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy')
+  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, steam_id, steam_username, steam_synced_at')
   .eq('auth_user_id', user.id)
   .single();
+
+const steamStatus = Astro.url.searchParams.get('steam'); // 'connected' | 'error' | 'cancelled' | null
 
 if (!profile) return Astro.redirect('/signin');
 
@@ -35,6 +37,7 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
         <a href="#account" class="settings-anchor-link">Account</a>
         <a href="#security" class="settings-anchor-link">Security</a>
         <a href="#privacy" class="settings-anchor-link">Privacy</a>
+        <a href="#steam" class="settings-anchor-link">Steam</a>
         <a href="#session" class="settings-anchor-link">Session</a>
       </div>
     </div>
@@ -113,6 +116,63 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           "Friends" means people you mutually follow. Playing and Completed are always public.
         </div>
         <div id="privacyMsg" style="font-size:12px;min-height:16px;margin-top:4px"></div>
+      </div>
+    </section>
+
+    <!-- Steam -->
+    <section class="settings-section" id="steam">
+      <div class="settings-section-label">Steam</div>
+      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+
+        {steamStatus === 'connected' && (
+          <div class="steam-banner steam-banner-ok">Steam account connected successfully.</div>
+        )}
+        {steamStatus === 'error' && (
+          <div class="steam-banner steam-banner-err">Something went wrong connecting Steam. Please try again.</div>
+        )}
+        {steamStatus === 'cancelled' && (
+          <div class="steam-banner steam-banner-err">Steam connection was cancelled.</div>
+        )}
+
+        {profile.steam_id ? (
+          <>
+            <div class="steam-connected-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Connected as <strong>{profile.steam_username ?? profile.steam_id}</strong></div>
+                {profile.steam_synced_at && (
+                  <div class="settings-row-sub">
+                    Last synced {new Date(profile.steam_synced_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                  </div>
+                )}
+                {!profile.steam_synced_at && (
+                  <div class="settings-row-sub">Library not synced yet — click Sync below.</div>
+                )}
+              </div>
+              <button class="settings-ghost-btn steam-disconnect-btn" id="steamDisconnectBtn" onclick="steamDisconnect()">Disconnect</button>
+            </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Sync library</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Imports your Steam games as <strong>Owned</strong> and updates playtime. Won't overwrite statuses you've set manually.
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="steamSyncBtn" onclick="steamSync()">Sync Steam library</button>
+                <span id="steamSyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="steamSyncResults" class="steam-results" style="display:none"></div>
+            </div>
+          </>
+        ) : (
+          <div class="steam-connect-row">
+            <div class="settings-row-text">
+              <div class="settings-row-label">Connect your Steam account</div>
+              <div class="settings-row-sub">Import your library and playtime to quickly build out your game collection on Chekpoint.</div>
+            </div>
+            <a href="/api/auth/steam-connect" class="settings-save-btn steam-connect-btn">Connect Steam</a>
+          </div>
+        )}
+
       </div>
     </section>
 
@@ -365,11 +425,55 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
   .priv-opt.active { background: var(--accent); color: white; }
   .priv-opt.active:hover { background: var(--accent); opacity: 0.9; }
 
+  /* ── Steam ── */
+  .steam-banner {
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+  .steam-banner-ok  { background: rgba(74,222,128,.08); color: #4ade80; border: 1px solid rgba(74,222,128,.2); }
+  .steam-banner-err { background: rgba(248,113,113,.08); color: #f87171; border: 1px solid rgba(248,113,113,.2); }
+
+  .steam-connected-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .steam-disconnect-btn:hover { border-color: #f87171 !important; color: #f87171 !important; }
+
+  .steam-connect-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .steam-connect-btn {
+    text-decoration: none;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  .steam-results {
+    margin-top: 12px;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
   @media (max-width: 768px) {
     .settings-main { padding: 16px 16px 80px; }
     .settings-account-card { flex-wrap: wrap; }
     .settings-view-profile { width: 100%; margin-top: 4px; }
     .priv-row { flex-direction: column; align-items: flex-start; }
+    .steam-connect-row, .steam-connected-row { flex-direction: column; align-items: flex-start; }
+    .steam-connect-btn { width: 100%; text-align: center; }
   }
 </style>
 
@@ -379,6 +483,8 @@ declare global {
     togglePwForm: () => void;
     changePassword: () => Promise<void>;
     setPrivacy: (field: string, value: string, btn: HTMLElement) => Promise<void>;
+    steamSync: () => Promise<void>;
+    steamDisconnect: () => Promise<void>;
   }
 }
 
@@ -473,4 +579,69 @@ async function changePassword() {
   }
 }
 window.changePassword = changePassword;
+
+async function steamSync() {
+  const btn = document.getElementById('steamSyncBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('steamSyncMsg');
+  const results = document.getElementById('steamSyncResults');
+  if (!btn || !msg || !results) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.textContent = 'Fetching your Steam library…';
+  results.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/steam/import', { method: 'POST' });
+    const data = await res.json();
+
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Something went wrong.';
+      (msg as HTMLElement).style.color = '#f87171';
+    } else {
+      msg.textContent = '';
+      results.style.display = 'block';
+      results.innerHTML = `
+        <strong>Sync complete</strong><br>
+        ${data.matched} games added as Owned &nbsp;·&nbsp;
+        ${data.updated} playtimes updated &nbsp;·&nbsp;
+        ${data.unmatched} Steam games not yet in Chekpoint's library
+        <br><span style="color:var(--text-tertiary);font-size:11px">${data.total} total games in your Steam library</span>
+      `;
+    }
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync Steam library';
+  }
+}
+window.steamSync = steamSync;
+
+async function steamDisconnect() {
+  const btn = document.getElementById('steamDisconnectBtn') as HTMLButtonElement | null;
+  if (!btn) return;
+  if (!confirm('Disconnect your Steam account? Your game statuses and playtimes will not be removed.')) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Disconnecting…';
+
+  try {
+    const res = await fetch('/api/steam/disconnect', { method: 'POST' });
+    if (res.ok) {
+      window.location.reload();
+    } else {
+      const data = await res.json();
+      alert(data.error ?? 'Failed to disconnect.');
+      btn.disabled = false;
+      btn.textContent = 'Disconnect';
+    }
+  } catch (e) {
+    alert('Could not reach server. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Disconnect';
+  }
+}
+window.steamDisconnect = steamDisconnect;
 </script>
