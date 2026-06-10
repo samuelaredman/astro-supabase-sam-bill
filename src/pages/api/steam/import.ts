@@ -74,8 +74,14 @@ export const POST: APIRoute = async (context) => {
 
   const toInsert: any[] = [];
   const toUpdatePlaytime: any[] = [];
+  const seenGameIds = new Set<string>();
 
   for (const game of matches) {
+    // Deduplicate — match_steam_games can return the same game_id multiple times
+    // if several Steam titles match the same Chekpoint game (e.g. GOTY editions)
+    if (seenGameIds.has(game.id)) continue;
+    seenGameIds.add(game.id);
+
     const playtime = steamByTitle.get(game.title.toLowerCase().trim()) ?? 0;
     const existing = existingByGameId.get(game.id);
 
