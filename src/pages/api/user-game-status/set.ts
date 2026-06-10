@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
 
-const VALID_STATUSES = ["playing", "want_to_play", "completed", "dropped"] as const;
+const VALID_STATUSES = ["playing", "want_to_play", "owned", "completed", "hundred_percent", "dropped"] as const;
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
