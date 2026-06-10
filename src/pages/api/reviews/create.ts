@@ -12,7 +12,7 @@ export const POST: APIRoute = async (context) => {
   if (!game_id || !score || !title || !reviewBody)
     return json({ error: "Missing required fields." }, 400);
 
-  const { data: existing } = await (db as any)
+  const { data: existing } = await db
     .from('reviews')
     .select('id')
     .eq('profile_id', profile.id)
@@ -22,7 +22,7 @@ export const POST: APIRoute = async (context) => {
 
   if (existing) return json({ error: "You've already reviewed this game." }, 409);
 
-  const { data: inserted, error: insertError } = await (db as any)
+  const { data: inserted, error: insertError } = await db
     .from("reviews")
     .insert({
       profile_id: profile.id,
@@ -48,12 +48,12 @@ export const POST: APIRoute = async (context) => {
   try {
 
     // People actively tracking this game (want_to_play or playing), excluding the reviewer
-    const { data: watchers } = await (db as any)
+    const { data: watchers } = await db
       .from('user_game_status').select('profile_id')
       .eq('game_id', game_id).in('status', ['want_to_play', 'playing']).neq('profile_id', profile.id);
 
     // People who follow the reviewer with notify = true (excluding the reviewer)
-    const { data: notifyFollowers } = await (db as any)
+    const { data: notifyFollowers } = await db
       .from('follows').select('follower_id')
       .eq('following_id', profile.id).eq('notify', true).neq('follower_id', profile.id);
 
@@ -75,20 +75,20 @@ export const POST: APIRoute = async (context) => {
       }
     }
 
-    if (rows.length > 0) await (db as any).from('notifications').insert(rows);
+    if (rows.length > 0) await db.from('notifications').insert(rows);
   } catch (e) {
     console.error('[create] notification error (non-fatal):', e);
   }
 
   // ── Fetch community context for the post-review reveal card ──
   const [{ data: gameData }, { data: communityReviews }] = await Promise.all([
-    (db as any).from('games').select('slug, cover_img_url').eq('id', game_id).single(),
-    (db as any).from('reviews').select('score').eq('game_id', game_id).eq('status', 'published'),
+    db.from('games').select('slug, cover_img_url').eq('id', game_id).single(),
+    db.from('reviews').select('score').eq('game_id', game_id).eq('status', 'published'),
   ]);
 
   const reviewCount = communityReviews?.length ?? 1;
   const communityAvg = reviewCount > 0
-    ? Math.round((communityReviews.reduce((s: number, r: any) => s + r.score, 0) / reviewCount) * 10) / 10
+    ? Math.round(((communityReviews ?? []).reduce((s: number, r: any) => s + r.score, 0) / reviewCount) * 10) / 10
     : score;
 
   return json({

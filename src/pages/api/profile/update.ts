@@ -17,7 +17,7 @@ export const POST: APIRoute = async (context) => {
   if (Object.keys(update).length === 0)
     return json({ error: 'Nothing to update.' }, 400);
 
-  const { error: updateError } = await (db as any)
+  const { error: updateError } = await db
     .from('profiles')
     .update(update)
     .eq('id', profile.id);

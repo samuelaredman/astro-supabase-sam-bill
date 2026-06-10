@@ -11,7 +11,7 @@ export const POST: APIRoute = async (context) => {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return json({ error: "Unauthorized" }, 401);
 
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
 
   const { data: profile } = await db
     .from("profiles").select("id, is_group_admin").eq("auth_user_id", user.id).single();

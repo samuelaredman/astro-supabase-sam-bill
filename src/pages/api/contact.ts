@@ -26,7 +26,7 @@ export const POST: APIRoute = async (context) => {
     return bad("One or more fields exceed the maximum length.");
   }
 
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
 
   // Look up profile_id for this auth user
   const { data: profile } = await db

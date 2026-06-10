@@ -15,7 +15,7 @@ export const POST: APIRoute = async (context) => {
 
     if (!path.startsWith(`groups/${groupId}/`)) return json({ error: 'Invalid path' }, 403);
 
-    const db = getSupabaseAdmin() as any;
+    const db = getSupabaseAdmin();
 
     const { data: profile } = await db
       .from('profiles').select('id').eq('auth_user_id', user.id).single();

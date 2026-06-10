@@ -14,7 +14,7 @@ export const POST: APIRoute = async (context) => {
   if (body.trim().length > 2000)
     return json({ error: "Comment must be 2000 characters or fewer." }, 400);
 
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
 
   // Fetch extra profile fields needed for the response
   const { data: profile } = await db

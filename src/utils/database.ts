@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { createServerClient, parseCookieHeader, serializeCookieHeader } from '@supabase/ssr';
+import type { Database } from '../../supabase/types';
 
 /**
  * Admin client — uses the service role key to bypass RLS.
@@ -11,7 +12,7 @@ export function getSupabaseAdmin() {
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error('Missing SUPABASE_DATABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars');
   }
-  return createClient(supabaseUrl, serviceRoleKey, {
+  return createClient<Database>(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false },
   });
 }
@@ -20,7 +21,7 @@ export function getSupabase() {
   const supabaseUrl = import.meta.env.SUPABASE_DATABASE_URL;
   const supabaseKey = import.meta.env.SUPABASE_ANON_KEY;
   if (!supabaseUrl || !supabaseKey) throw new Error('Missing Supabase env vars');
-  return createClient(supabaseUrl, supabaseKey);
+  return createClient<Database>(supabaseUrl, supabaseKey);
 }
 
 export function createSupabaseServerClient(request: Request, response: Response) {

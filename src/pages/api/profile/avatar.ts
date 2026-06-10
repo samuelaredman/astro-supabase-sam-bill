@@ -19,7 +19,7 @@ export const POST: APIRoute = async (context) => {
   const path = `${user.id}/avatar.${ext}`;
 
   // Use admin client for storage and DB writes
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
 
   const { error: uploadError } = await db.storage
     .from('avatars')

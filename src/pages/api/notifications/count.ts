@@ -7,7 +7,7 @@ export const GET: APIRoute = async (context) => {
   const { data: { user } } = await userClient.auth.getUser();
   if (!user) return json({ unread: 0 });
 
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
   const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();
   if (!profile) return json({ unread: 0 });

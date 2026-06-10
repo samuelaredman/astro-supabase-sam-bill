@@ -14,7 +14,7 @@ export const POST: APIRoute = async (context) => {
   if (!file || !groupId) return json({ error: 'Missing file or group_id' }, 400);
   if (file.size > 5 * 1024 * 1024) return json({ error: 'File must be under 5MB' }, 400);
 
-  const db = getSupabaseAdmin() as any;
+  const db = getSupabaseAdmin();
 
   const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();

@@ -14,7 +14,7 @@ export const POST: APIRoute = async (context) => {
   if (!VALID_TARGET_TYPES.includes(target_type) || !target_id || !VALID_REASONS.includes(reason))
     return json({ error: "Invalid report data." }, 400);
 
-  const { data: existing } = await (db as any)
+  const { data: existing } = await db
     .from('reports')
     .select('id')
     .eq('reporter_id', profile.id)
@@ -24,7 +24,7 @@ export const POST: APIRoute = async (context) => {
 
   if (existing) return json({ error: "You've already reported this." }, 409);
 
-  const { error } = await (db as any)
+  const { error } = await db
     .from('reports')
     .insert({
       reporter_id: profile.id,

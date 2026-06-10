@@ -16,7 +16,7 @@ export const POST: APIRoute = async (context) => {
     const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
     if (!allowed.includes(fileType)) return json({ error: 'Only JPEG, PNG, WebP, or GIF allowed' }, 400);
 
-    const db = getSupabaseAdmin() as any;
+    const db = getSupabaseAdmin();
 
     const { data: existing } = await db.storage.from('banners').list(user.id);
     if (existing?.length) {
