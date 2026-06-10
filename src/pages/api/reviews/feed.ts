@@ -1,11 +1,6 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+import { json } from "../../../utils/api";
 
 const REVIEW_FIELDS = `
   id, score, title, body, play_time_hours,

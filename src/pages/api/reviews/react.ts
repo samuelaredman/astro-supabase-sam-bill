@@ -1,23 +1,14 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+import { requireAuth, json } from "../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  const userClient = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await userClient.auth.getUser();
-  if (!user) return json({ error: "Sign in to react to reviews." }, 401);
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
   const { review_id, reaction_type } = await context.request.json();
   if (!review_id || !reaction_type)
     return json({ error: "review_id and reaction_type are required." }, 400);
-
-  const db = getSupabaseAdmin() as any;
-
-  const { data: profile } = await db
-    .from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return json({ error: "Profile not found." }, 404);
 
   // Toggle: delete if exists, insert if not
   const { data: existing } = await db

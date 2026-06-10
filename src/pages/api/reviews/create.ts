@@ -1,41 +1,18 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { requireAuth, json } from "../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return new Response(JSON.stringify({ error: "You must be signed in to post a review." }), {
-      status: 401,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  const { data: profile, error: profileError } = await (supabase as any)
-    .from("profiles")
-    .select("id")
-    .eq("auth_user_id", user.id)
-    .single();
-
-  if (profileError || !profile) {
-    return new Response(JSON.stringify({ error: "Profile not found." }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
   const body = await context.request.json();
   const { game_id, score, title, body: reviewBody, platform_played_on, play_time_hours, contains_spoilers } = body;
 
-  if (!game_id || !score || !title || !reviewBody) {
-    return new Response(JSON.stringify({ error: "Missing required fields." }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (!game_id || !score || !title || !reviewBody)
+    return json({ error: "Missing required fields." }, 400);
 
-  const { data: existing } = await (supabase as any)
+  const { data: existing } = await (db as any)
     .from('reviews')
     .select('id')
     .eq('profile_id', profile.id)
@@ -43,14 +20,9 @@ export const POST: APIRoute = async (context) => {
     .eq('status', 'published')
     .maybeSingle();
 
-  if (existing) {
-    return new Response(JSON.stringify({ error: "You've already reviewed this game." }), {
-      status: 409,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (existing) return json({ error: "You've already reviewed this game." }, 409);
 
-  const { data: inserted, error: insertError } = await (supabase as any)
+  const { data: inserted, error: insertError } = await (db as any)
     .from("reviews")
     .insert({
       profile_id: profile.id,
@@ -68,23 +40,20 @@ export const POST: APIRoute = async (context) => {
     .single();
 
   if (insertError) {
-    return new Response(JSON.stringify({ error: insertError.message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    console.error('[reviews/create] insert error:', JSON.stringify(insertError));
+    return json({ error: insertError.message }, 500);
   }
 
   // ── Fire notifications (non-blocking — don't fail the request if this errors) ──
   try {
-    const db = getSupabaseAdmin() as any;
 
     // People actively tracking this game (want_to_play or playing), excluding the reviewer
-    const { data: watchers } = await db
+    const { data: watchers } = await (db as any)
       .from('user_game_status').select('profile_id')
       .eq('game_id', game_id).in('status', ['want_to_play', 'playing']).neq('profile_id', profile.id);
 
     // People who follow the reviewer with notify = true (excluding the reviewer)
-    const { data: notifyFollowers } = await db
+    const { data: notifyFollowers } = await (db as any)
       .from('follows').select('follower_id')
       .eq('following_id', profile.id).eq('notify', true).neq('follower_id', profile.id);
 
@@ -106,15 +75,15 @@ export const POST: APIRoute = async (context) => {
       }
     }
 
-    if (rows.length > 0) await db.from('notifications').insert(rows);
+    if (rows.length > 0) await (db as any).from('notifications').insert(rows);
   } catch (e) {
     console.error('[create] notification error (non-fatal):', e);
   }
 
   // ── Fetch community context for the post-review reveal card ──
   const [{ data: gameData }, { data: communityReviews }] = await Promise.all([
-    (supabase as any).from('games').select('slug, cover_img_url').eq('id', game_id).single(),
-    (supabase as any).from('reviews').select('score').eq('game_id', game_id).eq('status', 'published'),
+    (db as any).from('games').select('slug, cover_img_url').eq('id', game_id).single(),
+    (db as any).from('reviews').select('score').eq('game_id', game_id).eq('status', 'published'),
   ]);
 
   const reviewCount = communityReviews?.length ?? 1;
@@ -122,14 +91,11 @@ export const POST: APIRoute = async (context) => {
     ? Math.round((communityReviews.reduce((s: number, r: any) => s + r.score, 0) / reviewCount) * 10) / 10
     : score;
 
-  return new Response(JSON.stringify({
+  return json({
     success: true,
     gameSlug: gameData?.slug ?? null,
     gameCover: gameData?.cover_img_url ?? null,
     communityAvg,
     reviewCount,
-  }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
   });
 };

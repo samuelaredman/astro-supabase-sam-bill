@@ -1,9 +1,7 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+import { json } from '../../../utils/api';
 
 export const POST: APIRoute = async (context) => {
   try {

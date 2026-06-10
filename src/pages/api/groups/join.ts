@@ -1,19 +1,13 @@
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { requireAuth, json } from "../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  const supabase = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return json({ error: "Unauthorized" }, 401);
-
-  const { data: profile } = await (supabase as any)
-    .from("profiles").select("id").eq("auth_user_id", user.id).single();
-  if (!profile) return json({ error: "Profile not found" }, 404);
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
   const body = await context.request.json();
   const { group_id, invite_code } = body;
-
-  const db = getSupabaseAdmin() as any;
 
   // Resolve the group — by id or invite_code
   let groupQuery = db.from("groups").select("id, visibility, invite_code");
@@ -59,10 +53,3 @@ export const POST: APIRoute = async (context) => {
 
   return json({ id: group.id });
 };
-
-function json(body: object, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}

@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { json } from "../../../utils/api";
 
 function randomCode(len = 8) {
   return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
@@ -51,10 +52,3 @@ export const POST: APIRoute = async (context) => {
 
   return json({ id: group.id, invite_code: group.invite_code });
 };
-
-function json(body: object, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}

@@ -1,18 +1,13 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../utils/database";
+import { json } from "../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  const bad = (msg: string) =>
-    new Response(JSON.stringify({ error: msg }), { status: 400, headers: { "Content-Type": "application/json" } });
+  const bad = (msg: string) => json({ error: msg }, 400);
 
-  // Must be logged in
   const userClient = createSupabaseServerClientFromContext(context);
   const { data: { user } } = await userClient.auth.getUser();
-  if (!user) {
-    return new Response(JSON.stringify({ error: "Sign in to send a message." }), {
-      status: 401, headers: { "Content-Type": "application/json" },
-    });
-  }
+  if (!user) return json({ error: "Sign in to send a message." }, 401);
 
   let body: any;
   try { body = await context.request.json(); } catch { return bad("Invalid JSON."); }
@@ -51,13 +46,9 @@ export const POST: APIRoute = async (context) => {
     });
 
   if (error) {
-    console.error('contact insert error', error);
-    return new Response(JSON.stringify({ error: "Failed to submit. Please try again." }), {
-      status: 500, headers: { "Content-Type": "application/json" },
-    });
+    console.error('contact insert error', JSON.stringify(error));
+    return json({ error: "Failed to submit. Please try again." }, 500);
   }
 
-  return new Response(JSON.stringify({ ok: true }), {
-    status: 200, headers: { "Content-Type": "application/json" },
-  });
+  return json({ ok: true });
 };
