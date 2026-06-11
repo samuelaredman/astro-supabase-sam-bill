@@ -29,22 +29,34 @@ export const POST: APIRoute = async (context) => {
   const steamId = profileData.steam_id;
   const steamApiKey = import.meta.env.STEAM_API_KEY;
 
+  if (!steamApiKey) {
+    console.error('[steam/import] STEAM_API_KEY is not set');
+    return json({ error: 'Steam API is not configured. Please contact support.' }, 500);
+  }
+
   // Fetch owned games from Steam
   let steamGames: Array<{ appid: number; name: string; playtime_forever: number }> = [];
   try {
     const res = await fetch(
       `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=true&include_played_free_games=true`
     );
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[steam/import] Steam returned HTTP ${res.status}:`, text.slice(0, 200));
+      return json({ error: `Steam returned an error (HTTP ${res.status}). Please try again.` }, 502);
+    }
     const data = await res.json();
     steamGames = data?.response?.games ?? [];
   } catch (e) {
-    console.error('[steam/import] GetOwnedGames error:', e);
-    return json({ error: 'Could not reach Steam. Please try again.' }, 502);
+    console.error('[steam/import] GetOwnedGames fetch/parse error:', e);
+    return json({ error: `Could not reach Steam (network error). Please try again.` }, 502);
   }
 
   // Optional: only import/keep games with playtime > 0
   const body = await context.request.json().catch(() => ({}));
   const playedOnly = body.playedOnly === true;
+
+  console.log(`[steam/import] Steam returned ${steamGames.length} games for steamId=${steamId}`);
 
   if (steamGames.length === 0) {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0, removed: 0 });
@@ -58,6 +70,10 @@ export const POST: APIRoute = async (context) => {
 
   // Match against our games table via DB function (case-insensitive)
   const steamTitles = Array.from(steamByTitle.keys());
+
+  console.log(`[steam/import] Sending ${steamTitles.length} titles to match_steam_games`);
+  console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
+
   const { data: matchedGames, error: matchError } = await db
     .rpc('match_steam_games', { steam_titles: steamTitles });
 
@@ -67,6 +83,14 @@ export const POST: APIRoute = async (context) => {
   }
 
   const matches: Array<{ id: string; title: string }> = matchedGames ?? [];
+
+  console.log(`[steam/import] match_steam_games returned ${matches.length} matches:`, matches.map(m => m.title));
+
+  if (matches.length > 0) {
+    const matchedTitlesSet = new Set(matches.map(m => m.title.toLowerCase().trim()));
+    const unmatched = steamTitles.filter(t => !matchedTitlesSet.has(t));
+    console.log(`[steam/import] Unmatched Steam titles (${unmatched.length}):`, unmatched);
+  }
 
   if (matches.length === 0) {
     await db.from('profiles').update({ steam_synced_at: new Date().toISOString() }).eq('id', profile.id);
