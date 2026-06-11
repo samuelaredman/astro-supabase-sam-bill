@@ -205,13 +205,19 @@ if (currentProfile && !isOwnProfile) {
 const db = getSupabaseAdmin() as any;
 const { data: libraryData } = await db
   .from('user_game_status')
-  .select('status, updated_at, games(id, title, slug, cover_img_url)')
+  .select('status, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
   .eq('profile_id', reviewer.id)
   .order('updated_at', { ascending: false });
 
+// Which games has this reviewer published a review for?
+const { data: reviewedRows } = await db
+  .from('reviews')
+  .select('game_id')
+  .eq('profile_id', reviewer.id)
+  .eq('status', 'published');
+const reviewedGameIdsSet: Set<string> = new Set((reviewedRows ?? []).map((r: any) => r.game_id));
+
 // Apply privacy filtering
-// Use the negative pattern: show by default (treat undefined/null as 'public'),
-// hide only when explicitly set to 'private' or 'friends' without mutual follow.
 const canSeeWantToPlay = isOwnProfile
   || !(reviewer.want_to_play_privacy === 'private'
        || (reviewer.want_to_play_privacy === 'friends' && !isMutualFollow));
@@ -220,13 +226,14 @@ const canSeeDropped = isOwnProfile
        || (reviewer.dropped_privacy === 'friends' && !isMutualFollow));
 
 const allLibraryItems = (libraryData ?? []).filter((item: any) => {
+  if (item.status === 'hidden') return isOwnProfile;   // hidden = owner-only
   if (item.status === 'want_to_play') return canSeeWantToPlay;
   if (item.status === 'dropped') return canSeeDropped;
-  return true; // playing + completed always public
+  return true;
 });
 
 // Group by status for filter pills
-const libraryByStatus: Record<string, any[]> = { playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [] };
+const libraryByStatus: Record<string, any[]> = { playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [], hidden: [] };
 for (const item of allLibraryItems) {
   if (libraryByStatus[item.status]) libraryByStatus[item.status].push(item.games);
 }
@@ -366,6 +373,18 @@ const isOwnProfileJson = JSON.stringify(isOwnProfile)
 const showcaseJson = JSON.stringify(
   Array.isArray(reviewer.showcase_games) ? reviewer.showcase_games : []
 )
+const libraryJson = JSON.stringify(allLibraryItems.map((item: any) => ({
+  gameId:   item.games?.id ?? '',
+  title:    item.games?.title ?? '',
+  slug:     item.games?.slug ?? '',
+  cover:    item.games?.cover_img_url ?? null,
+  status:   item.status,
+  updatedAt: item.updated_at ?? '',
+  playtime: item.steam_playtime_minutes ?? null,
+  hasReview: reviewedGameIdsSet.has(item.games?.id),
+  genres:   (item.games?.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean),
+})))
+const libraryIsOwn = JSON.stringify(isOwnProfile)
 
 // vote counting logic for reviews
 // CDN cache — anonymous visitors share a cached response; auth users get a fresh render
@@ -603,8 +622,31 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .lib-dot.completed{background:#4ade80}
     .lib-dot.hundred_percent{background:#fbbf24}
     .lib-dot.dropped{background:#f87171}
+    .lib-dot.hidden{background:#6b7280}
     .lib-legend{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:4px;margin-top:-6px}
     .lib-legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary)}
+    /* library controls */
+    .lib-controls-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+    .lib-search{flex:1;min-width:160px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:7px 12px;font-size:13px;color:var(--text-primary);font-family:inherit;outline:none}
+    .lib-search:focus{border-color:var(--accent)}
+    .lib-sort{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px;color:var(--text-primary);font-family:inherit;cursor:pointer;outline:none}
+    .lib-edit-btn{background:transparent;border:1px solid var(--border);color:var(--text-secondary);padding:7px 14px;border-radius:8px;font-size:13px;font-family:inherit;cursor:pointer;white-space:nowrap}
+    .lib-edit-btn:hover{border-color:var(--accent);color:var(--accent)}
+    /* bulk edit bar */
+    #libEditBar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;background:rgba(96,80,200,.08);border:1px solid rgba(96,80,200,.25);border-radius:8px;margin-bottom:14px}
+    .lib-edit-count{font-size:13px;font-weight:600;color:var(--accent);flex:1;min-width:80px}
+    .lib-bulk-apply{background:var(--accent);color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
+    .lib-bulk-delete{background:transparent;border:1px solid #f87171;color:#f87171;padding:6px 14px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
+    .lib-bulk-delete:hover{background:#f87171;color:#fff}
+    .lib-edit-cancel{background:transparent;border:1px solid var(--border);color:var(--text-secondary);padding:6px 14px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer;margin-left:auto}
+    /* edit mode item */
+    .lib-item.lib-edit-active{cursor:pointer}
+    .lib-checkbox{position:absolute;top:5px;left:5px;width:18px;height:18px;border-radius:4px;background:rgba(0,0,0,.55);border:1.5px solid rgba(255,255,255,.45);display:flex;align-items:center;justify-content:center;z-index:2}
+    .lib-checkbox.checked{background:var(--accent);border-color:var(--accent)}
+    .lib-check-inner{width:9px;height:9px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.5 5l2.5 2.5 4.5-4.5' stroke='white' stroke-width='1.8' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;opacity:0}
+    .lib-checkbox.checked .lib-check-inner{opacity:1}
+    /* reviewed badge */
+    .lib-reviewed-badge{position:absolute;top:5px;right:5px;font-size:10px;background:rgba(0,0,0,.6);color:#fbbf24;border-radius:4px;padding:1px 4px;line-height:1.4;z-index:1}
 
     /* VOTES FOR REVIEWS */
     .vote-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
@@ -1065,6 +1107,8 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
   <!-- ── LIBRARY TAB ── -->
   <div class={`tab-panel ${activeTab === 'library' ? 'active' : ''}`} data-tab="library">
+
+    {/* Steam CTA / sync bar */}
     {isOwnProfile && (
       <>
         {!reviewer.steam_id ? (
@@ -1074,7 +1118,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
             </div>
             <div class="steam-cta-body">
               <div class="steam-cta-title">Import your Steam library</div>
-              <div class="steam-cta-desc">Connect Steam to automatically add your owned games and playtime — then track what you're playing, what you've finished, and what's next.</div>
+              <div class="steam-cta-desc">Connect Steam to automatically add your owned games and playtime.</div>
             </div>
             <a href={`/api/auth/steam-connect?from=${encodeURIComponent(`/reviewers/${reviewer.username}?tab=library`)}`} class="steam-cta-btn">Connect Steam</a>
           </div>
@@ -1093,81 +1137,73 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
             </label>
             <button class="steam-sync-btn" id="profileSyncBtn" data-username={reviewer.username} onclick="profileSteamSync()">Sync now</button>
           </div>
-          <div id="profileSyncStatus" style="font-size:13px;color:var(--text-tertiary);min-height:0;margin-top:6px;display:none"></div>
         )}
       </>
     )}
-    {allLibraryItems.length === 0 ? (
+
+    {/* Library controls — search, sort, edit (rendered by JS from libraryJson) */}
+    <div id="libControls" style="display:none">
+      <div class="lib-controls-row">
+        <input id="libSearch" class="lib-search" type="search" placeholder="Search by title or genre…" autocomplete="off" />
+        <select id="libSort" class="lib-sort">
+          <option value="alpha">A – Z</option>
+          <option value="recent">Recently added</option>
+          <option value="review">Has review first</option>
+          <option value="hours">Most hours played</option>
+        </select>
+        {isOwnProfile && (
+          <button id="libEditBtn" class="lib-edit-btn" onclick="toggleLibEdit()">Edit library</button>
+        )}
+      </div>
+      <div class="lib-filter-row" id="libFilterRow"></div>
+      <div id="profileSyncStatus" style="font-size:13px;color:var(--text-tertiary);margin-top:4px;display:none"></div>
+    </div>
+
+    {/* Bulk edit action bar */}
+    {isOwnProfile && (
+      <div id="libEditBar" style="display:none">
+        <span id="libEditCount" class="lib-edit-count">0 selected</span>
+        <select id="libBulkStatus" class="lib-sort" style="font-size:12px">
+          <option value="">Change status…</option>
+          <option value="playing">🎮 Playing</option>
+          <option value="want_to_play">🔖 Want to Play</option>
+          <option value="owned">📦 Owned</option>
+          <option value="completed">✓ Completed</option>
+          <option value="hundred_percent">💯 100%</option>
+          <option value="dropped">✗ Dropped</option>
+          <option value="hidden">🫥 Hidden</option>
+        </select>
+        <button class="lib-bulk-apply" onclick="applyBulkStatus()">Apply</button>
+        <button class="lib-bulk-delete" onclick="applyBulkDelete()">Remove</button>
+        <button class="lib-edit-cancel" onclick="toggleLibEdit()">Done</button>
+      </div>
+    )}
+
+    {/* Grid — rendered entirely by JS so sort/search/edit all work off one source of truth */}
+    <div id="libEmpty" style="display:none">
       <div class="empty-state">
-        <div class="empty-title">No games tracked yet</div>
+        <div class="empty-title">{allLibraryItems.length === 0 ? 'No games tracked yet' : 'No games match'}</div>
         <p style="font-size:14px;color:var(--text-tertiary)">
-          {isOwnProfile
-            ? 'Track your games from any game page, or connect Steam above to import your library automatically.'
-            : `@${reviewer.username} hasn't tracked any games yet.`
+          {allLibraryItems.length === 0
+            ? (isOwnProfile
+                ? 'Track your games from any game page, or connect Steam above to import your library automatically.'
+                : `@${reviewer.username} hasn't tracked any games yet.`)
+            : 'Try a different search or filter.'
           }
         </p>
       </div>
-    ) : (
-      <>
-        <div class="lib-filter-row" id="libFilterRow">
-          <button class="lib-pill active" data-filter="all" onclick="filterLib(this,'all')">
-            All <span class="pill-count">{allLibraryItems.length}</span>
-          </button>
-          {libraryByStatus.playing.length > 0 && (
-            <button class="lib-pill" data-filter="playing" onclick="filterLib(this,'playing')">
-              🎮 Playing <span class="pill-count">{libraryByStatus.playing.length}</span>
-            </button>
-          )}
-          {libraryByStatus.completed.length > 0 && (
-            <button class="lib-pill" data-filter="completed" onclick="filterLib(this,'completed')">
-              ✓ Completed <span class="pill-count">{libraryByStatus.completed.length}</span>
-            </button>
-          )}
-          {libraryByStatus.hundred_percent.length > 0 && (
-            <button class="lib-pill" data-filter="hundred_percent" onclick="filterLib(this,'hundred_percent')">
-              💯 100% <span class="pill-count">{libraryByStatus.hundred_percent.length}</span>
-            </button>
-          )}
-          {libraryByStatus.want_to_play.length > 0 && (
-            <button class="lib-pill" data-filter="want_to_play" onclick="filterLib(this,'want_to_play')">
-              🔖 Want to Play <span class="pill-count">{libraryByStatus.want_to_play.length}</span>
-            </button>
-          )}
-          {libraryByStatus.owned.length > 0 && (
-            <button class="lib-pill" data-filter="owned" onclick="filterLib(this,'owned')">
-              📦 Owned <span class="pill-count">{libraryByStatus.owned.length}</span>
-            </button>
-          )}
-          {libraryByStatus.dropped.length > 0 && (
-            <button class="lib-pill" data-filter="dropped" onclick="filterLib(this,'dropped')">
-              ✗ Dropped <span class="pill-count">{libraryByStatus.dropped.length}</span>
-            </button>
-          )}
-        </div>
-        <div class="lib-legend">
-          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#60a5fa;flex-shrink:0"></div>Playing</div>
-          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#4ade80;flex-shrink:0"></div>Completed</div>
-          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#fbbf24;flex-shrink:0"></div>100%</div>
-          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0"></div>Want to Play</div>
-          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#94a3b8;flex-shrink:0"></div>Owned</div>
-          <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#f87171;flex-shrink:0"></div>Dropped</div>
-        </div>
-        <div class="lib-grid" id="libGrid">
-          {allLibraryItems.map((item: any) => (
-            <a href={`/games/${item.games?.slug}`} class="lib-item" data-status={item.status}>
-              <div class="lib-cover">
-                {item.games?.cover_img_url
-                  ? <img src={igdbCover(item.games.cover_img_url, 't_cover_big') ?? ''} alt={item.games?.title} loading="lazy" />
-                  : <span>🎮</span>
-                }
-                <div class={`lib-dot ${item.status}`}></div>
-              </div>
-              <div class="lib-title">{item.games?.title}</div>
-            </a>
-          ))}
-        </div>
-      </>
-    )}
+    </div>
+    <div class="lib-legend" id="libLegend" style="display:none">
+      <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#60a5fa;flex-shrink:0"></div>Playing</div>
+      <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#4ade80;flex-shrink:0"></div>Completed</div>
+      <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#fbbf24;flex-shrink:0"></div>100%</div>
+      <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0"></div>Want to Play</div>
+      <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#94a3b8;flex-shrink:0"></div>Owned</div>
+      <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#f87171;flex-shrink:0"></div>Dropped</div>
+      <div class="lib-legend-item"><div style="width:8px;height:8px;border-radius:50%;background:#6b7280;flex-shrink:0"></div>Hidden</div>
+    </div>
+    <div class="lib-grid" id="libGrid"></div>
+
   </div>
 
   <!-- ── STATS TAB ── -->
@@ -1210,7 +1246,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn }}>
 
   var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#ffffff']
   var s = JSON.parse(statsJson)
@@ -1765,15 +1801,194 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 }
   window.sortReviews = sortReviews
 
-  // ── LIBRARY FILTER ──
-  function filterLib(btn, filter) {
-    document.querySelectorAll('.lib-pill').forEach(function(p) { p.classList.remove('active') })
-    btn.classList.add('active')
-    document.querySelectorAll('#libGrid .lib-item').forEach(function(item) {
-      item.style.display = (filter === 'all' || item.dataset.status === filter) ? '' : 'none'
+  // ── LIBRARY ──
+  var _libItems = JSON.parse(libraryJson)
+  var _libIsOwn = JSON.parse(libraryIsOwn)
+  var _libFilter = 'all'
+  var _libSort = 'alpha'
+  var _libSearch = ''
+  var _libEditMode = false
+  var _libSelected = new Set()
+
+  var STATUS_META = {
+    playing:         { icon: '🎮', label: 'Playing',      dot: '#60a5fa' },
+    completed:       { icon: '✓',  label: 'Completed',    dot: '#4ade80' },
+    hundred_percent: { icon: '💯', label: '100%',         dot: '#fbbf24' },
+    want_to_play:    { icon: '🔖', label: 'Want to Play', dot: '#f59e0b' },
+    owned:           { icon: '📦', label: 'Owned',        dot: '#94a3b8' },
+    dropped:         { icon: '✗',  label: 'Dropped',      dot: '#f87171' },
+    hidden:          { icon: '🫥', label: 'Hidden',       dot: '#6b7280' },
+  }
+
+  function _getVisible() {
+    var q = _libSearch.toLowerCase().trim()
+    var items = _libItems.filter(function(it) {
+      if (_libFilter !== 'all' && it.status !== _libFilter) return false
+      if (q) {
+        var inTitle = it.title.toLowerCase().includes(q)
+        var inGenre = it.genres.some(function(g) { return g.toLowerCase().includes(q) })
+        if (!inTitle && !inGenre) return false
+      }
+      return true
+    })
+    // sort
+    items = items.slice().sort(function(a, b) {
+      if (_libSort === 'alpha')   return a.title.localeCompare(b.title)
+      if (_libSort === 'recent')  return (b.updatedAt || '').localeCompare(a.updatedAt || '')
+      if (_libSort === 'review')  return (b.hasReview ? 1 : 0) - (a.hasReview ? 1 : 0)
+      if (_libSort === 'hours')   return (b.playtime || 0) - (a.playtime || 0)
+      return 0
+    })
+    return items
+  }
+
+  function _renderGrid() {
+    var grid = document.getElementById('libGrid')
+    var empty = document.getElementById('libEmpty')
+    var legend = document.getElementById('libLegend')
+    if (!grid) return
+    var items = _getVisible()
+    if (items.length === 0) {
+      grid.innerHTML = ''
+      if (empty) empty.style.display = ''
+      if (legend) legend.style.display = 'none'
+      return
+    }
+    if (empty) empty.style.display = 'none'
+    if (legend) legend.style.display = ''
+    grid.innerHTML = items.map(function(it) {
+      var coverUrl = it.cover
+        ? it.cover.replace(/^\/\//, 'https://').replace(/t_[a-z0-9_]+/, 't_cover_big')
+        : null
+      var checked = _libSelected.has(it.gameId)
+      return '<' + 'a href="/games/' + it.slug + '" class="lib-item' + (_libEditMode ? ' lib-edit-active' : '') + '" data-status="' + it.status + '" data-game-id="' + it.gameId + '">' +
+        '<div class="lib-cover">' +
+        (coverUrl ? '<img src="' + coverUrl + '" alt="" loading="lazy"/>' : '<span>🎮</span>') +
+        '<div class="lib-dot ' + it.status + '"></div>' +
+        (it.hasReview ? '<div class="lib-reviewed-badge" title="Reviewed">★</div>' : '') +
+        (_libEditMode ? '<div class="lib-checkbox' + (checked ? ' checked' : '') + '"><div class="lib-check-inner"></div></div>' : '') +
+        '</div>' +
+        '<div class="lib-title">' + it.title.replace(/</g,'&lt;') + '</div>' +
+        '</' + 'a>'
+    }).join('')
+
+    // click handler
+    grid.querySelectorAll('.lib-item').forEach(function(el) {
+      el.addEventListener('click', function(e) {
+        if (!_libEditMode) return // normal navigation
+        e.preventDefault()
+        var gid = el.dataset.gameId
+        if (_libSelected.has(gid)) _libSelected.delete(gid)
+        else _libSelected.add(gid)
+        _renderGrid()
+        _updateEditBar()
+      })
     })
   }
-  window.filterLib = filterLib
+
+  function _renderFilterPills() {
+    var row = document.getElementById('libFilterRow')
+    if (!row) return
+    var counts = {}
+    _libItems.forEach(function(it) { counts[it.status] = (counts[it.status] || 0) + 1 })
+    var total = _libItems.length
+    var pills = [{ key: 'all', label: 'All', count: total }]
+    var order = ['playing','completed','hundred_percent','want_to_play','owned','dropped','hidden']
+    order.forEach(function(s) {
+      if (counts[s]) pills.push({ key: s, label: (STATUS_META[s]?.icon || '') + ' ' + STATUS_META[s]?.label, count: counts[s] })
+    })
+    row.innerHTML = pills.map(function(p) {
+      return '<button class="lib-pill' + (_libFilter === p.key ? ' active' : '') + '" data-filter="' + p.key + '">' +
+        p.label + ' <span class="pill-count">' + p.count + '</span></button>'
+    }).join('')
+    row.querySelectorAll('.lib-pill').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        _libFilter = btn.dataset.filter
+        _renderFilterPills()
+        _renderGrid()
+      })
+    })
+  }
+
+  function _updateEditBar() {
+    var bar = document.getElementById('libEditBar')
+    var countEl = document.getElementById('libEditCount')
+    if (!bar) return
+    if (countEl) countEl.textContent = _libSelected.size + ' selected'
+    bar.style.display = _libEditMode ? 'flex' : 'none'
+  }
+
+  function toggleLibEdit() {
+    _libEditMode = !_libEditMode
+    _libSelected.clear()
+    var btn = document.getElementById('libEditBtn')
+    if (btn) btn.textContent = _libEditMode ? 'Cancel' : 'Edit library'
+    _renderGrid()
+    _updateEditBar()
+  }
+  window.toggleLibEdit = toggleLibEdit
+
+  async function applyBulkStatus() {
+    var sel = document.getElementById('libBulkStatus')
+    var status = sel ? sel.value : ''
+    if (!status || _libSelected.size === 0) return
+    var ids = Array.from(_libSelected)
+    var res = await fetch('/api/user-game-status/bulk-update', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game_ids: ids, action: 'set_status', status }),
+    })
+    if (res.ok) {
+      ids.forEach(function(gid) {
+        var it = _libItems.find(function(x) { return x.gameId === gid })
+        if (it) it.status = status
+      })
+      _libSelected.clear()
+      if (sel) sel.value = ''
+      _renderFilterPills()
+      _renderGrid()
+      _updateEditBar()
+    }
+  }
+  window.applyBulkStatus = applyBulkStatus
+
+  async function applyBulkDelete() {
+    if (_libSelected.size === 0) return
+    var ids = Array.from(_libSelected)
+    var res = await fetch('/api/user-game-status/bulk-update', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game_ids: ids, action: 'delete' }),
+    })
+    if (res.ok) {
+      _libItems = _libItems.filter(function(it) { return !_libSelected.has(it.gameId) })
+      _libSelected.clear()
+      _renderFilterPills()
+      _renderGrid()
+      _updateEditBar()
+    }
+  }
+  window.applyBulkDelete = applyBulkDelete
+
+  // Init library
+  ;(function() {
+    if (_libItems.length === 0 && !_libIsOwn) {
+      // show static empty state, controls hidden
+      var empty = document.getElementById('libEmpty')
+      if (empty) empty.style.display = ''
+      return
+    }
+    var controls = document.getElementById('libControls')
+    if (controls) controls.style.display = ''
+    var search = document.getElementById('libSearch')
+    var sort = document.getElementById('libSort')
+    if (search) search.addEventListener('input', function() { _libSearch = search.value; _renderGrid() })
+    if (sort) sort.addEventListener('change', function() { _libSort = sort.value; _renderGrid() })
+    _renderFilterPills()
+    _renderGrid()
+    if (_libItems.length > 0) {
+      var legend = document.getElementById('libLegend')
+      if (legend) legend.style.display = ''
+    }
+  })()
 
 
   // ── STATS TAB ──
