@@ -17,6 +17,15 @@ export const POST: APIRoute = async (context) => {
     return json({ error: 'No Steam account connected.' }, 400);
   }
 
+  // Enforce 1-minute cooldown between syncs
+  if (profileData.steam_synced_at) {
+    const secondsSinceSync = (Date.now() - new Date(profileData.steam_synced_at).getTime()) / 1000;
+    if (secondsSinceSync < 60) {
+      const wait = Math.ceil(60 - secondsSinceSync);
+      return json({ error: `Please wait ${wait}s before syncing again.` }, 429);
+    }
+  }
+
   const steamId = profileData.steam_id;
   const steamApiKey = import.meta.env.STEAM_API_KEY;
 
