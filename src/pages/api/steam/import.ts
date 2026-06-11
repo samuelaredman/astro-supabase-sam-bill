@@ -9,7 +9,7 @@ export const POST: APIRoute = async (context) => {
   // Check Steam account is connected
   const { data: profileData } = await db
     .from('profiles')
-    .select('steam_id')
+    .select('steam_id, steam_synced_at')
     .eq('id', profile.id)
     .single();
 
