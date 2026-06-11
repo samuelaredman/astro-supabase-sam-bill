@@ -29,16 +29,26 @@ export const POST: APIRoute = async (context) => {
   const steamId = profileData.steam_id;
   const steamApiKey = import.meta.env.STEAM_API_KEY;
 
+  if (!steamApiKey) {
+    console.error('[steam/import] STEAM_API_KEY is not set');
+    return json({ error: 'Steam API is not configured. Please contact support.' }, 500);
+  }
+
   // Fetch owned games from Steam
   let steamGames: Array<{ appid: number; name: string; playtime_forever: number }> = [];
   try {
     const res = await fetch(
       `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=true&include_played_free_games=true`
     );
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[steam/import] Steam returned HTTP ${res.status}:`, text.slice(0, 200));
+      return json({ error: 'Could not reach Steam. Please try again.' }, 502);
+    }
     const data = await res.json();
     steamGames = data?.response?.games ?? [];
   } catch (e) {
-    console.error('[steam/import] GetOwnedGames error:', e);
+    console.error('[steam/import] GetOwnedGames fetch/parse error:', e);
     return json({ error: 'Could not reach Steam. Please try again.' }, 502);
   }
 
