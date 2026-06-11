@@ -19,6 +19,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
   .select(`
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
     favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy,
+    library_visibility, library_show_hours, library_hidden_tabs,
     steam_id, steam_username, steam_synced_at,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
@@ -220,7 +221,7 @@ if (currentProfile && !isOwnProfile) {
 const db = getSupabaseAdmin() as any;
 const { data: libraryData } = await db
   .from('user_game_status')
-  .select('status, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
+  .select('status, is_hidden, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
   .eq('profile_id', reviewer.id)
   .order('updated_at', { ascending: false });
 
@@ -232,6 +233,12 @@ const { data: reviewedRows } = await db
   .eq('status', 'published');
 const reviewedGameIdsSet: Set<string> = new Set((reviewedRows ?? []).map((r: any) => r.game_id));
 
+// Library settings from profile (with defaults for old rows)
+const libraryVisibility: string = reviewer.library_visibility ?? 'public'
+const libraryShowHours: boolean = reviewer.library_show_hours ?? true
+const libraryHiddenTabs: string[] = reviewer.library_hidden_tabs ?? []
+const libraryIsPrivate = libraryVisibility === 'private' && !isOwnProfile
+
 // Apply privacy filtering
 const canSeeWantToPlay = isOwnProfile
   || !(reviewer.want_to_play_privacy === 'private'
@@ -240,15 +247,15 @@ const canSeeDropped = isOwnProfile
   || !(reviewer.dropped_privacy === 'private'
        || (reviewer.dropped_privacy === 'friends' && !isMutualFollow));
 
-const allLibraryItems = (libraryData ?? []).filter((item: any) => {
-  if (item.status === 'hidden') return isOwnProfile;   // hidden = owner-only
+const allLibraryItems = libraryIsPrivate ? [] : (libraryData ?? []).filter((item: any) => {
+  if (item.is_hidden && !isOwnProfile) return false;  // hidden games owner-only
   if (item.status === 'want_to_play') return canSeeWantToPlay;
   if (item.status === 'dropped') return canSeeDropped;
   return true;
 });
 
 // Group by status for filter pills
-const libraryByStatus: Record<string, any[]> = { playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [], hidden: [] };
+const libraryByStatus: Record<string, any[]> = { playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [] };
 for (const item of allLibraryItems) {
   if (libraryByStatus[item.status]) libraryByStatus[item.status].push(item.games);
 }
@@ -400,6 +407,7 @@ const libraryJson = JSON.stringify(allLibraryItems.map((item: any) => ({
   slug:     item.games?.slug ?? '',
   cover:    item.games?.cover_img_url ?? null,
   status:   item.status,
+  isHidden: item.is_hidden ?? false,
   updatedAt: item.updated_at ?? '',
   playtime: item.steam_playtime_minutes ?? null,
   hasReview: reviewedGameIdsSet.has(item.games?.id),
@@ -407,6 +415,12 @@ const libraryJson = JSON.stringify(allLibraryItems.map((item: any) => ({
   genres:   (item.games?.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean),
 })))
 const libraryIsOwn = JSON.stringify(isOwnProfile)
+const librarySettingsJson = JSON.stringify({
+  visibility: libraryVisibility,
+  showHours: libraryShowHours,
+  hiddenTabs: libraryHiddenTabs,
+  isPrivate: libraryIsPrivate,
+})
 
 // vote counting logic for reviews
 // CDN cache — anonymous visitors share a cached response; auth users get a fresh render
@@ -694,6 +708,27 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .lib-score-badge.score-low{background:var(--score-low-bg);color:var(--score-low);border:1px solid rgba(248,113,113,.4)}
     /* hours badge */
     .lib-hours-badge{position:absolute;top:5px;left:5px;font-size:10px;font-weight:600;background:rgba(0,0,0,.65);color:rgba(255,255,255,.85);border-radius:4px;padding:2px 5px;line-height:1.3;z-index:1;backdrop-filter:blur(4px)}
+    /* hidden indicator on card */
+    .lib-hidden-badge{position:absolute;top:5px;right:5px;font-size:12px;z-index:2;opacity:.8;line-height:1}
+    .lib-item-hidden{opacity:.7}
+    /* gear panel tabs */
+    .lib-gear-tabs{display:flex;gap:4px;margin:-16px -16px 16px;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--bg-hover);border-radius:11px 11px 0 0}
+    .lib-gear-tab{background:none;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;color:var(--text-tertiary);transition:all .15s}
+    .lib-gear-tab:hover{color:var(--text-primary);background:var(--bg-card)}
+    .lib-gear-tab.active{background:var(--accent);color:#fff}
+    /* settings controls */
+    .lib-gear-radio-group{display:flex;flex-direction:column;gap:8px}
+    .lib-gear-radio{display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary)}
+    .lib-gear-radio input[type=radio]{margin-top:2px;accent-color:var(--accent);cursor:pointer}
+    .lib-gear-radio-label{line-height:1.4}
+    .lib-gear-toggle-row{display:flex;align-items:center;justify-content:space-between;cursor:pointer;gap:12px}
+    .lib-gear-toggle{width:36px;height:20px;border-radius:10px;border:none;background:var(--border);cursor:pointer;position:relative;transition:background .2s;flex-shrink:0;padding:0}
+    .lib-gear-toggle::after{content:'';position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:white;transition:transform .2s}
+    .lib-gear-toggle.on{background:var(--accent)}
+    .lib-gear-toggle.on::after{transform:translateX(16px)}
+    .lib-gear-tab-toggles{display:flex;flex-direction:column;gap:6px}
+    .lib-gear-tab-toggle-row{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border-subtle)}
+    .lib-gear-tab-toggle-row:last-child{border-bottom:none}
 
     /* VOTES FOR REVIEWS */
     .vote-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
@@ -1129,6 +1164,13 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     )}
     <div id="profileSyncStatus" class="steam-sync-status" style="display:none"></div>
 
+    {libraryIsPrivate && (
+      <div class="empty-state" style="margin-top:16px">
+        <div class="empty-title">Library is private</div>
+        <p style="font-size:14px;color:var(--text-tertiary)">@{reviewer.username} has set their library to private.</p>
+      </div>
+    )}
+
     {/* Library controls — search, sort, edit (rendered by JS from libraryJson) */}
     <div id="libControls" style="display:none">
       <div class="lib-controls-row">
@@ -1156,14 +1198,51 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
     {isOwnProfile && (
       <div class="lib-gear-panel" id="libGearPanel">
-        <div class="lib-gear-section">
-          <div class="lib-gear-section-title">Hidden Games</div>
-          <div id="libHiddenList"></div>
+        <div class="lib-gear-tabs">
+          <button class="lib-gear-tab active" data-tab="settings" onclick="switchGearTab('settings',this)">Main Settings</button>
+          <button class="lib-gear-tab" data-tab="hidden" onclick="switchGearTab('hidden',this)">Hidden Games</button>
         </div>
-        <div class="lib-gear-section">
-          <div class="lib-gear-section-title">Hide a game</div>
-          <input class="lib-hide-search" id="libHideSearch" type="search" placeholder="Search your library…" autocomplete="off" />
-          <div class="lib-hide-results" id="libHideResults"></div>
+
+        {/* ── Main Settings tab ── */}
+        <div class="lib-gear-tab-content" id="libGearTabSettings">
+          <div class="lib-gear-section">
+            <div class="lib-gear-section-title">Library Visibility</div>
+            <div class="lib-gear-radio-group" id="libVisibilityGroup">
+              <label class="lib-gear-radio">
+                <input type="radio" name="libVisibility" value="public" />
+                <span class="lib-gear-radio-label"><strong>Public</strong> — anyone can see your library</span>
+              </label>
+              <label class="lib-gear-radio">
+                <input type="radio" name="libVisibility" value="private" />
+                <span class="lib-gear-radio-label"><strong>Private</strong> — only you can see your library</span>
+              </label>
+            </div>
+          </div>
+          <div class="lib-gear-section">
+            <div class="lib-gear-section-title">Hours Played</div>
+            <label class="lib-gear-toggle-row" id="libShowHoursRow">
+              <span style="font-size:13px;color:var(--text-secondary)">Show hours played on cards</span>
+              <button class="lib-gear-toggle" id="libShowHoursBtn" onclick="toggleLibShowHours()"></button>
+            </label>
+          </div>
+          <div class="lib-gear-section" style="margin-bottom:0">
+            <div class="lib-gear-section-title">Visible Status Tabs</div>
+            <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:8px">Choose which filter tabs are visible to others on your profile.</div>
+            <div id="libTabToggles"></div>
+          </div>
+        </div>
+
+        {/* ── Hidden Games tab ── */}
+        <div class="lib-gear-tab-content" id="libGearTabHidden" style="display:none">
+          <div class="lib-gear-section">
+            <div class="lib-gear-section-title">Hidden Games</div>
+            <div id="libHiddenList"></div>
+          </div>
+          <div class="lib-gear-section" style="margin-bottom:0">
+            <div class="lib-gear-section-title">Hide a game</div>
+            <input class="lib-hide-search" id="libHideSearch" type="search" placeholder="Search your library…" autocomplete="off" />
+            <div class="lib-hide-results" id="libHideResults"></div>
+          </div>
         </div>
       </div>
     )}
@@ -1301,7 +1380,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn, librarySettingsJson }}>
 
   var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#ffffff']
   var s = JSON.parse(statsJson)
@@ -1859,6 +1938,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   // ── LIBRARY ──
   var _libItems = JSON.parse(libraryJson)
   var _libIsOwn = JSON.parse(libraryIsOwn)
+  var _libSettings = JSON.parse(librarySettingsJson)
   var _libFilter = 'all'
   var _libSort = 'alpha'
   var _libSearch = ''
@@ -1876,14 +1956,15 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     want_to_play:    { icon: '🔖', label: 'Want to Play', dot: '#f59e0b' },
     owned:           { icon: '📦', label: 'Owned',        dot: '#94a3b8' },
     dropped:         { icon: '✗',  label: 'Dropped',      dot: '#f87171' },
-    hidden:          { icon: '🫥', label: 'Hidden',       dot: '#6b7280' },
   }
 
   function _getVisible() {
     var q = _libSearch.toLowerCase().trim()
     var items = _libItems.filter(function(it) {
-      if (_showHidden) return it.status === 'hidden'
-      if (it.status === 'hidden') return false
+      // "Hidden" pill: show only hidden items
+      if (_showHidden) return it.isHidden
+      // Non-owners never see hidden items (server already filtered, but belt-and-suspenders)
+      if (it.isHidden && !_libIsOwn) return false
       if (_libFilter !== 'all') {
         if (_libFilter === 'completed') {
           if (it.status !== 'completed' && it.status !== 'hundred_percent') return false
@@ -1934,14 +2015,19 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       var scoreHtml = it.reviewScore != null
         ? '<div class="lib-score-badge ' + libScoreClass(it.reviewScore) + '">' + it.reviewScore + '</div>'
         : ''
-      var hrs = it.playtime != null ? Math.round(it.playtime / 60) : null
+      var showHrs = _libIsOwn || _libSettings.showHours
+      var hrs = (showHrs && it.playtime != null) ? Math.round(it.playtime / 60) : null
       var hoursHtml = hrs != null && it.playtime > 0
         ? '<div class="lib-hours-badge">' + hrs + 'h</div>'
         : ''
-      return '<' + 'a href="/games/' + it.slug + '" class="lib-item' + (_libEditMode ? ' lib-edit-active' : '') + '" data-status="' + it.status + '" data-game-id="' + it.gameId + '">' +
+      var hiddenBadge = (it.isHidden && _libIsOwn)
+        ? '<div class="lib-hidden-badge" title="Hidden from others">🫥</div>'
+        : ''
+      return '<' + 'a href="/games/' + it.slug + '" class="lib-item' + (_libEditMode ? ' lib-edit-active' : '') + (it.isHidden && _libIsOwn ? ' lib-item-hidden' : '') + '" data-status="' + it.status + '" data-game-id="' + it.gameId + '">' +
         '<div class="lib-cover">' +
         (coverUrl ? '<img src="' + coverUrl + '" alt="" loading="lazy"/>' : '<span>🎮</span>') +
         hoursHtml +
+        hiddenBadge +
         scoreHtml +
         (_libEditMode ? '<div class="lib-checkbox' + (checked ? ' checked' : '') + '"><div class="lib-check-inner"></div></div>' : '') +
         '</div>' +
@@ -1968,12 +2054,15 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     if (!row) return
     var counts = {}
     _libItems.forEach(function(it) { counts[it.status] = (counts[it.status] || 0) + 1 })
-    var hiddenCount = counts['hidden'] || 0
-    var total = _libItems.length - hiddenCount
+    var hiddenCount = _libItems.filter(function(it) { return it.isHidden }).length
+    // For "All" count: owner sees all; others already have is_hidden items filtered server-side
+    var total = _libItems.length
     var pills = [{ key: 'all', label: 'All', count: total }]
     var order = ['playing','completed','hundred_percent','want_to_play','owned','dropped']
+    var hiddenTabsSet = new Set(_libIsOwn ? [] : (_libSettings.hiddenTabs || []))
     order.forEach(function(s) {
       if (!counts[s]) return
+      if (!_libIsOwn && hiddenTabsSet.has(s)) return  // hidden from public view
       var count = s === 'completed' ? (counts['completed'] || 0) + (counts['hundred_percent'] || 0) : counts[s]
       pills.push({ key: s, label: (STATUS_META[s]?.icon || '') + ' ' + STATUS_META[s]?.label, count: count })
     })
@@ -2062,6 +2151,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
   // Init library
   ;(function() {
+    if (_libSettings.isPrivate) return  // private library: Astro shows the message above
     if (_libItems.length === 0 && !_libIsOwn) {
       // show static empty state, controls hidden
       var empty = document.getElementById('libEmpty')
@@ -2114,7 +2204,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     function _renderHiddenList() {
       var el = document.getElementById('libHiddenList')
       if (!el) return
-      var hidden = _libItems.filter(function(it) { return it.status === 'hidden' })
+      var hidden = _libItems.filter(function(it) { return it.isHidden })
       if (!hidden.length) {
         el.innerHTML = '<div style="font-size:13px;color:var(--text-tertiary);padding:4px 0">No hidden games.</div>'
         return
@@ -2133,7 +2223,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       var el = document.getElementById('libHideResults')
       if (!el) return
       var results = _libItems.filter(function(it) {
-        if (it.status === 'hidden') return false
+        if (it.isHidden) return false
         if (!q) return true
         return it.title.toLowerCase().includes(q.toLowerCase())
       }).slice(0, 30)
@@ -2157,10 +2247,79 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       if (!panel) return
       var open = panel.classList.toggle('open')
       if (btn) btn.classList.toggle('open', open)
-      if (open) {
-        _renderHiddenList()
-        _renderHideResults('')
+      if (open) { _renderGearSettings(); _renderHiddenList(); _renderHideResults('') }
+    }
+
+    window.switchGearTab = function(tab, el) {
+      document.querySelectorAll('.lib-gear-tab').forEach(function(t) { t.classList.remove('active') })
+      if (el) el.classList.add('active')
+      document.getElementById('libGearTabSettings').style.display = tab === 'settings' ? '' : 'none'
+      document.getElementById('libGearTabHidden').style.display = tab === 'hidden' ? '' : 'none'
+    }
+
+    // ── Settings rendering ──
+    function _renderGearSettings() {
+      // Visibility radios
+      var radios = document.querySelectorAll('input[name="libVisibility"]')
+      radios.forEach(function(r) { r.checked = (r.value === _libSettings.visibility) })
+      radios.forEach(function(r) {
+        r.addEventListener('change', async function() {
+          if (!r.checked) return
+          _libSettings.visibility = r.value
+          await fetch('/api/profile/library-settings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ library_visibility: r.value })
+          })
+        })
+      })
+      // Hours toggle
+      var hoursBtn = document.getElementById('libShowHoursBtn')
+      if (hoursBtn) {
+        hoursBtn.classList.toggle('on', _libSettings.showHours)
+        hoursBtn.onclick = async function() {
+          _libSettings.showHours = !_libSettings.showHours
+          hoursBtn.classList.toggle('on', _libSettings.showHours)
+          await fetch('/api/profile/library-settings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ library_show_hours: _libSettings.showHours })
+          })
+          _renderGrid()
+        }
       }
+      // Tab visibility toggles
+      var tabTogglesEl = document.getElementById('libTabToggles')
+      if (tabTogglesEl) {
+        var tabOrder = [
+          { key: 'playing', label: '🎮 Playing' },
+          { key: 'completed', label: '✓ Completed' },
+          { key: 'hundred_percent', label: '💯 100%' },
+          { key: 'want_to_play', label: '🔖 Want to Play' },
+          { key: 'owned', label: '📦 Owned' },
+          { key: 'dropped', label: '✗ Dropped' },
+        ]
+        var hiddenSet = new Set(_libSettings.hiddenTabs || [])
+        tabTogglesEl.innerHTML = '<div class="lib-gear-tab-toggles">' + tabOrder.map(function(t) {
+          var isOn = !hiddenSet.has(t.key)
+          return '<div class="lib-gear-tab-toggle-row">' +
+            '<span style="font-size:13px;color:var(--text-secondary)">' + t.label + '</span>' +
+            '<button class="lib-gear-toggle' + (isOn ? ' on' : '') + '" data-tabkey="' + t.key + '" onclick="toggleLibTab(\'' + t.key + '\',this)"></button>' +
+            '</div>'
+        }).join('') + '</div>'
+      }
+    }
+
+    window.toggleLibShowHours = function() {} // handled inline above
+
+    window.toggleLibTab = async function(key, btn) {
+      var hiddenSet = new Set(_libSettings.hiddenTabs || [])
+      if (hiddenSet.has(key)) hiddenSet.delete(key)
+      else hiddenSet.add(key)
+      _libSettings.hiddenTabs = Array.from(hiddenSet)
+      btn.classList.toggle('on', !hiddenSet.has(key))
+      await fetch('/api/profile/library-settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ library_hidden_tabs: _libSettings.hiddenTabs })
+      })
     }
 
     var hideSearch = document.getElementById('libHideSearch')
@@ -2168,29 +2327,29 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
     window.libUnhide = async function(gameId) {
       var it = _libItems.find(function(x) { return x.gameId === gameId })
-      var res = await fetch('/api/user-game-status/set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_id: gameId, status: 'owned' })
+      var res = await fetch('/api/user-game-status/toggle-hidden', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ game_id: gameId, hidden: false })
       })
       if (!res.ok) return
-      if (it) it.status = 'owned'
+      if (it) it.isHidden = false
       _renderHiddenList()
       _renderHideResults(hideSearch ? hideSearch.value : '')
+      _renderFilterPills()
       _renderGrid()
     }
 
     window.libHide = async function(gameId) {
       var it = _libItems.find(function(x) { return x.gameId === gameId })
-      var res = await fetch('/api/user-game-status/set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_id: gameId, status: 'hidden' })
+      var res = await fetch('/api/user-game-status/toggle-hidden', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ game_id: gameId, hidden: true })
       })
       if (!res.ok) return
-      if (it) it.status = 'hidden'
+      if (it) it.isHidden = true
       _renderHiddenList()
       _renderHideResults(hideSearch ? hideSearch.value : '')
+      _renderFilterPills()
       _renderGrid()
     }
   })()

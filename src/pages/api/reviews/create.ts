@@ -44,6 +44,18 @@ export const POST: APIRoute = async (context) => {
     return json({ error: insertError.message }, 500);
   }
 
+  // ── Auto-track the reviewed game as completed (if not already in library) ──
+  try {
+    await db.from("user_game_status").upsert({
+      profile_id: profile.id,
+      game_id,
+      status: "completed",
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "profile_id,game_id", ignoreDuplicates: true });
+  } catch (e) {
+    console.error("[create] library auto-track error (non-fatal):", e);
+  }
+
   // ── Fire notifications (non-blocking — don't fail the request if this errors) ──
   try {
 
