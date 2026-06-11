@@ -1091,7 +1091,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
               <input type="checkbox" id="profilePlayedOnly" style="accent-color:var(--accent)">
               Played only
             </label>
-            <button class="steam-sync-btn" id="profileSyncBtn" onclick="profileSteamSync()">Sync now</button>
+            <button class="steam-sync-btn" id="profileSyncBtn" data-username={reviewer.username} onclick="profileSteamSync()">Sync now</button>
           </div>
           <div id="profileSyncStatus" style="font-size:13px;color:var(--text-tertiary);min-height:0;margin-top:6px;display:none"></div>
         )}
@@ -1775,52 +1775,6 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   }
   window.filterLib = filterLib
 
-  // ── PROFILE PAGE STEAM SYNC ──
-  async function profileSteamSync() {
-    if (window.__steamSyncing) return
-    window.__steamSyncing = true
-    var btn = document.getElementById('profileSyncBtn')
-    var statusEl = document.getElementById('profileSyncStatus')
-    var playedOnly = !!(document.getElementById('profilePlayedOnly'))?.checked
-    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…' }
-    if (statusEl) { statusEl.textContent = ''; statusEl.style.display = 'none'; statusEl.style.color = 'var(--text-tertiary)' }
-    try {
-      var res = await fetch('/api/steam/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playedOnly: playedOnly })
-      })
-      var data = await res.json()
-      if (!res.ok) {
-        if (statusEl) { statusEl.textContent = data.error || 'Sync failed.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block' }
-        if (btn) { btn.disabled = false; btn.textContent = 'Sync now' }
-        window.__steamSyncing = false
-      } else {
-        var parts = [data.matched + ' new', data.updated + ' updated']
-        if (data.removed > 0) parts.push(data.removed + ' removed')
-        if (statusEl) {
-          statusEl.innerHTML = 'Synced — ' + parts.join(', ') + '. <a href="?tab=library" style="color:var(--accent)">Refresh to see changes</a>'
-          statusEl.style.display = 'block'
-        }
-        if (btn) { btn.disabled = false; btn.textContent = 'Sync now' }
-        window.__steamSyncing = false
-      }
-    } catch (e) {
-      if (statusEl) { statusEl.textContent = 'Network error.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block' }
-      if (btn) { btn.disabled = false; btn.textContent = 'Sync now' }
-      window.__steamSyncing = false
-    }
-  }
-  window.profileSteamSync = profileSteamSync
-
-  // Strip ?steam= param left by the callback redirect (no auto-action — user syncs manually)
-  (function() {
-    var sp = new URLSearchParams(window.location.search)
-    if (!sp.has('steam')) return
-    sp.delete('steam')
-    var newSearch = sp.toString()
-    history.replaceState(null, '', window.location.pathname + (newSearch ? '?' + newSearch : '') + window.location.hash)
-  })()
 
   // ── STATS TAB ──
   function scoreCol(score) {
@@ -2479,6 +2433,50 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     if (panel) panel.classList.add('active')
     if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
   })
+</script>
+<script>
+  // Strip ?steam= param left by the OAuth callback — no auto-action, user syncs manually
+  (function() {
+    var sp = new URLSearchParams(window.location.search);
+    if (!sp.has('steam')) return;
+    sp.delete('steam');
+    var q = sp.toString();
+    history.replaceState(null, '', window.location.pathname + (q ? '?' + q : '') + window.location.hash);
+  })();
+
+  window.profileSteamSync = async function profileSteamSync() {
+    var btn = document.getElementById('profileSyncBtn') as HTMLButtonElement | null;
+    var statusEl = document.getElementById('profileSyncStatus') as HTMLElement | null;
+    if (!btn || btn.disabled) return;
+    var username = btn.dataset.username ?? '';
+    var playedOnly = !!(document.getElementById('profilePlayedOnly') as HTMLInputElement | null)?.checked;
+    btn.disabled = true;
+    btn.textContent = 'Syncing…';
+    if (statusEl) { statusEl.textContent = ''; statusEl.style.display = 'none'; statusEl.style.color = 'var(--text-tertiary)'; }
+    try {
+      var res = await fetch('/api/steam/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playedOnly }),
+      });
+      var data = await res.json();
+      if (!res.ok) {
+        if (statusEl) { statusEl.textContent = data.error || 'Sync failed.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block'; }
+      } else {
+        var parts = [data.matched + ' new', data.updated + ' updated'];
+        if (data.removed > 0) parts.push(data.removed + ' removed');
+        if (statusEl) {
+          statusEl.innerHTML = 'Synced — ' + parts.join(', ') + '. <a href="/reviewers/' + username + '?tab=library" style="color:var(--accent)">Refresh to see changes</a>';
+          statusEl.style.display = 'block';
+        }
+      }
+    } catch (e) {
+      if (statusEl) { statusEl.textContent = 'Network error.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block'; }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Sync now';
+    }
+  };
 </script>
 <ReportModal />
 <EditModal />
