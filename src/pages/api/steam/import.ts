@@ -43,13 +43,13 @@ export const POST: APIRoute = async (context) => {
     if (!res.ok) {
       const text = await res.text();
       console.error(`[steam/import] Steam returned HTTP ${res.status}:`, text.slice(0, 200));
-      return json({ error: 'Could not reach Steam. Please try again.' }, 502);
+      return json({ error: `Steam returned an error (HTTP ${res.status}). Please try again.` }, 502);
     }
     const data = await res.json();
     steamGames = data?.response?.games ?? [];
   } catch (e) {
     console.error('[steam/import] GetOwnedGames fetch/parse error:', e);
-    return json({ error: 'Could not reach Steam. Please try again.' }, 502);
+    return json({ error: `Could not reach Steam (network error). Please try again.` }, 502);
   }
 
   // Optional: only import/keep games with playtime > 0
