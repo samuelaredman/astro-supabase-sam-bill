@@ -19,7 +19,6 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
   .select(`
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
     favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy,
-    library_visibility, library_show_hours, library_hidden_tabs,
     steam_id, steam_username, steam_synced_at,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
@@ -219,11 +218,34 @@ if (currentProfile && !isOwnProfile) {
 }
 
 const db = getSupabaseAdmin() as any;
-const { data: libraryData } = await db
-  .from('user_game_status')
-  .select('status, is_hidden, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
-  .eq('profile_id', reviewer.id)
-  .order('updated_at', { ascending: false });
+
+// Fetch library settings — columns added in migration 20260611000000; fall back to defaults if not yet applied
+const { data: libSettingsRow } = await db
+  .from('profiles')
+  .select('library_visibility, library_show_hours, library_hidden_tabs')
+  .eq('id', reviewer.id)
+  .maybeSingle()
+  .catch(() => ({ data: null }));
+
+// Try selecting is_hidden (added in migration 20260611000000); fall back without it if not yet applied
+let libraryData: any[] | null = null;
+{
+  const { data: ld1, error: le1 } = await db
+    .from('user_game_status')
+    .select('status, is_hidden, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
+    .eq('profile_id', reviewer.id)
+    .order('updated_at', { ascending: false });
+  if (!le1) {
+    libraryData = ld1;
+  } else {
+    const { data: ld2 } = await db
+      .from('user_game_status')
+      .select('status, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
+      .eq('profile_id', reviewer.id)
+      .order('updated_at', { ascending: false });
+    libraryData = ld2;
+  }
+}
 
 // Which games has this reviewer published a review for?
 const { data: reviewedRows } = await db
@@ -233,10 +255,10 @@ const { data: reviewedRows } = await db
   .eq('status', 'published');
 const reviewedGameIdsSet: Set<string> = new Set((reviewedRows ?? []).map((r: any) => r.game_id));
 
-// Library settings from profile (with defaults for old rows)
-const libraryVisibility: string = reviewer.library_visibility ?? 'public'
-const libraryShowHours: boolean = reviewer.library_show_hours ?? true
-const libraryHiddenTabs: string[] = reviewer.library_hidden_tabs ?? []
+// Library settings from profile (with defaults for old rows or pre-migration)
+const libraryVisibility: string = libSettingsRow?.library_visibility ?? 'public'
+const libraryShowHours: boolean = libSettingsRow?.library_show_hours ?? true
+const libraryHiddenTabs: string[] = libSettingsRow?.library_hidden_tabs ?? []
 const libraryIsPrivate = libraryVisibility === 'private' && !isOwnProfile
 
 // Apply privacy filtering
