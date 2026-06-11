@@ -33,8 +33,12 @@ export const POST: APIRoute = async (context) => {
     return json({ error: 'Could not reach Steam. Please try again.' }, 502);
   }
 
+  // Optional: only import/keep games with playtime > 0
+  const body = await context.request.json().catch(() => ({}));
+  const playedOnly = body.playedOnly === true;
+
   if (steamGames.length === 0) {
-    return json({ matched: 0, updated: 0, unmatched: 0, total: 0 });
+    return json({ matched: 0, updated: 0, unmatched: 0, total: 0, removed: 0 });
   }
 
   // Build lowercase→playtime map from Steam library
@@ -86,7 +90,8 @@ export const POST: APIRoute = async (context) => {
     const existing = existingByGameId.get(game.id);
 
     if (!existing) {
-      // No status yet — add with 'owned'
+      // Skip 0-hour games when playedOnly is set
+      if (playedOnly && playtime === 0) continue;
       toInsert.push({
         profile_id: profile.id,
         game_id: game.id,
@@ -116,6 +121,24 @@ export const POST: APIRoute = async (context) => {
       .eq('game_id', game_id);
   }
 
+  // If playedOnly, remove any existing 'owned' rows that were imported with 0 playtime
+  // (steam_playtime_minutes = 0 means Steam-imported with no hours; NULL means manually added)
+  let removed = 0;
+  if (playedOnly) {
+    const { data: removed0, error: removeError } = await db
+      .from('user_game_status')
+      .delete()
+      .eq('profile_id', profile.id)
+      .eq('status', 'owned')
+      .eq('steam_playtime_minutes', 0)
+      .select('id');
+    if (removeError) {
+      console.error('[steam/import] remove 0-hour error:', JSON.stringify(removeError));
+    } else {
+      removed = removed0?.length ?? 0;
+    }
+  }
+
   // Stamp the sync time
   await db.from('profiles')
     .update({ steam_synced_at: new Date().toISOString() })
@@ -126,5 +149,6 @@ export const POST: APIRoute = async (context) => {
     updated: toUpdatePlaytime.length,
     unmatched: steamGames.length - matches.length,
     total: steamGames.length,
+    removed,
   });
 };

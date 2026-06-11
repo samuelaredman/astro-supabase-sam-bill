@@ -8,8 +8,15 @@ export const GET: APIRoute = async (context) => {
 
   const params = context.url.searchParams;
 
+  const from = params.get('from') ?? '';
+  function appendParam(base: string, kv: string) {
+    return base ? `${base}${base.includes('?') ? '&' : '?'}${kv}` : '';
+  }
+  const successRedirect = from ? appendParam(from, 'steam=connected') : '/settings?steam=connected';
+  const errorRedirect   = from ? appendParam(from, 'steam=error')     : '/settings?steam=error';
+
   if (params.get('openid.mode') !== 'id_res') {
-    return context.redirect('/settings?steam=cancelled');
+    return context.redirect(from ? appendParam(from, 'steam=cancelled') : '/settings?steam=cancelled');
   }
 
   // Verify the assertion with Steam to prevent forgery
@@ -25,7 +32,7 @@ export const GET: APIRoute = async (context) => {
 
   if (!verifyText.includes('is_valid:true')) {
     console.error('[steam-callback] OpenID verification failed:', verifyText);
-    return context.redirect('/settings?steam=error');
+    return context.redirect(errorRedirect);
   }
 
   // Extract Steam ID from the claimed identity URL
@@ -34,7 +41,7 @@ export const GET: APIRoute = async (context) => {
   const steamIdMatch = claimedId.match(/\/id\/(\d+)$/);
   if (!steamIdMatch) {
     console.error('[steam-callback] Could not extract Steam ID from:', claimedId);
-    return context.redirect('/settings?steam=error');
+    return context.redirect(errorRedirect);
   }
   const steamId = steamIdMatch[1];
 
@@ -55,7 +62,7 @@ export const GET: APIRoute = async (context) => {
   const db = getSupabaseAdmin() as any;
   const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return context.redirect('/settings?steam=error');
+  if (!profile) return context.redirect(errorRedirect);
 
   const { error } = await db.from('profiles').update({
     steam_id: steamId,
@@ -64,8 +71,8 @@ export const GET: APIRoute = async (context) => {
 
   if (error) {
     console.error('[steam-callback] profile update error:', JSON.stringify(error));
-    return context.redirect('/settings?steam=error');
+    return context.redirect(errorRedirect);
   }
 
-  return context.redirect('/settings?steam=connected');
+  return context.redirect(successRedirect);
 };
