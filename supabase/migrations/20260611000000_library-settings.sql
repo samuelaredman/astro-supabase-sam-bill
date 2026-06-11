@@ -2,6 +2,11 @@
 ALTER TABLE user_game_status
   ADD COLUMN IF NOT EXISTS is_hidden boolean NOT NULL DEFAULT false;
 
+-- Convert existing hidden-status rows before tightening the constraint
+UPDATE user_game_status
+  SET status = 'owned', is_hidden = true
+  WHERE status = 'hidden';
+
 -- Remove 'hidden' from valid status values; it is now tracked via is_hidden
 ALTER TABLE user_game_status DROP CONSTRAINT IF EXISTS user_game_status_status_check;
 
