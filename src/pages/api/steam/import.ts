@@ -46,6 +46,8 @@ export const POST: APIRoute = async (context) => {
   const body = await context.request.json().catch(() => ({}));
   const playedOnly = body.playedOnly === true;
 
+  console.log(`[steam/import] Steam returned ${steamGames.length} games for steamId=${steamId}`);
+
   if (steamGames.length === 0) {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0, removed: 0 });
   }
@@ -58,6 +60,10 @@ export const POST: APIRoute = async (context) => {
 
   // Match against our games table via DB function (case-insensitive)
   const steamTitles = Array.from(steamByTitle.keys());
+
+  console.log(`[steam/import] Sending ${steamTitles.length} titles to match_steam_games`);
+  console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
+
   const { data: matchedGames, error: matchError } = await db
     .rpc('match_steam_games', { steam_titles: steamTitles });
 
@@ -67,6 +73,14 @@ export const POST: APIRoute = async (context) => {
   }
 
   const matches: Array<{ id: string; title: string }> = matchedGames ?? [];
+
+  console.log(`[steam/import] match_steam_games returned ${matches.length} matches:`, matches.map(m => m.title));
+
+  if (matches.length > 0) {
+    const matchedTitlesSet = new Set(matches.map(m => m.title.toLowerCase().trim()));
+    const unmatched = steamTitles.filter(t => !matchedTitlesSet.has(t));
+    console.log(`[steam/import] Unmatched Steam titles (${unmatched.length}):`, unmatched);
+  }
 
   if (matches.length === 0) {
     await db.from('profiles').update({ steam_synced_at: new Date().toISOString() }).eq('id', profile.id);
