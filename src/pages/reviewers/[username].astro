@@ -219,32 +219,37 @@ if (currentProfile && !isOwnProfile) {
 
 const db = getSupabaseAdmin() as any;
 
-// Fetch library settings — columns added in migration 20260611000000; fall back to defaults if not yet applied
-const { data: libSettingsRow } = await db
-  .from('profiles')
-  .select('library_visibility, library_show_hours, library_hidden_tabs')
-  .eq('id', reviewer.id)
-  .maybeSingle()
-  .catch(() => ({ data: null }));
+// Fetch library settings with fallback in case migration hasn't run yet
+let libSettingsRow: any = null;
+try {
+  const { data } = await db
+    .from('profiles')
+    .select('library_visibility, library_show_hours, library_hidden_tabs')
+    .eq('id', reviewer.id)
+    .maybeSingle();
+  libSettingsRow = data;
+} catch (_) { /* columns not yet available, use defaults below */ }
 
-// Try selecting is_hidden (added in migration 20260611000000); fall back without it if not yet applied
+// Fetch library with is_hidden; fall back to query without it if column missing
 let libraryData: any[] | null = null;
-{
-  const { data: ld1, error: le1 } = await db
+try {
+  const { data, error } = await db
     .from('user_game_status')
     .select('status, is_hidden, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
     .eq('profile_id', reviewer.id)
     .order('updated_at', { ascending: false });
-  if (!le1) {
-    libraryData = ld1;
+  if (!error) {
+    libraryData = data;
   } else {
-    const { data: ld2 } = await db
+    const { data: fallback } = await db
       .from('user_game_status')
       .select('status, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
       .eq('profile_id', reviewer.id)
       .order('updated_at', { ascending: false });
-    libraryData = ld2;
+    libraryData = fallback;
   }
+} catch (_) {
+  libraryData = [];
 }
 
 // Which games has this reviewer published a review for?
