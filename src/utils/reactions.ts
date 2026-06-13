@@ -1,34 +1,11 @@
-export type EmojiCategory = { label: string; emojis: string[] };
-
-export const EMOJI_CATEGORIES: EmojiCategory[] = [
-  {
-    label: 'Reactions',
-    emojis: ['😂','😭','😍','🤩','😤','😠','😱','🤯','😴','🤔','🙃','😎','😬','🤡','💀','🥹','😏','🥱','🫠','🤦'],
-  },
-  {
-    label: 'Hands & Hearts',
-    emojis: ['👍','👎','👏','🙌','🤝','🫶','❤️','💯','💪','🤌','👌','🤙','✌️','🤞','💔','🖤','🤍','🫂','🙏','✋'],
-  },
-  {
-    label: 'Gaming',
-    emojis: ['🎮','🕹️','👾','🏆','🥇','🎯','💣','⚔️','🛡️','🧙','🐉','👻','🤖','💥','🎲','🏅','🎭','🚀','⚡','🌟'],
-  },
-  {
-    label: 'Objects & Nature',
-    emojis: ['🔥','💎','💰','💵','💸','🔮','🧩','📝','🔑','👁️','🎵','🍿','☕','🌈','🌙','❄️','🌊','🦋','🦊','🐸'],
-  },
-  {
-    label: 'Symbols',
-    emojis: ['✅','❌','⭐','💫','❓','❗','💤','🎉','🎊','🚩','♾️','🔁','☠️','💢','👀','🫡','💡','🏳️','🔴','🟢'],
-  },
-];
-
 export type ImageEmote = { key: string; path: string };
 
 export const IMAGE_EMOTES: ImageEmote[] = [
   { key: '5Head',        path: '/emotes/5Head.webp' },
+  { key: 'AYAYA',        path: '/emotes/AYAYA.webp' },
   { key: 'catJam',       path: '/emotes/catJam.webp' },
   { key: 'Clap',         path: '/emotes/Clap.webp' },
+  { key: 'clubPls',      path: '/emotes/clubPls.webp' },
   { key: 'COPIUM',       path: '/emotes/COPIUM.webp' },
   { key: 'ddHuh',        path: '/emotes/ddHuh.webp' },
   { key: 'DonoWall',     path: '/emotes/DonoWall.webp' },
@@ -36,7 +13,9 @@ export const IMAGE_EMOTES: ImageEmote[] = [
   { key: 'gachiBASS',    path: '/emotes/gachiBASS.webp' },
   { key: 'gachiHyper',   path: '/emotes/gachiHyper.webp' },
   { key: 'GIGACHAD',     path: '/emotes/GIGACHAD.webp' },
+  { key: 'jjkStress',    path: '/emotes/jjkStress.webp' },
   { key: 'KEKW',         path: '/emotes/KEKW.webp' },
+  { key: 'LOLL',         path: '/emotes/LOLL.webp' },
   { key: 'LULW',         path: '/emotes/LULW.webp' },
   { key: 'MLADY',        path: '/emotes/MLADY.webp' },
   { key: 'monkaW',       path: '/emotes/monkaW.webp' },
@@ -52,23 +31,19 @@ export const IMAGE_EMOTES: ImageEmote[] = [
   { key: 'pepeD',        path: '/emotes/pepeD.webp' },
   { key: 'PepeHands',    path: '/emotes/PepeHands.webp' },
   { key: 'pepeJAM',      path: '/emotes/pepeJAM.webp' },
-  { key: 'PepeLaugh',    path: '/emotes/PepeLaugh.webp' },
   { key: 'Pepega',       path: '/emotes/Pepega.webp' },
   { key: 'PepegaCredit', path: '/emotes/PepegaCredit.webp' },
+  { key: 'PepeLaugh',    path: '/emotes/PepeLaugh.webp' },
+  { key: 'PenguinR',     path: '/emotes/PenguinR.webp' },
+  { key: 'pikaOMG',      path: '/emotes/pikaOMG.webp' },
   { key: 'POGGERS',      path: '/emotes/POGGERS.webp' },
+  { key: 'POLICE',       path: '/emotes/POLICE.webp' },
+  { key: 'ppDrool',      path: '/emotes/ppDrool.webp' },
+  { key: 'Prayge',       path: '/emotes/Prayge.webp' },
+  { key: 'pressF',       path: '/emotes/pressF.webp' },
   { key: 'Sadge',        path: '/emotes/Sadge.webp' },
-  { key: 'pressF',        path: '/emotes/pressF.webp' },
-  { key: 'POLICE',        path: '/emotes/POLICE.webp' },
-  { key: 'AYAYA',        path: '/emotes/AYAYA.webp' },
-  { key: 'pikaOMG',        path: '/emotes/pikaOMG.webp' },
-  { key: 'Prayge',        path: '/emotes/Prayge.webp' },
-  { key: 'ThisIsFine',        path: '/emotes/ThisIsFine.webp' },
-  { key: 'jjkStress',        path: '/emotes/jjkStress.webp' },
-  { key: 'LOLL',        path: '/emotes/LOLL.webp' },
-  { key: 'ppDrool',        path: '/emotes/ppDrool.webp' },
-  { key: 'PenguinR',        path: '/emotes/PenguinR.webp' },
-  { key: 'clubPls',        path: '/emotes/clubPls.webp' },
-]; 
+  { key: 'ThisIsFine',   path: '/emotes/ThisIsFine.webp' },
+];
 
 export const IMAGE_EMOTE_MAP: Record<string, string> = Object.fromEntries(
   IMAGE_EMOTES.map(e => [e.key, e.path])
