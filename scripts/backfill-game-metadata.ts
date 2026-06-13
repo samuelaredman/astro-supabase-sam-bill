@@ -111,15 +111,26 @@ async function upsertJunctionBatch(
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const { data: allGames, error } = await db
-    .from('games')
-    .select('id, igdb_id, title')
-    .not('igdb_id', 'is', null)
-    .order('id');
+  const allGames: any[] = [];
+  const PAGE_SIZE = 1000;
+  let page = 0;
 
-  if (error || !allGames) {
-    console.error('Failed to fetch games from DB:', error);
-    process.exit(1);
+  while (true) {
+    const { data, error } = await db
+      .from('games')
+      .select('id, igdb_id, title')
+      .not('igdb_id', 'is', null)
+      .order('id')
+      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+
+    if (error) {
+      console.error('Failed to fetch games from DB:', error);
+      process.exit(1);
+    }
+    if (!data || data.length === 0) break;
+    allGames.push(...data);
+    if (data.length < PAGE_SIZE) break;
+    page++;
   }
 
   const total = allGames.length;
