@@ -146,26 +146,24 @@ async function main() {
     const igdbByIgdbId = new Map<number, any>(igdbGames.map(g => [g.id, g]));
 
     const gameDataMap = new Map<string, any>();
-    const scalarUpdates: any[] = [];
 
     for (const game of batch) {
       const igdbData = igdbByIgdbId.get(game.igdb_id);
       if (!igdbData) continue;
       gameDataMap.set(game.id, igdbData);
-      scalarUpdates.push({
-        id:            game.id,
-        igdb_category: igdbData.category  ?? null,
-        igdb_status:   igdbData.status    ?? null,
-        storyline:     igdbData.storyline ?? null,
-      });
-    }
 
-    // Bulk update scalar fields
-    if (scalarUpdates.length > 0) {
+      // Use update (not upsert) — upsert triggers NOT NULL check on title at
+      // INSERT stage even when the row already exists and conflict resolves it.
       const { error: updateError } = await db
         .from('games')
-        .upsert(scalarUpdates, { onConflict: 'id' });
-      if (updateError) console.error('\n  Scalar update error:', updateError.message);
+        .update({
+          igdb_category: igdbData.category  ?? null,
+          igdb_status:   igdbData.status    ?? null,
+          storyline:     igdbData.storyline ?? null,
+        })
+        .eq('id', game.id);
+
+      if (updateError) console.error(`\n  Update error for "${game.title}":`, updateError.message);
     }
 
     // Batch upsert all junction tables in parallel
