@@ -4,6 +4,7 @@ import Layout from "../components/Layout.astro";
 import ReportModal from "../components/ReportModal.astro";
 import EditModal from "../components/EditModal.astro";
 import ReviewCard from "../components/ReviewCard.astro";
+import ListCard from "../components/ListCard.astro";
 import { igdbImage, timeAgo, scoreClass } from '../utils/format';
 
 const supabase = getSupabase();
@@ -69,6 +70,47 @@ const [
 
 const currentProfile = profileRes.data ?? null
 const { data: platforms } = platformsRes
+
+// ── Recent lists shared to feed ──
+const { data: recentListsRaw } = await db
+  .from('lists')
+  .select('id, title, is_ranked, visibility, created_at, profiles(id, username, avatar_url)')
+  .eq('visibility', 'public')
+  .eq('shared_to_feed', true)
+  .order('created_at', { ascending: false })
+  .limit(4);
+
+const recentListIds = (recentListsRaw ?? []).map((l: any) => l.id);
+const { data: recentListEntries } = recentListIds.length > 0
+  ? await db.from('list_entries')
+      .select('list_id, games(cover_img_url)')
+      .in('list_id', recentListIds)
+      .order('position', { ascending: true, nullsFirst: false })
+      .order('added_at', { ascending: true })
+  : { data: [] };
+const { data: recentListEntryCounts } = recentListIds.length > 0
+  ? await db.from('list_entries').select('list_id').in('list_id', recentListIds)
+  : { data: [] };
+
+const recentListCoversByListId: Record<string, string[]> = {};
+for (const e of recentListEntries ?? []) {
+  const cover = igdbImage(e.games?.cover_img_url, 't_cover_big');
+  if (cover) {
+    if (!recentListCoversByListId[e.list_id]) recentListCoversByListId[e.list_id] = [];
+    if (recentListCoversByListId[e.list_id].length < 4) recentListCoversByListId[e.list_id].push(cover);
+  }
+}
+const recentListCountByListId: Record<string, number> = {};
+for (const e of recentListEntryCounts ?? []) {
+  recentListCountByListId[e.list_id] = (recentListCountByListId[e.list_id] ?? 0) + 1;
+}
+const recentLists = (recentListsRaw ?? []).map((l: any) => ({
+  ...l,
+  ownerUsername: l.profiles?.username,
+  ownerAvatar: l.profiles?.avatar_url,
+  coverUrls: recentListCoversByListId[l.id] ?? [],
+  entryCount: recentListCountByListId[l.id] ?? 0,
+}));
 
 type Platform = { id: string; name: string; slug: string; };
 type Review = {
@@ -923,6 +965,28 @@ const initialFollowingDone = followingReviews.length < 20
         ))
       )}
     </div>
+
+    {recentLists.length > 0 && (
+      <div class="widget" style="margin-top:4px">
+        <div class="widget-title">Recent Lists</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          {recentLists.map((list: any) => (
+            <ListCard
+              id={list.id}
+              title={list.title}
+              isRanked={list.is_ranked}
+              visibility={list.visibility}
+              entryCount={list.entryCount}
+              coverUrls={list.coverUrls}
+              ownerUsername={list.ownerUsername}
+              ownerAvatar={list.ownerAvatar}
+              showOwner={true}
+              compact={true}
+            />
+          ))}
+        </div>
+      </div>
+    )}
 
     <div class="widget" style="margin-top:4px">
       <div class="widget-title">Site stats</div>
