@@ -1,0 +1,484 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import Layout from "../../../components/Layout.astro";
+import { igdbImage } from "../../../utils/format";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+if (!user) return Astro.redirect("/signin");
+
+const { id } = Astro.params;
+const db = getSupabaseAdmin() as any;
+
+const { data: currentProfile } = await db
+  .from("profiles")
+  .select("id, username, avatar_url")
+  .eq("auth_user_id", user.id)
+  .maybeSingle();
+if (!currentProfile) return Astro.redirect("/signin");
+
+const { data: list } = await db
+  .from("lists")
+  .select("id, title, description, is_ranked, visibility, profile_id")
+  .eq("id", id)
+  .maybeSingle();
+
+if (!list || list.profile_id !== currentProfile.id) return Astro.redirect("/404");
+
+const { data: entries } = await db
+  .from("list_entries")
+  .select("id, position, notes, added_at, games ( id, title, slug, cover_img_url, date_released )")
+  .eq("list_id", id)
+  .order("position", { ascending: true, nullsFirst: false })
+  .order("added_at", { ascending: true });
+
+const entryList = entries ?? [];
+const entriesJson = JSON.stringify(entryList.map((e: any) => ({
+  id: e.id,
+  position: e.position,
+  notes: e.notes ?? "",
+  game_id: e.games?.id,
+  game_title: e.games?.title,
+  game_slug: e.games?.slug,
+  game_year: e.games?.date_released ? new Date(e.games.date_released).getFullYear() : null,
+  cover: igdbImage(e.games?.cover_img_url, "t_cover_big"),
+})));
+---
+
+<Layout title={`Edit "${list.title}" — Chekpoint`} isLoggedIn={true} currentProfile={currentProfile}>
+<style is:global>
+  .edit-wrap { max-width: 640px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  .edit-back { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; padding: 0 0 20px; font-family: inherit; transition: color .15s; }
+  .edit-back:hover { color: var(--text-secondary); }
+
+  .edit-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; margin-bottom: 16px; }
+  .edit-section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-tertiary); margin-bottom: 16px; }
+
+  .form-group { margin-bottom: 16px; }
+  .form-label { display: block; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-secondary); margin-bottom: 7px; }
+  .form-input { width: 100%; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 14px; font-family: inherit; outline: none; transition: border-color .15s; box-sizing: border-box; }
+  .form-input:focus { border-color: var(--accent); }
+  textarea.form-input { resize: vertical; min-height: 72px; }
+
+  .toggle-row { display: flex; align-items: center; gap: 10px; }
+  .toggle-label { font-size: 14px; color: var(--text-secondary); }
+  .toggle-switch { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-track { position: absolute; inset: 0; border-radius: 11px; background: var(--border); cursor: pointer; transition: background .2s; }
+  .toggle-switch input:checked + .toggle-track { background: var(--accent); }
+  .toggle-track::after { content: ''; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .2s; }
+  .toggle-switch input:checked + .toggle-track::after { transform: translateX(18px); }
+
+  .meta-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .meta-row .form-group { flex: 1; min-width: 200px; margin-bottom: 0; }
+
+  .btn-primary { background: var(--accent); color: #fff; border: none; padding: 9px 22px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity .15s; }
+  .btn-primary:hover { opacity: .85; }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-ghost { background: var(--tag-bg); color: var(--text-secondary); border: 1px solid var(--border); padding: 9px 18px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+  .btn-danger { background: rgba(248,113,113,.1); color: #f87171; border: 1px solid rgba(248,113,113,.25); padding: 9px 18px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; }
+  .btn-danger:hover { background: rgba(248,113,113,.2); }
+  .meta-save-msg { font-size: 13px; color: var(--score-great, #4ade80); display: none; }
+
+  /* ── Game search ── */
+  .search-wrap { position: relative; }
+  .search-input { width: 100%; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 14px; font-family: inherit; outline: none; transition: border-color .15s; box-sizing: border-box; }
+  .search-input:focus { border-color: var(--accent); }
+  .search-results { position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; z-index: 50; display: none; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+  .search-result { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; transition: background .1s; }
+  .search-result:hover { background: var(--bg-hover); }
+  .search-result-cover { width: 32px; height: 42px; border-radius: 5px; object-fit: cover; background: var(--tag-bg); flex-shrink: 0; }
+  .search-result-title { font-size: 13px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .search-result-year { font-size: 12px; color: var(--text-tertiary); flex-shrink: 0; }
+  .search-result-source { font-size: 10px; color: var(--accent); background: rgba(96,80,200,.1); padding: 2px 6px; border-radius: 6px; flex-shrink: 0; }
+  .search-no-results { padding: 14px; font-size: 13px; color: var(--text-tertiary); text-align: center; }
+
+  /* ── Entry list ── */
+  .entries-list { display: flex; flex-direction: column; gap: 0; }
+  .entry-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); user-select: none; }
+  .entry-row:last-child { border-bottom: none; }
+  .entry-row.drag-over { background: var(--bg-hover); border-radius: 8px; outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .entry-row.dragging { opacity: .4; }
+  .drag-handle { width: 20px; flex-shrink: 0; padding-top: 18px; cursor: grab; color: var(--text-tertiary); display: flex; align-items: center; justify-content: center; }
+  .drag-handle:active { cursor: grabbing; }
+  .entry-rank { width: 24px; flex-shrink: 0; font-family: 'DM Serif Display', serif; font-size: 16px; color: var(--text-tertiary); padding-top: 18px; text-align: right; line-height: 1; }
+  .entry-cover { width: 42px; height: 56px; border-radius: 7px; object-fit: cover; flex-shrink: 0; border: 1px solid var(--border); background: var(--tag-bg); display: block; }
+  .entry-cover-ph { width: 42px; height: 56px; border-radius: 7px; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .entry-body { flex: 1; min-width: 0; }
+  .entry-game-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; margin-top: 4px; }
+  .entry-notes-input { width: 100%; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); font-size: 12px; font-family: inherit; outline: none; transition: border-color .15s; box-sizing: border-box; resize: none; }
+  .entry-notes-input:focus { border-color: var(--accent); background: var(--bg-hover); }
+  .entry-notes-input::placeholder { color: var(--text-tertiary); font-style: italic; }
+  .entry-remove { background: none; border: none; cursor: pointer; color: var(--text-tertiary); font-size: 18px; padding: 0 4px; flex-shrink: 0; padding-top: 14px; transition: color .15s; line-height: 1; }
+  .entry-remove:hover { color: #f87171; }
+  .notes-save-indicator { font-size: 11px; color: var(--score-great, #4ade80); display: none; }
+
+  .empty-entries { padding: 32px 0; text-align: center; font-size: 14px; color: var(--text-tertiary); }
+
+  .danger-zone { border-color: rgba(248,113,113,.2); }
+  .danger-zone .edit-section-title { color: #f87171; }
+</style>
+
+<div class="edit-wrap">
+  <button class="edit-back" onclick={`window.location.href='/lists/${list.id}'`}>
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
+    Back to list
+  </button>
+
+  <!-- Metadata -->
+  <div class="edit-section">
+    <div class="edit-section-title">List details</div>
+    <div class="form-group">
+      <label class="form-label" for="meta-title">Title</label>
+      <input id="meta-title" class="form-input" type="text" value={list.title} maxlength="100" />
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="meta-desc">Description</label>
+      <textarea id="meta-desc" class="form-input">{list.description ?? ""}</textarea>
+    </div>
+    <div class="meta-row">
+      <div class="form-group">
+        <label class="form-label">Type</label>
+        <div class="toggle-row">
+          <label class="toggle-switch">
+            <input type="checkbox" id="meta-ranked" checked={list.is_ranked} />
+            <span class="toggle-track"></span>
+          </label>
+          <span class="toggle-label" id="ranked-label">{list.is_ranked ? "Ranked" : "Unranked"}</span>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="meta-vis">Visibility</label>
+        <select id="meta-vis" class="form-input" style="appearance:auto">
+          <option value="public" selected={list.visibility === "public"}>Public</option>
+          <option value="private" selected={list.visibility === "private"}>Private</option>
+        </select>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+      <button class="btn-primary" id="meta-save-btn">Save changes</button>
+      <span class="meta-save-msg" id="meta-save-msg">Saved</span>
+    </div>
+  </div>
+
+  <!-- Add games -->
+  <div class="edit-section">
+    <div class="edit-section-title">Add games</div>
+    <div class="search-wrap">
+      <input class="search-input" id="game-search" type="text" placeholder="Search for a game…" autocomplete="off" />
+      <div class="search-results" id="search-results"></div>
+    </div>
+    <div id="add-msg" style="font-size:13px;color:#f87171;margin-top:8px;display:none"></div>
+  </div>
+
+  <!-- Entries -->
+  <div class="edit-section">
+    <div class="edit-section-title" id="entries-heading">
+      {entryList.length} {entryList.length === 1 ? "game" : "games"}
+    </div>
+    <div class="entries-list" id="entries-list"></div>
+    {entryList.length === 0 && <div class="empty-entries" id="empty-msg">No games yet — search above to add some.</div>}
+  </div>
+
+  <!-- Danger zone -->
+  <div class="edit-section danger-zone">
+    <div class="edit-section-title">Danger zone</div>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:16px">Deleting a list is permanent and cannot be undone.</p>
+    <button class="btn-danger" id="delete-btn">Delete this list</button>
+  </div>
+</div>
+</Layout>
+
+<script is:inline define:vars={{ listId: list.id, isRanked: list.is_ranked, initialEntries: entriesJson }}>
+var entries = JSON.parse(initialEntries);
+var ranked = isRanked;
+
+// ── Ranked label sync ──────────────────────────────────────────────────────
+document.getElementById('meta-ranked').addEventListener('change', function() {
+  ranked = this.checked;
+  document.getElementById('ranked-label').textContent = this.checked ? 'Ranked' : 'Unranked';
+  renderEntries();
+});
+
+// ── Metadata save ──────────────────────────────────────────────────────────
+document.getElementById('meta-save-btn').addEventListener('click', async function() {
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  var msg = document.getElementById('meta-save-msg');
+  msg.style.display = 'none';
+
+  var res = await fetch('/api/lists/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      list_id: listId,
+      title: document.getElementById('meta-title').value.trim(),
+      description: document.getElementById('meta-desc').value.trim() || null,
+      is_ranked: document.getElementById('meta-ranked').checked,
+      visibility: document.getElementById('meta-vis').value,
+    }),
+  });
+  btn.disabled = false;
+  btn.textContent = 'Save changes';
+  if (res.ok) {
+    msg.style.display = 'inline';
+    setTimeout(function() { msg.style.display = 'none'; }, 2000);
+  }
+});
+
+// ── Game search ────────────────────────────────────────────────────────────
+var searchTimer = null;
+var searchEl = document.getElementById('game-search');
+var resultsEl = document.getElementById('search-results');
+
+searchEl.addEventListener('input', function() {
+  clearTimeout(searchTimer);
+  var q = this.value.trim();
+  if (q.length < 2) { resultsEl.style.display = 'none'; return; }
+  searchTimer = setTimeout(function() { runSearch(q); }, 300);
+});
+
+async function runSearch(q) {
+  var res = await fetch('/api/games/search?q=' + encodeURIComponent(q));
+  var games = await res.json();
+  if (!games.length) {
+    resultsEl.innerHTML = '<div class="search-no-results">No games found.</div>';
+    resultsEl.style.display = 'block';
+    return;
+  }
+  resultsEl.innerHTML = games.map(function(g) {
+    var year = g.date_released ? new Date(g.date_released).getFullYear() : '';
+    var coverSrc = g.cover_img_url ? g.cover_img_url.replace(/t_[a-z0-9_]+/, 't_thumb') : '';
+    return '<div class="search-result" data-game-id="' + g.id + '" data-title="' + (g.title || g.name || '').replace(/"/g,'&quot;') + '" data-source="' + g.source + '" data-igdb-id="' + (g.igdb_id || '') + '" data-cover="' + coverSrc + '" data-year="' + year + '" data-slug="' + (g.slug || '') + '">'
+      + (coverSrc ? '<img class="search-result-cover" src="' + coverSrc + '" alt="" />' : '<div class="search-result-cover"></div>')
+      + '<span class="search-result-title">' + (g.title || g.name || '') + '</span>'
+      + (year ? '<span class="search-result-year">' + year + '</span>' : '')
+      + (g.source === 'igdb' ? '<span class="search-result-source">IGDB</span>' : '')
+      + '</div>';
+  }).join('');
+  resultsEl.style.display = 'block';
+}
+
+document.addEventListener('click', function(e) {
+  var result = e.target.closest('.search-result');
+  if (result) { addGame(result); return; }
+  if (!e.target.closest('.search-wrap')) resultsEl.style.display = 'none';
+});
+
+async function addGame(el) {
+  var gameId = el.dataset.gameId;
+  var source = el.dataset.source;
+  var addMsg = document.getElementById('add-msg');
+  addMsg.style.display = 'none';
+  resultsEl.style.display = 'none';
+  searchEl.value = '';
+
+  if (source === 'igdb') {
+    var igdbId = el.dataset.igdbId;
+    var imp = await fetch('/api/games/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ igdb_id: parseInt(igdbId) }),
+    });
+    if (!imp.ok) { addMsg.textContent = 'Failed to import game.'; addMsg.style.display = 'block'; return; }
+    var imported = await imp.json();
+    gameId = imported.id;
+  }
+
+  var res = await fetch('/api/lists/entries/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId, game_id: gameId }),
+  });
+  var data = await res.json();
+  if (!res.ok) {
+    addMsg.textContent = data.error || 'Failed to add game.';
+    addMsg.style.display = 'block';
+    return;
+  }
+
+  var cover = el.dataset.cover || '';
+  var coverBig = cover ? cover.replace(/t_[a-z0-9_]+/, 't_cover_big') : '';
+  entries.push({
+    id: data.entry_id,
+    position: data.position,
+    notes: '',
+    game_id: gameId,
+    game_title: el.dataset.title,
+    game_slug: el.dataset.slug || '',
+    game_year: el.dataset.year ? parseInt(el.dataset.year) : null,
+    cover: coverBig,
+  });
+  renderEntries();
+  updateHeading();
+}
+
+// ── Remove entry ───────────────────────────────────────────────────────────
+async function removeEntry(entryId) {
+  var entry = entries.find(function(e) { return e.id === entryId; });
+  if (!entry) return;
+  var res = await fetch('/api/lists/entries/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId, game_id: entry.game_id }),
+  });
+  if (!res.ok) return;
+  entries = entries.filter(function(e) { return e.id !== entryId; });
+  // Re-number positions in local state
+  if (ranked) {
+    entries.forEach(function(e, i) { e.position = i + 1; });
+  }
+  renderEntries();
+  updateHeading();
+}
+
+// ── Notes save (debounced) ─────────────────────────────────────────────────
+var noteTimers = {};
+function scheduleNotesSave(entryId, notes) {
+  clearTimeout(noteTimers[entryId]);
+  noteTimers[entryId] = setTimeout(async function() {
+    var entry = entries.find(function(e) { return e.id === entryId; });
+    if (entry) entry.notes = notes;
+    await fetch('/api/lists/entries/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry_id: entryId, notes: notes }),
+    });
+  }, 800);
+}
+
+// ── Drag-and-drop (ranked lists only) ─────────────────────────────────────
+var draggedId = null;
+
+function onDragStart(e) {
+  draggedId = e.currentTarget.dataset.entryId;
+  e.currentTarget.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.entry-row').forEach(function(r) { r.classList.remove('drag-over'); });
+}
+function onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  var row = e.currentTarget;
+  document.querySelectorAll('.entry-row').forEach(function(r) { r.classList.remove('drag-over'); });
+  if (row.dataset.entryId !== draggedId) row.classList.add('drag-over');
+}
+function onDrop(e) {
+  e.preventDefault();
+  var targetId = e.currentTarget.dataset.entryId;
+  if (!draggedId || draggedId === targetId) return;
+  var fromIdx = entries.findIndex(function(e) { return e.id === draggedId; });
+  var toIdx   = entries.findIndex(function(e) { return e.id === targetId; });
+  if (fromIdx === -1 || toIdx === -1) return;
+  var moved = entries.splice(fromIdx, 1)[0];
+  entries.splice(toIdx, 0, moved);
+  entries.forEach(function(e, i) { e.position = i + 1; });
+  renderEntries();
+  saveOrder();
+}
+
+async function saveOrder() {
+  await fetch('/api/lists/entries/reorder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId, entry_ids: entries.map(function(e) { return e.id; }) }),
+  });
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderEntries() {
+  var list = document.getElementById('entries-list');
+  var emptyMsg = document.getElementById('empty-msg');
+  if (!entries.length) {
+    list.innerHTML = '';
+    if (emptyMsg) emptyMsg.style.display = 'block';
+    return;
+  }
+  if (emptyMsg) emptyMsg.style.display = 'none';
+
+  list.innerHTML = entries.map(function(e, i) {
+    var coverHtml = e.cover
+      ? '<img class="entry-cover" src="' + e.cover + '" alt="" />'
+      : '<div class="entry-cover-ph">🎮</div>';
+    var rankHtml = ranked
+      ? '<div class="entry-rank">' + (i + 1) + '</div>'
+      : '';
+    var dragHtml = ranked
+      ? '<div class="drag-handle" title="Drag to reorder"><svg width="12" height="16" viewBox="0 0 12 16" fill="none"><circle cx="3" cy="3" r="1.5" fill="currentColor"/><circle cx="9" cy="3" r="1.5" fill="currentColor"/><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="9" cy="8" r="1.5" fill="currentColor"/><circle cx="3" cy="13" r="1.5" fill="currentColor"/><circle cx="9" cy="13" r="1.5" fill="currentColor"/></svg></div>'
+      : '';
+    return '<div class="entry-row" data-entry-id="' + e.id + '" draggable="' + (ranked ? 'true' : 'false') + '">'
+      + dragHtml
+      + rankHtml
+      + coverHtml
+      + '<div class="entry-body">'
+        + '<div class="entry-game-title">' + (e.game_title || '') + (e.game_year ? ' <span style="font-weight:400;color:var(--text-tertiary);font-size:12px">(' + e.game_year + ')</span>' : '') + '</div>'
+        + '<textarea class="entry-notes-input" data-entry-id="' + e.id + '" placeholder="Add a note… (why you ranked it here)" rows="1">' + (e.notes || '') + '</textarea>'
+      + '</div>'
+      + '<button class="entry-remove" data-entry-id="' + e.id + '" title="Remove">×</button>'
+    + '</div>';
+  }).join('');
+
+  // Attach drag events
+  if (ranked) {
+    list.querySelectorAll('.entry-row').forEach(function(row) {
+      row.addEventListener('dragstart', onDragStart);
+      row.addEventListener('dragend', onDragEnd);
+      row.addEventListener('dragover', onDragOver);
+      row.addEventListener('drop', onDrop);
+    });
+  }
+
+  // Attach remove buttons
+  list.querySelectorAll('.entry-remove').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (confirm('Remove this game from the list?')) removeEntry(btn.dataset.entryId);
+    });
+  });
+
+  // Attach notes inputs
+  list.querySelectorAll('.entry-notes-input').forEach(function(ta) {
+    ta.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = this.scrollHeight + 'px';
+      scheduleNotesSave(ta.dataset.entryId, ta.value);
+    });
+    // Set initial height
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  });
+}
+
+function updateHeading() {
+  var h = document.getElementById('entries-heading');
+  if (h) h.textContent = entries.length + ' ' + (entries.length === 1 ? 'game' : 'games');
+}
+
+// ── Delete list ────────────────────────────────────────────────────────────
+document.getElementById('delete-btn').addEventListener('click', async function() {
+  if (!confirm('Delete this list permanently? This cannot be undone.')) return;
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Deleting…';
+  var res = await fetch('/api/lists/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId }),
+  });
+  if (res.ok) {
+    window.location.href = '/profile';
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Delete this list';
+    alert('Failed to delete list.');
+  }
+});
+
+// Initial render
+renderEntries();
+</script>

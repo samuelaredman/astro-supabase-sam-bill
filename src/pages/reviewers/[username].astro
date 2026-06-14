@@ -7,6 +7,7 @@ import ReportModal from '../../components/ReportModal.astro';
 import EditModal from '../../components/EditModal.astro';
 import CropModal from '../../components/CropModal.astro';
 import ReviewCard from '../../components/ReviewCard.astro';
+import ListCard from '../../components/ListCard.astro';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
@@ -116,6 +117,48 @@ if (user) {
     }
   }
 }
+
+// ── LISTS ──
+const { data: profileListsRaw } = await (supabase as any)
+  .from('lists')
+  .select('id, title, is_ranked, visibility, updated_at')
+  .eq('profile_id', reviewer.id)
+  .order('updated_at', { ascending: false });
+
+const profileListIds = (profileListsRaw ?? []).map((l: any) => l.id);
+
+const [{ data: coverEntriesRaw }, { data: allEntriesRaw }] = profileListIds.length > 0
+  ? await Promise.all([
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id, games(cover_img_url)')
+        .in('list_id', profileListIds)
+        .order('position', { ascending: true, nullsFirst: false })
+        .order('added_at', { ascending: true }),
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id')
+        .in('list_id', profileListIds),
+    ])
+  : [{ data: [] }, { data: [] }];
+
+const coversByListId: Record<string, string[]> = {};
+for (const e of coverEntriesRaw ?? []) {
+  const cover = igdbCover(e.games?.cover_img_url, 't_cover_big');
+  if (cover) {
+    if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
+    if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
+  }
+}
+const entryCountByListId: Record<string, number> = {};
+for (const e of allEntriesRaw ?? []) {
+  entryCountByListId[e.list_id] = (entryCountByListId[e.list_id] ?? 0) + 1;
+}
+const profileLists = (profileListsRaw ?? []).map((l: any) => ({
+  ...l,
+  coverUrls: coversByListId[l.id] ?? [],
+  entryCount: entryCountByListId[l.id] ?? 0,
+}));
 
 // favorite game — find reviewer's own review of it
 const favGame = reviewer.favorite_game ?? null
@@ -657,6 +700,10 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .expand-btn{font-size:11px;color:var(--accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;padding:0;font-weight:500}
     .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
     .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
+    .empty-state-tab{padding:60px 0;text-align:center;color:var(--text-tertiary)}
+    .lists-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;padding:4px 0}
+    .btn-create-list{display:inline-flex;align-items:center;gap:6px;padding:9px 22px;border-radius:22px;background:var(--accent);color:#fff;font-size:13px;font-weight:500;font-family:inherit;text-decoration:none;border:none;cursor:pointer;transition:opacity .15s}
+    .btn-create-list:hover{opacity:.85}
     .watchlist-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:14px;padding:20px 0}
     .watchlist-card{display:block;text-decoration:none}
     .watchlist-cover{width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15)}
@@ -977,6 +1024,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     <a href={`/reviewers/${reviewer.username}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>Reviews {publishedReviews.length > 0 && <span class="tab-count">{publishedReviews.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=followers`} class={`tab-link ${activeTab === 'followers' ? 'active' : ''}`}>Followers {followerCount ? `(${followerCount})` : ''}</a>
     <a href={`/reviewers/${reviewer.username}?tab=following`} class={`tab-link ${activeTab === 'following' ? 'active' : ''}`}>Following {followingCount ? `(${followingCount})` : ''}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {profileLists.length > 0 && <span class="tab-count">{profileLists.length}</span>}</a>
   </nav>
 
   <!-- ── PROFILE TAB ── -->
@@ -1382,6 +1430,39 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
           </a>
         ))}
       </div>
+    )}
+  </div>
+
+  <!-- ── LISTS TAB ── -->
+  <div class={`tab-panel ${activeTab === 'lists' ? 'active' : ''}`} data-tab="lists">
+    {profileLists.length === 0 ? (
+      <div class="empty-state-tab">
+        <div class="empty-title">{isOwnProfile ? "You haven't created any lists yet" : `@${reviewer.username} hasn't created any lists yet`}</div>
+        {isOwnProfile && (
+          <a href="/lists/create" class="btn-create-list">+ Create your first list</a>
+        )}
+      </div>
+    ) : (
+      <>
+        <div class="lists-grid">
+          {profileLists.map((list: any) => (
+            <ListCard
+              id={list.id}
+              title={list.title}
+              isRanked={list.is_ranked}
+              visibility={list.visibility}
+              entryCount={list.entryCount}
+              coverUrls={list.coverUrls}
+              showOwner={false}
+            />
+          ))}
+        </div>
+        {isOwnProfile && (
+          <div style="margin-top: 20px">
+            <a href="/lists/create" class="btn-create-list">+ New list</a>
+          </div>
+        )}
+      </>
     )}
   </div>
 
