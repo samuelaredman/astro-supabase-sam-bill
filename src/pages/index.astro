@@ -1,5 +1,5 @@
 ---
-import { getSupabase, createSupabaseServerClientFromContext } from "../utils/database";
+import { getSupabase, createSupabaseServerClientFromContext, getSupabaseAdmin } from "../utils/database";
 import Layout from "../components/Layout.astro";
 import ReportModal from "../components/ReportModal.astro";
 import EditModal from "../components/EditModal.astro";
@@ -72,24 +72,26 @@ const currentProfile = profileRes.data ?? null
 const { data: platforms } = platformsRes
 
 // ── Recent lists shared to feed ──
-const { data: recentListsRaw } = await db
+const adminDb = getSupabaseAdmin() as any;
+const { data: recentListsRaw, error: listsError } = await adminDb
   .from('lists')
   .select('id, title, is_ranked, visibility, created_at, profiles(id, username, avatar_url)')
   .eq('visibility', 'public')
   .eq('shared_to_feed', true)
   .order('created_at', { ascending: false })
-  .limit(4);
+  .limit(10);
+if (listsError) console.error('[index] lists query error:', JSON.stringify(listsError));
 
 const recentListIds = (recentListsRaw ?? []).map((l: any) => l.id);
 const { data: recentListEntries } = recentListIds.length > 0
-  ? await db.from('list_entries')
+  ? await adminDb.from('list_entries')
       .select('list_id, games(cover_img_url)')
       .in('list_id', recentListIds)
       .order('position', { ascending: true, nullsFirst: false })
       .order('added_at', { ascending: true })
   : { data: [] };
 const { data: recentListEntryCounts } = recentListIds.length > 0
-  ? await db.from('list_entries').select('list_id').in('list_id', recentListIds)
+  ? await adminDb.from('list_entries').select('list_id').in('list_id', recentListIds)
   : { data: [] };
 
 const recentListCoversByListId: Record<string, string[]> = {};
@@ -106,6 +108,7 @@ for (const e of recentListEntryCounts ?? []) {
 }
 const recentLists = (recentListsRaw ?? []).map((l: any) => ({
   ...l,
+  _isListItem: true,
   ownerUsername: l.profiles?.username,
   ownerAvatar: l.profiles?.avatar_url,
   coverUrls: recentListCoversByListId[l.id] ?? [],
@@ -122,6 +125,12 @@ type Review = {
   review_votes: { vote: number; profile_id: string }[] | { vote: number; profile_id: string } | null;
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
+
+// Merge reviews and shared lists into a single chronological feed
+const feedItems: any[] = [
+  ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
+  ...recentLists.map((l: any) => ({ ...l, _date: l.created_at })),
+].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>
 const todayMap: DayMap = {}
@@ -295,21 +304,38 @@ const initialFollowingDone = followingReviews.length < 20
     )}
 
     <div id="tab-recent">
-      {reviews.length === 0 ? (
+      {feedItems.length === 0 ? (
         <div class="empty-state">
           <div class="empty-state-title">No reviews yet</div>
           <p>Be the first to review a game.</p>
         </div>
       ) : (
-        reviews.map((review: any) => (
-          <ReviewCard
-            review={review}
-            isLoggedIn={isLoggedIn}
-            showReviewer={true}
-            showGame={true}
-            currentProfileId={currentProfile?.id ?? null}
-            isOwnProfile={!!(currentProfile && review.profiles?.id === currentProfile.id)}
-          />
+        feedItems.map((item: any) => (
+          item._isListItem ? (
+            <div class="feed-list-card">
+              <ListCard
+                id={item.id}
+                title={item.title}
+                isRanked={item.is_ranked}
+                visibility={item.visibility}
+                entryCount={item.entryCount}
+                coverUrls={item.coverUrls}
+                ownerUsername={item.ownerUsername}
+                ownerAvatar={item.ownerAvatar}
+                showOwner={true}
+                compact={false}
+              />
+            </div>
+          ) : (
+            <ReviewCard
+              review={item}
+              isLoggedIn={isLoggedIn}
+              showReviewer={true}
+              showGame={true}
+              currentProfileId={currentProfile?.id ?? null}
+              isOwnProfile={!!(currentProfile && item.profiles?.id === currentProfile.id)}
+            />
+          )
         ))
       )}
       <div id="sentinel-recent" style="height:1px;margin:0"></div>
@@ -970,7 +996,7 @@ const initialFollowingDone = followingReviews.length < 20
       <div class="widget" style="margin-top:4px">
         <div class="widget-title">Recent Lists</div>
         <div style="display:flex;flex-direction:column;gap:10px">
-          {recentLists.map((list: any) => (
+          {recentLists.slice(0, 4).map((list: any) => (
             <ListCard
               id={list.id}
               title={list.title}
@@ -1118,4 +1144,6 @@ const initialFollowingDone = followingReviews.length < 20
   .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; margin-top: 8px; }
   .report-trigger-sm { font-size: 11px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; font-family: inherit; padding: 2px 6px; border-radius: 6px; transition: color 0.15s, background 0.15s; }
   .report-trigger-sm:hover { color: #f87171; background: rgba(248,113,113,.08); }
+  .feed-list-card { padding: 12px 16px; border-bottom: 1px solid var(--border-subtle); }
+  .feed-list-card .list-card { border-radius: 12px; }
 </style>
