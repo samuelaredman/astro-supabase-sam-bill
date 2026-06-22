@@ -3,6 +3,7 @@ export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
 import { igdbImage, timeAgo } from "../../../utils/format";
+import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../../../utils/reactions";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
@@ -30,26 +31,61 @@ if (list.visibility === "private") {
   if (!currentProfile || currentProfile.id !== list.profiles?.id) return Astro.redirect("/404");
 }
 
-const { data: entries } = await db
-  .from("list_entries")
-  .select("id, position, notes, added_at, games ( id, title, slug, cover_img_url, date_released )")
-  .eq("list_id", id)
-  .order("position", { ascending: true, nullsFirst: false })
-  .order("added_at", { ascending: true });
+const [
+  { data: entries },
+  { data: saveRow },
+  { count: saveCount },
+  { data: votesRaw },
+  { data: reactionsRaw },
+  { data: commentsRaw },
+] = await Promise.all([
+  db.from("list_entries")
+    .select("id, position, notes, added_at, games ( id, title, slug, cover_img_url, date_released )")
+    .eq("list_id", id)
+    .order("position", { ascending: true, nullsFirst: false })
+    .order("added_at", { ascending: true }),
+  currentProfile
+    ? db.from("list_saves").select("id").eq("list_id", id).eq("profile_id", currentProfile.id).maybeSingle()
+    : Promise.resolve({ data: null }),
+  db.from("list_saves").select("*", { count: "exact", head: true }).eq("list_id", id),
+  db.from("list_votes").select("vote, profile_id").eq("list_id", id),
+  db.from("list_reactions").select("reaction_type, profile_id").eq("list_id", id),
+  db.from("list_comments")
+    .select("id, body, created_at, profiles ( id, username, avatar_url )")
+    .eq("list_id", id)
+    .order("created_at", { ascending: true }),
+]);
 
 const entryList = entries ?? [];
-
-const { data: saveRow } = currentProfile
-  ? await db.from("list_saves").select("id").eq("list_id", id).eq("profile_id", currentProfile.id).maybeSingle()
-  : { data: null };
 const isSaved = !!saveRow;
-
-const { count: saveCount } = await db
-  .from("list_saves")
-  .select("*", { count: "exact", head: true })
-  .eq("list_id", id);
-
 const isOwner = currentProfile?.id === list.profiles?.id;
+
+// Votes
+const votesArr: { vote: number; profile_id: string }[] = votesRaw ?? [];
+const upVotes = votesArr.filter(v => v.vote === 1).length;
+const downVotes = votesArr.filter(v => v.vote === -1).length;
+const myVote = currentProfile
+  ? (votesArr.find(v => v.profile_id === currentProfile.id)?.vote ?? 0)
+  : 0;
+
+// Reactions
+const reactionsArr: { reaction_type: string; profile_id: string }[] = reactionsRaw ?? [];
+const reactionCountMap: Record<string, { count: number; active: boolean }> = {};
+for (const r of reactionsArr) {
+  if (!reactionCountMap[r.reaction_type]) reactionCountMap[r.reaction_type] = { count: 0, active: false };
+  reactionCountMap[r.reaction_type].count++;
+  if (currentProfile && r.profile_id === currentProfile.id) reactionCountMap[r.reaction_type].active = true;
+}
+const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => ({
+  type,
+  isImage: !!IMAGE_EMOTE_MAP[type],
+  path: IMAGE_EMOTE_MAP[type] ?? null,
+  count: info.count,
+  active: info.active,
+}));
+
+// Comments
+const commentList: any[] = commentsRaw ?? [];
 
 // Cover collage: first 4 covers
 const collageSrcs = entryList
@@ -120,6 +156,142 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
   .empty-state { text-align: center; padding: 48px 20px; color: var(--text-tertiary); font-size: 14px; }
   .empty-state-title { font-size: 16px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
 
+  /* ── Vote / react bar ── */
+  .list-interact {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 14px 20px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .list-vote-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 14px;
+    border-radius: 20px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .list-vote-btn:hover:not(.lv-up):not(.lv-down) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .list-vote-btn:disabled { opacity: 0.5; cursor: default; }
+  .lv-up { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.08); }
+  .lv-down { border-color: #f87171; color: #f87171; background: rgba(248,113,113,.08); }
+  .list-sep { width: 1px; height: 16px; background: var(--border); margin: 0 2px; flex-shrink: 0; }
+
+  .list-reaction-wrap { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .list-reaction-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .list-reaction-btn:hover:not(.lr-active) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .lr-active { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.08); }
+  .list-react-toggle {
+    background: none;
+    border: 1.5px solid var(--border);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .list-react-toggle:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
+  .list-emote-img { width: 18px; height: 18px; object-fit: contain; vertical-align: middle; }
+
+  /* ── Comments ── */
+  .list-comments {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    margin-top: 20px;
+  }
+  .list-comments-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-tertiary); margin-bottom: 20px; }
+  .lc-list { display: flex; flex-direction: column; gap: 0; }
+  .lc-item { display: flex; gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--border-subtle); }
+  .lc-item:last-child { border-bottom: none; }
+  .lc-avatar {
+    width: 28px; height: 28px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
+    background: var(--tag-bg); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: var(--text-tertiary); text-decoration: none;
+  }
+  .lc-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .lc-body { flex: 1; min-width: 0; }
+  .lc-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; flex-wrap: wrap; }
+  .lc-username { font-size: 13px; font-weight: 600; color: var(--text-primary); text-decoration: none; }
+  .lc-username:hover { color: var(--accent); }
+  .lc-ts { font-size: 12px; color: var(--text-tertiary); }
+  .lc-text { font-size: 14px; color: var(--text-primary); line-height: 1.6; opacity: .85; white-space: pre-wrap; word-break: break-word; }
+  .lc-delete { background: none; border: none; cursor: pointer; color: var(--text-tertiary); font-size: 11px; padding: 2px 6px; border-radius: 4px; font-family: inherit; margin-left: auto; transition: color .15s; }
+  .lc-delete:hover { color: #f87171; }
+  .lc-empty { padding: 20px 0; text-align: center; font-size: 13px; color: var(--text-tertiary); }
+
+  /* ── Comment form ── */
+  .lc-form { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+  .lc-signin-prompt { font-size: 13px; color: var(--text-tertiary); padding: 16px; background: var(--bg-hover); border-radius: 10px; text-align: center; }
+  .lc-signin-prompt a { color: var(--accent); text-decoration: none; }
+  .lc-textarea {
+    width: 100%; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e); color: var(--text-primary); font-size: 14px;
+    font-family: inherit; outline: none; resize: vertical; min-height: 72px;
+    transition: border-color .15s; box-sizing: border-box;
+  }
+  .lc-textarea:focus { border-color: var(--accent); }
+  .lc-submit {
+    align-self: flex-end; background: var(--accent); color: #fff; border: none;
+    padding: 8px 20px; border-radius: 20px; font-size: 13px; font-weight: 600;
+    font-family: inherit; cursor: pointer; transition: opacity .15s;
+  }
+  .lc-submit:hover { opacity: .85; }
+  .lc-submit:disabled { opacity: .45; cursor: not-allowed; }
+  .lc-error { font-size: 13px; color: #f87171; display: none; }
+
+  /* ── Emoji picker for detail page ── */
+  #ldp-emoji-picker {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; box-shadow: 0 4px 24px rgba(0,0,0,.2);
+    max-height: 320px; overflow-y: auto; min-width: 260px; max-width: 320px;
+    scrollbar-width: thin; position: fixed; z-index: 1000; display: none;
+  }
+  .ldp-emote-search {
+    width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 5px 8px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--bg-hover);
+    color: var(--text-primary); font-size: 12px; outline: none;
+  }
+  .ldp-emote-search:focus { border-color: var(--accent); }
+  .ldp-emoji-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+  .ldp-emoji-pick {
+    width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+    background: none; border: none; cursor: pointer; border-radius: 6px;
+    transition: background 0.1s, transform 0.1s; padding: 2px;
+  }
+  .ldp-emoji-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
+  .ldp-emoji-pick.ldp-emoji-active { background: rgba(96,80,200,.12); outline: 1.5px solid var(--accent); }
+  .ldp-emote-picker-img { width: 28px; height: 28px; object-fit: contain; display: block; }
+
   @media (max-width: 600px) {
     .list-meta { padding: 16px; }
     .list-title { font-size: 20px; }
@@ -188,6 +360,45 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
     </div>
   </div>
 
+  <!-- Vote / react bar -->
+  <div class="list-interact">
+    <button
+      class={`list-vote-btn${myVote === 1 ? ' lv-up' : ''}`}
+      id="lvote-up"
+      data-list-id={list.id}
+      data-vote="1"
+      data-logged-in={isLoggedIn ? 'true' : 'false'}
+    >▲ {upVotes}</button>
+    <button
+      class={`list-vote-btn${myVote === -1 ? ' lv-down' : ''}`}
+      id="lvote-down"
+      data-list-id={list.id}
+      data-vote="-1"
+      data-logged-in={isLoggedIn ? 'true' : 'false'}
+    >▼ {downVotes}</button>
+
+    <span class="list-sep"></span>
+
+    <div class="list-reaction-wrap" id="list-reaction-wrap">
+      {displayReactions.map(r => (
+        <button
+          class={`list-reaction-btn${r.active ? ' lr-active' : ''}`}
+          data-reaction={r.type}
+          data-reacted={r.active ? 'true' : 'false'}
+          data-count={r.count}
+          data-logged-in={isLoggedIn ? 'true' : 'false'}
+          data-is-image={r.isImage ? 'true' : 'false'}
+        >
+          {r.isImage
+            ? <><img src={r.path!} class="list-emote-img" alt={r.type} />{' '}{r.count}</>
+            : <>{r.type} {r.count}</>
+          }
+        </button>
+      ))}
+      <button class="list-react-toggle" id="list-react-toggle" data-logged-in={isLoggedIn ? 'true' : 'false'} title="Add reaction">+</button>
+    </div>
+  </div>
+
   {entryList.length === 0
     ? <div class="empty-state">
         <div class="empty-state-title">No games yet</div>
@@ -216,33 +427,321 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
         })}
       </div>
   }
+
+  <!-- Comments -->
+  <div class="list-comments" id="comments">
+    <div class="list-comments-title">Comments ({commentList.length})</div>
+    <div class="lc-list" id="lc-list">
+      {commentList.length === 0 && <div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>}
+      {commentList.map((c: any) => (
+        <div class="lc-item" data-comment-id={c.id}>
+          <a href={`/reviewers/${c.profiles?.username}`} class="lc-avatar">
+            {c.profiles?.avatar_url
+              ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
+              : <span>{(c.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
+            }
+          </a>
+          <div class="lc-body">
+            <div class="lc-meta">
+              <a href={`/reviewers/${c.profiles?.username}`} class="lc-username">@{c.profiles?.username}</a>
+              <span class="lc-ts">{timeAgo(c.created_at)}</span>
+              {currentProfile?.id === c.profiles?.id && (
+                <button class="lc-delete" data-comment-id={c.id}>Delete</button>
+              )}
+            </div>
+            <div class="lc-text">{c.body}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+
+    <div class="lc-form">
+      {isLoggedIn
+        ? <>
+            <textarea class="lc-textarea" id="lc-textarea" placeholder="Write a comment…" maxlength="2000" rows="3"></textarea>
+            <p class="lc-error" id="lc-error"></p>
+            <button class="lc-submit" id="lc-submit">Post comment</button>
+          </>
+        : <div class="lc-signin-prompt">
+            <a href="/signin">Sign in</a> to leave a comment.
+          </div>
+      }
+    </div>
+  </div>
 </main>
 </Layout>
 
-<script is:inline define:vars={{ listId: list.id, initialSaved: isSaved, initialCount: saveCount ?? 0 }}>
-  var saveBtn = document.getElementById('save-btn');
-  if (saveBtn) {
-    saveBtn.addEventListener('click', async function() {
-      if (saveBtn.disabled) return;
-      saveBtn.disabled = true;
-      var wasSaved = saveBtn.dataset.saved === 'true';
-      try {
-        var res = await fetch('/api/lists/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ list_id: listId }),
-        });
-        if (res.status === 401) { window.location.href = '/signin'; return; }
-        var data = await res.json();
-        if (!res.ok) return;
-        saveBtn.dataset.saved = data.saved ? 'true' : 'false';
-        saveBtn.textContent = data.saved ? 'Saved' : 'Save list';
-        saveBtn.classList.toggle('saved', data.saved);
-      } catch(e) {
-        saveBtn.dataset.saved = wasSaved ? 'true' : 'false';
-      } finally {
-        saveBtn.disabled = false;
+<script is:inline define:vars={{ listId: list.id, imageEmotes: IMAGE_EMOTES, imageEmoteMap: IMAGE_EMOTE_MAP, currentProfileId: currentProfile?.id ?? null }}>
+
+// ── Save button ──────────────────────────────────────────────────────────────
+var saveBtn = document.getElementById('save-btn');
+if (saveBtn) {
+  saveBtn.addEventListener('click', async function() {
+    if (saveBtn.disabled) return;
+    saveBtn.disabled = true;
+    var wasSaved = saveBtn.dataset.saved === 'true';
+    try {
+      var res = await fetch('/api/lists/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId }),
+      });
+      if (res.status === 401) { window.location.href = '/signin'; return; }
+      var data = await res.json();
+      if (!res.ok) return;
+      saveBtn.dataset.saved = data.saved ? 'true' : 'false';
+      saveBtn.textContent = data.saved ? 'Saved' : 'Save list';
+      saveBtn.classList.toggle('saved', data.saved);
+    } catch(e) {
+      saveBtn.dataset.saved = wasSaved ? 'true' : 'false';
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+}
+
+// ── Vote buttons ─────────────────────────────────────────────────────────────
+document.querySelectorAll('.list-vote-btn').forEach(function(btn) {
+  btn.addEventListener('click', async function() {
+    if (btn.disabled) return;
+    var loggedIn = btn.dataset.loggedIn === 'true';
+    if (!loggedIn) { window.location.href = '/signin'; return; }
+    btn.disabled = true;
+    var vote = parseInt(btn.dataset.vote);
+    try {
+      var res = await fetch('/api/lists/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId, vote }),
+      });
+      if (res.status === 401) { window.location.href = '/signin'; return; }
+      if (!res.ok) return;
+      var data = await res.json();
+      var upBtn = document.getElementById('lvote-up');
+      var downBtn = document.getElementById('lvote-down');
+      if (upBtn) {
+        upBtn.textContent = '▲ ' + data.up;
+        upBtn.classList.toggle('lv-up', data.vote === 1);
       }
-    });
+      if (downBtn) {
+        downBtn.textContent = '▼ ' + data.down;
+        downBtn.classList.toggle('lv-down', data.vote === -1);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+});
+
+// ── Emoji picker for detail page ─────────────────────────────────────────────
+var ldpPicker = document.createElement('div');
+ldpPicker.id = 'ldp-emoji-picker';
+var ldpHtml = '<input type="text" id="ldp-emote-search" class="ldp-emote-search" placeholder="Search emotes..." autocomplete="off">';
+ldpHtml += '<div class="ldp-emoji-grid" id="ldp-emote-grid">';
+imageEmotes.forEach(function(emote) {
+  ldpHtml += '<button class="ldp-emoji-pick" data-emoji="' + emote.key + '" title="' + emote.key + '"><img src="' + emote.path + '" class="ldp-emote-picker-img" alt="' + emote.key + '"></button>';
+});
+ldpHtml += '</div>';
+ldpPicker.innerHTML = ldpHtml;
+document.body.appendChild(ldpPicker);
+
+document.getElementById('ldp-emote-search').addEventListener('input', function() {
+  var q = this.value.toLowerCase();
+  document.querySelectorAll('#ldp-emote-grid .ldp-emoji-pick').forEach(function(btn) {
+    btn.style.display = btn.dataset.emoji.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+  });
+});
+
+function applyDetailReaction(reactionType, reacted, count) {
+  var isImage = !!imageEmoteMap[reactionType];
+  var existing = document.querySelector('.list-reaction-btn[data-reaction="' + reactionType + '"]');
+  if (existing) {
+    existing.dataset.reacted = reacted ? 'true' : 'false';
+    existing.dataset.count = String(count);
+    if (isImage) {
+      existing.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="list-emote-img" alt="' + reactionType + '"> ' + count;
+    } else {
+      existing.textContent = reactionType + ' ' + count;
+    }
+    existing.classList.toggle('lr-active', reacted);
+    if (count === 0) existing.remove();
+  } else if (count > 0) {
+    var wrap = document.getElementById('list-reaction-wrap');
+    var toggle = document.getElementById('list-react-toggle');
+    if (wrap && toggle) {
+      var newBtn = document.createElement('button');
+      newBtn.className = 'list-reaction-btn' + (reacted ? ' lr-active' : '');
+      newBtn.dataset.reaction = reactionType;
+      newBtn.dataset.reacted = reacted ? 'true' : 'false';
+      newBtn.dataset.count = String(count);
+      newBtn.dataset.loggedIn = 'true';
+      newBtn.dataset.isImage = isImage ? 'true' : 'false';
+      if (isImage) {
+        newBtn.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="list-emote-img" alt="' + reactionType + '"> ' + count;
+      } else {
+        newBtn.textContent = reactionType + ' ' + count;
+      }
+      wrap.insertBefore(newBtn, toggle);
+    }
   }
+}
+
+document.addEventListener('click', function(e) {
+  // Inline reaction button
+  var reactionBtn = e.target.closest('.list-reaction-btn');
+  if (reactionBtn) {
+    var loggedIn = reactionBtn.dataset.loggedIn === 'true';
+    if (!loggedIn) { window.location.href = '/signin'; return; }
+    var reaction = reactionBtn.dataset.reaction;
+    var reacted = reactionBtn.dataset.reacted === 'true';
+    var count = parseInt(reactionBtn.dataset.count) || 0;
+    applyDetailReaction(reaction, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/react', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId, reaction_type: reaction }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) applyDetailReaction(reaction, d.reacted, d.count); })
+      .catch(function() { applyDetailReaction(reaction, reacted, count); });
+    return;
+  }
+
+  // React toggle button
+  var toggleBtn = e.target.closest('#list-react-toggle');
+  if (toggleBtn) {
+    var loggedIn = toggleBtn.dataset.loggedIn === 'true';
+    if (!loggedIn) { window.location.href = '/signin'; return; }
+    var picker = document.getElementById('ldp-emoji-picker');
+    var isOpen = picker.style.display !== 'none';
+    picker.style.display = isOpen ? 'none' : 'block';
+    if (!isOpen) {
+      requestAnimationFrame(function() {
+        var rect = toggleBtn.getBoundingClientRect();
+        var pRect = picker.getBoundingClientRect();
+        var top = rect.top - pRect.height - 8;
+        if (top < 8) top = rect.bottom + 8;
+        var left = rect.left;
+        if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+        picker.style.top = top + 'px';
+        picker.style.left = left + 'px';
+        picker.querySelectorAll('.ldp-emoji-pick').forEach(function(btn) {
+          var inlineBtn = document.querySelector('.list-reaction-btn[data-reaction="' + btn.dataset.emoji + '"]');
+          btn.classList.toggle('ldp-emoji-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
+        });
+      });
+    }
+    return;
+  }
+
+  // Pick from emoji picker
+  var emojiBtn = e.target.closest('.ldp-emoji-pick');
+  if (emojiBtn) {
+    var picker = document.getElementById('ldp-emoji-picker');
+    picker.style.display = 'none';
+    var emoji = emojiBtn.dataset.emoji;
+    var existing = document.querySelector('.list-reaction-btn[data-reaction="' + emoji + '"]');
+    var reacted = existing ? existing.dataset.reacted === 'true' : false;
+    var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+    applyDetailReaction(emoji, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/react', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId, reaction_type: emoji }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) applyDetailReaction(emoji, d.reacted, d.count); })
+      .catch(function() { applyDetailReaction(emoji, reacted, count); });
+    return;
+  }
+
+  // Outside click: close picker
+  if (!e.target.closest('.list-reaction-wrap') && !e.target.closest('#ldp-emoji-picker')) {
+    var picker = document.getElementById('ldp-emoji-picker');
+    if (picker) picker.style.display = 'none';
+  }
+});
+
+// ── Comments ─────────────────────────────────────────────────────────────────
+var lcSubmit = document.getElementById('lc-submit');
+if (lcSubmit) {
+  lcSubmit.addEventListener('click', async function() {
+    var ta = document.getElementById('lc-textarea');
+    var errEl = document.getElementById('lc-error');
+    var body = ta.value.trim();
+    if (!body) return;
+    errEl.style.display = 'none';
+    lcSubmit.disabled = true;
+    lcSubmit.textContent = 'Posting…';
+    try {
+      var res = await fetch('/api/lists/comments/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId, body }),
+      });
+      if (res.status === 401) { window.location.href = '/signin'; return; }
+      var data = await res.json();
+      if (!res.ok) {
+        errEl.textContent = data.error || 'Failed to post comment.';
+        errEl.style.display = 'block';
+        return;
+      }
+      ta.value = '';
+      var emptyEl = document.getElementById('lc-empty');
+      if (emptyEl) emptyEl.remove();
+      var c = data.comment;
+      var initials = (c.profiles?.username ?? '?').slice(0, 2).toUpperCase();
+      var avatarHtml = c.profiles?.avatar_url
+        ? '<img src="' + c.profiles.avatar_url + '" alt="' + c.profiles.username + '" style="width:100%;height:100%;object-fit:cover">'
+        : '<span>' + initials + '</span>';
+      var deleteHtml = currentProfileId === c.profiles?.id
+        ? '<button class="lc-delete" data-comment-id="' + c.id + '">Delete</button>'
+        : '';
+      var html = '<div class="lc-item" data-comment-id="' + c.id + '">'
+        + '<a href="/reviewers/' + c.profiles?.username + '" class="lc-avatar">' + avatarHtml + '</a>'
+        + '<div class="lc-body">'
+        + '<div class="lc-meta">'
+        + '<a href="/reviewers/' + c.profiles?.username + '" class="lc-username">@' + c.profiles?.username + '</a>'
+        + '<span class="lc-ts">just now</span>'
+        + deleteHtml
+        + '</div>'
+        + '<div class="lc-text">' + c.body.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>'
+        + '</div></div>';
+      document.getElementById('lc-list').insertAdjacentHTML('beforeend', html);
+      // Update comment count in heading
+      var heading = document.querySelector('.list-comments-title');
+      if (heading) {
+        var match = heading.textContent.match(/\d+/);
+        var newCount = match ? parseInt(match[0]) + 1 : 1;
+        heading.textContent = 'Comments (' + newCount + ')';
+      }
+    } finally {
+      lcSubmit.disabled = false;
+      lcSubmit.textContent = 'Post comment';
+    }
+  });
+}
+
+// Comment delete
+document.addEventListener('click', async function(e) {
+  var delBtn = e.target.closest('.lc-delete');
+  if (!delBtn) return;
+  if (!confirm('Delete this comment?')) return;
+  var commentId = delBtn.dataset.commentId;
+  var res = await fetch('/api/lists/comments/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comment_id: commentId }),
+  });
+  if (!res.ok) { alert('Failed to delete comment.'); return; }
+  var item = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
+  if (item) item.remove();
+  var heading = document.querySelector('.list-comments-title');
+  if (heading) {
+    var match = heading.textContent.match(/\d+/);
+    var newCount = match ? Math.max(0, parseInt(match[0]) - 1) : 0;
+    heading.textContent = 'Comments (' + newCount + ')';
+  }
+  if (!document.querySelector('.lc-item')) {
+    document.getElementById('lc-list').innerHTML = '<div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>';
+  }
+});
 </script>

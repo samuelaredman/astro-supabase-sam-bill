@@ -84,16 +84,21 @@ const { data: recentListsRaw, error: listsError } = await adminDb
 if (listsError) console.error('[index] lists query error:', JSON.stringify(listsError));
 
 const recentListIds = (recentListsRaw ?? []).map((l: any) => l.id);
-const { data: recentListEntries } = recentListIds.length > 0
-  ? await adminDb.from('list_entries')
-      .select('list_id, games(cover_img_url)')
-      .in('list_id', recentListIds)
-      .order('position', { ascending: true, nullsFirst: false })
-      .order('added_at', { ascending: true })
-  : { data: [] };
-const { data: recentListEntryCounts } = recentListIds.length > 0
-  ? await adminDb.from('list_entries').select('list_id').in('list_id', recentListIds)
-  : { data: [] };
+const [
+  { data: recentListEntries },
+  { data: recentListEntryCounts },
+  { data: listVotesRaw },
+  { data: listCommentsRaw },
+  { data: listReactionsRaw },
+] = recentListIds.length > 0
+  ? await Promise.all([
+      adminDb.from('list_entries').select('list_id, games(cover_img_url)').in('list_id', recentListIds).order('position', { ascending: true, nullsFirst: false }).order('added_at', { ascending: true }),
+      adminDb.from('list_entries').select('list_id').in('list_id', recentListIds),
+      adminDb.from('list_votes').select('list_id, vote, profile_id').in('list_id', recentListIds),
+      adminDb.from('list_comments').select('list_id').in('list_id', recentListIds),
+      adminDb.from('list_reactions').select('list_id, reaction_type, profile_id').in('list_id', recentListIds),
+    ])
+  : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }];
 
 const recentListCoversByListId: Record<string, string[]> = {};
 for (const e of recentListEntries ?? []) {
@@ -107,6 +112,26 @@ const recentListCountByListId: Record<string, number> = {};
 for (const e of recentListEntryCounts ?? []) {
   recentListCountByListId[e.list_id] = (recentListCountByListId[e.list_id] ?? 0) + 1;
 }
+
+// Aggregate votes, comments, reactions by list_id
+const listUpByListId: Record<string, number> = {};
+const listDownByListId: Record<string, number> = {};
+const listMyVoteByListId: Record<string, number> = {};
+for (const v of listVotesRaw ?? []) {
+  if (v.vote === 1) listUpByListId[v.list_id] = (listUpByListId[v.list_id] ?? 0) + 1;
+  else listDownByListId[v.list_id] = (listDownByListId[v.list_id] ?? 0) + 1;
+  if (currentProfile && v.profile_id === currentProfile.id) listMyVoteByListId[v.list_id] = v.vote;
+}
+const listCommentCountByListId: Record<string, number> = {};
+for (const c of listCommentsRaw ?? []) {
+  listCommentCountByListId[c.list_id] = (listCommentCountByListId[c.list_id] ?? 0) + 1;
+}
+const listReactionsByListId: Record<string, { reaction_type: string; profile_id: string }[]> = {};
+for (const r of listReactionsRaw ?? []) {
+  if (!listReactionsByListId[r.list_id]) listReactionsByListId[r.list_id] = [];
+  listReactionsByListId[r.list_id].push({ reaction_type: r.reaction_type, profile_id: r.profile_id });
+}
+
 const recentLists = (recentListsRaw ?? []).map((l: any) => ({
   ...l,
   _isListItem: true,
@@ -114,6 +139,11 @@ const recentLists = (recentListsRaw ?? []).map((l: any) => ({
   ownerAvatar: l.profiles?.avatar_url,
   coverUrls: recentListCoversByListId[l.id] ?? [],
   entryCount: recentListCountByListId[l.id] ?? 0,
+  upVotes: listUpByListId[l.id] ?? 0,
+  downVotes: listDownByListId[l.id] ?? 0,
+  myVote: listMyVoteByListId[l.id] ?? 0,
+  commentCount: listCommentCountByListId[l.id] ?? 0,
+  reactions: listReactionsByListId[l.id] ?? [],
 }));
 
 type Platform = { id: string; name: string; slug: string; };
@@ -323,6 +353,13 @@ const initialFollowingDone = followingReviews.length < 20
               ownerUsername={item.ownerUsername}
               ownerAvatar={item.ownerAvatar ?? null}
               createdAt={item.created_at}
+              upVotes={item.upVotes}
+              downVotes={item.downVotes}
+              myVote={item.myVote}
+              commentCount={item.commentCount}
+              reactions={item.reactions}
+              isLoggedIn={isLoggedIn}
+              currentProfileId={currentProfile?.id ?? null}
             />
           ) : (
             <ReviewCard
