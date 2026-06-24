@@ -6,14 +6,14 @@ export const POST: APIRoute = async (context) => {
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { list_id, body } = await context.request.json();
+  const { list_id, body, parent_id } = await context.request.json();
   if (!list_id || !body?.trim()) return json({ error: "list_id and body are required." }, 400);
   if (body.trim().length > 2000) return json({ error: "Comment must be 2000 characters or fewer." }, 400);
 
   const { data: inserted, error } = await (db as any)
     .from('list_comments')
-    .insert({ list_id, profile_id: profile.id, body: body.trim() })
-    .select('id, body, created_at')
+    .insert({ list_id, profile_id: profile.id, body: body.trim(), parent_id: parent_id || null })
+    .select('id, body, created_at, parent_id')
     .single();
 
   if (error) {

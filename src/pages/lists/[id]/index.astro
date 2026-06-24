@@ -51,7 +51,7 @@ const [
   db.from("list_votes").select("vote, profile_id").eq("list_id", id),
   db.from("list_reactions").select("reaction_type, profile_id").eq("list_id", id),
   db.from("list_comments")
-    .select("id, body, created_at, profiles ( id, username, avatar_url )")
+    .select("id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url ), list_comment_votes ( vote, profile_id ), list_comment_reactions ( reaction_type, profile_id )")
     .eq("list_id", id)
     .order("created_at", { ascending: true }),
 ]);
@@ -86,6 +86,51 @@ const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => 
 
 // Comments
 const commentList: any[] = commentsRaw ?? [];
+
+function renderBody(text: string): string {
+  const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const withMentions = esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="lc-mention" href="/reviewers/$3">$2</a>');
+  return withMentions.replace(/:([A-Za-z0-9_]+):/g, (_, key) => {
+    const path = IMAGE_EMOTE_MAP[key];
+    return path ? `<img src="${path}" class="lc-emote-inline" alt=":${key}:" title=":${key}:">` : `:${key}:`;
+  });
+}
+
+function getLCVotes(comment: any) {
+  const arr = Array.isArray(comment.list_comment_votes) ? comment.list_comment_votes : [];
+  return {
+    up: arr.filter((v: any) => v.vote === 1).length,
+    down: arr.filter((v: any) => v.vote === -1).length,
+    my: currentProfile ? (arr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0) : 0,
+  };
+}
+
+function getLCReactions(comment: any) {
+  const arr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(comment.list_comment_reactions) ? comment.list_comment_reactions : [];
+  const map: Record<string, { count: number; active: boolean }> = {};
+  for (const r of arr) {
+    if (!map[r.reaction_type]) map[r.reaction_type] = { count: 0, active: false };
+    map[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) map[r.reaction_type].active = true;
+  }
+  return Object.entries(map).map(([type, info]) => ({
+    type,
+    isImage: !!IMAGE_EMOTE_MAP[type],
+    path: IMAGE_EMOTE_MAP[type] ?? null,
+    count: info.count,
+    active: info.active,
+  }));
+}
+
+const topLevelComments = commentList.filter((c: any) => !c.parent_id);
+const directReplyMap: Record<string, any[]> = {};
+for (const c of commentList) {
+  if (c.parent_id) {
+    if (!directReplyMap[c.parent_id]) directReplyMap[c.parent_id] = [];
+    directReplyMap[c.parent_id].push(c);
+  }
+}
 
 // Cover collage: first 4 covers
 const collageSrcs = entryList
@@ -302,6 +347,182 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
   .lc-submit:disabled { opacity: .45; cursor: not-allowed; }
   .lc-error { font-size: 13px; color: #f87171; display: none; }
 
+  /* ── Threaded comments ── */
+  .lct { display: flex; flex-direction: column; gap: 0; }
+  .lc-replies { margin-left: 20px; border-left: 2px solid var(--border-subtle); padding-left: 10px; }
+  .lc-replies-deep { margin-left: 16px; }
+  .lc-reply { padding: 10px 0 6px; border-bottom: none; }
+  .lc-avatar-sm { width: 22px !important; height: 22px !important; min-width: 22px !important; font-size: 8px !important; }
+  .lc-avatar-sm img { width: 22px !important; height: 22px !important; }
+  .lc-edited { font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+  .lc-mention { color: var(--accent); text-decoration: none; }
+  .lc-mention:hover { text-decoration: underline; }
+  .lc-emote-inline { width: 16px; height: 16px; object-fit: contain; vertical-align: middle; }
+
+  /* ── Comment actions row ── */
+  .lc-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-top: 5px;
+  }
+  .lcv-btn {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 14px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+    line-height: 1.4;
+  }
+  .lcv-btn:hover:not(.lcv-up):not(.lcv-down) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .lcv-btn:disabled { opacity: 0.5; cursor: default; }
+  .lcv-up   { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.08); }
+  .lcv-down { border-color: #f87171; color: #f87171; background: rgba(248,113,113,.08); }
+
+  .lcrx-wrap { display: inline-flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+  .lcrx-btn {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 14px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+  .lcrx-btn:hover:not(.lcrx-active) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .lcrx-active { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.08); }
+  .lcrx-toggle {
+    background: none;
+    border: 1.5px solid var(--border);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 5px;
+    font-family: inherit;
+    transition: all 0.15s;
+    line-height: 1.5;
+  }
+  .lcrx-toggle:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
+  .lcrx-emote-img { width: 14px; height: 14px; object-fit: contain; vertical-align: middle; }
+
+  .lc-reply-btn, .lc-edit-btn, .lc-delete-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    font-family: inherit;
+    padding: 2px 5px;
+    border-radius: 4px;
+    transition: color 0.15s;
+    line-height: 1.4;
+  }
+  .lc-reply-btn:hover { color: var(--accent); }
+  .lc-edit-btn:hover  { color: var(--text-secondary); }
+  .lc-delete-btn:hover { color: #f87171; }
+
+  /* ── Reply form ── */
+  .lc-rf {
+    margin: 6px 0 8px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .lc-rf-ta {
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+    resize: vertical;
+    min-height: 52px;
+    transition: border-color .15s;
+    box-sizing: border-box;
+  }
+  .lc-rf-ta:focus { border-color: var(--accent); }
+  .lc-rf-foot { display: flex; justify-content: flex-end; gap: 6px; align-items: center; }
+  .lc-rf-cancel {
+    background: none; border: 1px solid var(--border); padding: 4px 10px;
+    border-radius: 14px; font-size: 11px; font-family: inherit; color: var(--text-secondary);
+    cursor: pointer; transition: all .15s;
+  }
+  .lc-rf-cancel:hover { border-color: var(--text-tertiary); }
+  .lc-rf-submit {
+    background: var(--accent); color: #fff; border: none; padding: 4px 12px;
+    border-radius: 14px; font-size: 11px; font-weight: 600; font-family: inherit;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .lc-rf-submit:hover { opacity: .85; }
+  .lc-rf-submit:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ── Comment edit inline ── */
+  .lc-edit-wrap { margin-top: 6px; }
+  .lc-edit-ta {
+    width: 100%; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e); color: var(--text-primary); font-size: 12px;
+    font-family: inherit; outline: none; resize: vertical; min-height: 52px;
+    transition: border-color .15s; box-sizing: border-box;
+  }
+  .lc-edit-ta:focus { border-color: var(--accent); }
+  .lc-edit-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px; }
+  .lc-edit-cancel {
+    background: none; border: 1px solid var(--border); padding: 4px 10px;
+    border-radius: 14px; font-size: 11px; font-family: inherit; color: var(--text-secondary);
+    cursor: pointer; transition: all .15s;
+  }
+  .lc-edit-cancel:hover { border-color: var(--text-tertiary); }
+  .lc-edit-save {
+    background: var(--accent); color: #fff; border: none; padding: 4px 12px;
+    border-radius: 14px; font-size: 11px; font-weight: 600; font-family: inherit;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .lc-edit-save:hover { opacity: .85; }
+  .lc-edit-save:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ── Comment emoji picker ── */
+  #ldpc-emoji-picker {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; box-shadow: 0 4px 24px rgba(0,0,0,.2);
+    max-height: 280px; overflow-y: auto; min-width: 220px; max-width: 280px;
+    scrollbar-width: thin; position: fixed; z-index: 1000; display: none;
+  }
+  .ldpc-search {
+    width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 5px 8px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--bg-hover);
+    color: var(--text-primary); font-size: 12px; outline: none;
+  }
+  .ldpc-search:focus { border-color: var(--accent); }
+  .ldpc-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+  .ldpc-pick {
+    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+    background: none; border: none; cursor: pointer; border-radius: 6px;
+    transition: background 0.1s, transform 0.1s; padding: 2px;
+  }
+  .ldpc-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
+  .ldpc-pick.ldpc-active { background: rgba(96,80,200,.12); outline: 1.5px solid var(--accent); }
+  .ldpc-pick img { width: 24px; height: 24px; object-fit: contain; display: block; }
+
   /* ── Emoji picker for detail page ── */
   #ldp-emoji-picker {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
@@ -488,26 +709,179 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
         <div class="list-comments-title">Comments ({commentList.length})</div>
         <div class="lc-list" id="lc-list">
           {commentList.length === 0 && <div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>}
-          {commentList.map((c: any) => (
-            <div class="lc-item" data-comment-id={c.id}>
-              <a href={`/reviewers/${c.profiles?.username}`} class="lc-avatar">
-                {c.profiles?.avatar_url
-                  ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
-                  : <span>{(c.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
-                }
-              </a>
-              <div class="lc-body">
-                <div class="lc-meta">
-                  <a href={`/reviewers/${c.profiles?.username}`} class="lc-username">@{c.profiles?.username}</a>
-                  <span class="lc-ts">{timeAgo(c.created_at)}</span>
-                  {currentProfile?.id === c.profiles?.id && (
-                    <button class="lc-delete" data-comment-id={c.id}>Delete</button>
-                  )}
+          {topLevelComments.map((c: any) => {
+            const level1Replies = directReplyMap[c.id] ?? [];
+            const cv = getLCVotes(c);
+            const cr = getLCReactions(c);
+            const isOwn = currentProfile?.id === c.profiles?.id;
+            return (
+              <div class="lct" data-thread-id={c.id}>
+                <div class="lc-item" data-comment-id={c.id}>
+                  <a href={`/reviewers/${c.profiles?.username}`} class="lc-avatar">
+                    {c.profiles?.avatar_url
+                      ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
+                      : <span>{(c.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
+                    }
+                  </a>
+                  <div class="lc-body">
+                    <div class="lc-meta">
+                      <a href={`/reviewers/${c.profiles?.username}`} class="lc-username">@{c.profiles?.username}</a>
+                      <span class="lc-ts">{timeAgo(c.created_at)}</span>
+                      {c.updated_at && <span class="lc-edited">(edited)</span>}
+                    </div>
+                    <div class="lc-text" data-raw-body={c.body} set:html={renderBody(c.body)}></div>
+                    <div class="lc-actions">
+                      <button class={`lcv-btn${cv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cv.up}</button>
+                      <button class={`lcv-btn${cv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cv.down}</button>
+                      {(cr.length > 0 || isLoggedIn) && (
+                        <div class="lcrx-wrap" data-comment-id={c.id}>
+                          {cr.map((rx: any) => (
+                            <button
+                              class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
+                              data-comment-id={c.id}
+                              data-reaction={rx.type}
+                              data-reacted={rx.active ? 'true' : 'false'}
+                              data-count={rx.count}
+                              data-logged-in={isLoggedIn ? 'true' : 'false'}
+                              data-is-image={rx.isImage ? 'true' : 'false'}
+                            >
+                              {rx.isImage
+                                ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                : <>{rx.type} {rx.count}</>}
+                            </button>
+                          ))}
+                          {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={c.id} title="React">+</button>}
+                        </div>
+                      )}
+                      {isLoggedIn && <button class="lc-reply-btn" data-parent-id={c.id} data-thread-id={c.id} data-reply-to={c.profiles?.username} type="button">↩ Reply</button>}
+                      {isOwn && <button class="lc-edit-btn" data-comment-id={c.id} type="button">Edit</button>}
+                      {isOwn && <button class="lc-delete-btn" data-comment-id={c.id} type="button">Delete</button>}
+                    </div>
+                  </div>
                 </div>
-                <div class="lc-text">{c.body}</div>
+
+                <div class="lc-replies" data-replies-for={c.id}>
+                  {level1Replies.map((r: any) => {
+                    const level2Replies = directReplyMap[r.id] ?? [];
+                    const rv = getLCVotes(r);
+                    const rr = getLCReactions(r);
+                    const isOwnR = currentProfile?.id === r.profiles?.id;
+                    return (
+                      <Fragment>
+                        <div class="lc-item lc-reply" data-comment-id={r.id}>
+                          <a href={`/reviewers/${r.profiles?.username}`} class="lc-avatar lc-avatar-sm">
+                            {r.profiles?.avatar_url
+                              ? <img src={r.profiles.avatar_url} alt={r.profiles.username} />
+                              : <span>{(r.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
+                            }
+                          </a>
+                          <div class="lc-body">
+                            <div class="lc-meta">
+                              <a href={`/reviewers/${r.profiles?.username}`} class="lc-username">@{r.profiles?.username}</a>
+                              <span class="lc-ts">{timeAgo(r.created_at)}</span>
+                              {r.updated_at && <span class="lc-edited">(edited)</span>}
+                            </div>
+                            <div class="lc-text" data-raw-body={r.body} set:html={renderBody(r.body)}></div>
+                            <div class="lc-actions">
+                              <button class={`lcv-btn${rv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={r.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {rv.up}</button>
+                              <button class={`lcv-btn${rv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={r.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {rv.down}</button>
+                              {(rr.length > 0 || isLoggedIn) && (
+                                <div class="lcrx-wrap" data-comment-id={r.id}>
+                                  {rr.map((rx: any) => (
+                                    <button
+                                      class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
+                                      data-comment-id={r.id}
+                                      data-reaction={rx.type}
+                                      data-reacted={rx.active ? 'true' : 'false'}
+                                      data-count={rx.count}
+                                      data-logged-in={isLoggedIn ? 'true' : 'false'}
+                                      data-is-image={rx.isImage ? 'true' : 'false'}
+                                    >
+                                      {rx.isImage
+                                        ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                        : <>{rx.type} {rx.count}</>}
+                                    </button>
+                                  ))}
+                                  {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={r.id} title="React">+</button>}
+                                </div>
+                              )}
+                              {isLoggedIn && <button class="lc-reply-btn" data-parent-id={r.id} data-thread-id={c.id} data-reply-to={r.profiles?.username} type="button">↩ Reply</button>}
+                              {isOwnR && <button class="lc-edit-btn" data-comment-id={r.id} type="button">Edit</button>}
+                              {isOwnR && <button class="lc-delete-btn" data-comment-id={r.id} type="button">Delete</button>}
+                            </div>
+                          </div>
+                        </div>
+                        {level2Replies.length > 0 && (
+                          <div class="lc-replies lc-replies-deep" data-replies-for={r.id}>
+                            {level2Replies.map((dr: any) => {
+                              const dv = getLCVotes(dr);
+                              const drr = getLCReactions(dr);
+                              const isOwnDr = currentProfile?.id === dr.profiles?.id;
+                              return (
+                                <div class="lc-item lc-reply" data-comment-id={dr.id}>
+                                  <a href={`/reviewers/${dr.profiles?.username}`} class="lc-avatar lc-avatar-sm">
+                                    {dr.profiles?.avatar_url
+                                      ? <img src={dr.profiles.avatar_url} alt={dr.profiles.username} />
+                                      : <span>{(dr.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
+                                    }
+                                  </a>
+                                  <div class="lc-body">
+                                    <div class="lc-meta">
+                                      <a href={`/reviewers/${dr.profiles?.username}`} class="lc-username">@{dr.profiles?.username}</a>
+                                      <span class="lc-ts">{timeAgo(dr.created_at)}</span>
+                                      {dr.updated_at && <span class="lc-edited">(edited)</span>}
+                                    </div>
+                                    <div class="lc-text" data-raw-body={dr.body} set:html={renderBody(dr.body)}></div>
+                                    <div class="lc-actions">
+                                      <button class={`lcv-btn${dv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={dr.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {dv.up}</button>
+                                      <button class={`lcv-btn${dv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={dr.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {dv.down}</button>
+                                      {(drr.length > 0 || isLoggedIn) && (
+                                        <div class="lcrx-wrap" data-comment-id={dr.id}>
+                                          {drr.map((rx: any) => (
+                                            <button
+                                              class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
+                                              data-comment-id={dr.id}
+                                              data-reaction={rx.type}
+                                              data-reacted={rx.active ? 'true' : 'false'}
+                                              data-count={rx.count}
+                                              data-logged-in={isLoggedIn ? 'true' : 'false'}
+                                              data-is-image={rx.isImage ? 'true' : 'false'}
+                                            >
+                                              {rx.isImage
+                                                ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                                : <>{rx.type} {rx.count}</>}
+                                            </button>
+                                          ))}
+                                          {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={dr.id} title="React">+</button>}
+                                        </div>
+                                      )}
+                                      {isLoggedIn && <button class="lc-reply-btn" data-parent-id={dr.id} data-thread-id={c.id} data-reply-to={dr.profiles?.username} type="button">↩ Reply</button>}
+                                      {isOwnDr && <button class="lc-edit-btn" data-comment-id={dr.id} type="button">Edit</button>}
+                                      {isOwnDr && <button class="lc-delete-btn" data-comment-id={dr.id} type="button">Delete</button>}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </div>
+
+                {isLoggedIn && (
+                  <div class="lc-rf" id={`lc-rf-${c.id}`} style="display:none">
+                    <textarea class="lc-rf-ta" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>
+                    <div class="lc-rf-foot">
+                      <button class="lc-rf-cancel" type="button">Cancel</button>
+                      <button class="lc-rf-submit" type="button" data-parent-id={c.id} data-list-id={id}>Reply</button>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div class="lc-form">
@@ -557,7 +931,7 @@ if (saveBtn) {
   });
 }
 
-// ── Vote buttons ─────────────────────────────────────────────────────────────
+// ── List vote buttons ─────────────────────────────────────────────────────────
 document.querySelectorAll('.list-vote-btn').forEach(function(btn) {
   btn.addEventListener('click', async function() {
     if (btn.disabled) return;
@@ -576,21 +950,15 @@ document.querySelectorAll('.list-vote-btn').forEach(function(btn) {
       var data = await res.json();
       var upBtn = document.getElementById('lvote-up');
       var downBtn = document.getElementById('lvote-down');
-      if (upBtn) {
-        upBtn.textContent = '▲ ' + data.up;
-        upBtn.classList.toggle('lv-up', data.vote === 1);
-      }
-      if (downBtn) {
-        downBtn.textContent = '▼ ' + data.down;
-        downBtn.classList.toggle('lv-down', data.vote === -1);
-      }
+      if (upBtn) { upBtn.textContent = '▲ ' + data.up; upBtn.classList.toggle('lv-up', data.vote === 1); }
+      if (downBtn) { downBtn.textContent = '▼ ' + data.down; downBtn.classList.toggle('lv-down', data.vote === -1); }
     } finally {
       btn.disabled = false;
     }
   });
 });
 
-// ── Emoji picker for detail page ─────────────────────────────────────────────
+// ── List-level emoji picker (for list reactions) ──────────────────────────────
 var ldpPicker = document.createElement('div');
 ldpPicker.id = 'ldp-emoji-picker';
 var ldpHtml = '<input type="text" id="ldp-emote-search" class="ldp-emote-search" placeholder="Search emotes..." autocomplete="off">';
@@ -643,8 +1011,74 @@ function applyDetailReaction(reactionType, reacted, count) {
   }
 }
 
+// ── Comment-level emoji picker ─────────────────────────────────────────────────
+var ldpcPicker = document.createElement('div');
+ldpcPicker.id = 'ldpc-emoji-picker';
+var ldpcHtml = '<input type="text" class="ldpc-search" placeholder="Search emotes..." autocomplete="off">';
+ldpcHtml += '<div class="ldpc-grid">';
+imageEmotes.forEach(function(emote) {
+  ldpcHtml += '<button class="ldpc-pick" data-emoji="' + emote.key + '" title="' + emote.key + '"><img src="' + emote.path + '" alt="' + emote.key + '"></button>';
+});
+ldpcHtml += '</div>';
+ldpcPicker.innerHTML = ldpcHtml;
+document.body.appendChild(ldpcPicker);
+
+ldpcPicker.querySelector('.ldpc-search').addEventListener('input', function() {
+  var q = this.value.toLowerCase();
+  ldpcPicker.querySelectorAll('.ldpc-pick').forEach(function(btn) {
+    btn.style.display = btn.dataset.emoji.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+  });
+});
+
+function lcrxApply(commentId, reactionType, reacted, count) {
+  var isImage = !!imageEmoteMap[reactionType];
+  var wrap = document.querySelector('.lcrx-wrap[data-comment-id="' + commentId + '"]');
+  if (!wrap) return;
+  var existing = wrap.querySelector('.lcrx-btn[data-reaction="' + reactionType + '"]');
+  if (existing) {
+    existing.dataset.reacted = reacted ? 'true' : 'false';
+    existing.dataset.count = String(count);
+    if (isImage) {
+      existing.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="lcrx-emote-img" alt="' + reactionType + '"> ' + count;
+    } else {
+      existing.textContent = reactionType + ' ' + count;
+    }
+    existing.classList.toggle('lcrx-active', reacted);
+    if (count === 0) existing.remove();
+  } else if (count > 0) {
+    var toggle = wrap.querySelector('.lcrx-toggle');
+    var newBtn = document.createElement('button');
+    newBtn.className = 'lcrx-btn' + (reacted ? ' lcrx-active' : '');
+    newBtn.dataset.commentId = commentId;
+    newBtn.dataset.reaction = reactionType;
+    newBtn.dataset.reacted = reacted ? 'true' : 'false';
+    newBtn.dataset.count = String(count);
+    newBtn.dataset.loggedIn = 'true';
+    newBtn.dataset.isImage = isImage ? 'true' : 'false';
+    if (isImage) {
+      newBtn.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="lcrx-emote-img" alt="' + reactionType + '"> ' + count;
+    } else {
+      newBtn.textContent = reactionType + ' ' + count;
+    }
+    if (toggle) { wrap.insertBefore(newBtn, toggle); } else { wrap.appendChild(newBtn); }
+  }
+}
+
+function renderBody(text) {
+  var esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  var withMentions = esc.replace(/(^|\s)(@([\w]+))/g, function(m, pre, mention, username) {
+    return pre + '<a class="lc-mention" href="/reviewers/' + username + '">' + mention + '</a>';
+  });
+  return withMentions.replace(/:([A-Za-z0-9_]+):/g, function(match, key) {
+    var path = imageEmoteMap[key];
+    return path ? '<img src="' + path + '" class="lc-emote-inline" alt=":' + key + ':" title=":' + key + ':">' : match;
+  });
+}
+
+// ── Delegated click handler ───────────────────────────────────────────────────
 document.addEventListener('click', function(e) {
-  // Inline reaction button
+
+  // ── List reaction inline btn
   var reactionBtn = e.target.closest('.list-reaction-btn');
   if (reactionBtn) {
     var loggedIn = reactionBtn.dataset.loggedIn === 'true';
@@ -654,8 +1088,7 @@ document.addEventListener('click', function(e) {
     var count = parseInt(reactionBtn.dataset.count) || 0;
     applyDetailReaction(reaction, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
     fetch('/api/lists/react', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ list_id: listId, reaction_type: reaction }),
     }).then(function(r) { return r.json(); })
       .then(function(d) { if (d) applyDetailReaction(reaction, d.reacted, d.count); })
@@ -663,7 +1096,7 @@ document.addEventListener('click', function(e) {
     return;
   }
 
-  // React toggle button
+  // ── List react toggle
   var toggleBtn = e.target.closest('#list-react-toggle');
   if (toggleBtn) {
     var loggedIn = toggleBtn.dataset.loggedIn === 'true';
@@ -690,7 +1123,7 @@ document.addEventListener('click', function(e) {
     return;
   }
 
-  // Pick from emoji picker
+  // ── List emoji pick
   var emojiBtn = e.target.closest('.ldp-emoji-pick');
   if (emojiBtn) {
     var picker = document.getElementById('ldp-emoji-picker');
@@ -701,8 +1134,7 @@ document.addEventListener('click', function(e) {
     var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
     applyDetailReaction(emoji, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
     fetch('/api/lists/react', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ list_id: listId, reaction_type: emoji }),
     }).then(function(r) { return r.json(); })
       .then(function(d) { if (d) applyDetailReaction(emoji, d.reacted, d.count); })
@@ -710,14 +1142,331 @@ document.addEventListener('click', function(e) {
     return;
   }
 
-  // Outside click: close picker
+  // ── Comment vote
+  var cvBtn = e.target.closest('.lcv-btn');
+  if (cvBtn) {
+    if (cvBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+    if (cvBtn.disabled) return;
+    cvBtn.disabled = true;
+    var commentId = cvBtn.dataset.commentId;
+    var vote = parseInt(cvBtn.dataset.vote);
+    fetch('/api/lists/comments/vote', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, vote }),
+    }).then(function(r) {
+      if (r.status === 401) { window.location.href = '/signin'; return r.json(); }
+      return r.json();
+    }).then(function(data) {
+      if (!data) return;
+      document.querySelectorAll('.lcv-btn[data-comment-id="' + commentId + '"]').forEach(function(b) {
+        var bv = parseInt(b.dataset.vote);
+        b.textContent = (bv === 1 ? '▲ ' : '▼ ') + (bv === 1 ? data.up : data.down);
+        b.classList.toggle('lcv-up',   bv === 1  && data.vote === 1);
+        b.classList.toggle('lcv-down', bv === -1 && data.vote === -1);
+      });
+    }).finally(function() { cvBtn.disabled = false; });
+    return;
+  }
+
+  // ── Comment inline reaction
+  var crxBtn = e.target.closest('.lcrx-btn');
+  if (crxBtn) {
+    if (crxBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+    var commentId = crxBtn.dataset.commentId;
+    var reaction = crxBtn.dataset.reaction;
+    var reacted = crxBtn.dataset.reacted === 'true';
+    var count = parseInt(crxBtn.dataset.count) || 0;
+    lcrxApply(commentId, reaction, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/comments/react', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, reaction_type: reaction }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) lcrxApply(commentId, reaction, d.reacted, d.count); })
+      .catch(function() { lcrxApply(commentId, reaction, reacted, count); });
+    return;
+  }
+
+  // ── Comment reaction toggle (+)
+  var crxToggle = e.target.closest('.lcrx-toggle');
+  if (crxToggle) {
+    var commentId = crxToggle.dataset.toggleCommentId;
+    var picker = document.getElementById('ldpc-emoji-picker');
+    var isOpen = picker.style.display !== 'none' && picker.dataset.activeCommentId === commentId;
+    picker.style.display = 'none';
+    if (!isOpen) {
+      picker.dataset.activeCommentId = commentId;
+      picker.style.display = 'block';
+      requestAnimationFrame(function() {
+        var rect = crxToggle.getBoundingClientRect();
+        var pRect = picker.getBoundingClientRect();
+        var top = rect.top - pRect.height - 8;
+        if (top < 8) top = rect.bottom + 8;
+        var left = rect.left;
+        if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+        picker.style.top = top + 'px';
+        picker.style.left = left + 'px';
+        picker.querySelectorAll('.ldpc-pick').forEach(function(btn) {
+          var inlineBtn = document.querySelector('.lcrx-btn[data-comment-id="' + commentId + '"][data-reaction="' + btn.dataset.emoji + '"]');
+          btn.classList.toggle('ldpc-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
+        });
+      });
+    }
+    return;
+  }
+
+  // ── Comment emoji picker pick
+  var ldpcBtn = e.target.closest('.ldpc-pick');
+  if (ldpcBtn) {
+    var picker = document.getElementById('ldpc-emoji-picker');
+    var commentId = picker && picker.dataset.activeCommentId;
+    if (!commentId) return;
+    picker.style.display = 'none';
+    var emoji = ldpcBtn.dataset.emoji;
+    var existing = document.querySelector('.lcrx-btn[data-comment-id="' + commentId + '"][data-reaction="' + emoji + '"]');
+    var reacted = existing ? existing.dataset.reacted === 'true' : false;
+    var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+    lcrxApply(commentId, emoji, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/comments/react', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, reaction_type: emoji }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) lcrxApply(commentId, emoji, d.reacted, d.count); })
+      .catch(function() { lcrxApply(commentId, emoji, reacted, count); });
+    return;
+  }
+
+  // ── Reply btn: open reply form
+  var replyBtn = e.target.closest('.lc-reply-btn');
+  if (replyBtn) {
+    var parentId = replyBtn.dataset.parentId;
+    var threadId = replyBtn.dataset.threadId || parentId;
+    var replyTo = replyBtn.dataset.replyTo;
+    var form = document.getElementById('lc-rf-' + threadId);
+    if (!form) return;
+    var isOpen = form.style.display !== 'none';
+    document.querySelectorAll('.lc-rf').forEach(function(f) { f.style.display = 'none'; });
+    if (!isOpen) {
+      var sb = form.querySelector('.lc-rf-submit');
+      if (sb) sb.dataset.parentId = parentId;
+      form.style.display = 'flex';
+      form.style.flexDirection = 'column';
+      var ta = form.querySelector('.lc-rf-ta');
+      if (ta) {
+        ta.value = replyTo ? '@' + replyTo + ' ' : '';
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
+    }
+    return;
+  }
+
+  // ── Reply form cancel
+  var rfCancel = e.target.closest('.lc-rf-cancel');
+  if (rfCancel) {
+    var form = rfCancel.closest('.lc-rf');
+    form.style.display = 'none';
+    var ta = form.querySelector('.lc-rf-ta');
+    if (ta) ta.value = '';
+    return;
+  }
+
+  // ── Reply form submit
+  var rfSubmit = e.target.closest('.lc-rf-submit');
+  if (rfSubmit) {
+    var parentId = rfSubmit.dataset.parentId;
+    var rfListId = rfSubmit.dataset.listId;
+    var form = rfSubmit.closest('.lc-rf');
+    var threadId = form.id.replace('lc-rf-', '');
+    var ta = form.querySelector('.lc-rf-ta');
+    var body = ta.value.trim();
+    if (!body) return;
+    rfSubmit.disabled = true;
+    rfSubmit.textContent = 'Posting…';
+    fetch('/api/lists/comments/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: rfListId, body, parent_id: parentId }),
+    }).then(function(r) {
+      if (r.status === 401) { window.location.href = '/signin'; throw new Error('unauth'); }
+      return r.json();
+    }).then(function(data) {
+      if (!data || data.error) { alert(data?.error || 'Failed to post reply.'); return; }
+      var c = data.comment;
+      var p = c.profiles;
+      var initials = p?.username ? p.username.slice(0,2).toUpperCase() : '?';
+      var avatarHtml = p?.avatar_url
+        ? '<img src="' + p.avatar_url + '" alt="" style="width:100%;height:100%;object-fit:cover">'
+        : '<span>' + initials + '</span>';
+      var isOwn = currentProfileId === p?.id;
+      var replyEl = document.createElement('div');
+      replyEl.className = 'lc-item lc-reply';
+      replyEl.dataset.commentId = c.id;
+      replyEl.innerHTML =
+        '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-avatar lc-avatar-sm">' + avatarHtml + '</a>' +
+        '<div class="lc-body">' +
+          '<div class="lc-meta">' +
+            '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-username">@' + (p?.username ?? '') + '</a>' +
+            '<span class="lc-ts">just now</span>' +
+          '</div>' +
+          '<div class="lc-text" data-raw-body="' + (c.body ?? '').replace(/"/g,'&quot;') + '">' + renderBody(c.body ?? '') + '</div>' +
+          '<div class="lc-actions">' +
+            '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
+            '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+            '<div class="lcrx-wrap" data-comment-id="' + c.id + '">' +
+              '<button class="lcrx-toggle" data-toggle-comment-id="' + c.id + '" title="React">+</button>' +
+            '</div>' +
+            '<button class="lc-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + threadId + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
+            (isOwn ? '<button class="lc-edit-btn" data-comment-id="' + c.id + '" type="button">Edit</button><button class="lc-delete-btn" data-comment-id="' + c.id + '" type="button">Delete</button>' : '') +
+          '</div>' +
+        '</div>';
+
+      var container;
+      if (parentId === threadId) {
+        container = document.querySelector('.lc-replies[data-replies-for="' + threadId + '"]:not(.lc-replies-deep)');
+      } else {
+        container = document.querySelector('.lc-replies-deep[data-replies-for="' + parentId + '"]');
+        if (!container) {
+          container = document.createElement('div');
+          container.className = 'lc-replies lc-replies-deep';
+          container.dataset.repliesFor = parentId;
+          var parentEl = document.querySelector('.lc-item[data-comment-id="' + parentId + '"]');
+          if (parentEl) { parentEl.after(container); }
+          else { container = document.querySelector('.lc-replies[data-replies-for="' + threadId + '"]:not(.lc-replies-deep)'); }
+        }
+      }
+      if (container) container.appendChild(replyEl);
+      form.style.display = 'none';
+      ta.value = '';
+      updateCommentCount(1);
+    }).catch(function(err) {
+      if (err.message !== 'unauth') alert('Something went wrong. Please try again.');
+    }).finally(function() {
+      rfSubmit.disabled = false;
+      rfSubmit.textContent = 'Reply';
+    });
+    return;
+  }
+
+  // ── Edit btn
+  var editBtn = e.target.closest('.lc-edit-btn');
+  if (editBtn) {
+    var commentId = editBtn.dataset.commentId;
+    var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
+    if (!commentEl) return;
+    var textEl = commentEl.querySelector('.lc-text');
+    var existing = commentEl.querySelector('.lc-edit-wrap');
+    if (existing) { existing.remove(); textEl.style.display = ''; return; }
+    var rawBody = textEl.dataset.rawBody || textEl.textContent;
+    textEl.style.display = 'none';
+    var editWrap = document.createElement('div');
+    editWrap.className = 'lc-edit-wrap';
+    editWrap.innerHTML =
+      '<textarea class="lc-edit-ta" maxlength="2000" rows="3">' + rawBody.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea>' +
+      '<div class="lc-edit-foot">' +
+        '<button class="lc-edit-cancel" type="button">Cancel</button>' +
+        '<button class="lc-edit-save" type="button" data-comment-id="' + commentId + '">Save</button>' +
+      '</div>';
+    textEl.after(editWrap);
+    editWrap.querySelector('textarea').focus();
+    return;
+  }
+
+  // ── Edit cancel
+  var editCancel = e.target.closest('.lc-edit-cancel');
+  if (editCancel) {
+    var wrap = editCancel.closest('.lc-edit-wrap');
+    var commentEl = wrap.closest('.lc-item');
+    commentEl.querySelector('.lc-text').style.display = '';
+    wrap.remove();
+    return;
+  }
+
+  // ── Edit save
+  var editSave = e.target.closest('.lc-edit-save');
+  if (editSave) {
+    var commentId = editSave.dataset.commentId;
+    var wrap = editSave.closest('.lc-edit-wrap');
+    var ta = wrap.querySelector('textarea');
+    var body = ta.value.trim();
+    if (!body) return;
+    editSave.disabled = true;
+    editSave.textContent = 'Saving…';
+    fetch('/api/lists/comments/update', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, body }),
+    }).then(function(r) {
+      if (r.status === 401) { window.location.href = '/signin'; throw new Error('unauth'); }
+      return r.json();
+    }).then(function(data) {
+      if (!data || data.error) { alert(data?.error || 'Failed to update comment.'); return; }
+      var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
+      var textEl = commentEl.querySelector('.lc-text');
+      textEl.innerHTML = renderBody(body);
+      textEl.dataset.rawBody = body;
+      textEl.style.display = '';
+      wrap.remove();
+      var meta = commentEl.querySelector('.lc-meta');
+      if (!meta.querySelector('.lc-edited')) {
+        var span = document.createElement('span');
+        span.className = 'lc-edited';
+        span.textContent = '(edited)';
+        meta.appendChild(span);
+      }
+    }).catch(function(err) {
+      if (err.message !== 'unauth') alert('Something went wrong.');
+    }).finally(function() {
+      if (editSave.isConnected) { editSave.disabled = false; editSave.textContent = 'Save'; }
+    });
+    return;
+  }
+
+  // ── Delete btn
+  var deleteBtn = e.target.closest('.lc-delete-btn');
+  if (deleteBtn) {
+    if (!confirm('Delete this comment?')) return;
+    var commentId = deleteBtn.dataset.commentId;
+    deleteBtn.disabled = true;
+    fetch('/api/lists/comments/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId }),
+    }).then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) { alert(data.error); return; }
+        var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
+        if (commentEl) {
+          var deepReplies = commentEl.parentElement && commentEl.parentElement.querySelector('.lc-replies-deep[data-replies-for="' + commentId + '"]');
+          if (deepReplies) deepReplies.remove();
+          commentEl.remove();
+        }
+        updateCommentCount(-1);
+        if (!document.querySelector('.lc-item')) {
+          document.getElementById('lc-list').innerHTML = '<div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>';
+        }
+      })
+      .catch(function() { alert('Failed to delete comment.'); })
+      .finally(function() { if (deleteBtn.isConnected) deleteBtn.disabled = false; });
+    return;
+  }
+
+  // ── Outside click: close pickers
   if (!e.target.closest('.list-reaction-wrap') && !e.target.closest('#ldp-emoji-picker')) {
-    var picker = document.getElementById('ldp-emoji-picker');
-    if (picker) picker.style.display = 'none';
+    var p = document.getElementById('ldp-emoji-picker');
+    if (p) p.style.display = 'none';
+  }
+  if (!e.target.closest('.lcrx-wrap') && !e.target.closest('#ldpc-emoji-picker')) {
+    var p = document.getElementById('ldpc-emoji-picker');
+    if (p) { p.style.display = 'none'; }
   }
 });
 
-// ── Comments ─────────────────────────────────────────────────────────────────
+function updateCommentCount(delta) {
+  var heading = document.querySelector('.list-comments-title');
+  if (!heading) return;
+  var match = heading.textContent.match(/\d+/);
+  var newCount = match ? Math.max(0, parseInt(match[0]) + delta) : Math.max(0, delta);
+  heading.textContent = 'Comments (' + newCount + ')';
+}
+
+// ── Top-level comment submit ──────────────────────────────────────────────────
 var lcSubmit = document.getElementById('lc-submit');
 if (lcSubmit) {
   lcSubmit.addEventListener('click', async function() {
@@ -745,60 +1494,49 @@ if (lcSubmit) {
       var emptyEl = document.getElementById('lc-empty');
       if (emptyEl) emptyEl.remove();
       var c = data.comment;
-      var initials = (c.profiles?.username ?? '?').slice(0, 2).toUpperCase();
-      var avatarHtml = c.profiles?.avatar_url
-        ? '<img src="' + c.profiles.avatar_url + '" alt="' + c.profiles.username + '" style="width:100%;height:100%;object-fit:cover">'
+      var p = c.profiles;
+      var initials = (p?.username ?? '?').slice(0, 2).toUpperCase();
+      var avatarHtml = p?.avatar_url
+        ? '<img src="' + p.avatar_url + '" alt="' + (p.username ?? '') + '" style="width:100%;height:100%;object-fit:cover">'
         : '<span>' + initials + '</span>';
-      var deleteHtml = currentProfileId === c.profiles?.id
-        ? '<button class="lc-delete" data-comment-id="' + c.id + '">Delete</button>'
-        : '';
-      var html = '<div class="lc-item" data-comment-id="' + c.id + '">'
-        + '<a href="/reviewers/' + c.profiles?.username + '" class="lc-avatar">' + avatarHtml + '</a>'
-        + '<div class="lc-body">'
-        + '<div class="lc-meta">'
-        + '<a href="/reviewers/' + c.profiles?.username + '" class="lc-username">@' + c.profiles?.username + '</a>'
-        + '<span class="lc-ts">just now</span>'
-        + deleteHtml
-        + '</div>'
-        + '<div class="lc-text">' + c.body.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>'
-        + '</div></div>';
-      document.getElementById('lc-list').insertAdjacentHTML('beforeend', html);
-      // Update comment count in heading
-      var heading = document.querySelector('.list-comments-title');
-      if (heading) {
-        var match = heading.textContent.match(/\d+/);
-        var newCount = match ? parseInt(match[0]) + 1 : 1;
-        heading.textContent = 'Comments (' + newCount + ')';
-      }
+      var isOwn = currentProfileId === p?.id;
+      var thread = document.createElement('div');
+      thread.className = 'lct';
+      thread.dataset.threadId = c.id;
+      thread.innerHTML =
+        '<div class="lc-item" data-comment-id="' + c.id + '">' +
+          '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-avatar">' + avatarHtml + '</a>' +
+          '<div class="lc-body">' +
+            '<div class="lc-meta">' +
+              '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-username">@' + (p?.username ?? '') + '</a>' +
+              '<span class="lc-ts">just now</span>' +
+            '</div>' +
+            '<div class="lc-text" data-raw-body="' + (c.body ?? '').replace(/"/g,'&quot;') + '">' + renderBody(c.body ?? '') + '</div>' +
+            '<div class="lc-actions">' +
+              '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
+              '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+              '<div class="lcrx-wrap" data-comment-id="' + c.id + '">' +
+                '<button class="lcrx-toggle" data-toggle-comment-id="' + c.id + '" title="React">+</button>' +
+              '</div>' +
+              '<button class="lc-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + c.id + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
+              (isOwn ? '<button class="lc-edit-btn" data-comment-id="' + c.id + '" type="button">Edit</button><button class="lc-delete-btn" data-comment-id="' + c.id + '" type="button">Delete</button>' : '') +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="lc-replies" data-replies-for="' + c.id + '"></div>' +
+        '<div class="lc-rf" id="lc-rf-' + c.id + '" style="display:none">' +
+          '<textarea class="lc-rf-ta" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>' +
+          '<div class="lc-rf-foot">' +
+            '<button class="lc-rf-cancel" type="button">Cancel</button>' +
+            '<button class="lc-rf-submit" type="button" data-parent-id="' + c.id + '" data-list-id="' + listId + '">Reply</button>' +
+          '</div>' +
+        '</div>';
+      document.getElementById('lc-list').appendChild(thread);
+      updateCommentCount(1);
     } finally {
       lcSubmit.disabled = false;
       lcSubmit.textContent = 'Post comment';
     }
   });
 }
-
-// Comment delete
-document.addEventListener('click', async function(e) {
-  var delBtn = e.target.closest('.lc-delete');
-  if (!delBtn) return;
-  if (!confirm('Delete this comment?')) return;
-  var commentId = delBtn.dataset.commentId;
-  var res = await fetch('/api/lists/comments/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ comment_id: commentId }),
-  });
-  if (!res.ok) { alert('Failed to delete comment.'); return; }
-  var item = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
-  if (item) item.remove();
-  var heading = document.querySelector('.list-comments-title');
-  if (heading) {
-    var match = heading.textContent.match(/\d+/);
-    var newCount = match ? Math.max(0, parseInt(match[0]) - 1) : 0;
-    heading.textContent = 'Comments (' + newCount + ')';
-  }
-  if (!document.querySelector('.lc-item')) {
-    document.getElementById('lc-list').innerHTML = '<div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>';
-  }
-});
 </script>
