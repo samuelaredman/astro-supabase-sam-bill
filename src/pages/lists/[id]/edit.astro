@@ -20,7 +20,7 @@ if (!currentProfile) return Astro.redirect("/signin");
 
 const { data: list } = await db
   .from("lists")
-  .select("id, title, description, is_ranked, visibility, shared_to_feed, profile_id")
+  .select("id, title, description, is_ranked, visibility, shared_to_feed, default_view, profile_id")
   .eq("id", id)
   .maybeSingle();
 
@@ -309,6 +309,12 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
   .search-result-source { font-size: 10px; color: var(--accent); background: rgba(96,80,200,.1); padding: 1px 5px; border-radius: 4px; }
   .search-no-results { padding: 14px; font-size: 13px; color: var(--text-tertiary); text-align: center; }
 
+  /* ── entries view toggle ── */
+  .el-view-toggle { display: flex; gap: 3px; }
+  .el-view-btn { padding: 5px 8px; border-radius: 7px; border: 1px solid var(--border); background: transparent; color: var(--text-tertiary); cursor: pointer; transition: background .15s, color .15s, border-color .15s; line-height: 0; }
+  .el-view-btn:hover { color: var(--text-secondary); }
+  .el-view-btn.active { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-secondary); }
+
   /* ── entry grid (library-style) ── */
   .entries-list {
     display: grid;
@@ -316,6 +322,17 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
     gap: 14px;
     padding-top: 4px;
   }
+
+  /* ── entry list-view override ── */
+  .entries-list.list-view { display: flex; flex-direction: column; gap: 0; padding-top: 0; }
+  .entries-list.list-view .entry-card { flex-direction: row; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
+  .entries-list.list-view .entry-card:last-child { border-bottom: none; }
+  .entries-list.list-view .entry-card-cover { width: 56px; height: 75px; aspect-ratio: unset; flex-shrink: 0; border-radius: 7px; cursor: grab; }
+  .entries-list.list-view .entry-card-cover:active { cursor: grabbing; }
+  .entries-list.list-view .entry-card:hover .entry-card-cover { transform: none; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .entries-list.list-view .entry-card-info { flex: 1; min-width: 0; margin-top: 0; padding-top: 2px; }
+  .entries-list.list-view .entry-card-title { font-size: 13px; font-weight: 600; -webkit-line-clamp: unset; overflow: visible; white-space: normal; }
+  .entries-list.list-view .entry-card-notes { margin-top: 4px; }
   .entry-card { display: flex; flex-direction: column; position: relative; }
   .entry-card-cover {
     width: 100%;
@@ -410,8 +427,18 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
 
         <!-- Entries grid -->
         <div class="el-section">
-          <div class="el-section-title" id="entries-heading">
-            {entryList.length} {entryList.length === 1 ? "game" : "games"}
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+            <div class="el-section-title" id="entries-heading" style="margin-bottom:0">
+              {entryList.length} {entryList.length === 1 ? "game" : "games"}
+            </div>
+            <div class="el-view-toggle">
+              <button class="el-view-btn" id="el-view-grid" title="Grid view">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="0" y="0" width="6" height="6" rx="1"/><rect x="8" y="0" width="6" height="6" rx="1"/><rect x="0" y="8" width="6" height="6" rx="1"/><rect x="8" y="8" width="6" height="6" rx="1"/></svg>
+              </button>
+              <button class="el-view-btn" id="el-view-list" title="List view">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="1" y1="3.5" x2="13" y2="3.5"/><line x1="1" y1="7" x2="13" y2="7"/><line x1="1" y1="10.5" x2="13" y2="10.5"/></svg>
+              </button>
+            </div>
           </div>
           <div class="entries-list" id="entries-list"></div>
           {entryList.length === 0 && <div class="empty-entries" id="empty-msg">No games yet — search above to add some.</div>}
@@ -450,6 +477,13 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
               </select>
             </div>
           </div>
+          <div class="el-field">
+            <label class="el-label" for="meta-default-view">Default view</label>
+            <select id="meta-default-view" class="el-input" style="appearance:auto">
+              <option value="grid" selected={list.default_view !== "list"}>Grid</option>
+              <option value="list" selected={list.default_view === "list"}>List</option>
+            </select>
+          </div>
           <div id="share-feed-group" style={list.visibility === "private" ? "display:none" : ""}>
             <div class="el-share-row">
               <div class="el-share-text">
@@ -475,9 +509,33 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
 </div>
 </Layout>
 
-<script is:inline define:vars={{ listId: list.id, isRanked: list.is_ranked, initialEntries: entriesJson, ownerUsername: currentProfile.username }}>
+<script is:inline define:vars={{ listId: list.id, isRanked: list.is_ranked, initialEntries: entriesJson, ownerUsername: currentProfile.username, initialDefaultView: list.default_view ?? 'grid' }}>
 var entries = JSON.parse(initialEntries);
 var ranked = isRanked;
+var currentView = localStorage.getItem('chk-list-edit-view-' + listId) || initialDefaultView;
+
+// ── View toggle ────────────────────────────────────────────────────────────
+(function() {
+  var gridBtn = document.getElementById('el-view-grid');
+  var listBtn = document.getElementById('el-view-list');
+  var listEl  = document.getElementById('entries-list');
+  function applyView(v) {
+    listEl.classList.toggle('list-view', v === 'list');
+    gridBtn.classList.toggle('active', v === 'grid');
+    listBtn.classList.toggle('active', v === 'list');
+  }
+  applyView(currentView);
+  gridBtn.addEventListener('click', function() {
+    currentView = 'grid';
+    localStorage.setItem('chk-list-edit-view-' + listId, 'grid');
+    applyView('grid');
+  });
+  listBtn.addEventListener('click', function() {
+    currentView = 'list';
+    localStorage.setItem('chk-list-edit-view-' + listId, 'list');
+    applyView('list');
+  });
+})();
 
 // ── Ranked label sync ──────────────────────────────────────────────────────
 document.getElementById('meta-ranked').addEventListener('change', function() {
@@ -516,6 +574,7 @@ document.getElementById('meta-save-btn').addEventListener('click', async functio
       is_ranked: document.getElementById('meta-ranked').checked,
       visibility: document.getElementById('meta-vis').value,
       shared_to_feed: document.getElementById('meta-share-feed').checked,
+      default_view: document.getElementById('meta-default-view').value,
     }),
   });
   btn.disabled = false;
