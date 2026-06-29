@@ -160,6 +160,56 @@ const profileLists = (profileListsRaw ?? []).map((l: any) => ({
   entryCount: entryCountByListId[l.id] ?? 0,
 }));
 
+// ── SAVED LISTS ──
+let savedLists: any[] = []
+{
+  const { data: savedRaw } = await (supabase as any)
+    .from('list_saves')
+    .select('list_id, is_hidden, lists(id, title, is_ranked, visibility, updated_at, profiles(id, username, avatar_url))')
+    .eq('profile_id', reviewer.id)
+    .order('created_at', { ascending: false })
+
+  // Owners see all saves; others only see non-hidden ones
+  const rawSavedLists = (savedRaw ?? [])
+    .filter((s: any) => s.lists && (isOwnProfile || !s.is_hidden))
+    .map((s: any) => ({ ...s.lists, isHidden: s.is_hidden ?? false }))
+
+  if (rawSavedLists.length > 0) {
+    const savedListIds = rawSavedLists.map((l: any) => l.id)
+    const [{ data: savedCoversRaw }, { data: savedEntriesRaw }] = await Promise.all([
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id, games(cover_img_url)')
+        .in('list_id', savedListIds)
+        .order('position', { ascending: true, nullsFirst: false })
+        .order('added_at', { ascending: true }),
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id')
+        .in('list_id', savedListIds),
+    ])
+    const savedCoversByListId: Record<string, string[]> = {}
+    for (const e of savedCoversRaw ?? []) {
+      const cover = igdbCover(e.games?.cover_img_url, 't_cover_big')
+      if (cover) {
+        if (!savedCoversByListId[e.list_id]) savedCoversByListId[e.list_id] = []
+        if (savedCoversByListId[e.list_id].length < 4) savedCoversByListId[e.list_id].push(cover)
+      }
+    }
+    const savedEntryCountByListId: Record<string, number> = {}
+    for (const e of savedEntriesRaw ?? []) {
+      savedEntryCountByListId[e.list_id] = (savedEntryCountByListId[e.list_id] ?? 0) + 1
+    }
+    savedLists = rawSavedLists.map((l: any) => ({
+      ...l,
+      ownerUsername: l.profiles?.username,
+      ownerAvatar: l.profiles?.avatar_url,
+      coverUrls: savedCoversByListId[l.id] ?? [],
+      entryCount: savedEntryCountByListId[l.id] ?? 0,
+    }))
+  }
+}
+
 // favorite game — find reviewer's own review of it
 const favGame = reviewer.favorite_game ?? null
 const favReview = favGame
@@ -704,6 +754,11 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .lists-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;padding:4px 0}
     .btn-create-list{display:inline-flex;align-items:center;gap:6px;padding:9px 22px;border-radius:22px;background:var(--accent);color:#fff;font-size:13px;font-weight:500;font-family:inherit;text-decoration:none;border:none;cursor:pointer;transition:opacity .15s}
     .btn-create-list:hover{opacity:.85}
+    .saved-list-wrap{position:relative}
+    .saved-hide-btn{position:absolute;top:6px;right:6px;z-index:3;background:rgba(0,0,0,.55);border:none;border-radius:6px;padding:3px 6px;font-size:13px;line-height:1;cursor:pointer;opacity:0;transition:opacity .15s}
+    .saved-list-wrap:hover .saved-hide-btn{opacity:1}
+    .saved-list-wrap.is-hidden .list-card{opacity:.5}
+    .saved-list-wrap.is-hidden::after{content:'';position:absolute;inset:0;border:2px dashed rgba(150,150,150,.35);border-radius:14px;pointer-events:none}
     .watchlist-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:14px;padding:20px 0}
     .watchlist-card{display:block;text-decoration:none}
     .watchlist-cover{width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15)}
@@ -1022,7 +1077,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     <a href={`/reviewers/${reviewer.username}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`}>Stats</a>
     <a href={`/reviewers/${reviewer.username}?tab=library`} class={`tab-link ${activeTab === 'library' ? 'active' : ''}`}>Library</a>
     <a href={`/reviewers/${reviewer.username}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>Reviews {publishedReviews.length > 0 && <span class="tab-count">{publishedReviews.length}</span>}</a>
-    <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {profileLists.length > 0 && <span class="tab-count">{profileLists.length}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {(profileLists.length + savedLists.length) > 0 && <span class="tab-count">{profileLists.length + savedLists.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=followers`} class={`tab-link ${activeTab === 'followers' ? 'active' : ''}`}>Followers {followerCount ? `(${followerCount})` : ''}</a>
     <a href={`/reviewers/${reviewer.username}?tab=following`} class={`tab-link ${activeTab === 'following' ? 'active' : ''}`}>Following {followingCount ? `(${followingCount})` : ''}</a>
   </nav>
@@ -1435,35 +1490,80 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
   <!-- ── LISTS TAB ── -->
   <div class={`tab-panel ${activeTab === 'lists' ? 'active' : ''}`} data-tab="lists">
-    {profileLists.length === 0 ? (
-      <div class="empty-state-tab">
-        <div class="empty-title">{isOwnProfile ? "You haven't created any lists yet" : `@${reviewer.username} hasn't created any lists yet`}</div>
-        {isOwnProfile && (
-          <button class="btn-create-list" onclick="createNewList(this)">+ Create your first list</button>
-        )}
+    {savedLists.length > 0 && (
+      <div class="sort-tabs" style="margin-bottom: 16px">
+        <button class="sort-tab list-filter-tab active" onclick="switchListsSection('my', this)">My Lists</button>
+        <button class="sort-tab list-filter-tab" onclick="switchListsSection('saved', this)">Saved</button>
       </div>
-    ) : (
-      <>
+    )}
+
+    <div id="lists-my-section">
+      {profileLists.length === 0 ? (
+        <div class="empty-state-tab">
+          <div class="empty-title">{isOwnProfile ? "You haven't created any lists yet" : `@${reviewer.username} hasn't created any lists yet`}</div>
+          {isOwnProfile && (
+            <button class="btn-create-list" onclick="createNewList(this)">+ Create your first list</button>
+          )}
+        </div>
+      ) : (
+        <>
+          <div class="lists-grid">
+            {profileLists.map((list: any) => (
+              <ListCard
+                id={list.id}
+                title={list.title}
+                isRanked={list.is_ranked}
+                visibility={list.visibility}
+                entryCount={list.entryCount}
+                coverUrls={list.coverUrls}
+                showOwner={false}
+              />
+            ))}
+          </div>
+          {isOwnProfile && (
+            <div style="margin-top: 20px">
+              <button class="btn-create-list" onclick="createNewList(this)">+ New list</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+
+    <div id="lists-saved-section" style="display: none">
+      {savedLists.length === 0 ? (
+        <div class="empty-state-tab">
+          <div class="empty-title">{isOwnProfile ? "No saved lists yet" : `@${reviewer.username} hasn't saved any public lists yet`}</div>
+          {isOwnProfile && <p style="font-size: 13px; color: var(--text-tertiary); margin-top: 8px">Browse public lists and hit "Save list" to bookmark them here</p>}
+        </div>
+      ) : (
         <div class="lists-grid">
-          {profileLists.map((list: any) => (
-            <ListCard
-              id={list.id}
-              title={list.title}
-              isRanked={list.is_ranked}
-              visibility={list.visibility}
-              entryCount={list.entryCount}
-              coverUrls={list.coverUrls}
-              showOwner={false}
-            />
+          {savedLists.map((list: any) => (
+            <div class={`saved-list-wrap${list.isHidden ? ' is-hidden' : ''}`}>
+              <ListCard
+                id={list.id}
+                title={list.title}
+                isRanked={list.is_ranked}
+                visibility={list.visibility}
+                entryCount={list.entryCount}
+                coverUrls={list.coverUrls}
+                ownerUsername={list.ownerUsername}
+                ownerAvatar={list.ownerAvatar}
+                showOwner={true}
+              />
+              {isOwnProfile && (
+                <button
+                  class="saved-hide-btn"
+                  data-list-id={list.id}
+                  data-hidden={String(list.isHidden)}
+                  onclick="toggleSaveHidden(this)"
+                  title={list.isHidden ? 'Show on profile' : 'Hide from profile'}
+                >🫥</button>
+              )}
+            </div>
           ))}
         </div>
-        {isOwnProfile && (
-          <div style="margin-top: 20px">
-            <button class="btn-create-list" onclick="createNewList(this)">+ New list</button>
-          </div>
-        )}
-      </>
-    )}
+      )}
+    </div>
   </div>
 
 </div>
@@ -2048,6 +2148,38 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   cards.forEach(function(card) { list.appendChild(card) })
 }
   window.sortReviews = sortReviews
+
+  // ── SWITCH LISTS SECTION ──
+  function switchListsSection(type, btn) {
+    document.querySelectorAll('.list-filter-tab').forEach(function(b) { b.classList.remove('active') })
+    btn.classList.add('active')
+    var mySection = document.getElementById('lists-my-section')
+    var savedSection = document.getElementById('lists-saved-section')
+    if (mySection) mySection.style.display = type === 'my' ? '' : 'none'
+    if (savedSection) savedSection.style.display = type === 'saved' ? '' : 'none'
+  }
+  window.switchListsSection = switchListsSection
+
+  // ── TOGGLE SAVED LIST HIDDEN ──
+  window.toggleSaveHidden = async function(btn) {
+    var listId = btn.dataset.listId
+    var isHidden = btn.dataset.hidden === 'true'
+    var newHidden = !isHidden
+    btn.disabled = true
+    try {
+      var res = await fetch('/api/lists/toggle-save-hidden', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId, hidden: newHidden })
+      })
+      if (!res.ok) { var d = await res.json(); throw new Error(d.error || 'Failed') }
+      btn.dataset.hidden = newHidden ? 'true' : 'false'
+      btn.title = newHidden ? 'Show on profile' : 'Hide from profile'
+      var wrap = btn.closest('.saved-list-wrap')
+      if (wrap) wrap.classList.toggle('is-hidden', newHidden)
+    } catch(e) { console.error('[toggle-save-hidden]', e) }
+    btn.disabled = false
+  }
 
   // ── LIBRARY ──
   var _libItems = JSON.parse(libraryJson)
