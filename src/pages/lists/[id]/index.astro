@@ -75,6 +75,38 @@ if (_gameIds.length > 0 && list.profiles?.id) {
   }
 }
 
+// Fetch genres for games in this list
+const genreCount: Record<string, number> = {};
+if (_gameIds.length > 0) {
+  const { data: genreRows } = await db
+    .from('game_genres')
+    .select('game_id, genres ( name )')
+    .in('game_id', _gameIds);
+  for (const row of (genreRows ?? []) as any[]) {
+    if (row.genres?.name) {
+      genreCount[row.genres.name] = (genreCount[row.genres.name] ?? 0) + 1;
+    }
+  }
+}
+const topGenres = Object.entries(genreCount)
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, 4)
+  .map(([name]) => name);
+
+// Computed stats
+const reviewedEntries = Object.values(reviewByGameId);
+const reviewedCount = reviewedEntries.length;
+const totalHours = reviewedEntries.reduce((sum, r) => sum + (r.play_time_hours ?? 0), 0);
+const avgScore = reviewedCount > 0
+  ? reviewedEntries.reduce((sum, r) => sum + r.score, 0) / reviewedCount
+  : null;
+const releaseYears = (entryList as any[])
+  .map((e) => e.games?.date_released ? new Date(e.games.date_released).getFullYear() : null)
+  .filter((y): y is number => y !== null);
+const minYear = releaseYears.length > 0 ? Math.min(...releaseYears) : null;
+const maxYear = releaseYears.length > 0 ? Math.max(...releaseYears) : null;
+const hasStats = topGenres.length > 0 || totalHours > 0 || avgScore !== null || minYear !== null;
+
 // Votes
 const votesArr: { vote: number; profile_id: string }[] = votesRaw ?? [];
 const upVotes = votesArr.filter(v => v.vote === 1).length;
@@ -326,6 +358,92 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
   .lv-up { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.08); }
   .lv-down { border-color: #f87171; color: #f87171; background: rgba(248,113,113,.08); }
   .list-sep { width: 1px; height: 16px; background: var(--border); margin: 0 2px; flex-shrink: 0; }
+
+  /* ── List stats card ── */
+  .list-stats-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .lst-heading {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--text-tertiary);
+  }
+  .lst-numbers {
+    display: flex;
+    gap: 0;
+  }
+  .lst-num {
+    flex: 1;
+    text-align: center;
+    padding: 0 4px;
+  }
+  .lst-num + .lst-num { border-left: 1px solid var(--border-subtle); }
+  .lst-val {
+    font-size: 20px;
+    font-weight: 700;
+    font-family: 'DM Serif Display', serif;
+    color: var(--text-primary);
+    line-height: 1.2;
+  }
+  .lst-val.score-perfect { color: #F5C842; }
+  .lst-val.score-great   { color: #4ade80; }
+  .lst-val.score-teal    { color: #2dd4bf; }
+  .lst-val.score-good    { color: #60a5fa; }
+  .lst-val.score-mid     { color: #fbbf24; }
+  .lst-val.score-orange  { color: #fb923c; }
+  .lst-val.score-low     { color: #f87171; }
+  .lst-lab {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-top: 2px;
+  }
+  .lst-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    margin-bottom: 6px;
+  }
+  .lst-genre-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .lst-genre-pill {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 9px;
+    border-radius: 10px;
+    background: var(--tag-bg);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .lst-year-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .lst-year-val {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .lst-year-label {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
 
   .list-reaction-wrap { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
   .list-reaction-btn {
@@ -778,6 +896,54 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
           <button class="list-react-toggle" id="list-react-toggle" data-logged-in={isLoggedIn ? 'true' : 'false'} title="Add reaction">+</button>
         </div>
       </div>
+
+      <!-- Stats card -->
+      {hasStats && (
+        <div class="list-stats-card">
+          <div class="lst-heading">Stats</div>
+
+          {(reviewedCount > 0) && (
+            <div class="lst-numbers">
+              {totalHours > 0 && (
+                <div class="lst-num">
+                  <div class="lst-val">{totalHours}h</div>
+                  <div class="lst-lab">Hours</div>
+                </div>
+              )}
+              {avgScore !== null && (
+                <div class="lst-num">
+                  <div class={`lst-val ${scoreClass(Math.round(avgScore))}`}>{avgScore.toFixed(1)}</div>
+                  <div class="lst-lab">Avg Score</div>
+                </div>
+              )}
+              <div class="lst-num">
+                <div class="lst-val">{reviewedCount}/{entryList.length}</div>
+                <div class="lst-lab">Reviewed</div>
+              </div>
+            </div>
+          )}
+
+          {topGenres.length > 0 && (
+            <div>
+              <div class="lst-section-label">Top Genres</div>
+              <div class="lst-genre-pills">
+                {topGenres.map(g => <span class="lst-genre-pill">{g}</span>)}
+              </div>
+            </div>
+          )}
+
+          {minYear !== null && (
+            <div class="lst-year-row">
+              <span class="lst-year-val">
+                {minYear === maxYear ? minYear : `${minYear} – ${maxYear}`}
+              </span>
+              <span class="lst-year-label">
+                {minYear === maxYear ? 'Release year' : `${maxYear! - minYear!} year span`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
 
     <!-- Comments -->
