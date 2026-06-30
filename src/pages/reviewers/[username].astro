@@ -131,7 +131,7 @@ const [{ data: coverEntriesRaw }, { data: allEntriesRaw }] = profileListIds.leng
   ? await Promise.all([
       (supabase as any)
         .from('list_entries')
-        .select('list_id, games(cover_img_url)')
+        .select('list_id, games(id, cover_img_url, date_released)')
         .in('list_id', profileListIds)
         .order('position', { ascending: true, nullsFirst: false })
         .order('added_at', { ascending: true }),
@@ -143,18 +143,29 @@ const [{ data: coverEntriesRaw }, { data: allEntriesRaw }] = profileListIds.leng
   : [{ data: [] }, { data: [] }];
 
 const coversByListId: Record<string, string[]> = {};
+const gameIdsByListId: Record<string, string[]> = {};
+const yearsByListId: Record<string, number[]> = {};
 for (const e of coverEntriesRaw ?? []) {
   const cover = igdbCover(e.games?.cover_img_url, 't_cover_big');
   if (cover) {
     if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
     if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
   }
+  if (e.games?.id) {
+    if (!gameIdsByListId[e.list_id]) gameIdsByListId[e.list_id] = [];
+    gameIdsByListId[e.list_id].push(e.games.id);
+  }
+  if (e.games?.date_released) {
+    const yr = new Date(e.games.date_released).getFullYear();
+    if (!yearsByListId[e.list_id]) yearsByListId[e.list_id] = [];
+    yearsByListId[e.list_id].push(yr);
+  }
 }
 const entryCountByListId: Record<string, number> = {};
 for (const e of allEntriesRaw ?? []) {
   entryCountByListId[e.list_id] = (entryCountByListId[e.list_id] ?? 0) + 1;
 }
-const profileLists = (profileListsRaw ?? []).map((l: any) => ({
+let profileLists = (profileListsRaw ?? []).map((l: any) => ({
   ...l,
   coverUrls: coversByListId[l.id] ?? [],
   entryCount: entryCountByListId[l.id] ?? 0,
@@ -162,6 +173,8 @@ const profileLists = (profileListsRaw ?? []).map((l: any) => ({
 
 // ── SAVED LISTS ──
 let savedLists: any[] = []
+const savedGameIdsByListId: Record<string, string[]> = {};
+const savedYearsByListId: Record<string, number[]> = {};
 {
   const { data: savedRaw } = await (supabase as any)
     .from('list_saves')
@@ -179,7 +192,7 @@ let savedLists: any[] = []
     const [{ data: savedCoversRaw }, { data: savedEntriesRaw }] = await Promise.all([
       (supabase as any)
         .from('list_entries')
-        .select('list_id, games(cover_img_url)')
+        .select('list_id, games(id, cover_img_url, date_released)')
         .in('list_id', savedListIds)
         .order('position', { ascending: true, nullsFirst: false })
         .order('added_at', { ascending: true }),
@@ -195,6 +208,15 @@ let savedLists: any[] = []
         if (!savedCoversByListId[e.list_id]) savedCoversByListId[e.list_id] = []
         if (savedCoversByListId[e.list_id].length < 4) savedCoversByListId[e.list_id].push(cover)
       }
+      if (e.games?.id) {
+        if (!savedGameIdsByListId[e.list_id]) savedGameIdsByListId[e.list_id] = [];
+        savedGameIdsByListId[e.list_id].push(e.games.id);
+      }
+      if (e.games?.date_released) {
+        const yr = new Date(e.games.date_released).getFullYear();
+        if (!savedYearsByListId[e.list_id]) savedYearsByListId[e.list_id] = [];
+        savedYearsByListId[e.list_id].push(yr);
+      }
     }
     const savedEntryCountByListId: Record<string, number> = {}
     for (const e of savedEntriesRaw ?? []) {
@@ -209,6 +231,50 @@ let savedLists: any[] = []
     }))
   }
 }
+
+// ── LIST METADATA for genre/platform/dev filters ──
+{
+  const allGameIds = [...new Set([
+    ...Object.values(gameIdsByListId).flat(),
+    ...Object.values(savedGameIdsByListId).flat(),
+  ])];
+  if (allGameIds.length > 0) {
+    const [{ data: genreRows }, { data: platformRows }, { data: companyRows }] = await Promise.all([
+      (supabase as any).from('game_genres').select('game_id, genres(name)').in('game_id', allGameIds),
+      (supabase as any).from('game_platforms').select('game_id, platforms(name)').in('game_id', allGameIds),
+      (supabase as any).from('game_companies').select('game_id, role, developers(name)').eq('role', 'developer').in('game_id', allGameIds),
+    ]);
+    const genresByGameId: Record<string, string[]> = {};
+    const platformsByGameId: Record<string, string[]> = {};
+    const devsByGameId: Record<string, string[]> = {};
+    for (const row of genreRows ?? []) {
+      if (row.genres?.name) { if (!genresByGameId[row.game_id]) genresByGameId[row.game_id] = []; genresByGameId[row.game_id].push(row.genres.name); }
+    }
+    for (const row of platformRows ?? []) {
+      if (row.platforms?.name) { if (!platformsByGameId[row.game_id]) platformsByGameId[row.game_id] = []; platformsByGameId[row.game_id].push(row.platforms.name); }
+    }
+    for (const row of companyRows ?? []) {
+      if (row.developers?.name) { if (!devsByGameId[row.game_id]) devsByGameId[row.game_id] = []; devsByGameId[row.game_id].push(row.developers.name); }
+    }
+    function buildListMeta(listId: string, gids: Record<string, string[]>, yrs: Record<string, number[]>) {
+      const ids = gids[listId] ?? [];
+      const genres = [...new Set(ids.flatMap((id: string) => genresByGameId[id] ?? []))].sort();
+      const platforms = [...new Set(ids.flatMap((id: string) => platformsByGameId[id] ?? []))].sort();
+      const devs = [...new Set(ids.flatMap((id: string) => devsByGameId[id] ?? []))].sort();
+      const years = yrs[listId] ?? [];
+      return { genres, platforms, devs, minYear: years.length ? Math.min(...years) : null, maxYear: years.length ? Math.max(...years) : null };
+    }
+    profileLists = profileLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, gameIdsByListId, yearsByListId) }));
+    savedLists = savedLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, savedGameIdsByListId, savedYearsByListId) }));
+  }
+}
+
+const myGenres = [...new Set(profileLists.flatMap((l: any) => l.genres ?? []))].sort() as string[];
+const myPlatforms = [...new Set(profileLists.flatMap((l: any) => l.platforms ?? []))].sort() as string[];
+const myDevs = [...new Set(profileLists.flatMap((l: any) => l.devs ?? []))].sort() as string[];
+const savedGenres = [...new Set(savedLists.flatMap((l: any) => l.genres ?? []))].sort() as string[];
+const savedPlatforms = [...new Set(savedLists.flatMap((l: any) => l.platforms ?? []))].sort() as string[];
+const savedDevs = [...new Set(savedLists.flatMap((l: any) => l.devs ?? []))].sort() as string[];
 
 // favorite game — find reviewer's own review of it
 const favGame = reviewer.favorite_game ?? null
@@ -759,6 +825,27 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .saved-list-wrap:hover .saved-hide-btn{opacity:1}
     .saved-list-wrap.is-hidden .list-card{opacity:.5}
     .saved-list-wrap.is-hidden::after{content:'';position:absolute;inset:0;border:2px dashed rgba(150,150,150,.35);border-radius:14px;pointer-events:none}
+    /* edit mode — always show hide buttons */
+    .saved-edit-mode .saved-hide-btn{opacity:1}
+    /* list section header */
+    .list-section-hdr{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+    .list-section-title{font-size:15px;font-weight:700;color:var(--text-primary)}
+    .list-section-count{font-size:12px;color:var(--text-tertiary);background:var(--tag-bg);border:1px solid var(--border);border-radius:10px;padding:1px 8px}
+    .list-section-actions{margin-left:auto;display:flex;align-items:center;gap:6px}
+    .list-settings-btn{background:none;border:1px solid var(--border);border-radius:8px;padding:4px 9px;font-size:12px;color:var(--text-secondary);cursor:pointer;font-family:inherit;transition:all .15s}
+    .list-settings-btn:hover,.list-settings-btn.active{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    /* filter bar */
+    .list-filter-bar{display:flex;flex-direction:column;gap:8px;margin-bottom:16px;padding:12px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px}
+    .lf-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .lf-label{font-size:10px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.06em;flex-shrink:0;min-width:52px}
+    .lf-chip{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:16px;padding:3px 11px;font-size:11px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .12s;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}
+    .lf-chip:hover{border-color:var(--accent);color:var(--accent)}
+    .lf-chip.active{background:var(--accent);color:#fff;border-color:transparent}
+    .lf-select{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:16px;padding:3px 11px;font-size:11px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .12s;appearance:none;-webkit-appearance:none;padding-right:22px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
+    .lf-select:focus{outline:none;border-color:var(--accent)}
+    .lf-select.has-value{border-color:var(--accent);color:var(--accent)}
+    /* no-results */
+    .list-no-results{padding:32px 0;text-align:center;color:var(--text-tertiary);font-size:13px}
     .watchlist-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:14px;padding:20px 0}
     .watchlist-card{display:block;text-decoration:none}
     .watchlist-cover{width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15)}
@@ -1490,13 +1577,20 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
   <!-- ── LISTS TAB ── -->
   <div class={`tab-panel ${activeTab === 'lists' ? 'active' : ''}`} data-tab="lists">
-    {savedLists.length > 0 && (
-      <div class="sort-tabs" style="margin-bottom: 16px">
-        <button class="sort-tab list-filter-tab active" onclick="switchListsSection('my', this)">My Lists</button>
-        <button class="sort-tab list-filter-tab" onclick="switchListsSection('saved', this)">Saved</button>
+
+    <!-- Section switcher (only shown when saved lists exist) -->
+    {(savedLists.length > 0 || isOwnProfile) && (
+      <div class="sort-tabs" style="margin-bottom: 20px">
+        <button class="sort-tab list-filter-tab active" onclick="switchListsSection('my', this)">
+          {isOwnProfile ? 'My Lists' : `${reviewer.username}'s Lists`}
+        </button>
+        <button class="sort-tab list-filter-tab" onclick="switchListsSection('saved', this)">
+          Saved {savedLists.length > 0 && <span style="opacity:.6">({savedLists.length})</span>}
+        </button>
       </div>
     )}
 
+    <!-- ── MY LISTS SECTION ── -->
     <div id="lists-my-section">
       {profileLists.length === 0 ? (
         <div class="empty-state-tab">
@@ -1507,19 +1601,68 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         </div>
       ) : (
         <>
-          <div class="lists-grid">
+          <!-- Filter bar -->
+          <div class="list-filter-bar" id="my-filter-bar">
+            <div class="lf-row">
+              <span class="lf-label">Sort</span>
+              <button class="lf-chip active" onclick="setListSort('my','recent',this)">Recent</button>
+              <button class="lf-chip" onclick="setListSort('my','oldest',this)">Oldest</button>
+              <button class="lf-chip" onclick="setListSort('my','az',this)">A–Z</button>
+              <button class="lf-chip" onclick="setListSort('my','most-games',this)">Most Games</button>
+            </div>
+            {myGenres.length > 0 && (
+              <div class="lf-row">
+                <span class="lf-label">Genre</span>
+                <button class="lf-chip active" onclick="setListFilter('my','genre','',this)">All</button>
+                {myGenres.map((g: string) => (
+                  <button class="lf-chip" onclick={`setListFilter('my','genre',${JSON.stringify(g)},this)`}>{g}</button>
+                ))}
+              </div>
+            )}
+            {myPlatforms.length > 0 && (
+              <div class="lf-row">
+                <span class="lf-label">Platform</span>
+                <button class="lf-chip active" onclick="setListFilter('my','platform','',this)">All</button>
+                {myPlatforms.map((p: string) => (
+                  <button class="lf-chip" onclick={`setListFilter('my','platform',${JSON.stringify(p)},this)`}>{p}</button>
+                ))}
+              </div>
+            )}
+            {myDevs.length > 0 && (
+              <div class="lf-row">
+                <span class="lf-label">Dev</span>
+                <button class="lf-chip active" onclick="setListFilter('my','dev','',this)">All</button>
+                {myDevs.map((d: string) => (
+                  <button class="lf-chip" onclick={`setListFilter('my','dev',${JSON.stringify(d)},this)`}>{d}</button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div class="lists-grid" id="my-lists-grid">
             {profileLists.map((list: any) => (
-              <ListCard
-                id={list.id}
-                title={list.title}
-                isRanked={list.is_ranked}
-                visibility={list.visibility}
-                entryCount={list.entryCount}
-                coverUrls={list.coverUrls}
-                showOwner={false}
-              />
+              <div class="list-card-wrapper"
+                data-title={list.title}
+                data-updated={list.updated_at}
+                data-count={list.entryCount}
+                data-genres={(list.genres ?? []).join(',')}
+                data-platforms={(list.platforms ?? []).join(',')}
+                data-devs={(list.devs ?? []).join(',')}
+                data-min-year={list.minYear ?? ''}
+              >
+                <ListCard
+                  id={list.id}
+                  title={list.title}
+                  isRanked={list.is_ranked}
+                  visibility={list.visibility}
+                  entryCount={list.entryCount}
+                  coverUrls={list.coverUrls}
+                  showOwner={false}
+                />
+              </div>
             ))}
           </div>
+          <div class="list-no-results" id="my-no-results" style="display:none">No lists match these filters.</div>
           {isOwnProfile && (
             <div style="margin-top: 20px">
               <button class="btn-create-list" onclick="createNewList(this)">+ New list</button>
@@ -1529,6 +1672,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       )}
     </div>
 
+    <!-- ── SAVED LISTS SECTION ── -->
     <div id="lists-saved-section" style="display: none">
       {savedLists.length === 0 ? (
         <div class="empty-state-tab">
@@ -1536,32 +1680,86 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
           {isOwnProfile && <p style="font-size: 13px; color: var(--text-tertiary); margin-top: 8px">Browse public lists and hit "Save list" to bookmark them here</p>}
         </div>
       ) : (
-        <div class="lists-grid">
-          {savedLists.map((list: any) => (
-            <div class={`saved-list-wrap${list.isHidden ? ' is-hidden' : ''}`}>
-              <ListCard
-                id={list.id}
-                title={list.title}
-                isRanked={list.is_ranked}
-                visibility={list.visibility}
-                entryCount={list.entryCount}
-                coverUrls={list.coverUrls}
-                ownerUsername={list.ownerUsername}
-                ownerAvatar={list.ownerAvatar}
-                showOwner={true}
-              />
+        <>
+          <!-- Filter bar + settings button -->
+          <div class="list-filter-bar" id="saved-filter-bar">
+            <div class="lf-row">
+              <span class="lf-label">Sort</span>
+              <button class="lf-chip active" onclick="setListSort('saved','recent',this)">Recent</button>
+              <button class="lf-chip" onclick="setListSort('saved','oldest',this)">Oldest</button>
+              <button class="lf-chip" onclick="setListSort('saved','az',this)">A–Z</button>
+              <button class="lf-chip" onclick="setListSort('saved','most-games',this)">Most Games</button>
               {isOwnProfile && (
-                <button
-                  class="saved-hide-btn"
-                  data-list-id={list.id}
-                  data-hidden={String(list.isHidden)}
-                  onclick="toggleSaveHidden(this)"
-                  title={list.isHidden ? 'Show on profile' : 'Hide from profile'}
-                >🫥</button>
+                <button id="saved-settings-btn" class="list-settings-btn" style="margin-left:auto" onclick="toggleSavedEditMode(this)" title="Manage saved list visibility">
+                  ⚙ Manage
+                </button>
               )}
             </div>
-          ))}
-        </div>
+            {savedGenres.length > 0 && (
+              <div class="lf-row">
+                <span class="lf-label">Genre</span>
+                <button class="lf-chip active" onclick="setListFilter('saved','genre','',this)">All</button>
+                {savedGenres.map((g: string) => (
+                  <button class="lf-chip" onclick={`setListFilter('saved','genre',${JSON.stringify(g)},this)`}>{g}</button>
+                ))}
+              </div>
+            )}
+            {savedPlatforms.length > 0 && (
+              <div class="lf-row">
+                <span class="lf-label">Platform</span>
+                <button class="lf-chip active" onclick="setListFilter('saved','platform','',this)">All</button>
+                {savedPlatforms.map((p: string) => (
+                  <button class="lf-chip" onclick={`setListFilter('saved','platform',${JSON.stringify(p)},this)`}>{p}</button>
+                ))}
+              </div>
+            )}
+            {savedDevs.length > 0 && (
+              <div class="lf-row">
+                <span class="lf-label">Dev</span>
+                <button class="lf-chip active" onclick="setListFilter('saved','dev','',this)">All</button>
+                {savedDevs.map((d: string) => (
+                  <button class="lf-chip" onclick={`setListFilter('saved','dev',${JSON.stringify(d)},this)`}>{d}</button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div class="lists-grid" id="saved-lists-grid">
+            {savedLists.map((list: any) => (
+              <div class={`list-card-wrapper saved-list-wrap${list.isHidden ? ' is-hidden' : ''}`}
+                data-title={list.title}
+                data-updated={list.updated_at}
+                data-count={list.entryCount}
+                data-genres={(list.genres ?? []).join(',')}
+                data-platforms={(list.platforms ?? []).join(',')}
+                data-devs={(list.devs ?? []).join(',')}
+                data-min-year={list.minYear ?? ''}
+              >
+                <ListCard
+                  id={list.id}
+                  title={list.title}
+                  isRanked={list.is_ranked}
+                  visibility={list.visibility}
+                  entryCount={list.entryCount}
+                  coverUrls={list.coverUrls}
+                  ownerUsername={list.ownerUsername}
+                  ownerAvatar={list.ownerAvatar}
+                  showOwner={true}
+                />
+                {isOwnProfile && (
+                  <button
+                    class="saved-hide-btn"
+                    data-list-id={list.id}
+                    data-hidden={String(list.isHidden)}
+                    onclick="toggleSaveHidden(this)"
+                    title={list.isHidden ? 'Show on profile' : 'Hide from profile'}
+                  >{list.isHidden ? '👁' : '🫥'}</button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div class="list-no-results" id="saved-no-results" style="display:none">No lists match these filters.</div>
+        </>
       )}
     </div>
   </div>
@@ -2160,6 +2358,77 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   }
   window.switchListsSection = switchListsSection
 
+  // ── LIST FILTER STATE ──
+  var _listState = {
+    my:    { sort: 'recent', genre: '', platform: '', dev: '' },
+    saved: { sort: 'recent', genre: '', platform: '', dev: '' },
+  }
+
+  function applyListFilters(section) {
+    var grid = document.getElementById(section + '-lists-grid')
+    var noResults = document.getElementById(section + '-no-results')
+    if (!grid) return
+    var state = _listState[section]
+    var items = Array.from(grid.querySelectorAll('.list-card-wrapper'))
+
+    // filter
+    items.forEach(function(item) {
+      var show = true
+      if (state.genre) {
+        var genres = (item.dataset.genres || '').split(',')
+        if (genres.indexOf(state.genre) === -1) show = false
+      }
+      if (show && state.platform) {
+        var platforms = (item.dataset.platforms || '').split(',')
+        if (platforms.indexOf(state.platform) === -1) show = false
+      }
+      if (show && state.dev) {
+        var devs = (item.dataset.devs || '').split(',')
+        if (devs.indexOf(state.dev) === -1) show = false
+      }
+      item.style.display = show ? '' : 'none'
+    })
+
+    // sort visible
+    var visible = items.filter(function(i) { return i.style.display !== 'none' })
+    visible.sort(function(a, b) {
+      if (state.sort === 'oldest') return new Date(a.dataset.updated) - new Date(b.dataset.updated)
+      if (state.sort === 'az') return (a.dataset.title || '').localeCompare(b.dataset.title || '')
+      if (state.sort === 'most-games') return parseInt(b.dataset.count || '0') - parseInt(a.dataset.count || '0')
+      return new Date(b.dataset.updated) - new Date(a.dataset.updated) // recent default
+    })
+    visible.forEach(function(i) { grid.appendChild(i) })
+
+    if (noResults) noResults.style.display = visible.length === 0 ? '' : 'none'
+  }
+
+  window.setListSort = function(section, sortKey, btn) {
+    _listState[section].sort = sortKey
+    var bar = document.getElementById(section + '-filter-bar')
+    if (bar) {
+      var row = btn.closest('.lf-row')
+      if (row) row.querySelectorAll('.lf-chip').forEach(function(b) { b.classList.remove('active') })
+    }
+    btn.classList.add('active')
+    applyListFilters(section)
+  }
+
+  window.setListFilter = function(section, type, value, btn) {
+    _listState[section][type] = value
+    var row = btn.closest('.lf-row')
+    if (row) row.querySelectorAll('.lf-chip').forEach(function(b) { b.classList.remove('active') })
+    btn.classList.add('active')
+    applyListFilters(section)
+  }
+
+  window.toggleSavedEditMode = function(btn) {
+    var grid = document.getElementById('saved-lists-grid')
+    if (!grid) return
+    var active = grid.classList.toggle('saved-edit-mode')
+    btn.textContent = active ? '✓ Done' : '⚙ Manage'
+    btn.classList.toggle('active', active)
+  }
+
   // ── TOGGLE SAVED LIST HIDDEN ──
   window.toggleSaveHidden = async function(btn) {
     var listId = btn.dataset.listId
@@ -2175,6 +2444,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       if (!res.ok) { var d = await res.json(); throw new Error(d.error || 'Failed') }
       btn.dataset.hidden = newHidden ? 'true' : 'false'
       btn.title = newHidden ? 'Show on profile' : 'Hide from profile'
+      btn.textContent = newHidden ? '👁' : '🫥'
       var wrap = btn.closest('.saved-list-wrap')
       if (wrap) wrap.classList.toggle('is-hidden', newHidden)
     } catch(e) { console.error('[toggle-save-hidden]', e) }
