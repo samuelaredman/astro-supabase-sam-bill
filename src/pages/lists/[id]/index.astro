@@ -62,36 +62,47 @@ const isOwner = currentProfile?.id === list.profiles?.id;
 
 // Fetch the list owner's published reviews for games in this list
 const _gameIds = entryList.map((e: any) => e.games?.id).filter(Boolean);
-const reviewByGameId: Record<string, { id: string; score: number; play_time_hours: number | null }> = {};
+const reviewByGameId: Record<string, { id: string; score: number; play_time_hours: number | null; platform_played_on: string | null }> = {};
 if (_gameIds.length > 0 && list.profiles?.id) {
   const { data: _reviewRows } = await db
     .from('reviews')
-    .select('id, game_id, score, play_time_hours')
+    .select('id, game_id, score, play_time_hours, platform_played_on')
     .eq('profile_id', list.profiles.id)
     .eq('status', 'published')
     .in('game_id', _gameIds);
   for (const r of _reviewRows ?? []) {
-    reviewByGameId[r.game_id] = { id: r.id, score: r.score, play_time_hours: r.play_time_hours };
+    reviewByGameId[r.game_id] = { id: r.id, score: r.score, play_time_hours: r.play_time_hours, platform_played_on: r.platform_played_on ?? null };
   }
 }
 
-// Fetch genres for games in this list
+// Fetch genres and game companies in parallel
+const [{ data: genreRows }, { data: companyRows }] = await Promise.all([
+  _gameIds.length > 0
+    ? db.from('game_genres').select('game_id, genres ( name )').in('game_id', _gameIds)
+    : Promise.resolve({ data: [] }),
+  _gameIds.length > 0
+    ? db.from('game_companies').select('game_id, role, developers ( name )').in('game_id', _gameIds)
+    : Promise.resolve({ data: [] }),
+]);
+
+// Genres
 const genreCount: Record<string, number> = {};
-if (_gameIds.length > 0) {
-  const { data: genreRows } = await db
-    .from('game_genres')
-    .select('game_id, genres ( name )')
-    .in('game_id', _gameIds);
-  for (const row of (genreRows ?? []) as any[]) {
-    if (row.genres?.name) {
-      genreCount[row.genres.name] = (genreCount[row.genres.name] ?? 0) + 1;
-    }
-  }
+for (const row of (genreRows ?? []) as any[]) {
+  if (row.genres?.name) genreCount[row.genres.name] = (genreCount[row.genres.name] ?? 0) + 1;
 }
-const topGenres = Object.entries(genreCount)
-  .sort((a, b) => b[1] - a[1])
-  .slice(0, 4)
-  .map(([name, count]) => ({ name, count }));
+const topGenres = Object.entries(genreCount).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name, count]) => ({ name, count }));
+
+// Developers & publishers
+const devCount: Record<string, number> = {};
+const pubCount: Record<string, number> = {};
+for (const row of (companyRows ?? []) as any[]) {
+  const name = row.developers?.name;
+  if (!name) continue;
+  if (row.role === 'developer') devCount[name] = (devCount[name] ?? 0) + 1;
+  else if (row.role === 'publisher') pubCount[name] = (pubCount[name] ?? 0) + 1;
+}
+const topDevs = Object.entries(devCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
+const topPubs = Object.entries(pubCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
 
 // Computed stats
 const reviewedEntries = Object.values(reviewByGameId);
@@ -105,7 +116,24 @@ const releaseYears = (entryList as any[])
   .filter((y): y is number => y !== null);
 const minYear = releaseYears.length > 0 ? Math.min(...releaseYears) : null;
 const maxYear = releaseYears.length > 0 ? Math.max(...releaseYears) : null;
-const hasStats = topGenres.length > 0 || totalHours > 0 || avgScore !== null || minYear !== null;
+
+// Most played platform (from the owner's reviews)
+const platformIds = [...new Set(reviewedEntries.map(r => r.platform_played_on).filter((p): p is string => !!p))];
+const platformNameById: Record<string, string> = {};
+if (platformIds.length > 0) {
+  const { data: platRows } = await db.from('platforms').select('id, name').in('id', platformIds);
+  for (const p of (platRows ?? []) as any[]) platformNameById[p.id] = p.name;
+}
+const platformCount: Record<string, number> = {};
+for (const r of reviewedEntries) {
+  if (r.platform_played_on && platformNameById[r.platform_played_on]) {
+    const pname = platformNameById[r.platform_played_on];
+    platformCount[pname] = (platformCount[pname] ?? 0) + 1;
+  }
+}
+const topPlatforms = Object.entries(platformCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
+
+const hasStats = topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || totalHours > 0 || avgScore !== null || minYear !== null;
 
 // Votes
 const votesArr: { vote: number; profile_id: string }[] = votesRaw ?? [];
@@ -417,6 +445,26 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
     font-size: 10px;
     font-weight: 700;
     color: var(--text-tertiary);
+  }
+  .lst-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .lst-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .lst-row-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    flex-shrink: 0;
+    width: 58px;
+    line-height: 22px;
   }
   .lst-year {
     font-size: 13px;
@@ -866,17 +914,44 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
             </div>
           )}
 
-          {reviewedCount > 0 && (topGenres.length > 0 || minYear !== null) && (
+          {reviewedCount > 0 && (topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || minYear !== null) && (
             <div class="lst-divider"></div>
           )}
 
-          {topGenres.length > 0 && (
-            <div class="lst-genres">
-              {topGenres.map(g => (
-                <span class="lst-genre-chip">
-                  {g.name}<span class="lst-genre-n">{g.count}</span>
-                </span>
-              ))}
+          {(topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0) && (
+            <div class="lst-detail">
+              {topGenres.length > 0 && (
+                <div class="lst-row">
+                  <span class="lst-row-label">Genres</span>
+                  <div class="lst-genres">
+                    {topGenres.map(g => <span class="lst-genre-chip">{g.name}<span class="lst-genre-n">{g.count}</span></span>)}
+                  </div>
+                </div>
+              )}
+              {topDevs.length > 0 && (
+                <div class="lst-row">
+                  <span class="lst-row-label">Dev</span>
+                  <div class="lst-genres">
+                    {topDevs.map(d => <span class="lst-genre-chip">{d.name}<span class="lst-genre-n">{d.count}</span></span>)}
+                  </div>
+                </div>
+              )}
+              {topPubs.length > 0 && (
+                <div class="lst-row">
+                  <span class="lst-row-label">Publisher</span>
+                  <div class="lst-genres">
+                    {topPubs.map(p => <span class="lst-genre-chip">{p.name}<span class="lst-genre-n">{p.count}</span></span>)}
+                  </div>
+                </div>
+              )}
+              {topPlatforms.length > 0 && (
+                <div class="lst-row">
+                  <span class="lst-row-label">Platform</span>
+                  <div class="lst-genres">
+                    {topPlatforms.map(p => <span class="lst-genre-chip">{p.name}<span class="lst-genre-n">{p.count}</span></span>)}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
