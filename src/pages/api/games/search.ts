@@ -52,9 +52,13 @@ export const GET: APIRoute = async ({ request }) => {
   }
 
   const dbIdSet = new Set(dbGames.map((g: any) => g.id));
+  const qLower = q.toLowerCase();
 
   const igdbExtra = (igdbRes ?? [])
     .filter((g: any) => !dbIdSet.has(String(g.id)))
+    // IGDB's own fuzzy search returns loosely-related matches (e.g. "bioshock"
+    // pulling up "Bio Fault") — require the query as an actual substring.
+    .filter((g: any) => typeof g.name === "string" && g.name.toLowerCase().includes(qLower))
     .slice(0, Math.max(0, 8 - dbGames.length))
     .map((g: any) => ({
       id: String(g.id),
