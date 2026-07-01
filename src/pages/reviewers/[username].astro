@@ -269,6 +269,26 @@ const savedYearsByListId: Record<string, number[]> = {};
   }
 }
 
+// Per-list review metrics (avg score + total hours from user's own reviews)
+{
+  const reviewByGameId: Record<string, { score: number; hours: number }> = {};
+  for (const r of publishedReviews) {
+    if ((r as any).games?.id) {
+      reviewByGameId[(r as any).games.id] = { score: (r as any).score, hours: (r as any).play_time_hours ?? 0 };
+    }
+  }
+  function buildListReviewMeta(gameIds: string[]) {
+    const reviews = gameIds.map(id => reviewByGameId[id]).filter(Boolean);
+    const avgScore = reviews.length > 0
+      ? reviews.reduce((s: number, r: any) => s + r.score, 0) / reviews.length
+      : null;
+    const totalHours = reviews.reduce((s: number, r: any) => s + r.hours, 0);
+    return { avgScore, totalHours };
+  }
+  profileLists = profileLists.map((l: any) => ({ ...l, ...buildListReviewMeta(gameIdsByListId[l.id] ?? []) }));
+  savedLists = savedLists.map((l: any) => ({ ...l, ...buildListReviewMeta(savedGameIdsByListId[l.id] ?? []) }));
+}
+
 const myGenres = [...new Set(profileLists.flatMap((l: any) => l.genres ?? []))].sort() as string[];
 const myPlatforms = [...new Set(profileLists.flatMap((l: any) => l.platforms ?? []))].sort() as string[];
 const myDevs = [...new Set(profileLists.flatMap((l: any) => l.devs ?? []))].sort() as string[];
@@ -836,6 +856,8 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .list-settings-btn:hover,.list-settings-btn.active{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
     /* filter bar */
     .lf-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+    .lf-search{background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;outline:none;min-width:140px;max-width:200px}
+    .lf-search:focus{border-color:var(--accent)}
     .lf-select{background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;padding:5px 28px 5px 10px;font-size:12px;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
     .lf-select:focus{border-color:var(--accent)}
     .lf-select.has-value{border-color:var(--accent);color:var(--accent)}
@@ -1598,11 +1620,15 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         <>
           <!-- Filter bar -->
           <div class="lf-bar">
+            <input class="lf-search" type="text" placeholder="Search lists…" oninput="searchLists('my',this.value)" />
             <select class="lf-select" onchange="setListSort('my',this.value)">
               <option value="recent">Recent</option>
               <option value="oldest">Oldest</option>
               <option value="az">A–Z</option>
               <option value="most-games">Most Games</option>
+              <option value="highest-rated">Highest Rated</option>
+              <option value="lowest-rated">Lowest Rated</option>
+              <option value="most-hours">Most Hours</option>
             </select>
             {myGenres.length > 0 && (
               <select class="lf-select" onchange="setListFilter('my','genre',this.value,this)">
@@ -1634,6 +1660,8 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
                 data-platforms={(list.platforms ?? []).join(',')}
                 data-devs={(list.devs ?? []).join(',')}
                 data-min-year={list.minYear ?? ''}
+                data-avg-score={list.avgScore != null ? list.avgScore.toFixed(2) : ''}
+                data-total-hours={list.totalHours ?? 0}
               >
                 <ListCard
                   id={list.id}
@@ -1668,11 +1696,15 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         <>
           <!-- Filter bar + settings button -->
           <div class="lf-bar">
+            <input class="lf-search" type="text" placeholder="Search lists…" oninput="searchLists('saved',this.value)" />
             <select class="lf-select" onchange="setListSort('saved',this.value)">
               <option value="recent">Recent</option>
               <option value="oldest">Oldest</option>
               <option value="az">A–Z</option>
               <option value="most-games">Most Games</option>
+              <option value="highest-rated">Highest Rated</option>
+              <option value="lowest-rated">Lowest Rated</option>
+              <option value="most-hours">Most Hours</option>
             </select>
             {savedGenres.length > 0 && (
               <select class="lf-select" onchange="setListFilter('saved','genre',this.value,this)">
@@ -1709,6 +1741,8 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
                 data-platforms={(list.platforms ?? []).join(',')}
                 data-devs={(list.devs ?? []).join(',')}
                 data-min-year={list.minYear ?? ''}
+                data-avg-score={list.avgScore != null ? list.avgScore.toFixed(2) : ''}
+                data-total-hours={list.totalHours ?? 0}
               >
                 <ListCard
                   id={list.id}
@@ -2335,8 +2369,8 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
   // ── LIST FILTER STATE ──
   var _listState = {
-    my:    { sort: 'recent', genre: '', platform: '', dev: '' },
-    saved: { sort: 'recent', genre: '', platform: '', dev: '' },
+    my:    { sort: 'recent', genre: '', platform: '', dev: '', search: '' },
+    saved: { sort: 'recent', genre: '', platform: '', dev: '', search: '' },
   }
 
   function applyListFilters(section) {
@@ -2349,7 +2383,11 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     // filter
     items.forEach(function(item) {
       var show = true
-      if (state.genre) {
+      if (state.search) {
+        var q = state.search.toLowerCase()
+        if ((item.dataset.title || '').toLowerCase().indexOf(q) === -1) show = false
+      }
+      if (show && state.genre) {
         var genres = (item.dataset.genres || '').split(',')
         if (genres.indexOf(state.genre) === -1) show = false
       }
@@ -2370,6 +2408,21 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       if (state.sort === 'oldest') return new Date(a.dataset.updated) - new Date(b.dataset.updated)
       if (state.sort === 'az') return (a.dataset.title || '').localeCompare(b.dataset.title || '')
       if (state.sort === 'most-games') return parseInt(b.dataset.count || '0') - parseInt(a.dataset.count || '0')
+      if (state.sort === 'highest-rated') {
+        var as = parseFloat(a.dataset.avgScore || '-1'), bs = parseFloat(b.dataset.avgScore || '-1')
+        if (as < 0 && bs < 0) return 0
+        if (as < 0) return 1
+        if (bs < 0) return -1
+        return bs - as
+      }
+      if (state.sort === 'lowest-rated') {
+        var as = parseFloat(a.dataset.avgScore || '-1'), bs = parseFloat(b.dataset.avgScore || '-1')
+        if (as < 0 && bs < 0) return 0
+        if (as < 0) return 1
+        if (bs < 0) return -1
+        return as - bs
+      }
+      if (state.sort === 'most-hours') return parseInt(b.dataset.totalHours || '0') - parseInt(a.dataset.totalHours || '0')
       return new Date(b.dataset.updated) - new Date(a.dataset.updated) // recent default
     })
     visible.forEach(function(i) { grid.appendChild(i) })
@@ -2385,6 +2438,11 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   window.setListFilter = function(section, type, value, selectEl) {
     _listState[section][type] = value
     if (selectEl) selectEl.classList.toggle('has-value', !!value)
+    applyListFilters(section)
+  }
+
+  window.searchLists = function(section, value) {
+    _listState[section].search = value.trim()
     applyListFilters(section)
   }
 
