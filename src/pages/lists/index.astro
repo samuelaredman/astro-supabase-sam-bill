@@ -2,6 +2,8 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../utils/database";
 import Layout from "../../components/Layout.astro";
+import ListCard from "../../components/ListCard.astro";
+import { igdbImage } from "../../utils/format";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
@@ -30,7 +32,11 @@ const [{ data: votesRaw }, { data: entriesRaw }] = await Promise.all([
     ? db.from("list_votes").select("list_id, vote").in("list_id", listIds)
     : Promise.resolve({ data: [] }),
   listIds.length > 0
-    ? db.from("list_entries").select("list_id, game_id").in("list_id", listIds)
+    ? db.from("list_entries")
+        .select("list_id, game_id, games ( id, cover_img_url )")
+        .in("list_id", listIds)
+        .order("position", { ascending: true, nullsFirst: false })
+        .order("added_at", { ascending: true })
     : Promise.resolve({ data: [] }),
 ]);
 
@@ -42,14 +48,21 @@ for (const v of (votesRaw ?? []) as any[]) {
 }
 
 const gameCounts: Record<string, number> = {};
+const coversByListId: Record<string, string[]> = {};
 const listGameIds: Record<string, Set<string>> = {};
 for (const e of (entriesRaw ?? []) as any[]) {
   gameCounts[e.list_id] = (gameCounts[e.list_id] ?? 0) + 1;
   if (!listGameIds[e.list_id]) listGameIds[e.list_id] = new Set();
-  listGameIds[e.list_id].add(e.game_id);
+  if (e.game_id) listGameIds[e.list_id].add(e.game_id);
+
+  const cover = igdbImage(e.games?.cover_img_url, "t_cover_big");
+  if (cover) {
+    if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
+    if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
+  }
 }
 
-const allGameIds = Array.from(new Set((entriesRaw ?? []).map((e: any) => e.game_id)));
+const allGameIds = Array.from(new Set((entriesRaw ?? []).map((e: any) => e.game_id).filter(Boolean)));
 
 const { data: genreRows } = allGameIds.length > 0
   ? await db.from("game_genres").select("game_id, genres ( name )").in("game_id", allGameIds)
@@ -76,12 +89,9 @@ for (const listId of listIds) {
   for (const g of genreArr) genreFrequency[g] = (genreFrequency[g] ?? 0) + 1;
 }
 
-const topGenreFilters = Object.entries(genreFrequency)
+const allGenreOptions = Object.entries(genreFrequency)
   .sort((a, b) => b[1] - a[1])
-  .slice(0, 14)
   .map(([name]) => name);
-
-function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
 ---
 
 <Layout
@@ -109,41 +119,34 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
       </div>
     ) : (
       <>
-        <div class="bl-controls">
-          <div class="bl-search-wrap">
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="5.5"/><line x1="11.2" y1="11.2" x2="15" y2="15"/></svg>
-            <input type="text" id="bl-search" class="bl-search" placeholder="Search lists..." autocomplete="off" />
-          </div>
-          <select id="bl-sort" class="bl-sort">
+        <div class="lf-bar">
+          <input class="lf-search" type="text" id="bl-search" placeholder="Search lists…" />
+          <select class="lf-select" id="bl-sort">
             <option value="updated">Recently updated</option>
             <option value="upvoted">Most upvoted</option>
             <option value="downvoted">Most downvoted</option>
             <option value="games">Most games</option>
             <option value="alpha">A–Z</option>
           </select>
+          {allGenreOptions.length > 0 && (
+            <select class="lf-select" id="bl-genre">
+              <option value="">All Genres</option>
+              {allGenreOptions.map((g: string) => <option value={g.toLowerCase()}>{g}</option>)}
+            </select>
+          )}
           <label class="bl-ranked-filter">
             <input type="checkbox" id="bl-ranked-only" /> Ranked only
           </label>
         </div>
 
-        {topGenreFilters.length > 0 && (
-          <div class="bl-genre-row" id="bl-genre-row">
-            <button class="bl-genre-chip active" data-genre="all">All genres</button>
-            {topGenreFilters.map((g: string) => (
-              <button class="bl-genre-chip" data-genre={g.toLowerCase()}>{g}</button>
-            ))}
-          </div>
-        )}
-
-        <div class="bl-grid" id="bl-grid">
+        <div class="lists-grid" id="bl-grid">
           {lists.map((l: any) => {
             const votes = voteCounts[l.id] ?? { up: 0, down: 0 };
             const games = gameCounts[l.id] ?? 0;
             const genres = listGenres[l.id] ?? [];
             return (
-              <a
-                href={`/lists/${l.id}`}
-                class="bl-card"
+              <div
+                class="list-card-wrapper"
                 data-title={(l.title ?? "").toLowerCase()}
                 data-up={votes.up}
                 data-down={votes.down}
@@ -152,124 +155,92 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
                 data-ranked={l.is_ranked ? "true" : "false"}
                 data-genres={genres.map((g: string) => g.toLowerCase()).join(",")}
               >
-                <div class="bl-header">
-                  {l.is_ranked && <span class="bl-badge">Ranked</span>}
-                  <span class="bl-games">{games} game{games !== 1 ? "s" : ""}</span>
-                </div>
-                <div class="bl-title">{l.title}</div>
-                {l.description && <p class="bl-description">{l.description}</p>}
-                {genres.length > 0 && (
-                  <div class="bl-tags">
-                    {genres.slice(0, 3).map((g: string) => <span class="bl-tag">{g}</span>)}
-                    {genres.length > 3 && <span class="bl-tag">+{genres.length - 3}</span>}
-                  </div>
-                )}
-                <div class="bl-footer">
-                  <span class="bl-owner">
-                    <span class="bl-avatar">
-                      {l.profiles?.avatar_url
-                        ? <img src={l.profiles.avatar_url} alt={l.profiles.username} />
-                        : <span>{getInitials(l.profiles?.username ?? "?")}</span>
-                      }
-                    </span>
-                    @{l.profiles?.username}
-                  </span>
-                  <span class="bl-votes">
-                    <span class="bl-up">▲ {votes.up}</span>
-                    <span class="bl-down">▼ {votes.down}</span>
-                  </span>
-                </div>
-              </a>
+                <span class="bl-votes-badge">
+                  <span class="bl-up">▲ {votes.up}</span>
+                  <span class="bl-down">▼ {votes.down}</span>
+                </span>
+                <ListCard
+                  id={l.id}
+                  title={l.title}
+                  isRanked={l.is_ranked}
+                  visibility="public"
+                  entryCount={games}
+                  coverUrls={coversByListId[l.id] ?? []}
+                  ownerUsername={l.profiles?.username}
+                  ownerAvatar={l.profiles?.avatar_url}
+                  showOwner={true}
+                />
+              </div>
             );
           })}
         </div>
-        <div class="bl-empty-filtered" id="bl-empty-filtered">No lists match your filters.</div>
+        <div class="list-no-results" id="bl-no-results" style="display:none">No lists match these filters.</div>
       </>
     )}
   </main>
 </Layout>
 
 <style>
-  .bl-controls { display: flex; align-items: center; gap: 10px; padding: 14px 20px 4px; flex-wrap: wrap; }
-  .bl-search-wrap { position: relative; flex: 1; min-width: 160px; max-width: 280px; }
-  .bl-search-wrap svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-tertiary); pointer-events: none; }
-  .bl-search { width: 100%; padding: 7px 10px 7px 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 13px; font-family: inherit; box-sizing: border-box; }
-  .bl-search:focus { outline: none; border-color: var(--accent); }
-  .bl-sort { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 13px; font-family: inherit; cursor: pointer; }
-  .bl-sort:focus { outline: none; border-color: var(--accent); }
-  .bl-ranked-filter { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; white-space: nowrap; }
+  .lists-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; padding: 16px 20px 40px; }
+  .lf-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 14px 20px 4px; }
+  .lf-search { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; font-family: inherit; outline: none; min-width: 160px; max-width: 220px; }
+  .lf-search:focus { border-color: var(--accent); }
+  .lf-select {
+    background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 28px 6px 10px; font-size: 13px; font-family: inherit;
+    cursor: pointer; outline: none; appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 8px center;
+  }
+  .lf-select:focus { border-color: var(--accent); }
+  .lf-select.has-value { border-color: var(--accent); color: var(--accent); }
+  .bl-ranked-filter { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; white-space: nowrap; margin-left: auto; }
   .bl-ranked-filter input { accent-color: var(--accent); cursor: pointer; }
 
-  .bl-genre-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 20px 4px; }
-  .bl-genre-chip { font-size: 12px; font-weight: 500; padding: 4px 12px; border-radius: 14px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); cursor: pointer; transition: all .15s; font-family: inherit; text-transform: capitalize; }
-  .bl-genre-chip:hover { border-color: var(--text-tertiary); color: var(--text-primary); }
-  .bl-genre-chip.active { background: rgba(96,80,200,.12); border-color: var(--accent); color: var(--accent); }
-
-  .bl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; padding: 14px 20px 40px; }
-  .bl-card {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 16px;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    text-decoration: none;
-    color: inherit;
-    transition: transform .15s, box-shadow .15s, border-color .15s;
+  .list-card-wrapper { position: relative; }
+  .bl-votes-badge {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    display: flex; gap: 6px; padding: 3px 8px; border-radius: 10px;
+    background: rgba(0,0,0,.6); font-size: 11px; font-weight: 600;
+    backdrop-filter: blur(2px);
   }
-  .bl-card:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,.15); border-color: var(--text-tertiary); }
-  .bl-header { display: flex; align-items: center; gap: 8px; }
-  .bl-badge { font-size: 10px; font-weight: 700; padding: 2px 9px; border-radius: 10px; background: rgba(96,80,200,.12); color: var(--accent); text-transform: uppercase; letter-spacing: .06em; }
-  .bl-games { font-size: 12px; color: var(--text-tertiary); margin-left: auto; }
-  .bl-title { font-family: 'DM Serif Display', serif; font-size: 18px; color: var(--text-primary); line-height: 1.25; }
-  .bl-description { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .bl-tags { display: flex; flex-wrap: wrap; gap: 4px; }
-  .bl-tag { font-size: 11px; padding: 2px 8px; border-radius: 8px; background: var(--tag-bg); color: var(--tag-text); text-transform: capitalize; }
-  .bl-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
-  .bl-owner { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bl-avatar { width: 18px; height: 18px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 7px; font-weight: 700; overflow: hidden; flex-shrink: 0; color: var(--text-tertiary); }
-  .bl-avatar img { width: 100%; height: 100%; object-fit: cover; }
-  .bl-votes { display: flex; gap: 8px; font-size: 12px; flex-shrink: 0; }
   .bl-up { color: #4ade80; }
   .bl-down { color: #f87171; }
-  .bl-empty-filtered { display: none; text-align: center; padding: 40px 20px; color: var(--text-tertiary); font-size: 13px; }
 
-  @media (max-width: 620px) {
-    .bl-grid { grid-template-columns: 1fr; }
-  }
+  .list-no-results { padding: 32px 0; text-align: center; color: var(--text-tertiary); font-size: 13px; }
 </style>
 
 <script is:inline>
 (function() {
   var searchInput = document.getElementById('bl-search');
   var sortSelect = document.getElementById('bl-sort');
+  var genreSelect = document.getElementById('bl-genre');
   var rankedOnly = document.getElementById('bl-ranked-only');
-  var genreRow = document.getElementById('bl-genre-row');
   var grid = document.getElementById('bl-grid');
-  var emptyEl = document.getElementById('bl-empty-filtered');
+  var noResults = document.getElementById('bl-no-results');
   if (!grid) return;
 
-  var cards = Array.prototype.slice.call(grid.querySelectorAll('.bl-card'));
-  var activeGenre = 'all';
-
-  if (genreRow) {
-    Array.prototype.forEach.call(genreRow.querySelectorAll('.bl-genre-chip'), function(chip) {
-      chip.addEventListener('click', function() {
-        Array.prototype.forEach.call(genreRow.querySelectorAll('.bl-genre-chip'), function(c) { c.classList.remove('active'); });
-        chip.classList.add('active');
-        activeGenre = chip.dataset.genre;
-        applyFilterSort();
-      });
-    });
-  }
+  var items = Array.prototype.slice.call(grid.querySelectorAll('.list-card-wrapper'));
 
   function applyFilterSort() {
     var q = ((searchInput && searchInput.value) || '').trim().toLowerCase();
     var sortBy = sortSelect ? sortSelect.value : 'updated';
+    var genre = genreSelect ? genreSelect.value : '';
     var onlyRanked = rankedOnly ? rankedOnly.checked : false;
 
-    var sorted = cards.slice().sort(function(a, b) {
+    items.forEach(function(item) {
+      var show = true;
+      if (q && item.dataset.title.indexOf(q) === -1) show = false;
+      if (show && genre) {
+        var genres = item.dataset.genres ? item.dataset.genres.split(',') : [];
+        if (genres.indexOf(genre) === -1) show = false;
+      }
+      if (show && onlyRanked && item.dataset.ranked !== 'true') show = false;
+      item.style.display = show ? '' : 'none';
+    });
+
+    var visible = items.filter(function(i) { return i.style.display !== 'none'; });
+    visible.sort(function(a, b) {
       switch (sortBy) {
         case 'upvoted': return parseInt(b.dataset.up, 10) - parseInt(a.dataset.up, 10);
         case 'downvoted': return parseInt(b.dataset.down, 10) - parseInt(a.dataset.down, 10);
@@ -278,26 +249,17 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
         default: return parseInt(b.dataset.updated, 10) - parseInt(a.dataset.updated, 10);
       }
     });
+    visible.forEach(function(item) { grid.appendChild(item); });
 
-    sorted.forEach(function(card, i) { card.style.order = i; });
-
-    var visibleCount = 0;
-    cards.forEach(function(card) {
-      var matchesSearch = !q || card.dataset.title.indexOf(q) !== -1;
-      var matchesRanked = !onlyRanked || card.dataset.ranked === 'true';
-      var cardGenres = card.dataset.genres ? card.dataset.genres.split(',') : [];
-      var matchesGenre = activeGenre === 'all' || cardGenres.indexOf(activeGenre) !== -1;
-      var visible = matchesSearch && matchesRanked && matchesGenre;
-      card.style.display = visible ? '' : 'none';
-      if (visible) visibleCount++;
-    });
-
-    grid.style.display = visibleCount === 0 ? 'none' : '';
-    if (emptyEl) emptyEl.style.display = visibleCount === 0 ? '' : 'none';
+    if (noResults) noResults.style.display = visible.length === 0 ? '' : 'none';
   }
 
   if (searchInput) searchInput.addEventListener('input', applyFilterSort);
   if (sortSelect) sortSelect.addEventListener('change', applyFilterSort);
   if (rankedOnly) rankedOnly.addEventListener('change', applyFilterSort);
+  if (genreSelect) genreSelect.addEventListener('change', function() {
+    genreSelect.classList.toggle('has-value', !!genreSelect.value);
+    applyFilterSort();
+  });
 })();
 </script>
