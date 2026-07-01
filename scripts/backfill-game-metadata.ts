@@ -145,7 +145,7 @@ async function main() {
     process.stdout.write(`Batch ${batchNum}/${totalBatches} (${batch.length} games)... `);
 
     const igdbGames = await igdbFetch(`
-      fields id, category, status, storyline,
+      fields id, game_type, status, storyline,
              themes.id, themes.name, themes.slug,
              game_modes.id, game_modes.name, game_modes.slug,
              franchises.id, franchises.name, franchises.slug,
@@ -168,7 +168,7 @@ async function main() {
       const { error: updateError } = await db
         .from('games')
         .update({
-          igdb_category: igdbData.category  ?? null,
+          igdb_category: igdbData.game_type ?? null,
           igdb_status:   igdbData.status    ?? null,
           storyline:     igdbData.storyline ?? null,
         })

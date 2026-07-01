@@ -1,14 +1,7 @@
 import type { APIRoute } from "astro";
 import { getSupabase } from "../../../utils/database";
 import { igdbFetch } from "../../../utils/igdb";
-
-// Categories we consider reviewable games — DLC (1), bundles (3), mods (5),
-// episodes (6), seasons (7), ports (11), forks (12) etc. are excluded.
-const ALLOWED_CATEGORIES = [0, 2, 4, 8, 9, 10];
-
-// Games imported before this column existed have igdb_category = null.
-// We surface those rather than hiding the user's existing data.
-const CATEGORY_FILTER = `igdb_category.is.null,igdb_category.in.(${ALLOWED_CATEGORIES.join(',')})`;
+import { ALLOWED_GAME_CATEGORIES, GAME_CATEGORY_OR_FILTER } from "../../../utils/games";
 
 export const GET: APIRoute = async ({ request }) => {
   const url = new URL(request.url);
@@ -29,7 +22,7 @@ export const GET: APIRoute = async ({ request }) => {
     igdbFetch("games", `
       fields name, slug, cover.url;
       search "${q}";
-      where category = (${ALLOWED_CATEGORIES.join(',')});
+      where game_type = (${ALLOWED_GAME_CATEGORIES.join(',')});
       limit 6;
     `).catch(() => []),
   ]);
@@ -42,7 +35,7 @@ export const GET: APIRoute = async ({ request }) => {
       .from("games")
       .select("id, title, slug, cover_img_url, date_released")
       .in("id", rpcIds)
-      .or(CATEGORY_FILTER);
+      .or(GAME_CATEGORY_OR_FILTER);
     const orderMap = new Map(rpcIds.map((id, i) => [id, i]));
     dbGames = (data ?? []).sort(
       (a: any, b: any) => (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
@@ -53,7 +46,7 @@ export const GET: APIRoute = async ({ request }) => {
       .from("games")
       .select("id, title, slug, cover_img_url, date_released")
       .ilike("title", `%${q}%`)
-      .or(CATEGORY_FILTER)
+      .or(GAME_CATEGORY_OR_FILTER)
       .limit(8);
     dbGames = data ?? [];
   }

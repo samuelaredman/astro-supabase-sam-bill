@@ -102,7 +102,7 @@ export const POST: APIRoute = async (context) => {
 
   // Fetch full game data from IGDB
   const games = await igdbFetch("games", `
-    fields name, slug, summary, storyline, category, status,
+    fields name, slug, summary, storyline, game_type, status,
            first_release_date, cover.url,
            genres.id, genres.name, genres.slug,
            platforms.id, platforms.name, platforms.slug,
@@ -138,7 +138,7 @@ export const POST: APIRoute = async (context) => {
       slug:             finalSlug,
       game_description: game.summary   ?? null,
       storyline:        game.storyline ?? null,
-      igdb_category:    game.category  ?? null,
+      igdb_category:    game.game_type ?? null,
       igdb_status:      game.status    ?? null,
       cover_img_url:    coverUrl,
       date_released:    game.first_release_date
