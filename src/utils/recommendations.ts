@@ -5,6 +5,7 @@ export type SimilarGame = {
   title: string;
   slug: string;
   cover_img_url: string | null;
+  game_description: string | null;
   score: number;
 };
 
@@ -125,7 +126,7 @@ export async function getSimilarGames(
 
   const { data: candidateGames } = await db
     .from('games')
-    .select('id, title, slug, cover_img_url, igdb_category')
+    .select('id, title, slug, cover_img_url, game_description, igdb_category')
     .in('id', topCandidateIds);
 
   return (candidateGames ?? [])
@@ -135,6 +136,7 @@ export async function getSimilarGames(
       title: g.title,
       slug: g.slug,
       cover_img_url: g.cover_img_url,
+      game_description: g.game_description,
       score: scoreByGame.get(g.id) ?? 0,
     }))
     .sort((a: SimilarGame, b: SimilarGame) => b.score - a.score)
@@ -208,7 +210,7 @@ export async function getGenreBasedRecommendations(
 
   const { data: candidateGames } = await db
     .from('games')
-    .select('id, title, slug, cover_img_url, igdb_category')
+    .select('id, title, slug, cover_img_url, game_description, igdb_category')
     .in('id', topCandidateIds);
 
   const recs = (candidateGames ?? [])
@@ -218,6 +220,7 @@ export async function getGenreBasedRecommendations(
       title: g.title,
       slug: g.slug,
       cover_img_url: g.cover_img_url,
+      game_description: g.game_description,
       score: popularity.get(g.id) ?? 0,
     }))
     .sort((a: SimilarGame, b: SimilarGame) => b.score - a.score)
@@ -252,7 +255,7 @@ export async function getSocialRecommendations(
 
   const { data: friendReviews } = await db
     .from('reviews')
-    .select('id, profile_id, game_id, score, games(id, title, slug, cover_img_url, igdb_category)')
+    .select('id, profile_id, game_id, score, games(id, title, slug, cover_img_url, game_description, igdb_category)')
     .in('profile_id', mutualIds)
     .eq('status', 'published')
     .gte('score', HIGH_SCORE_THRESHOLD)
@@ -308,6 +311,6 @@ export async function getSocialRecommendations(
     .slice(0, limit)
     .map(([gameId, score]) => {
       const g = gameById.get(gameId);
-      return { id: g.id, title: g.title, slug: g.slug, cover_img_url: g.cover_img_url, score };
+      return { id: g.id, title: g.title, slug: g.slug, cover_img_url: g.cover_img_url, game_description: g.game_description, score };
     });
 }
