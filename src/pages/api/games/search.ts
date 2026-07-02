@@ -20,7 +20,7 @@ export const GET: APIRoute = async ({ request }) => {
   const [rpcRes, igdbRes] = await Promise.all([
     supabase.rpc('search_games', { search_query: q, result_limit: 8 }),
     igdbFetch("games", `
-      fields name, slug, cover.url;
+      fields name, slug, cover.url, first_release_date;
       search "${q}";
       where game_type = (${ALLOWED_GAME_CATEGORIES.join(',')});
       limit 6;
@@ -67,12 +67,19 @@ export const GET: APIRoute = async ({ request }) => {
       cover_img_url: g.cover?.url
         ? `https:${g.cover.url.replace("t_thumb", "t_cover_big")}`
         : null,
+      year: g.first_release_date
+        ? new Date(g.first_release_date * 1000).getFullYear()
+        : null,
       igdb_id: g.id,
       source: "igdb",
     }));
 
   const results = [
-    ...dbGames.map((g: any) => ({ ...g, source: "db" })),
+    ...dbGames.map((g: any) => ({
+      ...g,
+      year: g.date_released ? new Date(g.date_released).getFullYear() : null,
+      source: "db",
+    })),
     ...igdbExtra,
   ];
 
