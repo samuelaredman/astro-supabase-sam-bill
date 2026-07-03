@@ -22,16 +22,21 @@ const HIGH_SCORE_THRESHOLD = 7;
 // limit if queried directly (same failure mode as scripts/audit-game-categories.ts).
 const CANDIDATE_FETCH_CAP = 50;
 
-// All the game_ids a profile has already published a review for. Pass this as
-// `excludeIds` to every recommendation function below — recommending a game
-// someone already reviewed defeats the point.
-export async function getReviewedGameIds(db: any, profileId: string): Promise<Set<string>> {
-  const { data } = await db
-    .from('reviews')
-    .select('game_id')
-    .eq('profile_id', profileId)
-    .eq('status', 'published');
-  return new Set((data ?? []).map((r: any) => r.game_id));
+// Every game_id a profile has already reviewed OR tracked in their library
+// (playing/completed/dropped/owned/etc — any status at all). Pass this as
+// `excludeIds` to every recommendation function below. Tracking a game with
+// any status is a deliberate "I already know about this one" signal, same as
+// a review — a user who marks something "Dropped" doesn't want to see it
+// recommended again either.
+export async function getExcludedGameIds(db: any, profileId: string): Promise<Set<string>> {
+  const [{ data: reviewed }, { data: tracked }] = await Promise.all([
+    db.from('reviews').select('game_id').eq('profile_id', profileId).eq('status', 'published'),
+    db.from('user_game_status').select('game_id').eq('profile_id', profileId),
+  ]);
+  return new Set([
+    ...(reviewed ?? []).map((r: any) => r.game_id),
+    ...(tracked ?? []).map((r: any) => r.game_id),
+  ]);
 }
 
 // Games "similar" to gameId, ranked by shared genres/themes/franchise/collection
