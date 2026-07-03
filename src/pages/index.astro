@@ -6,6 +6,7 @@ import EditModal from "../components/EditModal.astro";
 import ReviewCard from "../components/ReviewCard.astro";
 import { igdbImage, timeAgo, scoreClass } from '../utils/format';
 import { GAME_CATEGORY_OR_FILTER } from '../utils/games';
+import { getSimilarGames, getExcludedGameIds } from '../utils/recommendations';
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
@@ -56,7 +57,7 @@ const [
   genresRes,
 ] = await Promise.all([
   user
-    ? db.from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single()
+    ? db.from('profiles').select('id, username, avatar_url, bio, favorite_game_id').eq('auth_user_id', user.id).single()
     : Promise.resolve({ data: null }),
   db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
   db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(20),
@@ -119,6 +120,63 @@ const topRated = Object.entries(weekGameMap)
   .filter(Boolean)
   .sort((a: any, b: any) => b.avg_score - a.avg_score)
   .slice(0, 12)
+
+const profileCompleteSteps = currentProfile
+  ? [!!currentProfile.avatar_url, !!currentProfile.bio, !!currentProfile.favorite_game_id]
+  : []
+const profileCompleteCount = profileCompleteSteps.filter(Boolean).length
+const profileIncomplete = isLoggedIn && profileCompleteCount < 3
+
+const profileNagRingRadius = 11
+const profileNagRingCircumference = 2 * Math.PI * profileNagRingRadius
+const profileNagRingOffset = profileNagRingCircumference * (1 - profileCompleteCount / 3)
+
+const profileMissingLabels: string[] = []
+if (currentProfile && !currentProfile.avatar_url) profileMissingLabels.push('an avatar')
+if (currentProfile && !currentProfile.bio) profileMissingLabels.push('a bio')
+if (currentProfile && !currentProfile.favorite_game_id) profileMissingLabels.push('a favorite game')
+const profileMissingText = profileMissingLabels.length <= 1
+  ? (profileMissingLabels[0] ?? '')
+  : profileMissingLabels.length === 2
+    ? profileMissingLabels.join(' and ')
+    : profileMissingLabels.slice(0, -1).join(', ') + ', and ' + profileMissingLabels[profileMissingLabels.length - 1]
+
+// "Recommended for you" — a compact preview for the sidebar widget. The full
+// breakdown (per-game/genre/social, with more results) lives on /recommendations.
+const RECS_SEED_LIMIT = 3
+const RECS_PER_SEED = 4
+const RECS_DISPLAY_LIMIT = 4
+let recommendedForYou: { id: string; title: string; slug: string; cover_img_url: string | null }[] = []
+if (currentProfile) {
+  const excludedIds = await getExcludedGameIds(db, currentProfile.id)
+
+  const { data: topOwnReviews } = await db
+    .from('reviews')
+    .select('game_id, score, games(id, title, slug, cover_img_url)')
+    .eq('profile_id', currentProfile.id)
+    .eq('status', 'published')
+    .gte('score', 7)
+    .order('score', { ascending: false })
+    .limit(RECS_SEED_LIMIT)
+
+  if (topOwnReviews && topOwnReviews.length > 0) {
+    const seedGames = (topOwnReviews as any[]).map(r => r.games).filter(Boolean)
+
+    const combined = new Map<string, { id: string; title: string; slug: string; cover_img_url: string | null; score: number }>()
+    const recLists = await Promise.all(
+      seedGames.map((g: any) => getSimilarGames(db, g.id, RECS_PER_SEED, excludedIds))
+    )
+    for (const recs of recLists) {
+      for (const rec of recs) {
+        const existing = combined.get(rec.id)
+        combined.set(rec.id, existing ? { ...existing, score: existing.score + rec.score } : rec)
+      }
+    }
+    recommendedForYou = [...combined.values()]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, RECS_DISPLAY_LIMIT)
+  }
+}
 
 const totalReviews = reviewCountRes.count ?? 0
 const totalGames = gameCountRes.count ?? 0
@@ -183,6 +241,26 @@ const initialFollowingDone = followingReviews.length < 20
             <a href="/signup" class="welcome-banner-cta">Create a free account →</a>
           </div>
           <button class="welcome-banner-dismiss" id="dismissWelcome" aria-label="Dismiss">✕</button>
+        </div>
+      </div>
+    )}
+
+    {profileIncomplete && currentProfile && (
+      <div class="profile-nag-banner" id="profileNagBanner">
+        <div class="profile-nag-body">
+          <svg width="28" height="28" viewBox="0 0 28 28" class="profile-nag-ring" aria-hidden="true">
+            <circle cx="14" cy="14" r={profileNagRingRadius} fill="none" stroke="var(--border)" stroke-width="3" />
+            <circle
+              cx="14" cy="14" r={profileNagRingRadius} fill="none" stroke="var(--accent)" stroke-width="3"
+              stroke-dasharray={profileNagRingCircumference} stroke-dashoffset={profileNagRingOffset}
+              stroke-linecap="round" transform="rotate(-90 14 14)"
+            />
+          </svg>
+          <div class="profile-nag-text">
+            <strong>Your profile is {profileCompleteCount}/3 complete</strong> — add {profileMissingText} so other reviewers know who you are.
+            <a href={`/reviewers/${currentProfile.username}`} class="profile-nag-cta">Complete your profile →</a>
+          </div>
+          <button class="profile-nag-dismiss" id="dismissProfileNag" aria-label="Dismiss">✕</button>
         </div>
       </div>
     )}
@@ -402,6 +480,16 @@ const initialFollowingDone = followingReviews.length < 20
       document.getElementById('dismissWelcome').addEventListener('click', function () {
         localStorage.setItem('ck_welcome_dismissed', '1');
         banner.style.display = 'none';
+      });
+    })();
+    (function () {
+      var nag = document.getElementById('profileNagBanner');
+      if (!nag) return;
+      // Session-scoped dismiss — reappears next session as long as the profile is still incomplete.
+      if (sessionStorage.getItem('ck_profile_nag_dismissed')) { nag.style.display = 'none'; return; }
+      document.getElementById('dismissProfileNag').addEventListener('click', function () {
+        sessionStorage.setItem('ck_profile_nag_dismissed', '1');
+        nag.style.display = 'none';
       });
     })();
   </script>
@@ -925,6 +1013,26 @@ const initialFollowingDone = followingReviews.length < 20
       )}
     </div>
 
+    {recommendedForYou.length > 0 && (
+      <div class="widget" style="margin-top:4px">
+        <div class="widget-title">Recommended for you</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          {recommendedForYou.map((game) => (
+            <a href={`/games/${game.slug}`} class="rec-widget-item">
+              <div class="rec-widget-cover">
+                {igdbImage(game.cover_img_url)
+                  ? <img src={igdbImage(game.cover_img_url) ?? ''} alt={game.title} loading="lazy" />
+                  : <span style="display:flex;align-items:center;justify-content:center;height:100%;font-size:16px">🎮</span>
+                }
+              </div>
+              <div class="rec-widget-title">{game.title}</div>
+            </a>
+          ))}
+        </div>
+        <a href="/recommendations" class="rec-widget-seeall">See all recommendations →</a>
+      </div>
+    )}
+
     <div class="widget" style="margin-top:4px">
       <div class="widget-title">Site stats</div>
       <div class="stat-row">
@@ -953,6 +1061,22 @@ const initialFollowingDone = followingReviews.length < 20
   .welcome-banner-cta:hover { text-decoration: underline; }
   .welcome-banner-dismiss { flex-shrink: 0; background: none; border: none; color: var(--text-tertiary); font-size: 14px; cursor: pointer; padding: 4px 6px; border-radius: 4px; line-height: 1; transition: color 0.15s; }
   .welcome-banner-dismiss:hover { color: var(--text-primary); }
+  .profile-nag-banner { background: var(--accent-subtle); border-bottom: 1px solid var(--border); }
+  .profile-nag-body { display: flex; align-items: center; gap: 12px; padding: 12px 20px; }
+  .profile-nag-ring { flex-shrink: 0; }
+  .profile-nag-ring circle { transition: stroke-dashoffset 0.3s; }
+  .profile-nag-text { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+  .profile-nag-text strong { color: var(--text-primary); }
+  .profile-nag-cta { display: inline-block; margin-left: 10px; color: var(--accent); font-weight: 500; white-space: nowrap; }
+  .profile-nag-cta:hover { text-decoration: underline; }
+  .profile-nag-dismiss { flex-shrink: 0; background: none; border: none; color: var(--text-tertiary); font-size: 14px; cursor: pointer; padding: 4px 6px; border-radius: 4px; line-height: 1; transition: color 0.15s; }
+  .profile-nag-dismiss:hover { color: var(--text-primary); }
+  .rec-widget-item { display: flex; }
+  .rec-widget-cover { flex-shrink: 0; width: 32px; height: 43px; border-radius: 5px; overflow: hidden; background: var(--tag-bg); border: 1px solid var(--border); margin-right: 10px; }
+  .rec-widget-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .rec-widget-title { font-size: 13px; color: var(--text-primary); line-height: 1.3; align-self: center; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .rec-widget-seeall { display: block; text-align: center; font-size: 12px; color: var(--accent); margin-top: 10px; text-decoration: none; }
+  .rec-widget-seeall:hover { text-decoration: underline; }
   .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
   .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.4; filter: blur(2px) saturate(1.4); transform: scale(1.05); }
   .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.6) 50%, rgba(10,10,10,0.2) 100%); }
