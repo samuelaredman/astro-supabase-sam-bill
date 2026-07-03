@@ -20,7 +20,7 @@ if (!currentProfile) return Astro.redirect("/signin");
 
 const { data: list } = await db
   .from("lists")
-  .select("id, title, description, is_ranked, visibility, shared_to_feed, default_view, profile_id")
+  .select("id, title, description, is_ranked, visibility, shared_to_feed, default_view, cover_image_url, profile_id")
   .eq("id", id)
   .maybeSingle();
 
@@ -44,6 +44,11 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
   game_year: e.games?.date_released ? new Date(e.games.date_released).getFullYear() : null,
   cover: igdbImage(e.games?.cover_img_url, "t_cover_big"),
 })));
+
+const autoCoverSrcs = entryList
+  .slice(0, 4)
+  .map((e: any) => igdbImage(e.games?.cover_img_url, "t_cover_big"))
+  .filter(Boolean) as string[];
 ---
 
 <Layout title={`Edit "${list.title}" — Chekpoint`} variant="fullwidth">
@@ -211,6 +216,39 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
   }
   .el-toggle input:checked + .el-track::after { transform: translateX(18px); }
   .el-toggle-text { font-size: 14px; color: var(--text-secondary); }
+
+  /* ── cover image ── */
+  .el-cover-preview {
+    width: 100%;
+    aspect-ratio: 4/3;
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    gap: 2px;
+    background: linear-gradient(135deg, #1a1030 0%, #0d1a2e 100%);
+    position: relative;
+    border: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  [data-theme="light"] .el-cover-preview { background: linear-gradient(135deg, #e8e4f8 0%, #dce8f5 100%); }
+  .el-cover-preview img { flex: 1; min-width: 0; height: 100%; object-fit: cover; display: block; }
+  .el-cover-empty-icon { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 34px; opacity: .3; }
+  .el-cover-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .el-cover-hint { font-size: 11px; color: var(--text-tertiary); margin-top: 8px; line-height: 1.5; }
+  .el-btn-secondary {
+    background: none;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    padding: 7px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .el-btn-secondary:hover { border-color: var(--text-tertiary); color: var(--text-primary); }
+  .el-btn-secondary:disabled { opacity: .5; cursor: not-allowed; }
 
   /* ── meta row (type + visibility side by side) ── */
   .el-meta-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
@@ -449,6 +487,24 @@ const entriesJson = JSON.stringify(entryList.map((e: any) => ({
 
       <!-- RIGHT: list details sidebar -->
       <div class="el-right">
+        <div class="el-section" style="margin-bottom:20px">
+          <div class="el-section-title">Cover image</div>
+          <div class={`el-cover-preview el-cover-${Math.max(1, Math.min(4, (list.cover_image_url ? [list.cover_image_url] : autoCoverSrcs).length))}`} id="cover-preview">
+            {list.cover_image_url
+              ? <img src={list.cover_image_url} alt="" id="cover-preview-img" />
+              : autoCoverSrcs.length === 0
+                ? <div class="el-cover-empty-icon" id="cover-empty-icon">📋</div>
+                : autoCoverSrcs.map((src: string) => <img src={src} alt="" class="cover-auto-img" />)
+            }
+          </div>
+          <div class="el-cover-actions">
+            <button class="el-btn-secondary" id="cover-upload-btn">Upload cover</button>
+            <button class="el-btn-secondary" id="cover-remove-btn" style={list.cover_image_url ? "" : "display:none"}>Remove</button>
+            <input type="file" id="cover-file-input" accept="image/png,image/jpeg,image/webp" style="display:none" />
+          </div>
+          <div class="el-cover-hint" id="cover-msg" style="display:none"></div>
+          {!list.cover_image_url && <div class="el-cover-hint">Without a custom cover, this list shows a collage of its games.</div>}
+        </div>
         <div class="el-section">
           <div class="el-section-title">List details</div>
           <div class="el-field">
@@ -818,6 +874,78 @@ function updateHeading() {
   var h = document.getElementById('entries-heading');
   if (h) h.textContent = entries.length + ' ' + (entries.length === 1 ? 'game' : 'games');
 }
+
+// ── Cover image upload ──────────────────────────────────────────────────────
+(function() {
+  var uploadBtn = document.getElementById('cover-upload-btn');
+  var removeBtn = document.getElementById('cover-remove-btn');
+  var fileInput = document.getElementById('cover-file-input');
+  var preview = document.getElementById('cover-preview');
+  var msg = document.getElementById('cover-msg');
+
+  function showMsg(text, isError) {
+    msg.textContent = text;
+    msg.style.color = isError ? '#f87171' : 'var(--text-tertiary)';
+    msg.style.display = 'block';
+  }
+
+  uploadBtn.addEventListener('click', function() { fileInput.click(); });
+
+  fileInput.addEventListener('change', async function() {
+    var file = fileInput.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      showMsg('File must be under 5MB.', true);
+      fileInput.value = '';
+      return;
+    }
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = 'Uploading…';
+    msg.style.display = 'none';
+
+    var formData = new FormData();
+    formData.append('cover', file);
+    formData.append('list_id', listId);
+
+    var res = await fetch('/api/lists/cover', { method: 'POST', body: formData });
+    var data = await res.json().catch(function() { return {}; });
+
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = 'Upload cover';
+    fileInput.value = '';
+
+    if (!res.ok) {
+      showMsg(data.error || 'Failed to upload cover image.', true);
+      return;
+    }
+
+    preview.className = 'el-cover-preview el-cover-1';
+    preview.innerHTML = '<img src="' + data.url + '" alt="" id="cover-preview-img" />';
+    removeBtn.style.display = '';
+  });
+
+  removeBtn.addEventListener('click', async function() {
+    if (!confirm('Remove the custom cover image? The list will go back to showing a collage of its games.')) return;
+    removeBtn.disabled = true;
+    removeBtn.textContent = 'Removing…';
+
+    var res = await fetch('/api/lists/cover', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId }),
+    });
+
+    removeBtn.disabled = false;
+    removeBtn.textContent = 'Remove';
+
+    if (!res.ok) {
+      var data = await res.json().catch(function() { return {}; });
+      showMsg(data.error || 'Failed to remove cover image.', true);
+      return;
+    }
+    window.location.reload();
+  });
+})();
 
 // ── Delete list ────────────────────────────────────────────────────────────
 document.getElementById('delete-btn').addEventListener('click', async function() {
