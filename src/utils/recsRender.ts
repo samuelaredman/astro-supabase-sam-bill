@@ -154,6 +154,11 @@ export function loadRecommendationsInto(
             fetchAndRender(true);
           });
         }
+
+        const sectionsEl = container.querySelector('.recs-sections') as HTMLElement | null;
+        if (sectionsEl) {
+          sectionsEl.addEventListener('scroll', () => syncSectionDots(sectionsEl));
+        }
       })
       .catch(() => {
         container.innerHTML = '<div class="recs-error">Couldn\'t load recommendations. Try again later.</div>';
@@ -186,13 +191,24 @@ function closeAllStatusMenus(): void {
 function goToSection(sections: HTMLElement, index: number): void {
   const all = sections.querySelectorAll('.recs-section');
   if (index < 0 || index >= all.length) return;
+  // Dots aren't updated here — the scroll listener below reacts to the
+  // resulting scroll position, so it stays correct however the section
+  // changed (this click, a mouse-wheel scroll, or a touch swipe).
   (all[index] as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Keeps the side dots in sync with whatever section is actually in view,
+// regardless of how the user got there (arrow click, wheel, touch, keyboard).
+// Sections have an exact height matching the container (see shared.css), so
+// scrollTop / clientHeight lands on a clean integer index at rest.
+function syncSectionDots(sections: HTMLElement): void {
+  if (!sections.clientHeight) return;
+  const index = Math.round(sections.scrollTop / sections.clientHeight);
   const wrap = sections.closest('.recs-sections-wrap');
-  if (wrap) {
-    wrap.querySelectorAll('.recs-section-dot').forEach((el) => {
-      el.classList.toggle('active', (el as HTMLElement).dataset.sectionDot === String(index));
-    });
-  }
+  if (!wrap) return;
+  wrap.querySelectorAll('.recs-section-dot').forEach((el) => {
+    el.classList.toggle('active', (el as HTMLElement).dataset.sectionDot === String(index));
+  });
 }
 
 if (!(window as any).__recsCarouselInit) {
