@@ -1,0 +1,202 @@
+---
+export const prerender = false;
+import Layout from "../../components/Layout.astro";
+import { resolveSiteAdminProfile } from "../../utils/api";
+import { getSupabaseAdmin } from "../../utils/database";
+
+const profile = await resolveSiteAdminProfile(Astro);
+if (!profile) return Astro.redirect('/404');
+
+const db = getSupabaseAdmin() as any;
+
+const { data: reports } = await db
+  .from('reports')
+  .select('id, reporter_id, target_type, target_id, reason, notes, status, created_at')
+  .eq('status', 'pending')
+  .order('created_at', { ascending: true })
+  .limit(200);
+
+const reportRows = reports ?? [];
+
+const reporterIds = [...new Set(reportRows.map((r: any) => r.reporter_id))];
+const reviewIds = reportRows.filter((r: any) => r.target_type === 'review').map((r: any) => r.target_id);
+const commentIds = reportRows.filter((r: any) => r.target_type === 'comment').map((r: any) => r.target_id);
+const profileTargetIds = reportRows.filter((r: any) => r.target_type === 'profile').map((r: any) => r.target_id);
+
+const [reportersRes, reviewsRes, commentsRes, profilesRes] = await Promise.all([
+  reporterIds.length
+    ? db.from('profiles').select('id, username').in('id', reporterIds)
+    : { data: [] as any[] },
+  reviewIds.length
+    ? db.from('reviews').select('id, title, body, profile_id, game_id, games(title), profiles(username)').in('id', reviewIds)
+    : { data: [] as any[] },
+  commentIds.length
+    ? db.from('review_comments').select('id, body, review_id, profile_id, profiles(username)').in('id', commentIds)
+    : { data: [] as any[] },
+  profileTargetIds.length
+    ? db.from('profiles').select('id, username').in('id', profileTargetIds)
+    : { data: [] as any[] },
+]);
+
+const reporterMap = new Map((reportersRes.data as any[] ?? []).map((p: any) => [p.id, p.username]));
+const reviewMap = new Map((reviewsRes.data as any[] ?? []).map((r: any) => [r.id, r]));
+const commentMap = new Map((commentsRes.data as any[] ?? []).map((c: any) => [c.id, c]));
+const profileMap = new Map((profilesRes.data as any[] ?? []).map((p: any) => [p.id, p]));
+
+function truncate(s: string | null | undefined, n: number): string {
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+const rows = reportRows.map((r: any) => {
+  let preview = '(content not found — may have been deleted)';
+  let link: string | null = null;
+
+  if (r.target_type === 'review') {
+    const rev = reviewMap.get(r.target_id);
+    if (rev) {
+      preview = `"${truncate(rev.title || rev.body, 140)}" on ${rev.games?.title ?? 'unknown game'} by ${rev.profiles?.username ?? 'unknown'}`;
+      link = `/reviews/${r.target_id}`;
+    }
+  } else if (r.target_type === 'comment') {
+    const c = commentMap.get(r.target_id);
+    if (c) {
+      preview = `"${truncate(c.body, 140)}" by ${c.profiles?.username ?? 'unknown'}`;
+      link = `/reviews/${c.review_id}`;
+    }
+  } else if (r.target_type === 'profile') {
+    const p = profileMap.get(r.target_id);
+    if (p) {
+      preview = `Profile: ${p.username}`;
+      link = `/reviewers/${p.username}`;
+    }
+  }
+
+  return {
+    id: r.id,
+    reporter: reporterMap.get(r.reporter_id) ?? 'unknown',
+    target_type: r.target_type,
+    reason: r.reason,
+    notes: r.notes,
+    created_at: r.created_at,
+    preview,
+    link,
+  };
+});
+---
+
+<Layout title="Reports — Admin" isLoggedIn={true} currentProfile={profile} variant="two-col">
+  <main class="feed admin-main">
+    <a href="/admin" class="admin-back-link">&larr; Admin</a>
+    <h1 class="admin-title">Reports</h1>
+    <p class="admin-sub">Pending user reports on reviews, comments, and profiles.</p>
+
+    {rows.length === 0 && <p class="admin-empty">No pending reports.</p>}
+
+    <div class="unmatched-list" id="reportsList">
+      {rows.map((row: any) => (
+        <div class="unmatched-row" data-report-id={row.id}>
+          <div class="unmatched-info">
+            <div class="unmatched-title">
+              <span class="report-type-badge">{row.target_type}</span>
+              <span class="report-reason-badge">{row.reason}</span>
+            </div>
+            <div class="unmatched-meta">
+              reported by {row.reporter} · {new Date(row.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+            </div>
+          </div>
+          <div class="report-preview">
+            {row.link ? <a href={row.link} target="_blank" rel="noopener">{row.preview}</a> : row.preview}
+          </div>
+          {row.notes && <div class="report-notes">Note: {row.notes}</div>}
+          <div class="unmatched-actions">
+            <button class="admin-btn admin-btn-primary" onclick={`resolveReport('${row.id}')`}>Resolve</button>
+            <button class="admin-btn admin-btn-ghost" onclick={`dismissReport('${row.id}')`}>Dismiss</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  </main>
+</Layout>
+
+<script>
+declare global {
+  interface Window {
+    resolveReport: (reportId: string) => Promise<void>;
+    dismissReport: (reportId: string) => Promise<void>;
+  }
+}
+
+function getRow(reportId: string): HTMLElement | null {
+  return document.querySelector(`.unmatched-row[data-report-id="${reportId}"]`);
+}
+
+async function updateReport(reportId: string, endpoint: string) {
+  const row = getRow(reportId);
+  if (!row) return;
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ report_id: reportId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Failed');
+    row.remove();
+  } catch (e: any) {
+    alert(e.message ?? 'Something went wrong.');
+  }
+}
+
+window.resolveReport = (reportId: string) => updateReport(reportId, '/api/admin/reports/resolve');
+window.dismissReport = (reportId: string) => updateReport(reportId, '/api/admin/reports/dismiss');
+</script>
+
+<style>
+  .admin-main { min-width: 0; }
+  .admin-back-link { font-size: 13px; color: var(--text-secondary); text-decoration: none; margin-bottom: 12px; display: inline-block; }
+  .admin-back-link:hover { color: var(--accent); }
+  .admin-title { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+  .admin-sub { color: var(--text-secondary); font-size: 14px; margin-bottom: 24px; }
+  .admin-empty { color: var(--text-secondary); font-size: 14px; }
+
+  .unmatched-list { display: flex; flex-direction: column; gap: 10px; }
+  .unmatched-row {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+    padding: 14px 16px;
+  }
+  .unmatched-info { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .unmatched-title { display: flex; gap: 8px; align-items: center; }
+  .unmatched-meta { font-size: 12px; color: var(--text-tertiary); white-space: nowrap; }
+  .unmatched-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+  .report-type-badge, .report-reason-badge {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+  }
+  .report-preview { font-size: 13px; margin-top: 8px; color: var(--text-primary); line-height: 1.4; }
+  .report-preview a { color: var(--accent); text-decoration: none; }
+  .report-preview a:hover { text-decoration: underline; }
+  .report-notes { font-size: 12px; color: var(--text-secondary); margin-top: 6px; font-style: italic; }
+
+  .admin-btn {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .admin-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .admin-btn-primary:hover { opacity: 0.9; }
+  .admin-btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+</style>

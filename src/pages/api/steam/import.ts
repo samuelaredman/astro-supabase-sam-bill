@@ -1,5 +1,15 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../utils/api";
+import { requireAuth, json, type SupabaseAdmin } from "../../../utils/api";
+
+// Fire-and-forget — logging a sync gap must never fail the actual sync.
+function logUnmatchedTitles(db: SupabaseAdmin, titles: string[]): void {
+  if (titles.length === 0) return;
+  (db as any).rpc('log_unmatched_steam_titles', { titles }).then(
+    ({ error }: any) => {
+      if (error) console.error('[steam/import] log_unmatched_steam_titles error (non-fatal):', JSON.stringify(error));
+    }
+  );
+}
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -64,8 +74,12 @@ export const POST: APIRoute = async (context) => {
 
   // Build lowercase→playtime map from Steam library
   const steamByTitle = new Map<string, number>();
+  const originalCaseByTitle = new Map<string, string>();
   for (const g of steamGames) {
-    if (g.name) steamByTitle.set(g.name.toLowerCase().trim(), g.playtime_forever);
+    if (g.name) {
+      steamByTitle.set(g.name.toLowerCase().trim(), g.playtime_forever);
+      originalCaseByTitle.set(g.name.toLowerCase().trim(), g.name);
+    }
   }
 
   // Match against our games table via DB function (case-insensitive)
@@ -90,9 +104,11 @@ export const POST: APIRoute = async (context) => {
     const matchedTitlesSet = new Set(matches.map(m => m.title.toLowerCase().trim()));
     const unmatched = steamTitles.filter(t => !matchedTitlesSet.has(t));
     console.log(`[steam/import] Unmatched Steam titles (${unmatched.length}):`, unmatched);
+    logUnmatchedTitles(db, unmatched.map(t => originalCaseByTitle.get(t) ?? t));
   }
 
   if (matches.length === 0) {
+    logUnmatchedTitles(db, steamGames.map(g => g.name));
     await db.from('profiles').update({ steam_synced_at: new Date().toISOString() }).eq('id', profile.id);
     return json({ matched: 0, updated: 0, unmatched: steamGames.length, total: steamGames.length });
   }
