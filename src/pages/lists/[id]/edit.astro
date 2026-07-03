@@ -1,0 +1,972 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import Layout from "../../../components/Layout.astro";
+import { igdbImage } from "../../../utils/format";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+if (!user) return Astro.redirect("/signin");
+
+const { id } = Astro.params;
+const db = getSupabaseAdmin() as any;
+
+const { data: currentProfile } = await db
+  .from("profiles")
+  .select("id, username, avatar_url")
+  .eq("auth_user_id", user.id)
+  .maybeSingle();
+if (!currentProfile) return Astro.redirect("/signin");
+
+const { data: list } = await db
+  .from("lists")
+  .select("id, title, description, is_ranked, visibility, shared_to_feed, default_view, cover_image_url, profile_id")
+  .eq("id", id)
+  .maybeSingle();
+
+if (!list || list.profile_id !== currentProfile.id) return Astro.redirect("/404");
+
+const { data: entries } = await db
+  .from("list_entries")
+  .select("id, position, notes, added_at, games ( id, title, slug, cover_img_url, date_released )")
+  .eq("list_id", id)
+  .order("position", { ascending: true, nullsFirst: false })
+  .order("added_at", { ascending: true });
+
+const entryList = entries ?? [];
+const entriesJson = JSON.stringify(entryList.map((e: any) => ({
+  id: e.id,
+  position: e.position,
+  notes: e.notes ?? "",
+  game_id: e.games?.id,
+  game_title: e.games?.title,
+  game_slug: e.games?.slug,
+  game_year: e.games?.date_released ? new Date(e.games.date_released).getFullYear() : null,
+  cover: igdbImage(e.games?.cover_img_url, "t_cover_big"),
+})));
+
+const autoCoverSrcs = entryList
+  .slice(0, 4)
+  .map((e: any) => igdbImage(e.games?.cover_img_url, "t_cover_big"))
+  .filter(Boolean) as string[];
+---
+
+<Layout title={`Edit "${list.title}" — Chekpoint`} variant="fullwidth">
+<style is:global>
+  *, *::before, *::after { box-sizing: border-box; }
+
+  .el-shell {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-page, #0e0e0e);
+  }
+
+  /* ── top bar ── */
+  .el-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    height: 56px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .el-back {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-decoration: none;
+    background: none;
+    border: none;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 6px 10px;
+    border-radius: 8px;
+    transition: color .15s, background .15s;
+  }
+  .el-back:hover { color: var(--text-primary); background: var(--bg-hover); }
+  .el-logo {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 11px;
+    color: var(--text-primary);
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .el-logo-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .el-topbar-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    width: 120px;
+  }
+  .el-view-link {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 6px 10px;
+    border-radius: 8px;
+    transition: background .15s;
+  }
+  .el-view-link:hover { background: rgba(96,80,200,.1); }
+
+  /* ── two-column body ── */
+  .el-body {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    padding: 32px 20px 80px;
+  }
+  .el-content {
+    width: 100%;
+    max-width: 980px;
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: 20px;
+    align-items: start;
+  }
+  .el-left { display: flex; flex-direction: column; gap: 16px; }
+  .el-right {
+    position: sticky;
+    top: 76px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  /* ── section cards ── */
+  .el-section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+  }
+  .el-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .09em;
+    color: var(--text-tertiary);
+    margin-bottom: 18px;
+  }
+
+  /* ── form fields ── */
+  .el-field { margin-bottom: 16px; }
+  .el-field:last-of-type { margin-bottom: 0; }
+  .el-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--text-secondary);
+    margin-bottom: 7px;
+  }
+  .el-input {
+    width: 100%;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .el-input:focus { border-color: var(--accent); }
+  textarea.el-input { resize: vertical; min-height: 72px; }
+
+  /* ── toggle ── */
+  .el-toggle-row { display: flex; align-items: center; gap: 12px; }
+  .el-toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+  .el-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .el-track {
+    position: absolute;
+    inset: 0;
+    border-radius: 12px;
+    background: var(--border);
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .el-toggle input:checked + .el-track { background: var(--accent); }
+  .el-track::after {
+    content: '';
+    position: absolute;
+    left: 4px; top: 4px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform .2s;
+  }
+  .el-toggle input:checked + .el-track::after { transform: translateX(18px); }
+  .el-toggle-text { font-size: 14px; color: var(--text-secondary); }
+
+  /* ── cover image ── */
+  .el-cover-preview {
+    width: 100%;
+    aspect-ratio: 4/3;
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    gap: 2px;
+    background: linear-gradient(135deg, #1a1030 0%, #0d1a2e 100%);
+    position: relative;
+    border: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  [data-theme="light"] .el-cover-preview { background: linear-gradient(135deg, #e8e4f8 0%, #dce8f5 100%); }
+  .el-cover-preview img { flex: 1; min-width: 0; height: 100%; object-fit: cover; display: block; }
+  .el-cover-empty-icon { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 34px; opacity: .3; }
+  .el-cover-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .el-cover-hint { font-size: 11px; color: var(--text-tertiary); margin-top: 8px; line-height: 1.5; }
+  .el-btn-secondary {
+    background: none;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    padding: 7px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .el-btn-secondary:hover { border-color: var(--text-tertiary); color: var(--text-primary); }
+  .el-btn-secondary:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* ── meta row (type + visibility side by side) ── */
+  .el-meta-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  .el-meta-row .el-field { flex: 1; min-width: 120px; margin-bottom: 0; }
+
+  /* ── share feed row ── */
+  .el-share-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    margin-top: 16px;
+  }
+  .el-share-text { flex: 1; }
+  .el-share-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
+  .el-share-desc { font-size: 11px; color: var(--text-tertiary); }
+
+  /* ── save + delete footer of details card ── */
+  .el-details-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+    gap: 10px;
+  }
+  .el-save-msg { font-size: 13px; color: #4ade80; display: none; }
+  .el-btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 8px 18px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+  .el-btn-primary:hover { opacity: .87; }
+  .el-btn-primary:disabled { opacity: .45; cursor: not-allowed; }
+  .el-btn-danger {
+    background: none;
+    color: #f87171;
+    border: 1px solid rgba(248,113,113,.3);
+    padding: 8px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .el-btn-danger:hover { background: rgba(248,113,113,.1); }
+
+  /* ── game search ── */
+  .el-search-wrap { position: relative; }
+  .el-search-input {
+    width: 100%;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .el-search-input:focus { border-color: var(--accent); }
+  .el-search-results {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0; right: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    z-index: 50;
+    display: none;
+    overflow: hidden;
+    box-shadow: 0 8px 24px rgba(0,0,0,.25);
+  }
+  .search-result { display: flex; align-items: center; gap: 12px; padding: 10px 14px; cursor: pointer; transition: background .1s; }
+  .search-result:hover { background: var(--bg-hover); }
+  .search-result-cover {
+    width: 38px; height: 51px; border-radius: 6px; object-fit: cover;
+    background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0;
+  }
+  .search-result-info { flex: 1; min-width: 0; }
+  .search-result-title { font-size: 13px; font-weight: 600; color: var(--text-primary); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .search-result-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; display: flex; align-items: center; gap: 6px; }
+  .search-result-source { font-size: 10px; color: var(--accent); background: rgba(96,80,200,.1); padding: 1px 5px; border-radius: 4px; }
+  .search-no-results { padding: 14px; font-size: 13px; color: var(--text-tertiary); text-align: center; }
+
+  /* ── entries view toggle ── */
+  .el-view-toggle { display: flex; gap: 3px; }
+  .el-view-btn { padding: 5px 8px; border-radius: 7px; border: 1px solid var(--border); background: transparent; color: var(--text-tertiary); cursor: pointer; transition: background .15s, color .15s, border-color .15s; line-height: 0; }
+  .el-view-btn:hover { color: var(--text-secondary); }
+  .el-view-btn.active { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-secondary); }
+
+  /* ── entry grid (library-style) ── */
+  .entries-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 16px;
+    padding-top: 4px;
+  }
+
+  /* ── entry list-view override ── */
+  .entries-list.list-view { display: flex; flex-direction: column; gap: 0; padding-top: 0; }
+  .entries-list.list-view .entry-card { flex-direction: row; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
+  .entries-list.list-view .entry-card:last-child { border-bottom: none; }
+  .entries-list.list-view .entry-card-cover { width: 68px; height: 91px; aspect-ratio: unset; flex-shrink: 0; border-radius: 7px; cursor: grab; }
+  .entries-list.list-view .entry-card-cover:active { cursor: grabbing; }
+  .entries-list.list-view .entry-card:hover .entry-card-cover { transform: none; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  .entries-list.list-view .entry-card-info { flex: 1; min-width: 0; margin-top: 0; padding-top: 2px; }
+  .entries-list.list-view .entry-card-title { font-size: 13px; font-weight: 600; -webkit-line-clamp: unset; overflow: visible; white-space: normal; }
+  .entries-list.list-view .entry-card-notes { margin-top: 4px; }
+  .entry-card { display: flex; flex-direction: column; position: relative; }
+  .entry-card-cover {
+    width: 100%;
+    aspect-ratio: 3/4;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    position: relative;
+    cursor: grab;
+    transition: transform .15s, box-shadow .15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  }
+  .entry-card-cover:active { cursor: grabbing; }
+  .entry-card:hover .entry-card-cover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,.3); }
+  .entry-card.drag-over .entry-card-cover { outline: 2px dashed var(--accent); outline-offset: 2px; transform: none; box-shadow: none; }
+  .entry-card.dragging { opacity: .4; }
+  .entry-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .entry-card-rank {
+    position: absolute; bottom: 5px; left: 5px;
+    font-family: 'DM Serif Display', serif; font-size: 13px; font-weight: 700;
+    background: rgba(0,0,0,.72); color: #fff; border-radius: 4px;
+    padding: 1px 6px; line-height: 1.5; z-index: 1;
+  }
+  .entry-card-remove {
+    position: absolute; top: 5px; right: 5px;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(0,0,0,.6); color: rgba(255,255,255,.85);
+    border: none; cursor: pointer; font-size: 15px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; transition: opacity .15s, background .15s; z-index: 2;
+  }
+  .entry-card:hover .entry-card-remove { opacity: 1; }
+  .entry-card-remove:hover { background: rgba(248,113,113,.8); color: #fff; }
+  .entry-card-info { margin-top: 6px; }
+  .entry-card-title {
+    font-size: 12px; font-weight: 500; color: var(--text-secondary);
+    line-height: 1.35; display: -webkit-box;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .entry-card-notes {
+    width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text-primary); font-size: 13px;
+    font-family: inherit; outline: none; resize: none; transition: border-color .15s, background .15s;
+    box-sizing: border-box; line-height: 1.5;
+    min-height: 72px;
+  }
+  .entry-card-notes:focus { border-color: var(--accent); background: var(--bg-hover); }
+  .entry-card-notes::placeholder { color: var(--text-tertiary); font-style: italic; }
+  .empty-entries { padding: 32px 0; text-align: center; font-size: 14px; color: var(--text-tertiary); }
+
+  @media (max-width: 720px) {
+    .el-content { grid-template-columns: 1fr; }
+    .el-right { position: static; }
+  }
+</style>
+
+<div class="el-shell">
+  <!-- top bar -->
+  <header class="el-topbar">
+    <button class="el-back" onclick={`window.location.href='/lists/${list.id}'`}>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 3L5 8L10 13"/>
+      </svg>
+      Back
+    </button>
+    <a href="/" class="el-logo"><span class="el-logo-dot"></span>Chekpoint</a>
+    <div class="el-topbar-right">
+      <a href={`/lists/${list.id}`} class="el-view-link">View list</a>
+    </div>
+  </header>
+
+  <main class="el-body">
+    <div class="el-content">
+
+      <!-- LEFT: search + entries -->
+      <div class="el-left">
+
+        <!-- Add games -->
+        <div class="el-section">
+          <div class="el-section-title">Add games</div>
+          <div class="el-search-wrap">
+            <input class="el-search-input" id="game-search" type="text" placeholder="Search for a game…" autocomplete="off" />
+            <div class="el-search-results" id="search-results"></div>
+          </div>
+          <div id="add-msg" style="font-size:13px;color:#f87171;margin-top:8px;display:none"></div>
+        </div>
+
+        <!-- Entries grid -->
+        <div class="el-section">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+            <div class="el-section-title" id="entries-heading" style="margin-bottom:0">
+              {entryList.length} {entryList.length === 1 ? "game" : "games"}
+            </div>
+            <div class="el-view-toggle">
+              <button class="el-view-btn" id="el-view-grid" title="Grid view">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="0" y="0" width="6" height="6" rx="1"/><rect x="8" y="0" width="6" height="6" rx="1"/><rect x="0" y="8" width="6" height="6" rx="1"/><rect x="8" y="8" width="6" height="6" rx="1"/></svg>
+              </button>
+              <button class="el-view-btn" id="el-view-list" title="List view">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="1" y1="3.5" x2="13" y2="3.5"/><line x1="1" y1="7" x2="13" y2="7"/><line x1="1" y1="10.5" x2="13" y2="10.5"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="entries-list" id="entries-list"></div>
+          {entryList.length === 0 && <div class="empty-entries" id="empty-msg">No games yet — search above to add some.</div>}
+        </div>
+
+      </div>
+
+      <!-- RIGHT: list details sidebar -->
+      <div class="el-right">
+        <div class="el-section" style="margin-bottom:20px">
+          <div class="el-section-title">Cover image</div>
+          <div class={`el-cover-preview el-cover-${Math.max(1, Math.min(4, (list.cover_image_url ? [list.cover_image_url] : autoCoverSrcs).length))}`} id="cover-preview">
+            {list.cover_image_url
+              ? <img src={list.cover_image_url} alt="" id="cover-preview-img" />
+              : autoCoverSrcs.length === 0
+                ? <div class="el-cover-empty-icon" id="cover-empty-icon">📋</div>
+                : autoCoverSrcs.map((src: string) => <img src={src} alt="" class="cover-auto-img" />)
+            }
+          </div>
+          <div class="el-cover-actions">
+            <button class="el-btn-secondary" id="cover-upload-btn">Upload cover</button>
+            <button class="el-btn-secondary" id="cover-remove-btn" style={list.cover_image_url ? "" : "display:none"}>Remove</button>
+            <input type="file" id="cover-file-input" accept="image/png,image/jpeg,image/webp" style="display:none" />
+          </div>
+          <div class="el-cover-hint" id="cover-msg" style="display:none"></div>
+          {!list.cover_image_url && <div class="el-cover-hint">Without a custom cover, this list shows a collage of its games.</div>}
+        </div>
+        <div class="el-section">
+          <div class="el-section-title">List details</div>
+          <div class="el-field">
+            <label class="el-label" for="meta-title">Title</label>
+            <input id="meta-title" class="el-input" type="text" value={list.title} maxlength="100" />
+          </div>
+          <div class="el-field">
+            <label class="el-label" for="meta-desc">Description</label>
+            <textarea id="meta-desc" class="el-input">{list.description ?? ""}</textarea>
+          </div>
+          <div class="el-meta-row">
+            <div class="el-field">
+              <label class="el-label">Type</label>
+              <div class="el-toggle-row">
+                <label class="el-toggle">
+                  <input type="checkbox" id="meta-ranked" checked={list.is_ranked} />
+                  <span class="el-track"></span>
+                </label>
+                <span class="el-toggle-text" id="ranked-label">{list.is_ranked ? "Ranked" : "Unranked"}</span>
+              </div>
+            </div>
+            <div class="el-field">
+              <label class="el-label" for="meta-vis">Visibility</label>
+              <select id="meta-vis" class="el-input" style="appearance:auto">
+                <option value="public" selected={list.visibility === "public"}>Public</option>
+                <option value="private" selected={list.visibility === "private"}>Private</option>
+              </select>
+            </div>
+          </div>
+          <div class="el-field">
+            <label class="el-label" for="meta-default-view">Default view</label>
+            <select id="meta-default-view" class="el-input" style="appearance:auto">
+              <option value="grid" selected={list.default_view !== "list"}>Grid</option>
+              <option value="list" selected={list.default_view === "list"}>List</option>
+            </select>
+          </div>
+          <div id="share-feed-group" style={list.visibility === "private" ? "display:none" : ""}>
+            <div class="el-share-row">
+              <div class="el-share-text">
+                <div class="el-share-title">Share to front page feed</div>
+                <div class="el-share-desc">Appears in the Recent Lists section on the home page</div>
+              </div>
+              <label class="el-toggle" style="margin-top:2px;flex-shrink:0">
+                <input type="checkbox" id="meta-share-feed" checked={list.shared_to_feed} />
+                <span class="el-track"></span>
+              </label>
+            </div>
+          </div>
+          <div class="el-details-footer">
+            <button class="el-btn-primary" id="meta-save-btn">Save changes</button>
+            <span class="el-save-msg" id="meta-save-msg">Saved</span>
+            <button class="el-btn-danger" id="delete-btn" style="margin-left:auto">Delete list</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+</Layout>
+
+<script is:inline define:vars={{ listId: list.id, isRanked: list.is_ranked, initialEntries: entriesJson, ownerUsername: currentProfile.username, initialDefaultView: list.default_view ?? 'grid' }}>
+var entries = JSON.parse(initialEntries);
+var ranked = isRanked;
+var currentView = localStorage.getItem('chk-list-edit-view-' + listId) || initialDefaultView;
+
+// ── View toggle ────────────────────────────────────────────────────────────
+(function() {
+  var gridBtn = document.getElementById('el-view-grid');
+  var listBtn = document.getElementById('el-view-list');
+  var listEl  = document.getElementById('entries-list');
+  function applyView(v) {
+    listEl.classList.toggle('list-view', v === 'list');
+    gridBtn.classList.toggle('active', v === 'grid');
+    listBtn.classList.toggle('active', v === 'list');
+  }
+  applyView(currentView);
+  gridBtn.addEventListener('click', function() {
+    currentView = 'grid';
+    localStorage.setItem('chk-list-edit-view-' + listId, 'grid');
+    applyView('grid');
+  });
+  listBtn.addEventListener('click', function() {
+    currentView = 'list';
+    localStorage.setItem('chk-list-edit-view-' + listId, 'list');
+    applyView('list');
+  });
+})();
+
+// ── Ranked label sync ──────────────────────────────────────────────────────
+document.getElementById('meta-ranked').addEventListener('change', function() {
+  ranked = this.checked;
+  document.getElementById('ranked-label').textContent = this.checked ? 'Ranked' : 'Unranked';
+  renderEntries();
+});
+
+// ── Visibility → hide/show share-to-feed toggle ────────────────────────────
+document.getElementById('meta-vis').addEventListener('change', function() {
+  var shareGroup = document.getElementById('share-feed-group');
+  var shareToggle = document.getElementById('meta-share-feed');
+  if (this.value === 'private') {
+    shareGroup.style.display = 'none';
+    shareToggle.checked = false;
+  } else {
+    shareGroup.style.display = 'block';
+  }
+});
+
+// ── Metadata save ──────────────────────────────────────────────────────────
+document.getElementById('meta-save-btn').addEventListener('click', async function() {
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  var msg = document.getElementById('meta-save-msg');
+  msg.style.display = 'none';
+
+  var res = await fetch('/api/lists/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      list_id: listId,
+      title: document.getElementById('meta-title').value.trim(),
+      description: document.getElementById('meta-desc').value.trim() || null,
+      is_ranked: document.getElementById('meta-ranked').checked,
+      visibility: document.getElementById('meta-vis').value,
+      shared_to_feed: document.getElementById('meta-share-feed').checked,
+      default_view: document.getElementById('meta-default-view').value,
+    }),
+  });
+  btn.disabled = false;
+  btn.textContent = 'Save changes';
+  if (res.ok) {
+    window.location.href = '/lists/' + listId;
+  }
+});
+
+// ── Game search ────────────────────────────────────────────────────────────
+var searchTimer = null;
+var searchEl = document.getElementById('game-search');
+var resultsEl = document.getElementById('search-results');
+
+searchEl.addEventListener('input', function() {
+  clearTimeout(searchTimer);
+  var q = this.value.trim();
+  if (q.length < 2) { resultsEl.style.display = 'none'; return; }
+  searchTimer = setTimeout(function() { runSearch(q); }, 300);
+});
+
+async function runSearch(q) {
+  var res = await fetch('/api/games/search?q=' + encodeURIComponent(q));
+  var games = await res.json();
+  if (!games.length) {
+    resultsEl.innerHTML = '<div class="search-no-results">No games found.</div>';
+    resultsEl.style.display = 'block';
+    return;
+  }
+  resultsEl.innerHTML = games.map(function(g) {
+    var year = g.date_released ? new Date(g.date_released).getFullYear() : '';
+    var coverSrc = g.cover_img_url ? g.cover_img_url.replace(/t_[a-z0-9_]+/, 't_thumb') : '';
+    return '<div class="search-result" data-game-id="' + g.id + '" data-title="' + (g.title || g.name || '').replace(/"/g,'&quot;') + '" data-source="' + g.source + '" data-igdb-id="' + (g.igdb_id || '') + '" data-cover="' + coverSrc + '" data-year="' + year + '" data-slug="' + (g.slug || '') + '">'
+      + (coverSrc ? '<img class="search-result-cover" src="' + coverSrc + '" alt="" />' : '<div class="search-result-cover"></div>')
+      + '<div class="search-result-info">'
+        + '<div class="search-result-title">' + (g.title || g.name || '') + '</div>'
+        + '<div class="search-result-sub">'
+          + (year ? '<span>' + year + '</span>' : '')
+          + (g.source === 'igdb' ? '<span class="search-result-source">IGDB</span>' : '')
+        + '</div>'
+      + '</div>'
+      + '</div>';
+  }).join('');
+  resultsEl.style.display = 'block';
+}
+
+document.addEventListener('click', function(e) {
+  var result = e.target.closest('.search-result');
+  if (result) { addGame(result); return; }
+  if (!e.target.closest('.el-search-wrap')) resultsEl.style.display = 'none';
+});
+
+async function addGame(el) {
+  var gameId = el.dataset.gameId;
+  var source = el.dataset.source;
+  var addMsg = document.getElementById('add-msg');
+  addMsg.style.display = 'none';
+  resultsEl.style.display = 'none';
+  searchEl.value = '';
+
+  if (source === 'igdb') {
+    var igdbId = el.dataset.igdbId;
+    var imp = await fetch('/api/games/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ igdb_id: parseInt(igdbId) }),
+    });
+    if (!imp.ok) { addMsg.textContent = 'Failed to import game.'; addMsg.style.display = 'block'; return; }
+    var imported = await imp.json();
+    gameId = imported.id;
+  }
+
+  var res = await fetch('/api/lists/entries/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId, game_id: gameId }),
+  });
+  var data = await res.json();
+  if (!res.ok) {
+    addMsg.textContent = data.error || 'Failed to add game.';
+    addMsg.style.display = 'block';
+    return;
+  }
+
+  var cover = el.dataset.cover || '';
+  var coverBig = cover ? cover.replace(/t_[a-z0-9_]+/, 't_cover_big') : '';
+  entries.push({
+    id: data.entry_id,
+    position: data.position,
+    notes: '',
+    game_id: gameId,
+    game_title: el.dataset.title,
+    game_slug: el.dataset.slug || '',
+    game_year: el.dataset.year ? parseInt(el.dataset.year) : null,
+    cover: coverBig,
+  });
+  renderEntries();
+  updateHeading();
+}
+
+// ── Remove entry ───────────────────────────────────────────────────────────
+async function removeEntry(entryId) {
+  var entry = entries.find(function(e) { return e.id === entryId; });
+  if (!entry) return;
+  var res = await fetch('/api/lists/entries/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId, game_id: entry.game_id }),
+  });
+  if (!res.ok) return;
+  entries = entries.filter(function(e) { return e.id !== entryId; });
+  if (ranked) {
+    entries.forEach(function(e, i) { e.position = i + 1; });
+  }
+  renderEntries();
+  updateHeading();
+}
+
+// ── Notes save (debounced) ─────────────────────────────────────────────────
+var noteTimers = {};
+function scheduleNotesSave(entryId, notes) {
+  clearTimeout(noteTimers[entryId]);
+  noteTimers[entryId] = setTimeout(async function() {
+    var entry = entries.find(function(e) { return e.id === entryId; });
+    if (entry) entry.notes = notes;
+    await fetch('/api/lists/entries/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry_id: entryId, notes: notes }),
+    });
+  }, 800);
+}
+
+// ── Drag-and-drop ──────────────────────────────────────────────────────────
+var draggedId = null;
+
+function onDragStart(e) {
+  draggedId = e.currentTarget.dataset.entryId;
+  e.currentTarget.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  e.currentTarget.setAttribute('draggable', 'false');
+  document.querySelectorAll('.entry-card').forEach(function(c) { c.classList.remove('drag-over'); });
+}
+function onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  var card = e.target.closest('.entry-card');
+  if (!card) return;
+  document.querySelectorAll('.entry-card').forEach(function(c) { c.classList.remove('drag-over'); });
+  if (card.dataset.entryId !== draggedId) card.classList.add('drag-over');
+}
+function onDrop(e) {
+  e.preventDefault();
+  var card = e.target.closest('.entry-card');
+  if (!card) return;
+  var targetId = card.dataset.entryId;
+  if (!draggedId || draggedId === targetId) return;
+  var fromIdx = entries.findIndex(function(en) { return en.id === draggedId; });
+  var toIdx   = entries.findIndex(function(en) { return en.id === targetId; });
+  if (fromIdx === -1 || toIdx === -1) return;
+  var moved = entries.splice(fromIdx, 1)[0];
+  entries.splice(toIdx, 0, moved);
+  if (ranked) entries.forEach(function(en, i) { en.position = i + 1; });
+  renderEntries();
+  saveOrder();
+}
+
+async function saveOrder() {
+  await fetch('/api/lists/entries/reorder', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId, entry_ids: entries.map(function(e) { return e.id; }) }),
+  });
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderEntries() {
+  var list = document.getElementById('entries-list');
+  var emptyMsg = document.getElementById('empty-msg');
+  if (!entries.length) {
+    list.innerHTML = '';
+    if (emptyMsg) emptyMsg.style.display = 'block';
+    return;
+  }
+  if (emptyMsg) emptyMsg.style.display = 'none';
+
+  list.innerHTML = entries.map(function(e, i) {
+    var coverInner = e.cover
+      ? '<img src="' + e.cover + '" alt="" />'
+      : '🎮';
+    var rankHtml = ranked
+      ? '<div class="entry-card-rank">' + (i + 1) + '</div>'
+      : '';
+    return '<div class="entry-card" data-entry-id="' + e.id + '" draggable="false">'
+      + '<div class="entry-card-cover">'
+        + coverInner
+        + rankHtml
+        + '<button class="entry-card-remove" data-entry-id="' + e.id + '" title="Remove">×</button>'
+      + '</div>'
+      + '<div class="entry-card-info">'
+        + '<div class="entry-card-title">' + (e.game_title || '') + (e.game_year ? ' <span style="opacity:.5">(' + e.game_year + ')</span>' : '') + '</div>'
+        + '<textarea class="entry-card-notes" data-entry-id="' + e.id + '" placeholder="Why did you place this game here?">' + (e.notes || '') + '</textarea>'
+      + '</div>'
+    + '</div>';
+  }).join('');
+
+  list.querySelectorAll('.entry-card').forEach(function(card) {
+    card.addEventListener('dragstart', onDragStart);
+    card.addEventListener('dragend', onDragEnd);
+    card.addEventListener('dragover', onDragOver);
+    card.addEventListener('drop', onDrop);
+    card.querySelector('.entry-card-cover').addEventListener('mousedown', function() {
+      card.setAttribute('draggable', 'true');
+    });
+  });
+
+  list.querySelectorAll('.entry-card-remove').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (confirm('Remove this game from the list?')) removeEntry(btn.dataset.entryId);
+    });
+  });
+
+  list.querySelectorAll('.entry-card-notes').forEach(function(ta) {
+    ta.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    ta.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = this.scrollHeight + 'px';
+      scheduleNotesSave(ta.dataset.entryId, ta.value);
+    });
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  });
+}
+
+function updateHeading() {
+  var h = document.getElementById('entries-heading');
+  if (h) h.textContent = entries.length + ' ' + (entries.length === 1 ? 'game' : 'games');
+}
+
+// ── Cover image upload ──────────────────────────────────────────────────────
+(function() {
+  var uploadBtn = document.getElementById('cover-upload-btn');
+  var removeBtn = document.getElementById('cover-remove-btn');
+  var fileInput = document.getElementById('cover-file-input');
+  var preview = document.getElementById('cover-preview');
+  var msg = document.getElementById('cover-msg');
+
+  function showMsg(text, isError) {
+    msg.textContent = text;
+    msg.style.color = isError ? '#f87171' : 'var(--text-tertiary)';
+    msg.style.display = 'block';
+  }
+
+  uploadBtn.addEventListener('click', function() { fileInput.click(); });
+
+  fileInput.addEventListener('change', async function() {
+    var file = fileInput.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      showMsg('File must be under 5MB.', true);
+      fileInput.value = '';
+      return;
+    }
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = 'Uploading…';
+    msg.style.display = 'none';
+
+    var formData = new FormData();
+    formData.append('cover', file);
+    formData.append('list_id', listId);
+
+    var res = await fetch('/api/lists/cover', { method: 'POST', body: formData });
+    var data = await res.json().catch(function() { return {}; });
+
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = 'Upload cover';
+    fileInput.value = '';
+
+    if (!res.ok) {
+      showMsg(data.error || 'Failed to upload cover image.', true);
+      return;
+    }
+
+    preview.className = 'el-cover-preview el-cover-1';
+    preview.innerHTML = '<img src="' + data.url + '" alt="" id="cover-preview-img" />';
+    removeBtn.style.display = '';
+  });
+
+  removeBtn.addEventListener('click', async function() {
+    if (!confirm('Remove the custom cover image? The list will go back to showing a collage of its games.')) return;
+    removeBtn.disabled = true;
+    removeBtn.textContent = 'Removing…';
+
+    var res = await fetch('/api/lists/cover', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId }),
+    });
+
+    removeBtn.disabled = false;
+    removeBtn.textContent = 'Remove';
+
+    if (!res.ok) {
+      var data = await res.json().catch(function() { return {}; });
+      showMsg(data.error || 'Failed to remove cover image.', true);
+      return;
+    }
+    window.location.reload();
+  });
+})();
+
+// ── Delete list ────────────────────────────────────────────────────────────
+document.getElementById('delete-btn').addEventListener('click', async function() {
+  if (!confirm('Delete this list permanently? This cannot be undone.')) return;
+  var btn = this;
+  btn.disabled = true;
+  btn.textContent = 'Deleting…';
+  var res = await fetch('/api/lists/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ list_id: listId }),
+  });
+  if (res.ok) {
+    window.location.href = '/reviewers/' + ownerUsername + '?tab=lists';
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Delete this list';
+    alert('Failed to delete list.');
+  }
+});
+
+// Initial render
+renderEntries();
+</script>

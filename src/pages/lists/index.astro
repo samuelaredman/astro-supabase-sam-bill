@@ -1,0 +1,266 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../utils/database";
+import Layout from "../../components/Layout.astro";
+import ListCard from "../../components/ListCard.astro";
+import { igdbImage } from "../../utils/format";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+const isLoggedIn = !!user;
+
+const db = getSupabaseAdmin() as any;
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await db.from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).maybeSingle();
+  currentProfile = cp;
+}
+
+const { data: listsRaw } = await db
+  .from("lists")
+  .select("id, title, description, is_ranked, cover_image_url, created_at, updated_at, profiles ( id, username, avatar_url )")
+  .eq("visibility", "public")
+  .order("updated_at", { ascending: false })
+  .limit(200);
+
+const lists = listsRaw ?? [];
+const listIds = lists.map((l: any) => l.id);
+
+const [{ data: votesRaw }, { data: entriesRaw }] = await Promise.all([
+  listIds.length > 0
+    ? db.from("list_votes").select("list_id, vote").in("list_id", listIds)
+    : Promise.resolve({ data: [] }),
+  listIds.length > 0
+    ? db.from("list_entries")
+        .select("list_id, game_id, games ( id, cover_img_url )")
+        .in("list_id", listIds)
+        .order("position", { ascending: true, nullsFirst: false })
+        .order("added_at", { ascending: true })
+    : Promise.resolve({ data: [] }),
+]);
+
+const voteCounts: Record<string, { up: number; down: number }> = {};
+for (const v of (votesRaw ?? []) as any[]) {
+  if (!voteCounts[v.list_id]) voteCounts[v.list_id] = { up: 0, down: 0 };
+  if (v.vote === 1) voteCounts[v.list_id].up++;
+  else voteCounts[v.list_id].down++;
+}
+
+const gameCounts: Record<string, number> = {};
+const coversByListId: Record<string, string[]> = {};
+const listGameIds: Record<string, Set<string>> = {};
+for (const e of (entriesRaw ?? []) as any[]) {
+  gameCounts[e.list_id] = (gameCounts[e.list_id] ?? 0) + 1;
+  if (!listGameIds[e.list_id]) listGameIds[e.list_id] = new Set();
+  if (e.game_id) listGameIds[e.list_id].add(e.game_id);
+
+  const cover = igdbImage(e.games?.cover_img_url, "t_cover_big");
+  if (cover) {
+    if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
+    if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
+  }
+}
+
+const allGameIds = Array.from(new Set((entriesRaw ?? []).map((e: any) => e.game_id).filter(Boolean)));
+
+const { data: genreRows } = allGameIds.length > 0
+  ? await db.from("game_genres").select("game_id, genres ( name )").in("game_id", allGameIds)
+  : { data: [] };
+
+const gameGenreMap: Record<string, Set<string>> = {};
+for (const row of (genreRows ?? []) as any[]) {
+  const name = row.genres?.name;
+  if (!name) continue;
+  if (!gameGenreMap[row.game_id]) gameGenreMap[row.game_id] = new Set();
+  gameGenreMap[row.game_id].add(name);
+}
+
+const listGenres: Record<string, string[]> = {};
+const genreFrequency: Record<string, number> = {};
+for (const listId of listIds) {
+  const gameIds = listGameIds[listId] ? Array.from(listGameIds[listId]) : [];
+  const genreSet = new Set<string>();
+  for (const gid of gameIds) {
+    for (const g of gameGenreMap[gid] ?? []) genreSet.add(g);
+  }
+  const genreArr = Array.from(genreSet);
+  listGenres[listId] = genreArr;
+  for (const g of genreArr) genreFrequency[g] = (genreFrequency[g] ?? 0) + 1;
+}
+
+const allGenreOptions = Object.entries(genreFrequency)
+  .sort((a, b) => b[1] - a[1])
+  .map(([name]) => name);
+---
+
+<Layout
+  title="Lists — Chekpoint"
+  description="Browse public game lists from the Chekpoint community — sort by votes, filter by genre."
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+  activeNav="lists"
+  variant="two-col"
+>
+  <main class="feed">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Lists</div>
+        <div class="feed-subtitle">
+          {lists.length > 0 ? `${lists.length} public list${lists.length !== 1 ? "s" : ""}` : "No public lists yet"}
+        </div>
+      </div>
+    </div>
+
+    {lists.length === 0 ? (
+      <div class="empty-state">
+        <div class="empty-state-title">No public lists yet</div>
+        <p>Be the first to create and share one.</p>
+      </div>
+    ) : (
+      <>
+        <div class="lf-bar">
+          <input class="lf-search" type="text" id="bl-search" placeholder="Search lists…" />
+          <select class="lf-select" id="bl-sort">
+            <option value="updated">Recently updated</option>
+            <option value="upvoted">Most upvoted</option>
+            <option value="downvoted">Most downvoted</option>
+            <option value="games">Most games</option>
+            <option value="alpha">A–Z</option>
+          </select>
+          {allGenreOptions.length > 0 && (
+            <select class="lf-select" id="bl-genre">
+              <option value="">All Genres</option>
+              {allGenreOptions.map((g: string) => <option value={g.toLowerCase()}>{g}</option>)}
+            </select>
+          )}
+          <label class="bl-ranked-filter">
+            <input type="checkbox" id="bl-ranked-only" /> Ranked only
+          </label>
+        </div>
+
+        <div class="lists-grid" id="bl-grid">
+          {lists.map((l: any) => {
+            const votes = voteCounts[l.id] ?? { up: 0, down: 0 };
+            const games = gameCounts[l.id] ?? 0;
+            const genres = listGenres[l.id] ?? [];
+            return (
+              <div
+                class="list-card-wrapper"
+                data-title={(l.title ?? "").toLowerCase()}
+                data-up={votes.up}
+                data-down={votes.down}
+                data-games={games}
+                data-updated={new Date(l.updated_at ?? l.created_at).getTime()}
+                data-ranked={l.is_ranked ? "true" : "false"}
+                data-genres={genres.map((g: string) => g.toLowerCase()).join(",")}
+              >
+                <span class="bl-votes-badge">
+                  <span class="bl-up">▲ {votes.up}</span>
+                  <span class="bl-down">▼ {votes.down}</span>
+                </span>
+                <ListCard
+                  id={l.id}
+                  title={l.title}
+                  isRanked={l.is_ranked}
+                  visibility="public"
+                  entryCount={games}
+                  coverUrls={coversByListId[l.id] ?? []}
+                  coverImageUrl={l.cover_image_url}
+                  ownerUsername={l.profiles?.username}
+                  ownerAvatar={l.profiles?.avatar_url}
+                  showOwner={true}
+                />
+              </div>
+            );
+          })}
+        </div>
+        <div class="list-no-results" id="bl-no-results" style="display:none">No lists match these filters.</div>
+      </>
+    )}
+  </main>
+</Layout>
+
+<style>
+  .lists-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; padding: 16px 20px 40px; }
+  .lf-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 14px 20px 4px; }
+  .lf-search { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; font-family: inherit; outline: none; min-width: 160px; max-width: 220px; }
+  .lf-search:focus { border-color: var(--accent); }
+  .lf-select {
+    background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 28px 6px 10px; font-size: 13px; font-family: inherit;
+    cursor: pointer; outline: none; appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 8px center;
+  }
+  .lf-select:focus { border-color: var(--accent); }
+  .lf-select.has-value { border-color: var(--accent); color: var(--accent); }
+  .bl-ranked-filter { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; white-space: nowrap; }
+  .bl-ranked-filter input { accent-color: var(--accent); cursor: pointer; }
+
+  .list-card-wrapper { position: relative; }
+  .bl-votes-badge {
+    position: absolute; top: 8px; right: 8px; z-index: 2;
+    display: flex; gap: 6px; padding: 3px 8px; border-radius: 10px;
+    background: rgba(0,0,0,.6); font-size: 11px; font-weight: 600;
+    backdrop-filter: blur(2px);
+  }
+  .bl-up { color: #4ade80; }
+  .bl-down { color: #f87171; }
+
+  .list-no-results { padding: 32px 0; text-align: center; color: var(--text-tertiary); font-size: 13px; }
+</style>
+
+<script is:inline>
+(function() {
+  var searchInput = document.getElementById('bl-search');
+  var sortSelect = document.getElementById('bl-sort');
+  var genreSelect = document.getElementById('bl-genre');
+  var rankedOnly = document.getElementById('bl-ranked-only');
+  var grid = document.getElementById('bl-grid');
+  var noResults = document.getElementById('bl-no-results');
+  if (!grid) return;
+
+  var items = Array.prototype.slice.call(grid.querySelectorAll('.list-card-wrapper'));
+
+  function applyFilterSort() {
+    var q = ((searchInput && searchInput.value) || '').trim().toLowerCase();
+    var sortBy = sortSelect ? sortSelect.value : 'updated';
+    var genre = genreSelect ? genreSelect.value : '';
+    var onlyRanked = rankedOnly ? rankedOnly.checked : false;
+
+    items.forEach(function(item) {
+      var show = true;
+      if (q && item.dataset.title.indexOf(q) === -1) show = false;
+      if (show && genre) {
+        var genres = item.dataset.genres ? item.dataset.genres.split(',') : [];
+        if (genres.indexOf(genre) === -1) show = false;
+      }
+      if (show && onlyRanked && item.dataset.ranked !== 'true') show = false;
+      item.style.display = show ? '' : 'none';
+    });
+
+    var visible = items.filter(function(i) { return i.style.display !== 'none'; });
+    visible.sort(function(a, b) {
+      switch (sortBy) {
+        case 'upvoted': return parseInt(b.dataset.up, 10) - parseInt(a.dataset.up, 10);
+        case 'downvoted': return parseInt(b.dataset.down, 10) - parseInt(a.dataset.down, 10);
+        case 'games': return parseInt(b.dataset.games, 10) - parseInt(a.dataset.games, 10);
+        case 'alpha': return a.dataset.title.localeCompare(b.dataset.title);
+        default: return parseInt(b.dataset.updated, 10) - parseInt(a.dataset.updated, 10);
+      }
+    });
+    visible.forEach(function(item) { grid.appendChild(item); });
+
+    if (noResults) noResults.style.display = visible.length === 0 ? '' : 'none';
+  }
+
+  if (searchInput) searchInput.addEventListener('input', applyFilterSort);
+  if (sortSelect) sortSelect.addEventListener('change', applyFilterSort);
+  if (rankedOnly) rankedOnly.addEventListener('change', applyFilterSort);
+  if (genreSelect) genreSelect.addEventListener('change', function() {
+    genreSelect.classList.toggle('has-value', !!genreSelect.value);
+    applyFilterSort();
+  });
+})();
+</script>

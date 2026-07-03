@@ -1,0 +1,2030 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import Layout from "../../../components/Layout.astro";
+import { igdbImage, timeAgo, scoreClass } from "../../../utils/format";
+import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../../../utils/reactions";
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await supabase.auth.getUser();
+const isLoggedIn = !!user;
+const { id } = Astro.params;
+
+const db = getSupabaseAdmin() as any;
+
+const { data: list } = await db
+  .from("lists")
+  .select("id, title, description, is_ranked, visibility, default_view, cover_image_url, created_at, updated_at, profiles ( id, username, avatar_url )")
+  .eq("id", id)
+  .maybeSingle();
+
+if (!list) return Astro.redirect("/404");
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await db.from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).maybeSingle();
+  currentProfile = cp;
+}
+
+// Private list: only visible to owner
+if (list.visibility === "private") {
+  if (!currentProfile || currentProfile.id !== list.profiles?.id) return Astro.redirect("/404");
+}
+
+const [
+  { data: entries },
+  { data: saveRow },
+  { count: saveCount },
+  { data: votesRaw },
+  { data: reactionsRaw },
+  { data: commentsRaw },
+] = await Promise.all([
+  db.from("list_entries")
+    .select("id, position, notes, added_at, games ( id, title, slug, cover_img_url, date_released )")
+    .eq("list_id", id)
+    .order("position", { ascending: true, nullsFirst: false })
+    .order("added_at", { ascending: true }),
+  currentProfile
+    ? db.from("list_saves").select("id").eq("list_id", id).eq("profile_id", currentProfile.id).maybeSingle()
+    : Promise.resolve({ data: null }),
+  db.from("list_saves").select("*", { count: "exact", head: true }).eq("list_id", id),
+  db.from("list_votes").select("vote, profile_id").eq("list_id", id),
+  db.from("list_reactions").select("reaction_type, profile_id").eq("list_id", id),
+  db.from("list_comments")
+    .select("id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url ), list_comment_votes ( vote, profile_id ), list_comment_reactions ( reaction_type, profile_id )")
+    .eq("list_id", id)
+    .order("created_at", { ascending: true }),
+]);
+
+const entryList = entries ?? [];
+const isSaved = !!saveRow;
+const isOwner = currentProfile?.id === list.profiles?.id;
+
+// Fetch the list owner's published reviews for games in this list
+const _gameIds = entryList.map((e: any) => e.games?.id).filter(Boolean);
+const reviewByGameId: Record<string, { id: string; score: number; play_time_hours: number | null; platform_played_on: string | null }> = {};
+if (_gameIds.length > 0 && list.profiles?.id) {
+  const { data: _reviewRows } = await db
+    .from('reviews')
+    .select('id, game_id, score, play_time_hours, platform_played_on')
+    .eq('profile_id', list.profiles.id)
+    .eq('status', 'published')
+    .in('game_id', _gameIds);
+  for (const r of _reviewRows ?? []) {
+    reviewByGameId[r.game_id] = { id: r.id, score: r.score, play_time_hours: r.play_time_hours, platform_played_on: r.platform_played_on ?? null };
+  }
+}
+
+// Fetch genres and game companies in parallel
+const [{ data: genreRows }, { data: companyRows }] = await Promise.all([
+  _gameIds.length > 0
+    ? db.from('game_genres').select('game_id, genres ( name )').in('game_id', _gameIds)
+    : Promise.resolve({ data: [] }),
+  _gameIds.length > 0
+    ? db.from('game_companies').select('game_id, role, developers ( name )').in('game_id', _gameIds)
+    : Promise.resolve({ data: [] }),
+]);
+
+// Genres
+const genreCount: Record<string, number> = {};
+for (const row of (genreRows ?? []) as any[]) {
+  if (row.genres?.name) genreCount[row.genres.name] = (genreCount[row.genres.name] ?? 0) + 1;
+}
+const topGenres = Object.entries(genreCount).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name, count]) => ({ name, count }));
+
+// Developers & publishers
+const devCount: Record<string, number> = {};
+const pubCount: Record<string, number> = {};
+for (const row of (companyRows ?? []) as any[]) {
+  const name = row.developers?.name;
+  if (!name) continue;
+  if (row.role === 'developer') devCount[name] = (devCount[name] ?? 0) + 1;
+  else if (row.role === 'publisher') pubCount[name] = (pubCount[name] ?? 0) + 1;
+}
+const topDevs = Object.entries(devCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
+const topPubs = Object.entries(pubCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
+
+// Computed stats
+const reviewedEntries = Object.values(reviewByGameId);
+const reviewedCount = reviewedEntries.length;
+const totalHours = reviewedEntries.reduce((sum, r) => sum + (r.play_time_hours ?? 0), 0);
+const avgScore = reviewedCount > 0
+  ? reviewedEntries.reduce((sum, r) => sum + r.score, 0) / reviewedCount
+  : null;
+const releaseYears = (entryList as any[])
+  .map((e) => e.games?.date_released ? new Date(e.games.date_released).getFullYear() : null)
+  .filter((y): y is number => y !== null);
+const minYear = releaseYears.length > 0 ? Math.min(...releaseYears) : null;
+const maxYear = releaseYears.length > 0 ? Math.max(...releaseYears) : null;
+
+// Most played platform (from the owner's reviews)
+const platformIds = [...new Set(reviewedEntries.map(r => r.platform_played_on).filter((p): p is string => !!p))];
+const platformNameById: Record<string, string> = {};
+if (platformIds.length > 0) {
+  const { data: platRows } = await db.from('platforms').select('id, name').in('id', platformIds);
+  for (const p of (platRows ?? []) as any[]) platformNameById[p.id] = p.name;
+}
+const platformCount: Record<string, number> = {};
+for (const r of reviewedEntries) {
+  if (r.platform_played_on && platformNameById[r.platform_played_on]) {
+    const pname = platformNameById[r.platform_played_on];
+    platformCount[pname] = (platformCount[pname] ?? 0) + 1;
+  }
+}
+const topPlatforms = Object.entries(platformCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
+
+const hasStats = topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || totalHours > 0 || avgScore !== null || minYear !== null;
+
+// Votes
+const votesArr: { vote: number; profile_id: string }[] = votesRaw ?? [];
+const upVotes = votesArr.filter(v => v.vote === 1).length;
+const downVotes = votesArr.filter(v => v.vote === -1).length;
+const netVotes = upVotes - downVotes;
+const myVote = currentProfile
+  ? (votesArr.find(v => v.profile_id === currentProfile.id)?.vote ?? 0)
+  : 0;
+
+// Reactions
+const reactionsArr: { reaction_type: string; profile_id: string }[] = reactionsRaw ?? [];
+const reactionCountMap: Record<string, { count: number; active: boolean }> = {};
+for (const r of reactionsArr) {
+  if (!reactionCountMap[r.reaction_type]) reactionCountMap[r.reaction_type] = { count: 0, active: false };
+  reactionCountMap[r.reaction_type].count++;
+  if (currentProfile && r.profile_id === currentProfile.id) reactionCountMap[r.reaction_type].active = true;
+}
+const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => ({
+  type,
+  isImage: !!IMAGE_EMOTE_MAP[type],
+  path: IMAGE_EMOTE_MAP[type] ?? null,
+  count: info.count,
+  active: info.active,
+}));
+
+// Comments
+const commentList: any[] = commentsRaw ?? [];
+
+function renderBody(text: string): string {
+  const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const withMentions = esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="lc-mention" href="/reviewers/$3">$2</a>');
+  return withMentions.replace(/:([A-Za-z0-9_]+):/g, (_, key) => {
+    const path = IMAGE_EMOTE_MAP[key];
+    return path ? `<img src="${path}" class="lc-emote-inline" alt=":${key}:" title=":${key}:">` : `:${key}:`;
+  });
+}
+
+function getLCVotes(comment: any) {
+  const arr = Array.isArray(comment.list_comment_votes) ? comment.list_comment_votes : [];
+  return {
+    up: arr.filter((v: any) => v.vote === 1).length,
+    down: arr.filter((v: any) => v.vote === -1).length,
+    my: currentProfile ? (arr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0) : 0,
+  };
+}
+
+function getLCReactions(comment: any) {
+  const arr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(comment.list_comment_reactions) ? comment.list_comment_reactions : [];
+  const map: Record<string, { count: number; active: boolean }> = {};
+  for (const r of arr) {
+    if (!map[r.reaction_type]) map[r.reaction_type] = { count: 0, active: false };
+    map[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) map[r.reaction_type].active = true;
+  }
+  return Object.entries(map).map(([type, info]) => ({
+    type,
+    isImage: !!IMAGE_EMOTE_MAP[type],
+    path: IMAGE_EMOTE_MAP[type] ?? null,
+    count: info.count,
+    active: info.active,
+  }));
+}
+
+const topLevelComments = commentList.filter((c: any) => !c.parent_id);
+const directReplyMap: Record<string, any[]> = {};
+for (const c of commentList) {
+  if (c.parent_id) {
+    if (!directReplyMap[c.parent_id]) directReplyMap[c.parent_id] = [];
+    directReplyMap[c.parent_id].push(c);
+  }
+}
+
+// Cover: custom upload takes priority, otherwise a collage of the first 4 game covers
+const collageSrcs = list.cover_image_url
+  ? [list.cover_image_url]
+  : entryList
+      .slice(0, 4)
+      .map((e: any) => igdbImage(e.games?.cover_img_url, "t_cover_big"))
+      .filter(Boolean) as string[];
+
+function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
+---
+
+<Layout
+  title={`${list.title} — Chekpoint`}
+  description={list.description ?? undefined}
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+>
+<style is:global>
+  .list-page { max-width: 1040px; padding: 24px 20px 80px; }
+
+  .list-back-btn { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-family: inherit; color: var(--text-tertiary); background: none; border: none; cursor: pointer; padding: 0 0 20px; transition: color .15s; }
+  .list-back-btn:hover { color: var(--text-secondary); }
+
+  /* ── Header card (sidebar, under thumbnail) ── */
+  .list-header {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    position: relative;
+    overflow: hidden;
+  }
+  .list-header::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse 260px 140px at 0% 0%, rgba(96,80,200,.10), transparent 70%);
+    pointer-events: none;
+  }
+  .list-header::after {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(to right, var(--accent), transparent 70%);
+    opacity: .7;
+  }
+  .list-header > * { position: relative; z-index: 1; }
+  .list-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .list-badge { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 10px; background: var(--tag-bg); color: var(--tag-text); text-transform: uppercase; letter-spacing: .06em; }
+  .list-badge-ranked { background: rgba(96,80,200,.12); color: var(--accent); }
+  .list-title { font-family: 'DM Serif Display', serif; font-size: 22px; font-weight: 400; line-height: 1.25; }
+  .list-description { font-size: 13px; color: var(--text-secondary); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .list-owner-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .owner-avatar { width: 20px; height: 20px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 700; overflow: hidden; flex-shrink: 0; color: var(--text-tertiary); }
+  .owner-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .owner-link { font-size: 13px; color: var(--text-secondary); text-decoration: none; }
+  .owner-link:hover { color: var(--text-primary); text-decoration: underline; }
+  .list-stat { font-size: 13px; color: var(--text-tertiary); }
+  .list-dot { color: var(--border); font-size: 12px; }
+  .btn-edit { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 16px; border-radius: 20px; border: 1px solid var(--border); background: var(--tag-bg); color: var(--text-secondary); font-size: 13px; font-family: inherit; font-weight: 500; cursor: pointer; text-decoration: none; transition: all .15s; align-self: flex-start; }
+  .btn-edit:hover { border-color: var(--text-tertiary); color: var(--text-primary); }
+
+  /* ── Two-column body ── */
+  .list-body { display: grid; grid-template-columns: 1fr 320px; gap: 20px; align-items: start; }
+
+  .entry-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 16px; padding: 4px 0; }
+  .entry-item { display: flex; flex-direction: column; }
+  .entry-cover-wrap {
+    position: relative; width: 100%; aspect-ratio: 3/4;
+    border-radius: 8px; overflow: hidden;
+    background: var(--tag-bg); border: 1px solid var(--border);
+    box-shadow: 0 2px 8px rgba(0,0,0,.15);
+    transition: transform .15s, box-shadow .15s;
+    display: flex; align-items: center; justify-content: center; font-size: 24px;
+  }
+  .entry-item:hover .entry-cover-wrap { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,.3); }
+  .entry-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .entry-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+  .entry-rank { position: absolute; bottom: 5px; left: 5px; font-family: 'DM Serif Display', serif; font-size: 13px; font-weight: 700; background: rgba(0,0,0,.72); color: #fff; border-radius: 4px; padding: 1px 6px; line-height: 1.5; z-index: 1; }
+  .entry-item:nth-child(1) .entry-rank, .entry-item:nth-child(1) .entry-rank-inline { color: #F5C842; }
+  .entry-item:nth-child(2) .entry-rank, .entry-item:nth-child(2) .entry-rank-inline { color: #B8BCC8; }
+  .entry-item:nth-child(3) .entry-rank, .entry-item:nth-child(3) .entry-rank-inline { color: #C87941; }
+  .entry-info { margin-top: 6px; }
+  .entry-game-link { font-size: 12px; font-weight: 500; color: var(--text-secondary); text-decoration: none; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.35; }
+  .entry-game-link:hover { color: var(--text-primary); }
+  .entry-notes { font-size: 11px; color: var(--text-tertiary); line-height: 1.35; font-style: italic; margin-top: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .entry-review-link { font-size: 11px; color: var(--accent); text-decoration: none; font-weight: 500; margin-top: 4px; display: inline-block; opacity: .85; }
+  .entry-review-link:hover { opacity: 1; text-decoration: underline; }
+  .entry-list.list-view .entry-review-link { font-size: 11px; margin-top: 2px; }
+  .entry-score-badge { position: absolute; bottom: 4px; right: 4px; min-width: 22px; height: 20px; padding: 0 5px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'DM Serif Display', serif; z-index: 1; }
+  .entry-score-badge.score-perfect { background: rgba(255,255,255,.95); color: #09090a; border: 1px solid rgba(255,255,255,.9); }
+  .entry-score-badge.score-great   { background: rgba(11,32,22,.85);   color: #4ade80; border: 1px solid rgba(74,222,128,.4); }
+  .entry-score-badge.score-teal    { background: rgba(11,30,28,.85);   color: #2dd4bf; border: 1px solid rgba(45,212,191,.4); }
+  .entry-score-badge.score-good    { background: rgba(11,24,40,.85);   color: #60a5fa; border: 1px solid rgba(96,165,250,.4); }
+  .entry-score-badge.score-mid     { background: rgba(26,20,0,.85);    color: #fbbf24; border: 1px solid rgba(251,191,36,.4); }
+  .entry-score-badge.score-orange  { background: rgba(31,16,8,.85);    color: #fb923c; border: 1px solid rgba(251,146,60,.4); }
+  .entry-score-badge.score-low     { background: rgba(32,8,8,.85);     color: #f87171; border: 1px solid rgba(248,113,113,.4); }
+  .entry-hours-badge { position: absolute; top: 4px; left: 4px; font-size: 10px; font-weight: 600; background: rgba(0,0,0,.65); color: rgba(255,255,255,.85); border-radius: 3px; padding: 2px 5px; line-height: 1.3; z-index: 1; }
+
+  /* ── List controls: search, sort, view toggle ── */
+  .list-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .list-controls-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; flex-wrap: wrap; }
+  .entry-search-wrap { position: relative; flex: 1; min-width: 140px; max-width: 240px; }
+  .entry-search-wrap svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-tertiary); pointer-events: none; }
+  .entry-search { width: 100%; padding: 6px 10px 6px 28px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 13px; font-family: inherit; }
+  .entry-search:focus { outline: none; border-color: var(--accent); }
+  .entry-sort { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 13px; font-family: inherit; cursor: pointer; flex-shrink: 0; }
+  .entry-sort:focus { outline: none; border-color: var(--accent); }
+  .entry-empty-filtered { display: none; text-align: center; padding: 32px 20px; color: var(--text-tertiary); font-size: 13px; }
+
+  /* ── View toggle ── */
+  .view-toggle-row { display: flex; gap: 4px; flex-shrink: 0; }
+  .view-toggle-btn { padding: 5px 8px; border-radius: 7px; border: 1px solid var(--border); background: transparent; color: var(--text-tertiary); cursor: pointer; transition: background .15s, color .15s, border-color .15s; line-height: 0; }
+  .view-toggle-btn:hover { color: var(--text-secondary); }
+  .view-toggle-btn.active { background: var(--bg-hover); color: var(--text-primary); border-color: var(--text-secondary); }
+
+  /* ── List-view overrides ── */
+  .entry-rank-inline { display: none; width: 26px; text-align: right; font-family: 'DM Serif Display', serif; font-size: 16px; color: var(--text-tertiary); flex-shrink: 0; align-self: flex-start; padding-top: 14px; line-height: 1; }
+  .entry-list.list-view { display: flex; flex-direction: column; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 0 20px; gap: 0; }
+  .entry-list.list-view .entry-item { flex-direction: row; align-items: flex-start; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--border-subtle); }
+  .entry-list.list-view .entry-item:last-child { border-bottom: none; }
+  .entry-list.list-view .entry-item:hover .entry-cover-wrap { transform: none; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .entry-list.list-view .entry-cover-wrap { width: 68px; height: 91px; aspect-ratio: unset; border-radius: 7px; flex-shrink: 0; }
+  .entry-list.list-view .entry-info { flex: 1; min-width: 0; margin-top: 0; padding-top: 2px; }
+  .entry-list.list-view .entry-game-link { font-size: 14px; font-weight: 600; color: var(--text-primary); -webkit-line-clamp: unset; }
+  .entry-list.list-view .entry-notes { display: block; -webkit-line-clamp: unset; overflow: visible; font-size: 13px; margin-top: 4px; }
+  .entry-list.list-view .entry-rank { display: none; }
+  .entry-list.list-view .entry-rank-inline { display: block; }
+
+  .empty-state { text-align: center; padding: 48px 20px; color: var(--text-tertiary); font-size: 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; }
+  .empty-state-title { font-size: 16px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; }
+
+  /* ── Sidebar ── */
+  .list-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    position: sticky;
+    top: 20px;
+  }
+
+  /* ── Cover mosaic in sidebar ── */
+  .list-mosaic {
+    width: 100%;
+    aspect-ratio: 4/3;
+    border-radius: 14px;
+    overflow: hidden;
+    display: flex;
+    gap: 2px;
+    background: linear-gradient(135deg, #1a1030 0%, #0d1a2e 100%);
+    position: relative;
+    border: 1px solid var(--border);
+  }
+  [data-theme="light"] .list-mosaic { background: linear-gradient(135deg, #e8e4f8 0%, #dce8f5 100%); }
+  .mosaic-img { flex: 1; min-width: 0; height: 100%; object-fit: cover; display: block; }
+  .mosaic-empty-icon { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 40px; opacity: .3; }
+
+  /* ── Sidebar stats strip ── */
+  .sidebar-stats {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    display: flex;
+    gap: 0;
+  }
+  .sidebar-stat { flex: 1; text-align: center; }
+  .sidebar-stat + .sidebar-stat { border-left: 1px solid var(--border-subtle); }
+  .sidebar-stat-value { font-size: 18px; font-weight: 700; color: var(--text-primary); line-height: 1.2; }
+  .sidebar-stat-value.stat-positive { color: #4ade80; }
+  .sidebar-stat-value.stat-negative { color: #f87171; }
+  .sidebar-stat-label { font-size: 12px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; }
+
+  /* ── Vote / react bar ── */
+  .list-interact {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .list-vote-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 14px;
+    border-radius: 20px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .list-vote-btn:hover:not(.lv-up):not(.lv-down) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .list-vote-btn:disabled { opacity: 0.5; cursor: default; }
+  .lv-up { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.08); }
+  .lv-down { border-color: #f87171; color: #f87171; background: rgba(248,113,113,.08); }
+  .list-save-btn.saved { border-color: var(--accent); color: var(--accent); background: rgba(96,80,200,.08); }
+  .list-sep { width: 1px; height: 16px; background: var(--border); margin: 0 2px; flex-shrink: 0; }
+
+  /* ── List stats card ── */
+  .list-stats-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .lst-numbers {
+    display: flex;
+    gap: 0;
+  }
+  .lst-num { flex: 1; text-align: center; }
+  .lst-num + .lst-num { border-left: 1px solid var(--border-subtle); }
+  .lst-val {
+    font-size: 22px;
+    font-weight: 700;
+    font-family: 'DM Serif Display', serif;
+    color: var(--text-primary);
+    line-height: 1.1;
+  }
+  .lst-val.score-perfect { color: #F5C842; }
+  .lst-val.score-great   { color: #4ade80; }
+  .lst-val.score-teal    { color: #2dd4bf; }
+  .lst-val.score-good    { color: #60a5fa; }
+  .lst-val.score-mid     { color: #fbbf24; }
+  .lst-val.score-orange  { color: #fb923c; }
+  .lst-val.score-low     { color: #f87171; }
+  .lst-lab {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin-top: 3px;
+  }
+  .lst-divider {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 0 -16px;
+  }
+  .lst-genres {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .lst-genre-chip {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 8px;
+    border-radius: 8px;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    max-width: 180px;
+    min-width: 0;
+    overflow: hidden;
+    gap: 4px;
+  }
+  .lst-genre-n {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-tertiary);
+  }
+  .lst-chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex-shrink: 1;
+  }
+  .lst-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .lst-detail-collapse { }
+  .lst-detail-collapse .lst-detail { margin-top: 10px; }
+  .lst-detail-summary {
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+  }
+  .lst-detail-summary::-webkit-details-marker { display: none; }
+  .lst-detail-summary::before {
+    content: '▸';
+    display: inline-block;
+    font-size: 10px;
+    transition: transform .15s;
+    color: var(--text-tertiary);
+  }
+  .lst-detail-collapse[open] .lst-detail-summary::before { transform: rotate(90deg); }
+  .lst-detail-summary:hover { color: var(--text-secondary); }
+  .lst-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .lst-row-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    flex-shrink: 0;
+    width: 78px;
+    line-height: 22px;
+  }
+  .lst-year {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+  .lst-year-sub {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    margin-left: 4px;
+  }
+
+  .list-reaction-wrap { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .list-reaction-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .list-reaction-btn:hover:not(.lr-active) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .lr-active { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.08); }
+  .list-react-toggle {
+    background: none;
+    border: 1.5px solid var(--border);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 15px;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 6px;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  .list-react-toggle:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
+  .list-emote-img { width: 18px; height: 18px; object-fit: contain; vertical-align: middle; }
+
+  /* ── Comments ── */
+  .list-comments {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+  }
+  .list-comments-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-tertiary); margin-bottom: 16px; }
+  .lc-list { display: flex; flex-direction: column; gap: 0; }
+  .lc-item { display: flex; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
+  .lc-item:last-child { border-bottom: none; }
+  .lc-avatar {
+    width: 28px; height: 28px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
+    background: var(--tag-bg); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: var(--text-tertiary); text-decoration: none;
+  }
+  .lc-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .lc-body { flex: 1; min-width: 0; }
+  .lc-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+  .lc-username { font-size: 13px; font-weight: 600; color: var(--text-primary); text-decoration: none; }
+  .lc-username:hover { color: var(--accent); }
+  .lc-ts { font-size: 12px; color: var(--text-tertiary); }
+  .lc-text { font-size: 13px; color: var(--text-primary); line-height: 1.6; opacity: .85; white-space: pre-wrap; word-break: break-word; }
+  .lc-delete { background: none; border: none; cursor: pointer; color: var(--text-tertiary); font-size: 11px; padding: 2px 6px; border-radius: 4px; font-family: inherit; margin-left: auto; transition: color .15s; }
+  .lc-delete:hover { color: #f87171; }
+  .lc-empty { padding: 16px 0; text-align: center; font-size: 13px; color: var(--text-tertiary); }
+
+  /* ── Comment form ── */
+  .lc-form { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .lc-signin-prompt { font-size: 13px; color: var(--text-tertiary); padding: 14px; background: var(--bg-hover); border-radius: 10px; text-align: center; }
+  .lc-signin-prompt a { color: var(--accent); text-decoration: none; }
+  .lc-textarea {
+    width: 100%; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e); color: var(--text-primary); font-size: 13px;
+    font-family: inherit; outline: none; resize: vertical; min-height: 64px;
+    transition: border-color .15s; box-sizing: border-box;
+  }
+  .lc-textarea:focus { border-color: var(--accent); }
+  .lc-submit {
+    align-self: flex-end; background: var(--accent); color: #fff; border: none;
+    padding: 7px 18px; border-radius: 20px; font-size: 13px; font-weight: 600;
+    font-family: inherit; cursor: pointer; transition: opacity .15s;
+  }
+  .lc-submit:hover { opacity: .85; }
+  .lc-submit:disabled { opacity: .45; cursor: not-allowed; }
+  .lc-error { font-size: 13px; color: #f87171; display: none; }
+
+  /* ── Threaded comments ── */
+  .lct { display: flex; flex-direction: column; gap: 0; }
+  .lc-replies { margin-left: 20px; border-left: 2px solid var(--border-subtle); padding-left: 10px; }
+  .lc-replies-deep { margin-left: 16px; }
+  .lc-reply { padding: 10px 0 6px; border-bottom: none; }
+  .lc-avatar-sm { width: 22px !important; height: 22px !important; min-width: 22px !important; font-size: 8px !important; }
+  .lc-avatar-sm img { width: 22px !important; height: 22px !important; }
+  .lc-edited { font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+  .lc-mention { color: var(--accent); text-decoration: none; }
+  .lc-mention:hover { text-decoration: underline; }
+  .lc-emote-inline { width: 16px; height: 16px; object-fit: contain; vertical-align: middle; }
+
+  /* ── Comment actions row ── */
+  .lc-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-top: 5px;
+  }
+  .lcv-btn {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 14px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+    line-height: 1.4;
+  }
+  .lcv-btn:hover:not(.lcv-up):not(.lcv-down) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .lcv-btn:disabled { opacity: 0.5; cursor: default; }
+  .lcv-up   { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.08); }
+  .lcv-down { border-color: #f87171; color: #f87171; background: rgba(248,113,113,.08); }
+
+  .lcrx-wrap { display: inline-flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+  .lcrx-btn {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 14px;
+    border: 1.5px solid var(--border);
+    color: var(--text-tertiary);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+    line-height: 1.4;
+  }
+  .lcrx-btn:hover:not(.lcrx-active) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .lcrx-active { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.08); }
+  .lcrx-toggle {
+    background: none;
+    border: 1.5px solid var(--border);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 5px;
+    font-family: inherit;
+    transition: all 0.15s;
+    line-height: 1.5;
+  }
+  .lcrx-toggle:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
+  .lcrx-emote-img { width: 14px; height: 14px; object-fit: contain; vertical-align: middle; }
+
+  .lc-reply-btn, .lc-edit-btn, .lc-delete-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    font-family: inherit;
+    padding: 2px 5px;
+    border-radius: 4px;
+    transition: color 0.15s;
+    line-height: 1.4;
+  }
+  .lc-reply-btn:hover { color: var(--accent); }
+  .lc-edit-btn:hover  { color: var(--text-secondary); }
+  .lc-delete-btn:hover { color: #f87171; }
+
+  /* ── Reply form ── */
+  .lc-rf {
+    margin: 6px 0 8px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .lc-rf-ta {
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+    resize: vertical;
+    min-height: 52px;
+    transition: border-color .15s;
+    box-sizing: border-box;
+  }
+  .lc-rf-ta:focus { border-color: var(--accent); }
+  .lc-rf-foot { display: flex; justify-content: flex-end; gap: 6px; align-items: center; }
+  .lc-rf-cancel {
+    background: none; border: 1px solid var(--border); padding: 4px 10px;
+    border-radius: 14px; font-size: 11px; font-family: inherit; color: var(--text-secondary);
+    cursor: pointer; transition: all .15s;
+  }
+  .lc-rf-cancel:hover { border-color: var(--text-tertiary); }
+  .lc-rf-submit {
+    background: var(--accent); color: #fff; border: none; padding: 4px 12px;
+    border-radius: 14px; font-size: 11px; font-weight: 600; font-family: inherit;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .lc-rf-submit:hover { opacity: .85; }
+  .lc-rf-submit:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ── Comment edit inline ── */
+  .lc-edit-wrap { margin-top: 6px; }
+  .lc-edit-ta {
+    width: 100%; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-page, #0e0e0e); color: var(--text-primary); font-size: 12px;
+    font-family: inherit; outline: none; resize: vertical; min-height: 52px;
+    transition: border-color .15s; box-sizing: border-box;
+  }
+  .lc-edit-ta:focus { border-color: var(--accent); }
+  .lc-edit-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px; }
+  .lc-edit-cancel {
+    background: none; border: 1px solid var(--border); padding: 4px 10px;
+    border-radius: 14px; font-size: 11px; font-family: inherit; color: var(--text-secondary);
+    cursor: pointer; transition: all .15s;
+  }
+  .lc-edit-cancel:hover { border-color: var(--text-tertiary); }
+  .lc-edit-save {
+    background: var(--accent); color: #fff; border: none; padding: 4px 12px;
+    border-radius: 14px; font-size: 11px; font-weight: 600; font-family: inherit;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .lc-edit-save:hover { opacity: .85; }
+  .lc-edit-save:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ── Comment emoji picker ── */
+  #ldpc-emoji-picker {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; box-shadow: 0 4px 24px rgba(0,0,0,.2);
+    max-height: 280px; overflow-y: auto; min-width: 220px; max-width: 280px;
+    scrollbar-width: thin; position: fixed; z-index: 1000; display: none;
+  }
+  .ldpc-search {
+    width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 5px 8px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--bg-hover);
+    color: var(--text-primary); font-size: 12px; outline: none;
+  }
+  .ldpc-search:focus { border-color: var(--accent); }
+  .ldpc-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+  .ldpc-pick {
+    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+    background: none; border: none; cursor: pointer; border-radius: 6px;
+    transition: background 0.1s, transform 0.1s; padding: 2px;
+  }
+  .ldpc-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
+  .ldpc-pick.ldpc-active { background: rgba(96,80,200,.12); outline: 1.5px solid var(--accent); }
+  .ldpc-pick img { width: 24px; height: 24px; object-fit: contain; display: block; }
+
+  /* ── Emoji picker for detail page ── */
+  #ldp-emoji-picker {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; box-shadow: 0 4px 24px rgba(0,0,0,.2);
+    max-height: 320px; overflow-y: auto; min-width: 260px; max-width: 320px;
+    scrollbar-width: thin; position: fixed; z-index: 1000; display: none;
+  }
+  .ldp-emote-search {
+    width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 5px 8px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--bg-hover);
+    color: var(--text-primary); font-size: 12px; outline: none;
+  }
+  .ldp-emote-search:focus { border-color: var(--accent); }
+  .ldp-emoji-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+  .ldp-emoji-pick {
+    width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+    background: none; border: none; cursor: pointer; border-radius: 6px;
+    transition: background 0.1s, transform 0.1s; padding: 2px;
+  }
+  .ldp-emoji-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
+  .ldp-emoji-pick.ldp-emoji-active { background: rgba(96,80,200,.12); outline: 1.5px solid var(--accent); }
+  .ldp-emote-picker-img { width: 28px; height: 28px; object-fit: contain; display: block; }
+
+  @media (max-width: 760px) {
+    .list-body { grid-template-columns: 1fr; }
+    .list-sidebar { order: -1; position: static; }
+    .list-mosaic { aspect-ratio: 16/7; }
+  }
+</style>
+
+<main class="list-page">
+  <button class="list-back-btn" onclick="history.length > 1 ? history.back() : (window.location.href='/')">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
+    Back
+  </button>
+
+  <!-- Two-column body -->
+  <div class="list-body">
+    <!-- Left: game entries -->
+    <div>
+      {entryList.length === 0
+        ? <div class="empty-state">
+            <div class="empty-state-title">No games yet</div>
+            {isOwner && <p>Add some games to get started.</p>}
+          </div>
+        : <>
+            <div class="list-controls">
+              <div class="list-controls-left">
+                <div class="entry-search-wrap">
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="5.5"/><line x1="11.2" y1="11.2" x2="15" y2="15"/></svg>
+                  <input type="text" id="entry-search" class="entry-search" placeholder="Search games..." autocomplete="off" />
+                </div>
+                <select id="entry-sort" class="entry-sort">
+                  <option value="default">List order</option>
+                  <option value="score-desc">Highest rated</option>
+                  <option value="score-asc">Lowest rated</option>
+                  <option value="hours-desc">Most played</option>
+                  <option value="hours-asc">Least played</option>
+                  <option value="added-desc">Recently added</option>
+                  <option value="alpha">A–Z</option>
+                </select>
+              </div>
+              <div class="view-toggle-row">
+                <button class="view-toggle-btn active" id="view-grid" title="Grid view">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="0" y="0" width="6" height="6" rx="1"/><rect x="8" y="0" width="6" height="6" rx="1"/><rect x="0" y="8" width="6" height="6" rx="1"/><rect x="8" y="8" width="6" height="6" rx="1"/></svg>
+                </button>
+                <button class="view-toggle-btn" id="view-list" title="List view">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="1" y1="3.5" x2="13" y2="3.5"/><line x1="1" y1="7" x2="13" y2="7"/><line x1="1" y1="10.5" x2="13" y2="10.5"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="entry-list" id="entry-list">
+              {entryList.map((entry: any, i: number) => {
+                const cover = igdbImage(entry.games?.cover_img_url, "t_cover_big");
+                const gameReview = entry.games?.id ? reviewByGameId[entry.games.id] : null;
+                return (
+                  <div
+                    class="entry-item"
+                    data-idx={i}
+                    data-title={(entry.games?.title ?? "").toLowerCase()}
+                    data-score={gameReview ? gameReview.score : ""}
+                    data-hours={gameReview?.play_time_hours ?? ""}
+                    data-added={new Date(entry.added_at).getTime()}
+                  >
+                    {list.is_ranked && <div class="entry-rank-inline">{entry.position ?? i + 1}</div>}
+                    <div class="entry-cover-wrap">
+                      {cover
+                        ? <img class="entry-cover" src={cover} alt={entry.games?.title} loading="lazy" />
+                        : <div class="entry-cover-placeholder">🎮</div>
+                      }
+                      {list.is_ranked && <div class="entry-rank">{entry.position ?? i + 1}</div>}
+                      {gameReview && <div class={`entry-score-badge ${scoreClass(gameReview.score)}`}>{gameReview.score}</div>}
+                      {gameReview?.play_time_hours ? <div class="entry-hours-badge">{gameReview.play_time_hours}h</div> : null}
+                    </div>
+                    <div class="entry-info">
+                      <a href={`/games/${entry.games?.slug}`} class="entry-game-link">{entry.games?.title}</a>
+                      {entry.notes && <div class="entry-notes">{entry.notes}</div>}
+                      {gameReview && <a href={`/reviews/${gameReview.id}`} class="entry-review-link">Full review →</a>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div class="entry-empty-filtered" id="entry-empty-filtered">No games match your search.</div>
+          </>
+      }
+    </div>
+
+    <!-- Right: sidebar (mosaic, stats, votes) -->
+    <div class="list-sidebar">
+      <!-- Cover collage -->
+      <div class={`list-mosaic mosaic-${Math.max(1, Math.min(4, collageSrcs.length))}`}>
+        {collageSrcs.length === 0 && <div class="mosaic-empty-icon">📋</div>}
+        {collageSrcs.map((src) => (
+          <img class="mosaic-img" src={src} alt="" loading="lazy" />
+        ))}
+      </div>
+
+      <!-- Title / description / owner -->
+      <div class="list-header">
+        {(list.is_ranked || list.visibility === "private") && (
+          <div class="list-badges">
+            {list.is_ranked && <span class="list-badge list-badge-ranked">Ranked</span>}
+            {list.visibility === "private" && <span class="list-badge">Private</span>}
+          </div>
+        )}
+
+        <h1 class="list-title">{list.title}</h1>
+        {list.description && <p class="list-description">{list.description}</p>}
+
+        <div class="list-owner-row">
+          <a href={`/reviewers/${list.profiles?.username}`} class="owner-link" style="display:flex;align-items:center;gap:6px">
+            <div class="owner-avatar">
+              {list.profiles?.avatar_url
+                ? <img src={list.profiles.avatar_url} alt={list.profiles.username} />
+                : <span>{getInitials(list.profiles?.username ?? "?")}</span>
+              }
+            </div>
+            @{list.profiles?.username}
+          </a>
+          <span class="list-dot">·</span>
+          <span class="list-stat">Updated {timeAgo(list.updated_at ?? list.created_at)} ago</span>
+        </div>
+
+        {isOwner && <a href={`/lists/${list.id}/edit`} class="btn-edit">Edit list</a>}
+      </div>
+
+      <!-- Stats strip -->
+      <div class="sidebar-stats">
+        <div class="sidebar-stat">
+          <div class="sidebar-stat-value">{entryList.length}</div>
+          <div class="sidebar-stat-label">{entryList.length === 1 ? "Game" : "Games"}</div>
+        </div>
+        <div class="sidebar-stat">
+          <div class={`sidebar-stat-value${netVotes > 0 ? ' stat-positive' : netVotes < 0 ? ' stat-negative' : ''}`}>
+            {netVotes > 0 ? `+${netVotes}` : netVotes}
+          </div>
+          <div class="sidebar-stat-label">Votes</div>
+        </div>
+        <div class="sidebar-stat">
+          <div class="sidebar-stat-value" id="saves-count">{saveCount ?? 0}</div>
+          <div class="sidebar-stat-label">Saves</div>
+        </div>
+      </div>
+
+      <!-- Stats card -->
+      {hasStats && (
+        <div class="list-stats-card">
+          {reviewedCount > 0 && (
+            <div class="lst-numbers">
+              {totalHours > 0 && (
+                <div class="lst-num">
+                  <div class="lst-val">{totalHours}h</div>
+                  <div class="lst-lab">Hours</div>
+                </div>
+              )}
+              {avgScore !== null && (
+                <div class="lst-num">
+                  <div class={`lst-val ${scoreClass(Math.round(avgScore))}`}>{avgScore.toFixed(1)}</div>
+                  <div class="lst-lab">Avg Score</div>
+                </div>
+              )}
+              <div class="lst-num">
+                <div class="lst-val">{reviewedCount}/{entryList.length}</div>
+                <div class="lst-lab">Reviewed</div>
+              </div>
+            </div>
+          )}
+
+          {reviewedCount > 0 && (topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || minYear !== null) && (
+            <div class="lst-divider"></div>
+          )}
+
+          {(topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0) && (
+            <details class="lst-detail-collapse">
+              <summary class="lst-detail-summary">Genres &amp; studios</summary>
+              <div class="lst-detail">
+                {topGenres.length > 0 && (
+                  <div class="lst-row">
+                    <span class="lst-row-label">Genres</span>
+                    <div class="lst-genres">
+                      {topGenres.map(g => <span class="lst-genre-chip"><span class="lst-chip-name">{g.name}</span><span class="lst-genre-n">{g.count}</span></span>)}
+                    </div>
+                  </div>
+                )}
+                {topDevs.length > 0 && (
+                  <div class="lst-row">
+                    <span class="lst-row-label">Dev</span>
+                    <div class="lst-genres">
+                      {topDevs.map(d => <span class="lst-genre-chip"><span class="lst-chip-name">{d.name}</span><span class="lst-genre-n">{d.count}</span></span>)}
+                    </div>
+                  </div>
+                )}
+                {topPubs.length > 0 && (
+                  <div class="lst-row">
+                    <span class="lst-row-label">Publisher</span>
+                    <div class="lst-genres">
+                      {topPubs.map(p => <span class="lst-genre-chip"><span class="lst-chip-name">{p.name}</span><span class="lst-genre-n">{p.count}</span></span>)}
+                    </div>
+                  </div>
+                )}
+                {topPlatforms.length > 0 && (
+                  <div class="lst-row">
+                    <span class="lst-row-label">Platform</span>
+                    <div class="lst-genres">
+                      {topPlatforms.map(p => <span class="lst-genre-chip"><span class="lst-chip-name">{p.name}</span><span class="lst-genre-n">{p.count}</span></span>)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
+
+          {minYear !== null && (
+            <div class="lst-year">
+              {minYear === maxYear ? minYear : `${minYear} – ${maxYear}`}
+              {minYear !== maxYear && (
+                <span class="lst-year-sub">{maxYear! - minYear!} yr span</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <!-- Vote / react bar -->
+      <div class="list-interact">
+        <button
+          class={`list-vote-btn${myVote === 1 ? ' lv-up' : ''}`}
+          id="lvote-up"
+          data-list-id={list.id}
+          data-vote="1"
+          data-logged-in={isLoggedIn ? 'true' : 'false'}
+        >▲ {upVotes}</button>
+        <button
+          class={`list-vote-btn${myVote === -1 ? ' lv-down' : ''}`}
+          id="lvote-down"
+          data-list-id={list.id}
+          data-vote="-1"
+          data-logged-in={isLoggedIn ? 'true' : 'false'}
+        >▼ {downVotes}</button>
+
+        {!isOwner && (
+          <button
+            class={`list-vote-btn list-save-btn${isSaved ? ' saved' : ''}`}
+            id="lvote-save"
+            data-list-id={list.id}
+            data-saved={isSaved ? 'true' : 'false'}
+            data-logged-in={isLoggedIn ? 'true' : 'false'}
+          >{isSaved ? '★ Saved' : '☆ Save'}</button>
+        )}
+
+        <span class="list-sep"></span>
+
+        <div class="list-reaction-wrap" id="list-reaction-wrap">
+          {displayReactions.map(r => (
+            <button
+              class={`list-reaction-btn${r.active ? ' lr-active' : ''}`}
+              data-reaction={r.type}
+              data-reacted={r.active ? 'true' : 'false'}
+              data-count={r.count}
+              data-logged-in={isLoggedIn ? 'true' : 'false'}
+              data-is-image={r.isImage ? 'true' : 'false'}
+            >
+              {r.isImage
+                ? <><img src={r.path!} class="list-emote-img" alt={r.type} />{' '}{r.count}</>
+                : <>{r.type} {r.count}</>
+              }
+            </button>
+          ))}
+          <button class="list-react-toggle" id="list-react-toggle" data-logged-in={isLoggedIn ? 'true' : 'false'} title="Add reaction">+</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Comments -->
+    <div class="list-comments" id="comments">
+        <div class="list-comments-title">Comments ({commentList.length})</div>
+        <div class="lc-list" id="lc-list">
+          {commentList.length === 0 && <div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>}
+          {topLevelComments.map((c: any) => {
+            const level1Replies = directReplyMap[c.id] ?? [];
+            const cv = getLCVotes(c);
+            const cr = getLCReactions(c);
+            const isOwn = currentProfile?.id === c.profiles?.id;
+            return (
+              <div class="lct" data-thread-id={c.id}>
+                <div class="lc-item" data-comment-id={c.id}>
+                  <a href={`/reviewers/${c.profiles?.username}`} class="lc-avatar">
+                    {c.profiles?.avatar_url
+                      ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
+                      : <span>{(c.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
+                    }
+                  </a>
+                  <div class="lc-body">
+                    <div class="lc-meta">
+                      <a href={`/reviewers/${c.profiles?.username}`} class="lc-username">@{c.profiles?.username}</a>
+                      <span class="lc-ts">{timeAgo(c.created_at)}</span>
+                      {c.updated_at && <span class="lc-edited">(edited)</span>}
+                    </div>
+                    <div class="lc-text" data-raw-body={c.body} set:html={renderBody(c.body)}></div>
+                    <div class="lc-actions">
+                      <button class={`lcv-btn${cv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cv.up}</button>
+                      <button class={`lcv-btn${cv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cv.down}</button>
+                      {(cr.length > 0 || isLoggedIn) && (
+                        <div class="lcrx-wrap" data-comment-id={c.id}>
+                          {cr.map((rx: any) => (
+                            <button
+                              class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
+                              data-comment-id={c.id}
+                              data-reaction={rx.type}
+                              data-reacted={rx.active ? 'true' : 'false'}
+                              data-count={rx.count}
+                              data-logged-in={isLoggedIn ? 'true' : 'false'}
+                              data-is-image={rx.isImage ? 'true' : 'false'}
+                            >
+                              {rx.isImage
+                                ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                : <>{rx.type} {rx.count}</>}
+                            </button>
+                          ))}
+                          {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={c.id} title="React">+</button>}
+                        </div>
+                      )}
+                      {isLoggedIn && <button class="lc-reply-btn" data-parent-id={c.id} data-thread-id={c.id} data-reply-to={c.profiles?.username} type="button">↩ Reply</button>}
+                      {isOwn && <button class="lc-edit-btn" data-comment-id={c.id} type="button">Edit</button>}
+                      {isOwn && <button class="lc-delete-btn" data-comment-id={c.id} type="button">Delete</button>}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="lc-replies" data-replies-for={c.id}>
+                  {level1Replies.map((r: any) => {
+                    const level2Replies = directReplyMap[r.id] ?? [];
+                    const rv = getLCVotes(r);
+                    const rr = getLCReactions(r);
+                    const isOwnR = currentProfile?.id === r.profiles?.id;
+                    return (
+                      <Fragment>
+                        <div class="lc-item lc-reply" data-comment-id={r.id}>
+                          <a href={`/reviewers/${r.profiles?.username}`} class="lc-avatar lc-avatar-sm">
+                            {r.profiles?.avatar_url
+                              ? <img src={r.profiles.avatar_url} alt={r.profiles.username} />
+                              : <span>{(r.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
+                            }
+                          </a>
+                          <div class="lc-body">
+                            <div class="lc-meta">
+                              <a href={`/reviewers/${r.profiles?.username}`} class="lc-username">@{r.profiles?.username}</a>
+                              <span class="lc-ts">{timeAgo(r.created_at)}</span>
+                              {r.updated_at && <span class="lc-edited">(edited)</span>}
+                            </div>
+                            <div class="lc-text" data-raw-body={r.body} set:html={renderBody(r.body)}></div>
+                            <div class="lc-actions">
+                              <button class={`lcv-btn${rv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={r.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {rv.up}</button>
+                              <button class={`lcv-btn${rv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={r.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {rv.down}</button>
+                              {(rr.length > 0 || isLoggedIn) && (
+                                <div class="lcrx-wrap" data-comment-id={r.id}>
+                                  {rr.map((rx: any) => (
+                                    <button
+                                      class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
+                                      data-comment-id={r.id}
+                                      data-reaction={rx.type}
+                                      data-reacted={rx.active ? 'true' : 'false'}
+                                      data-count={rx.count}
+                                      data-logged-in={isLoggedIn ? 'true' : 'false'}
+                                      data-is-image={rx.isImage ? 'true' : 'false'}
+                                    >
+                                      {rx.isImage
+                                        ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                        : <>{rx.type} {rx.count}</>}
+                                    </button>
+                                  ))}
+                                  {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={r.id} title="React">+</button>}
+                                </div>
+                              )}
+                              {isLoggedIn && <button class="lc-reply-btn" data-parent-id={r.id} data-thread-id={c.id} data-reply-to={r.profiles?.username} type="button">↩ Reply</button>}
+                              {isOwnR && <button class="lc-edit-btn" data-comment-id={r.id} type="button">Edit</button>}
+                              {isOwnR && <button class="lc-delete-btn" data-comment-id={r.id} type="button">Delete</button>}
+                            </div>
+                          </div>
+                        </div>
+                        {level2Replies.length > 0 && (
+                          <div class="lc-replies lc-replies-deep" data-replies-for={r.id}>
+                            {level2Replies.map((dr: any) => {
+                              const dv = getLCVotes(dr);
+                              const drr = getLCReactions(dr);
+                              const isOwnDr = currentProfile?.id === dr.profiles?.id;
+                              return (
+                                <div class="lc-item lc-reply" data-comment-id={dr.id}>
+                                  <a href={`/reviewers/${dr.profiles?.username}`} class="lc-avatar lc-avatar-sm">
+                                    {dr.profiles?.avatar_url
+                                      ? <img src={dr.profiles.avatar_url} alt={dr.profiles.username} />
+                                      : <span>{(dr.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
+                                    }
+                                  </a>
+                                  <div class="lc-body">
+                                    <div class="lc-meta">
+                                      <a href={`/reviewers/${dr.profiles?.username}`} class="lc-username">@{dr.profiles?.username}</a>
+                                      <span class="lc-ts">{timeAgo(dr.created_at)}</span>
+                                      {dr.updated_at && <span class="lc-edited">(edited)</span>}
+                                    </div>
+                                    <div class="lc-text" data-raw-body={dr.body} set:html={renderBody(dr.body)}></div>
+                                    <div class="lc-actions">
+                                      <button class={`lcv-btn${dv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={dr.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {dv.up}</button>
+                                      <button class={`lcv-btn${dv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={dr.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {dv.down}</button>
+                                      {(drr.length > 0 || isLoggedIn) && (
+                                        <div class="lcrx-wrap" data-comment-id={dr.id}>
+                                          {drr.map((rx: any) => (
+                                            <button
+                                              class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
+                                              data-comment-id={dr.id}
+                                              data-reaction={rx.type}
+                                              data-reacted={rx.active ? 'true' : 'false'}
+                                              data-count={rx.count}
+                                              data-logged-in={isLoggedIn ? 'true' : 'false'}
+                                              data-is-image={rx.isImage ? 'true' : 'false'}
+                                            >
+                                              {rx.isImage
+                                                ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
+                                                : <>{rx.type} {rx.count}</>}
+                                            </button>
+                                          ))}
+                                          {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={dr.id} title="React">+</button>}
+                                        </div>
+                                      )}
+                                      {isLoggedIn && <button class="lc-reply-btn" data-parent-id={dr.id} data-thread-id={c.id} data-reply-to={dr.profiles?.username} type="button">↩ Reply</button>}
+                                      {isOwnDr && <button class="lc-edit-btn" data-comment-id={dr.id} type="button">Edit</button>}
+                                      {isOwnDr && <button class="lc-delete-btn" data-comment-id={dr.id} type="button">Delete</button>}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </div>
+
+                {isLoggedIn && (
+                  <div class="lc-rf" id={`lc-rf-${c.id}`} style="display:none">
+                    <textarea class="lc-rf-ta" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>
+                    <div class="lc-rf-foot">
+                      <button class="lc-rf-cancel" type="button">Cancel</button>
+                      <button class="lc-rf-submit" type="button" data-parent-id={c.id} data-list-id={id}>Reply</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div class="lc-form">
+          {isLoggedIn
+            ? <>
+                <textarea class="lc-textarea" id="lc-textarea" placeholder="Write a comment…" maxlength="2000" rows="3"></textarea>
+                <p class="lc-error" id="lc-error"></p>
+                <button class="lc-submit" id="lc-submit">Post comment</button>
+              </>
+            : <div class="lc-signin-prompt">
+                <a href="/signin">Sign in</a> to leave a comment.
+              </div>
+          }
+        </div>
+    </div>
+  </div>
+</main>
+</Layout>
+
+<script is:inline define:vars={{ listId: list.id, imageEmotes: IMAGE_EMOTES, imageEmoteMap: IMAGE_EMOTE_MAP, currentProfileId: currentProfile?.id ?? null }}>
+
+// ── Save button ──────────────────────────────────────────────────────────────
+var saveBtn = document.getElementById('lvote-save');
+if (saveBtn) {
+  saveBtn.addEventListener('click', async function() {
+    if (saveBtn.disabled) return;
+    var loggedIn = saveBtn.dataset.loggedIn === 'true';
+    if (!loggedIn) { window.location.href = '/signin'; return; }
+    saveBtn.disabled = true;
+    var wasSaved = saveBtn.dataset.saved === 'true';
+    try {
+      var res = await fetch('/api/lists/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId }),
+      });
+      if (res.status === 401) { window.location.href = '/signin'; return; }
+      var data = await res.json();
+      if (!res.ok) return;
+      saveBtn.dataset.saved = data.saved ? 'true' : 'false';
+      saveBtn.textContent = data.saved ? '★ Saved' : '☆ Save';
+      saveBtn.classList.toggle('saved', data.saved);
+      var savesCount = document.getElementById('saves-count');
+      if (savesCount) savesCount.textContent = data.count;
+    } catch(e) {
+      saveBtn.dataset.saved = wasSaved ? 'true' : 'false';
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+}
+
+// ── List vote buttons ─────────────────────────────────────────────────────────
+document.querySelectorAll('.list-vote-btn:not(.list-save-btn)').forEach(function(btn) {
+  btn.addEventListener('click', async function() {
+    if (btn.disabled) return;
+    var loggedIn = btn.dataset.loggedIn === 'true';
+    if (!loggedIn) { window.location.href = '/signin'; return; }
+    btn.disabled = true;
+    var vote = parseInt(btn.dataset.vote);
+    try {
+      var res = await fetch('/api/lists/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId, vote }),
+      });
+      if (res.status === 401) { window.location.href = '/signin'; return; }
+      if (!res.ok) return;
+      var data = await res.json();
+      var upBtn = document.getElementById('lvote-up');
+      var downBtn = document.getElementById('lvote-down');
+      if (upBtn) { upBtn.textContent = '▲ ' + data.up; upBtn.classList.toggle('lv-up', data.vote === 1); }
+      if (downBtn) { downBtn.textContent = '▼ ' + data.down; downBtn.classList.toggle('lv-down', data.vote === -1); }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+});
+
+// ── List-level emoji picker (for list reactions) ──────────────────────────────
+var ldpPicker = document.createElement('div');
+ldpPicker.id = 'ldp-emoji-picker';
+var ldpHtml = '<input type="text" id="ldp-emote-search" class="ldp-emote-search" placeholder="Search emotes..." autocomplete="off">';
+ldpHtml += '<div class="ldp-emoji-grid" id="ldp-emote-grid">';
+imageEmotes.forEach(function(emote) {
+  ldpHtml += '<button class="ldp-emoji-pick" data-emoji="' + emote.key + '" title="' + emote.key + '"><img src="' + emote.path + '" class="ldp-emote-picker-img" alt="' + emote.key + '"></button>';
+});
+ldpHtml += '</div>';
+ldpPicker.innerHTML = ldpHtml;
+document.body.appendChild(ldpPicker);
+
+document.getElementById('ldp-emote-search').addEventListener('input', function() {
+  var q = this.value.toLowerCase();
+  document.querySelectorAll('#ldp-emote-grid .ldp-emoji-pick').forEach(function(btn) {
+    btn.style.display = btn.dataset.emoji.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+  });
+});
+
+function applyDetailReaction(reactionType, reacted, count) {
+  var isImage = !!imageEmoteMap[reactionType];
+  var existing = document.querySelector('.list-reaction-btn[data-reaction="' + reactionType + '"]');
+  if (existing) {
+    existing.dataset.reacted = reacted ? 'true' : 'false';
+    existing.dataset.count = String(count);
+    if (isImage) {
+      existing.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="list-emote-img" alt="' + reactionType + '"> ' + count;
+    } else {
+      existing.textContent = reactionType + ' ' + count;
+    }
+    existing.classList.toggle('lr-active', reacted);
+    if (count === 0) existing.remove();
+  } else if (count > 0) {
+    var wrap = document.getElementById('list-reaction-wrap');
+    var toggle = document.getElementById('list-react-toggle');
+    if (wrap && toggle) {
+      var newBtn = document.createElement('button');
+      newBtn.className = 'list-reaction-btn' + (reacted ? ' lr-active' : '');
+      newBtn.dataset.reaction = reactionType;
+      newBtn.dataset.reacted = reacted ? 'true' : 'false';
+      newBtn.dataset.count = String(count);
+      newBtn.dataset.loggedIn = 'true';
+      newBtn.dataset.isImage = isImage ? 'true' : 'false';
+      if (isImage) {
+        newBtn.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="list-emote-img" alt="' + reactionType + '"> ' + count;
+      } else {
+        newBtn.textContent = reactionType + ' ' + count;
+      }
+      wrap.insertBefore(newBtn, toggle);
+    }
+  }
+}
+
+// ── Comment-level emoji picker ─────────────────────────────────────────────────
+var ldpcPicker = document.createElement('div');
+ldpcPicker.id = 'ldpc-emoji-picker';
+var ldpcHtml = '<input type="text" class="ldpc-search" placeholder="Search emotes..." autocomplete="off">';
+ldpcHtml += '<div class="ldpc-grid">';
+imageEmotes.forEach(function(emote) {
+  ldpcHtml += '<button class="ldpc-pick" data-emoji="' + emote.key + '" title="' + emote.key + '"><img src="' + emote.path + '" alt="' + emote.key + '"></button>';
+});
+ldpcHtml += '</div>';
+ldpcPicker.innerHTML = ldpcHtml;
+document.body.appendChild(ldpcPicker);
+
+ldpcPicker.querySelector('.ldpc-search').addEventListener('input', function() {
+  var q = this.value.toLowerCase();
+  ldpcPicker.querySelectorAll('.ldpc-pick').forEach(function(btn) {
+    btn.style.display = btn.dataset.emoji.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
+  });
+});
+
+function lcrxApply(commentId, reactionType, reacted, count) {
+  var isImage = !!imageEmoteMap[reactionType];
+  var wrap = document.querySelector('.lcrx-wrap[data-comment-id="' + commentId + '"]');
+  if (!wrap) return;
+  var existing = wrap.querySelector('.lcrx-btn[data-reaction="' + reactionType + '"]');
+  if (existing) {
+    existing.dataset.reacted = reacted ? 'true' : 'false';
+    existing.dataset.count = String(count);
+    if (isImage) {
+      existing.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="lcrx-emote-img" alt="' + reactionType + '"> ' + count;
+    } else {
+      existing.textContent = reactionType + ' ' + count;
+    }
+    existing.classList.toggle('lcrx-active', reacted);
+    if (count === 0) existing.remove();
+  } else if (count > 0) {
+    var toggle = wrap.querySelector('.lcrx-toggle');
+    var newBtn = document.createElement('button');
+    newBtn.className = 'lcrx-btn' + (reacted ? ' lcrx-active' : '');
+    newBtn.dataset.commentId = commentId;
+    newBtn.dataset.reaction = reactionType;
+    newBtn.dataset.reacted = reacted ? 'true' : 'false';
+    newBtn.dataset.count = String(count);
+    newBtn.dataset.loggedIn = 'true';
+    newBtn.dataset.isImage = isImage ? 'true' : 'false';
+    if (isImage) {
+      newBtn.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="lcrx-emote-img" alt="' + reactionType + '"> ' + count;
+    } else {
+      newBtn.textContent = reactionType + ' ' + count;
+    }
+    if (toggle) { wrap.insertBefore(newBtn, toggle); } else { wrap.appendChild(newBtn); }
+  }
+}
+
+function renderBody(text) {
+  var esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  var withMentions = esc.replace(/(^|\s)(@([\w]+))/g, function(m, pre, mention, username) {
+    return pre + '<a class="lc-mention" href="/reviewers/' + username + '">' + mention + '</a>';
+  });
+  return withMentions.replace(/:([A-Za-z0-9_]+):/g, function(match, key) {
+    var path = imageEmoteMap[key];
+    return path ? '<img src="' + path + '" class="lc-emote-inline" alt=":' + key + ':" title=":' + key + ':">' : match;
+  });
+}
+
+// ── Delegated click handler ───────────────────────────────────────────────────
+document.addEventListener('click', function(e) {
+
+  // ── List reaction inline btn
+  var reactionBtn = e.target.closest('.list-reaction-btn');
+  if (reactionBtn) {
+    var loggedIn = reactionBtn.dataset.loggedIn === 'true';
+    if (!loggedIn) { window.location.href = '/signin'; return; }
+    var reaction = reactionBtn.dataset.reaction;
+    var reacted = reactionBtn.dataset.reacted === 'true';
+    var count = parseInt(reactionBtn.dataset.count) || 0;
+    applyDetailReaction(reaction, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/react', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId, reaction_type: reaction }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) applyDetailReaction(reaction, d.reacted, d.count); })
+      .catch(function() { applyDetailReaction(reaction, reacted, count); });
+    return;
+  }
+
+  // ── List react toggle
+  var toggleBtn = e.target.closest('#list-react-toggle');
+  if (toggleBtn) {
+    var loggedIn = toggleBtn.dataset.loggedIn === 'true';
+    if (!loggedIn) { window.location.href = '/signin'; return; }
+    var picker = document.getElementById('ldp-emoji-picker');
+    var isOpen = picker.style.display !== 'none';
+    picker.style.display = isOpen ? 'none' : 'block';
+    if (!isOpen) {
+      requestAnimationFrame(function() {
+        var rect = toggleBtn.getBoundingClientRect();
+        var pRect = picker.getBoundingClientRect();
+        var top = rect.top - pRect.height - 8;
+        if (top < 8) top = rect.bottom + 8;
+        var left = rect.left;
+        if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+        picker.style.top = top + 'px';
+        picker.style.left = left + 'px';
+        picker.querySelectorAll('.ldp-emoji-pick').forEach(function(btn) {
+          var inlineBtn = document.querySelector('.list-reaction-btn[data-reaction="' + btn.dataset.emoji + '"]');
+          btn.classList.toggle('ldp-emoji-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
+        });
+      });
+    }
+    return;
+  }
+
+  // ── List emoji pick
+  var emojiBtn = e.target.closest('.ldp-emoji-pick');
+  if (emojiBtn) {
+    var picker = document.getElementById('ldp-emoji-picker');
+    picker.style.display = 'none';
+    var emoji = emojiBtn.dataset.emoji;
+    var existing = document.querySelector('.list-reaction-btn[data-reaction="' + emoji + '"]');
+    var reacted = existing ? existing.dataset.reacted === 'true' : false;
+    var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+    applyDetailReaction(emoji, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/react', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId, reaction_type: emoji }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) applyDetailReaction(emoji, d.reacted, d.count); })
+      .catch(function() { applyDetailReaction(emoji, reacted, count); });
+    return;
+  }
+
+  // ── Comment vote
+  var cvBtn = e.target.closest('.lcv-btn');
+  if (cvBtn) {
+    if (cvBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+    if (cvBtn.disabled) return;
+    cvBtn.disabled = true;
+    var commentId = cvBtn.dataset.commentId;
+    var vote = parseInt(cvBtn.dataset.vote);
+    fetch('/api/lists/comments/vote', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, vote }),
+    }).then(function(r) {
+      if (r.status === 401) { window.location.href = '/signin'; return r.json(); }
+      return r.json();
+    }).then(function(data) {
+      if (!data) return;
+      document.querySelectorAll('.lcv-btn[data-comment-id="' + commentId + '"]').forEach(function(b) {
+        var bv = parseInt(b.dataset.vote);
+        b.textContent = (bv === 1 ? '▲ ' : '▼ ') + (bv === 1 ? data.up : data.down);
+        b.classList.toggle('lcv-up',   bv === 1  && data.vote === 1);
+        b.classList.toggle('lcv-down', bv === -1 && data.vote === -1);
+      });
+    }).finally(function() { cvBtn.disabled = false; });
+    return;
+  }
+
+  // ── Comment inline reaction
+  var crxBtn = e.target.closest('.lcrx-btn');
+  if (crxBtn) {
+    if (crxBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+    var commentId = crxBtn.dataset.commentId;
+    var reaction = crxBtn.dataset.reaction;
+    var reacted = crxBtn.dataset.reacted === 'true';
+    var count = parseInt(crxBtn.dataset.count) || 0;
+    lcrxApply(commentId, reaction, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/comments/react', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, reaction_type: reaction }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) lcrxApply(commentId, reaction, d.reacted, d.count); })
+      .catch(function() { lcrxApply(commentId, reaction, reacted, count); });
+    return;
+  }
+
+  // ── Comment reaction toggle (+)
+  var crxToggle = e.target.closest('.lcrx-toggle');
+  if (crxToggle) {
+    var commentId = crxToggle.dataset.toggleCommentId;
+    var picker = document.getElementById('ldpc-emoji-picker');
+    var isOpen = picker.style.display !== 'none' && picker.dataset.activeCommentId === commentId;
+    picker.style.display = 'none';
+    if (!isOpen) {
+      picker.dataset.activeCommentId = commentId;
+      picker.style.display = 'block';
+      requestAnimationFrame(function() {
+        var rect = crxToggle.getBoundingClientRect();
+        var pRect = picker.getBoundingClientRect();
+        var top = rect.top - pRect.height - 8;
+        if (top < 8) top = rect.bottom + 8;
+        var left = rect.left;
+        if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+        picker.style.top = top + 'px';
+        picker.style.left = left + 'px';
+        picker.querySelectorAll('.ldpc-pick').forEach(function(btn) {
+          var inlineBtn = document.querySelector('.lcrx-btn[data-comment-id="' + commentId + '"][data-reaction="' + btn.dataset.emoji + '"]');
+          btn.classList.toggle('ldpc-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
+        });
+      });
+    }
+    return;
+  }
+
+  // ── Comment emoji picker pick
+  var ldpcBtn = e.target.closest('.ldpc-pick');
+  if (ldpcBtn) {
+    var picker = document.getElementById('ldpc-emoji-picker');
+    var commentId = picker && picker.dataset.activeCommentId;
+    if (!commentId) return;
+    picker.style.display = 'none';
+    var emoji = ldpcBtn.dataset.emoji;
+    var existing = document.querySelector('.lcrx-btn[data-comment-id="' + commentId + '"][data-reaction="' + emoji + '"]');
+    var reacted = existing ? existing.dataset.reacted === 'true' : false;
+    var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+    lcrxApply(commentId, emoji, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+    fetch('/api/lists/comments/react', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, reaction_type: emoji }),
+    }).then(function(r) { return r.json(); })
+      .then(function(d) { if (d) lcrxApply(commentId, emoji, d.reacted, d.count); })
+      .catch(function() { lcrxApply(commentId, emoji, reacted, count); });
+    return;
+  }
+
+  // ── Reply btn: open reply form
+  var replyBtn = e.target.closest('.lc-reply-btn');
+  if (replyBtn) {
+    var parentId = replyBtn.dataset.parentId;
+    var threadId = replyBtn.dataset.threadId || parentId;
+    var replyTo = replyBtn.dataset.replyTo;
+    var form = document.getElementById('lc-rf-' + threadId);
+    if (!form) return;
+    var isOpen = form.style.display !== 'none';
+    document.querySelectorAll('.lc-rf').forEach(function(f) { f.style.display = 'none'; });
+    if (!isOpen) {
+      var sb = form.querySelector('.lc-rf-submit');
+      if (sb) sb.dataset.parentId = parentId;
+      form.style.display = 'flex';
+      form.style.flexDirection = 'column';
+      var ta = form.querySelector('.lc-rf-ta');
+      if (ta) {
+        ta.value = replyTo ? '@' + replyTo + ' ' : '';
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
+    }
+    return;
+  }
+
+  // ── Reply form cancel
+  var rfCancel = e.target.closest('.lc-rf-cancel');
+  if (rfCancel) {
+    var form = rfCancel.closest('.lc-rf');
+    form.style.display = 'none';
+    var ta = form.querySelector('.lc-rf-ta');
+    if (ta) ta.value = '';
+    return;
+  }
+
+  // ── Reply form submit
+  var rfSubmit = e.target.closest('.lc-rf-submit');
+  if (rfSubmit) {
+    var parentId = rfSubmit.dataset.parentId;
+    var rfListId = rfSubmit.dataset.listId;
+    var form = rfSubmit.closest('.lc-rf');
+    var threadId = form.id.replace('lc-rf-', '');
+    var ta = form.querySelector('.lc-rf-ta');
+    var body = ta.value.trim();
+    if (!body) return;
+    rfSubmit.disabled = true;
+    rfSubmit.textContent = 'Posting…';
+    fetch('/api/lists/comments/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: rfListId, body, parent_id: parentId }),
+    }).then(function(r) {
+      if (r.status === 401) { window.location.href = '/signin'; throw new Error('unauth'); }
+      return r.json();
+    }).then(function(data) {
+      if (!data || data.error) { alert(data?.error || 'Failed to post reply.'); return; }
+      var c = data.comment;
+      var p = c.profiles;
+      var initials = p?.username ? p.username.slice(0,2).toUpperCase() : '?';
+      var avatarHtml = p?.avatar_url
+        ? '<img src="' + p.avatar_url + '" alt="" style="width:100%;height:100%;object-fit:cover">'
+        : '<span>' + initials + '</span>';
+      var isOwn = currentProfileId === p?.id;
+      var replyEl = document.createElement('div');
+      replyEl.className = 'lc-item lc-reply';
+      replyEl.dataset.commentId = c.id;
+      replyEl.innerHTML =
+        '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-avatar lc-avatar-sm">' + avatarHtml + '</a>' +
+        '<div class="lc-body">' +
+          '<div class="lc-meta">' +
+            '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-username">@' + (p?.username ?? '') + '</a>' +
+            '<span class="lc-ts">just now</span>' +
+          '</div>' +
+          '<div class="lc-text" data-raw-body="' + (c.body ?? '').replace(/"/g,'&quot;') + '">' + renderBody(c.body ?? '') + '</div>' +
+          '<div class="lc-actions">' +
+            '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
+            '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+            '<div class="lcrx-wrap" data-comment-id="' + c.id + '">' +
+              '<button class="lcrx-toggle" data-toggle-comment-id="' + c.id + '" title="React">+</button>' +
+            '</div>' +
+            '<button class="lc-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + threadId + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
+            (isOwn ? '<button class="lc-edit-btn" data-comment-id="' + c.id + '" type="button">Edit</button><button class="lc-delete-btn" data-comment-id="' + c.id + '" type="button">Delete</button>' : '') +
+          '</div>' +
+        '</div>';
+
+      var container;
+      if (parentId === threadId) {
+        container = document.querySelector('.lc-replies[data-replies-for="' + threadId + '"]:not(.lc-replies-deep)');
+      } else {
+        container = document.querySelector('.lc-replies-deep[data-replies-for="' + parentId + '"]');
+        if (!container) {
+          container = document.createElement('div');
+          container.className = 'lc-replies lc-replies-deep';
+          container.dataset.repliesFor = parentId;
+          var parentEl = document.querySelector('.lc-item[data-comment-id="' + parentId + '"]');
+          if (parentEl) { parentEl.after(container); }
+          else { container = document.querySelector('.lc-replies[data-replies-for="' + threadId + '"]:not(.lc-replies-deep)'); }
+        }
+      }
+      if (container) container.appendChild(replyEl);
+      form.style.display = 'none';
+      ta.value = '';
+      updateCommentCount(1);
+    }).catch(function(err) {
+      if (err.message !== 'unauth') alert('Something went wrong. Please try again.');
+    }).finally(function() {
+      rfSubmit.disabled = false;
+      rfSubmit.textContent = 'Reply';
+    });
+    return;
+  }
+
+  // ── Edit btn
+  var editBtn = e.target.closest('.lc-edit-btn');
+  if (editBtn) {
+    var commentId = editBtn.dataset.commentId;
+    var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
+    if (!commentEl) return;
+    var textEl = commentEl.querySelector('.lc-text');
+    var existing = commentEl.querySelector('.lc-edit-wrap');
+    if (existing) { existing.remove(); textEl.style.display = ''; return; }
+    var rawBody = textEl.dataset.rawBody || textEl.textContent;
+    textEl.style.display = 'none';
+    var editWrap = document.createElement('div');
+    editWrap.className = 'lc-edit-wrap';
+    editWrap.innerHTML =
+      '<textarea class="lc-edit-ta" maxlength="2000" rows="3">' + rawBody.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea>' +
+      '<div class="lc-edit-foot">' +
+        '<button class="lc-edit-cancel" type="button">Cancel</button>' +
+        '<button class="lc-edit-save" type="button" data-comment-id="' + commentId + '">Save</button>' +
+      '</div>';
+    textEl.after(editWrap);
+    editWrap.querySelector('textarea').focus();
+    return;
+  }
+
+  // ── Edit cancel
+  var editCancel = e.target.closest('.lc-edit-cancel');
+  if (editCancel) {
+    var wrap = editCancel.closest('.lc-edit-wrap');
+    var commentEl = wrap.closest('.lc-item');
+    commentEl.querySelector('.lc-text').style.display = '';
+    wrap.remove();
+    return;
+  }
+
+  // ── Edit save
+  var editSave = e.target.closest('.lc-edit-save');
+  if (editSave) {
+    var commentId = editSave.dataset.commentId;
+    var wrap = editSave.closest('.lc-edit-wrap');
+    var ta = wrap.querySelector('textarea');
+    var body = ta.value.trim();
+    if (!body) return;
+    editSave.disabled = true;
+    editSave.textContent = 'Saving…';
+    fetch('/api/lists/comments/update', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId, body }),
+    }).then(function(r) {
+      if (r.status === 401) { window.location.href = '/signin'; throw new Error('unauth'); }
+      return r.json();
+    }).then(function(data) {
+      if (!data || data.error) { alert(data?.error || 'Failed to update comment.'); return; }
+      var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
+      var textEl = commentEl.querySelector('.lc-text');
+      textEl.innerHTML = renderBody(body);
+      textEl.dataset.rawBody = body;
+      textEl.style.display = '';
+      wrap.remove();
+      var meta = commentEl.querySelector('.lc-meta');
+      if (!meta.querySelector('.lc-edited')) {
+        var span = document.createElement('span');
+        span.className = 'lc-edited';
+        span.textContent = '(edited)';
+        meta.appendChild(span);
+      }
+    }).catch(function(err) {
+      if (err.message !== 'unauth') alert('Something went wrong.');
+    }).finally(function() {
+      if (editSave.isConnected) { editSave.disabled = false; editSave.textContent = 'Save'; }
+    });
+    return;
+  }
+
+  // ── Delete btn
+  var deleteBtn = e.target.closest('.lc-delete-btn');
+  if (deleteBtn) {
+    if (!confirm('Delete this comment?')) return;
+    var commentId = deleteBtn.dataset.commentId;
+    deleteBtn.disabled = true;
+    fetch('/api/lists/comments/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment_id: commentId }),
+    }).then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) { alert(data.error); return; }
+        var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
+        if (commentEl) {
+          var deepReplies = commentEl.parentElement && commentEl.parentElement.querySelector('.lc-replies-deep[data-replies-for="' + commentId + '"]');
+          if (deepReplies) deepReplies.remove();
+          commentEl.remove();
+        }
+        updateCommentCount(-1);
+        if (!document.querySelector('.lc-item')) {
+          document.getElementById('lc-list').innerHTML = '<div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>';
+        }
+      })
+      .catch(function() { alert('Failed to delete comment.'); })
+      .finally(function() { if (deleteBtn.isConnected) deleteBtn.disabled = false; });
+    return;
+  }
+
+  // ── Outside click: close pickers
+  if (!e.target.closest('.list-reaction-wrap') && !e.target.closest('#ldp-emoji-picker')) {
+    var p = document.getElementById('ldp-emoji-picker');
+    if (p) p.style.display = 'none';
+  }
+  if (!e.target.closest('.lcrx-wrap') && !e.target.closest('#ldpc-emoji-picker')) {
+    var p = document.getElementById('ldpc-emoji-picker');
+    if (p) { p.style.display = 'none'; }
+  }
+});
+
+function updateCommentCount(delta) {
+  var heading = document.querySelector('.list-comments-title');
+  if (!heading) return;
+  var match = heading.textContent.match(/\d+/);
+  var newCount = match ? Math.max(0, parseInt(match[0]) + delta) : Math.max(0, delta);
+  heading.textContent = 'Comments (' + newCount + ')';
+}
+
+// ── Top-level comment submit ──────────────────────────────────────────────────
+var lcSubmit = document.getElementById('lc-submit');
+if (lcSubmit) {
+  lcSubmit.addEventListener('click', async function() {
+    var ta = document.getElementById('lc-textarea');
+    var errEl = document.getElementById('lc-error');
+    var body = ta.value.trim();
+    if (!body) return;
+    errEl.style.display = 'none';
+    lcSubmit.disabled = true;
+    lcSubmit.textContent = 'Posting…';
+    try {
+      var res = await fetch('/api/lists/comments/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId, body }),
+      });
+      if (res.status === 401) { window.location.href = '/signin'; return; }
+      var data = await res.json();
+      if (!res.ok) {
+        errEl.textContent = data.error || 'Failed to post comment.';
+        errEl.style.display = 'block';
+        return;
+      }
+      ta.value = '';
+      var emptyEl = document.getElementById('lc-empty');
+      if (emptyEl) emptyEl.remove();
+      var c = data.comment;
+      var p = c.profiles;
+      var initials = (p?.username ?? '?').slice(0, 2).toUpperCase();
+      var avatarHtml = p?.avatar_url
+        ? '<img src="' + p.avatar_url + '" alt="' + (p.username ?? '') + '" style="width:100%;height:100%;object-fit:cover">'
+        : '<span>' + initials + '</span>';
+      var isOwn = currentProfileId === p?.id;
+      var thread = document.createElement('div');
+      thread.className = 'lct';
+      thread.dataset.threadId = c.id;
+      thread.innerHTML =
+        '<div class="lc-item" data-comment-id="' + c.id + '">' +
+          '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-avatar">' + avatarHtml + '</a>' +
+          '<div class="lc-body">' +
+            '<div class="lc-meta">' +
+              '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-username">@' + (p?.username ?? '') + '</a>' +
+              '<span class="lc-ts">just now</span>' +
+            '</div>' +
+            '<div class="lc-text" data-raw-body="' + (c.body ?? '').replace(/"/g,'&quot;') + '">' + renderBody(c.body ?? '') + '</div>' +
+            '<div class="lc-actions">' +
+              '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
+              '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
+              '<div class="lcrx-wrap" data-comment-id="' + c.id + '">' +
+                '<button class="lcrx-toggle" data-toggle-comment-id="' + c.id + '" title="React">+</button>' +
+              '</div>' +
+              '<button class="lc-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + c.id + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
+              (isOwn ? '<button class="lc-edit-btn" data-comment-id="' + c.id + '" type="button">Edit</button><button class="lc-delete-btn" data-comment-id="' + c.id + '" type="button">Delete</button>' : '') +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="lc-replies" data-replies-for="' + c.id + '"></div>' +
+        '<div class="lc-rf" id="lc-rf-' + c.id + '" style="display:none">' +
+          '<textarea class="lc-rf-ta" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>' +
+          '<div class="lc-rf-foot">' +
+            '<button class="lc-rf-cancel" type="button">Cancel</button>' +
+            '<button class="lc-rf-submit" type="button" data-parent-id="' + c.id + '" data-list-id="' + listId + '">Reply</button>' +
+          '</div>' +
+        '</div>';
+      document.getElementById('lc-list').appendChild(thread);
+      updateCommentCount(1);
+    } finally {
+      lcSubmit.disabled = false;
+      lcSubmit.textContent = 'Post comment';
+    }
+  });
+}
+</script>
+
+<script is:inline define:vars={{ _listId: list.id, _defaultView: list.default_view ?? 'grid' }}>
+(function() {
+  var gridBtn = document.getElementById('view-grid');
+  var listBtn = document.getElementById('view-list');
+  var el = document.getElementById('entry-list');
+  if (!gridBtn || !listBtn || !el) return;
+
+  var storageKey = 'chk-list-view-' + _listId;
+  var view = localStorage.getItem(storageKey) || _defaultView;
+
+  if (view === 'list') {
+    el.classList.add('list-view');
+    listBtn.classList.add('active');
+    gridBtn.classList.remove('active');
+  }
+
+  gridBtn.addEventListener('click', function() {
+    el.classList.remove('list-view');
+    gridBtn.classList.add('active');
+    listBtn.classList.remove('active');
+    localStorage.setItem(storageKey, 'grid');
+  });
+
+  listBtn.addEventListener('click', function() {
+    el.classList.add('list-view');
+    listBtn.classList.add('active');
+    gridBtn.classList.remove('active');
+    localStorage.setItem(storageKey, 'list');
+  });
+})();
+</script>
+
+<script is:inline>
+(function() {
+  var searchInput = document.getElementById('entry-search');
+  var sortSelect = document.getElementById('entry-sort');
+  var entryListEl = document.getElementById('entry-list');
+  var emptyFiltered = document.getElementById('entry-empty-filtered');
+  if (!entryListEl) return;
+
+  var items = Array.prototype.slice.call(entryListEl.querySelectorAll('.entry-item'));
+
+  function numOrNull(v) {
+    return v === '' || v === null || v === undefined ? null : parseFloat(v);
+  }
+
+  function cmpNumeric(av, bv, ascending) {
+    if (av === null && bv === null) return 0;
+    if (av === null) return 1;
+    if (bv === null) return -1;
+    return ascending ? av - bv : bv - av;
+  }
+
+  function applyFilterSort() {
+    var q = ((searchInput && searchInput.value) || '').trim().toLowerCase();
+    var sortBy = sortSelect ? sortSelect.value : 'default';
+
+    var sorted = items.slice().sort(function(a, b) {
+      var idxA = parseInt(a.dataset.idx, 10);
+      var idxB = parseInt(b.dataset.idx, 10);
+      switch (sortBy) {
+        case 'alpha':
+          return a.dataset.title.localeCompare(b.dataset.title) || idxA - idxB;
+        case 'score-desc':
+          return cmpNumeric(numOrNull(a.dataset.score), numOrNull(b.dataset.score), false) || idxA - idxB;
+        case 'score-asc':
+          return cmpNumeric(numOrNull(a.dataset.score), numOrNull(b.dataset.score), true) || idxA - idxB;
+        case 'hours-desc':
+          return cmpNumeric(numOrNull(a.dataset.hours), numOrNull(b.dataset.hours), false) || idxA - idxB;
+        case 'hours-asc':
+          return cmpNumeric(numOrNull(a.dataset.hours), numOrNull(b.dataset.hours), true) || idxA - idxB;
+        case 'added-desc':
+          return cmpNumeric(numOrNull(a.dataset.added), numOrNull(b.dataset.added), false) || idxA - idxB;
+        default:
+          return idxA - idxB;
+      }
+    });
+
+    sorted.forEach(function(item, i) { item.style.order = i; });
+
+    var visibleCount = 0;
+    items.forEach(function(item) {
+      var matches = !q || item.dataset.title.indexOf(q) !== -1;
+      item.style.display = matches ? '' : 'none';
+      if (matches) visibleCount++;
+    });
+
+    entryListEl.style.display = visibleCount === 0 ? 'none' : '';
+    if (emptyFiltered) emptyFiltered.style.display = visibleCount === 0 ? '' : 'none';
+  }
+
+  if (searchInput) searchInput.addEventListener('input', applyFilterSort);
+  if (sortSelect) sortSelect.addEventListener('change', applyFilterSort);
+})();
+</script>

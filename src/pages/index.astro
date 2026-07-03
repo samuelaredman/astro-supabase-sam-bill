@@ -1,9 +1,11 @@
 ---
-import { getSupabase, createSupabaseServerClientFromContext } from "../utils/database";
+import { getSupabase, createSupabaseServerClientFromContext, getSupabaseAdmin } from "../utils/database";
 import Layout from "../components/Layout.astro";
 import ReportModal from "../components/ReportModal.astro";
 import EditModal from "../components/EditModal.astro";
 import ReviewCard from "../components/ReviewCard.astro";
+import ListCard from "../components/ListCard.astro";
+import ListFeedCard from "../components/ListFeedCard.astro";
 import { igdbImage, timeAgo, scoreClass } from '../utils/format';
 import { GAME_CATEGORY_OR_FILTER } from '../utils/games';
 import { getSimilarGames, getExcludedGameIds } from '../utils/recommendations';
@@ -72,6 +74,80 @@ const [
 const currentProfile = profileRes.data ?? null
 const { data: platforms } = platformsRes
 
+// ── Recent lists shared to feed ──
+const adminDb = getSupabaseAdmin() as any;
+const { data: recentListsRaw, error: listsError } = await adminDb
+  .from('lists')
+  .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, profiles(id, username, avatar_url)')
+  .eq('visibility', 'public')
+  .eq('shared_to_feed', true)
+  .order('created_at', { ascending: false })
+  .limit(2);
+if (listsError) console.error('[index] lists query error:', JSON.stringify(listsError));
+
+const recentListIds = (recentListsRaw ?? []).map((l: any) => l.id);
+const [
+  { data: recentListEntries },
+  { data: recentListEntryCounts },
+  { data: listVotesRaw },
+  { data: listCommentsRaw },
+  { data: listReactionsRaw },
+] = recentListIds.length > 0
+  ? await Promise.all([
+      adminDb.from('list_entries').select('list_id, games(cover_img_url)').in('list_id', recentListIds).order('position', { ascending: true, nullsFirst: false }).order('added_at', { ascending: true }),
+      adminDb.from('list_entries').select('list_id').in('list_id', recentListIds),
+      adminDb.from('list_votes').select('list_id, vote, profile_id').in('list_id', recentListIds),
+      adminDb.from('list_comments').select('list_id').in('list_id', recentListIds),
+      adminDb.from('list_reactions').select('list_id, reaction_type, profile_id').in('list_id', recentListIds),
+    ])
+  : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }];
+
+const recentListCoversByListId: Record<string, string[]> = {};
+for (const e of recentListEntries ?? []) {
+  const cover = igdbImage(e.games?.cover_img_url, 't_cover_big');
+  if (cover) {
+    if (!recentListCoversByListId[e.list_id]) recentListCoversByListId[e.list_id] = [];
+    if (recentListCoversByListId[e.list_id].length < 10) recentListCoversByListId[e.list_id].push(cover);
+  }
+}
+const recentListCountByListId: Record<string, number> = {};
+for (const e of recentListEntryCounts ?? []) {
+  recentListCountByListId[e.list_id] = (recentListCountByListId[e.list_id] ?? 0) + 1;
+}
+
+// Aggregate votes, comments, reactions by list_id
+const listUpByListId: Record<string, number> = {};
+const listDownByListId: Record<string, number> = {};
+const listMyVoteByListId: Record<string, number> = {};
+for (const v of listVotesRaw ?? []) {
+  if (v.vote === 1) listUpByListId[v.list_id] = (listUpByListId[v.list_id] ?? 0) + 1;
+  else listDownByListId[v.list_id] = (listDownByListId[v.list_id] ?? 0) + 1;
+  if (currentProfile && v.profile_id === currentProfile.id) listMyVoteByListId[v.list_id] = v.vote;
+}
+const listCommentCountByListId: Record<string, number> = {};
+for (const c of listCommentsRaw ?? []) {
+  listCommentCountByListId[c.list_id] = (listCommentCountByListId[c.list_id] ?? 0) + 1;
+}
+const listReactionsByListId: Record<string, { reaction_type: string; profile_id: string }[]> = {};
+for (const r of listReactionsRaw ?? []) {
+  if (!listReactionsByListId[r.list_id]) listReactionsByListId[r.list_id] = [];
+  listReactionsByListId[r.list_id].push({ reaction_type: r.reaction_type, profile_id: r.profile_id });
+}
+
+const recentLists = (recentListsRaw ?? []).map((l: any) => ({
+  ...l,
+  _isListItem: true,
+  ownerUsername: l.profiles?.username,
+  ownerAvatar: l.profiles?.avatar_url,
+  coverUrls: recentListCoversByListId[l.id] ?? [],
+  entryCount: recentListCountByListId[l.id] ?? 0,
+  upVotes: listUpByListId[l.id] ?? 0,
+  downVotes: listDownByListId[l.id] ?? 0,
+  myVote: listMyVoteByListId[l.id] ?? 0,
+  commentCount: listCommentCountByListId[l.id] ?? 0,
+  reactions: listReactionsByListId[l.id] ?? [],
+}));
+
 type Platform = { id: string; name: string; slug: string; };
 type Review = {
   id: string; score: number; title: string; body: string;
@@ -82,6 +158,12 @@ type Review = {
   review_votes: { vote: number; profile_id: string }[] | { vote: number; profile_id: string } | null;
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
+
+// Merge reviews and shared lists into a single chronological feed
+const feedItems: any[] = [
+  ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
+  ...recentLists.map((l: any) => ({ ...l, _date: l.created_at })),
+].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>
 const todayMap: DayMap = {}
@@ -332,21 +414,43 @@ const initialFollowingDone = followingReviews.length < 20
     )}
 
     <div id="tab-recent">
-      {reviews.length === 0 ? (
+      {feedItems.length === 0 ? (
         <div class="empty-state">
           <div class="empty-state-title">No reviews yet</div>
           <p>Be the first to review a game.</p>
         </div>
       ) : (
-        reviews.map((review: any) => (
-          <ReviewCard
-            review={review}
-            isLoggedIn={isLoggedIn}
-            showReviewer={true}
-            showGame={true}
-            currentProfileId={currentProfile?.id ?? null}
-            isOwnProfile={!!(currentProfile && review.profiles?.id === currentProfile.id)}
-          />
+        feedItems.map((item: any) => (
+          item._isListItem ? (
+            <ListFeedCard
+              id={item.id}
+              title={item.title}
+              description={item.description ?? null}
+              isRanked={item.is_ranked}
+              entryCount={item.entryCount}
+              coverUrls={item.coverUrls}
+              coverImageUrl={item.cover_image_url}
+              ownerUsername={item.ownerUsername}
+              ownerAvatar={item.ownerAvatar ?? null}
+              createdAt={item.created_at}
+              upVotes={item.upVotes}
+              downVotes={item.downVotes}
+              myVote={item.myVote}
+              commentCount={item.commentCount}
+              reactions={item.reactions}
+              isLoggedIn={isLoggedIn}
+              currentProfileId={currentProfile?.id ?? null}
+            />
+          ) : (
+            <ReviewCard
+              review={item}
+              isLoggedIn={isLoggedIn}
+              showReviewer={true}
+              showGame={true}
+              currentProfileId={currentProfile?.id ?? null}
+              isOwnProfile={!!(currentProfile && item.profiles?.id === currentProfile.id)}
+            />
+          )
         ))
       )}
       <div id="sentinel-recent" style="height:1px;margin:0"></div>
@@ -1012,6 +1116,29 @@ const initialFollowingDone = followingReviews.length < 20
         ))
       )}
     </div>
+
+    {recentLists.length > 0 && (
+      <div class="widget" style="margin-top:4px">
+        <div class="widget-title">Recent Lists</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          {recentLists.map((list: any) => (
+            <ListCard
+              id={list.id}
+              title={list.title}
+              isRanked={list.is_ranked}
+              visibility={list.visibility}
+              entryCount={list.entryCount}
+              coverUrls={list.coverUrls}
+              coverImageUrl={list.cover_image_url}
+              ownerUsername={list.ownerUsername}
+              ownerAvatar={list.ownerAvatar}
+              showOwner={true}
+              compact={true}
+            />
+          ))}
+        </div>
+      </div>
+    )}
 
     {recommendedForYou.length > 0 && (
       <div class="widget" style="margin-top:4px">
