@@ -1,7 +1,8 @@
 ---
-import { getSupabase, createSupabaseServerClientFromContext, getSupabaseAdmin } from '../utils/database'
+import { getSupabase, createSupabaseServerClientFromContext } from '../utils/database'
 import { igdbFetch } from '../utils/igdb'
 import { igdbImage } from '../utils/format'
+import { GAME_CATEGORY_OR_FILTER } from '../utils/games'
 import Layout from '../components/Layout.astro'
 
 export const prerender = false
@@ -28,83 +29,6 @@ let games: any[] = []
 let igdbGames: any[] = []
 let profiles: any[] = []
 let companies: any[] = []
-
-if (Astro.request.method === 'POST') {
-  const form = await Astro.request.formData()
-  const igdbId = parseInt(form.get('igdb_id') as string)
-
-  const db = getSupabaseAdmin() as any
-
-  // Check if already in DB (read — anon client is fine)
-  const { data: existing } = await supabase
-    .from('games')
-    .select('slug')
-    .eq('igdb_id', igdbId)
-    .single()
-
-  if (existing) return Astro.redirect(`/games/${existing.slug}?tab=overview`)
-
-  const result = await igdbFetch('games',
-    `fields id, name, slug, summary, cover.url, first_release_date,
-            genres.id, genres.name, genres.slug,
-            platforms.id, platforms.name, platforms.slug,
-            involved_companies.company.id,
-            involved_companies.company.name,
-            involved_companies.company.slug,
-            involved_companies.developer,
-            involved_companies.publisher;
-     where id = ${igdbId};`)
-  const igdbGame = result?.[0]
-  if (!igdbGame) return Astro.redirect('/search')
-
-  const slug = igdbGame.slug || igdbGame.name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-
-  // All writes use admin client to bypass RLS
-  const { data: inserted, error: insertError } = await db.from('games').insert({
-    igdb_id: igdbGame.id,
-    title: igdbGame.name,
-    slug,
-    game_description: igdbGame.summary,
-    cover_img_url: igdbGame.cover?.url
-      ? `https:${igdbGame.cover.url.replace('t_thumb', 't_cover_big')}`
-      : null,
-    date_released: igdbGame.first_release_date
-      ? new Date(igdbGame.first_release_date * 1000).toISOString().split('T')[0]
-      : null
-  }).select('id').single()
-
-  if (insertError) {
-    console.error('[search import] insert error:', insertError)
-    return Astro.redirect(`/search?tab=games&q=${encodeURIComponent(igdbGame.name)}&error=import_failed`)
-  }
-
-  if (inserted) {
-    for (const genre of igdbGame.genres ?? []) {
-      await db.from('genres').upsert({ igdb_id: genre.id, name: genre.name, slug: genre.slug }, { onConflict: 'igdb_id' })
-      const { data: genreRow } = await db.from('genres').select('id').eq('igdb_id', genre.id).single()
-      if (genreRow) await db.from('game_genres').upsert({ game_id: inserted.id, genre_id: genreRow.id }, { onConflict: 'game_id,genre_id' })
-    }
-    for (const platform of igdbGame.platforms ?? []) {
-      await db.from('platforms').upsert({ igdb_id: platform.id, name: platform.name, slug: platform.slug }, { onConflict: 'igdb_id' })
-      const { data: platformRow } = await db.from('platforms').select('id').eq('igdb_id', platform.id).single()
-      if (platformRow) await db.from('game_platforms').upsert({ game_id: inserted.id, platform_id: platformRow.id }, { onConflict: 'game_id,platform_id' })
-    }
-    for (const ic of igdbGame.involved_companies ?? []) {
-      if (!ic.company) continue
-      await db.from('developers').upsert({ igdb_id: ic.company.id, name: ic.company.name, slug: ic.company.slug }, { onConflict: 'igdb_id' })
-      const { data: devRow } = await db.from('developers').select('id').eq('igdb_id', ic.company.id).single()
-      if (devRow) {
-        const role = ic.developer ? 'developer' : ic.publisher ? 'publisher' : 'other'
-        await db.from('game_companies').upsert({ game_id: inserted.id, company_id: devRow.id, role }, { onConflict: 'game_id,company_id' })
-      }
-    }
-  }
-
-  return Astro.redirect(`/games/${slug}?tab=overview`)
-}
 
 const { data: genres } = await supabase.from('genres').select('id, name').order('name')
 const { data: platforms } = await supabase.from('platforms').select('id, name, slug').order('name')
@@ -136,6 +60,7 @@ if (tab === 'games') {
           reviews!reviews_game_id_fkey(score, play_time_hours)
         `)
         .in('id', rawGameIds)
+        .or(GAME_CATEGORY_OR_FILTER)
 
       const orderMap = new Map<string, number>(rawGameIds.map((id: string, i: number) => [id, i]))
       rawGames = (fullGames ?? []).sort((a: any, b: any) =>
@@ -153,6 +78,7 @@ if (tab === 'games') {
           reviews!reviews_game_id_fkey(score, play_time_hours)
         `)
         .ilike('title', `%${query}%`)
+        .or(GAME_CATEGORY_OR_FILTER)
         .limit(24)
 
       if (genreFilter || platformFilter) {
@@ -237,6 +163,7 @@ if (tab === 'games') {
           reviews!reviews_game_id_fkey(score, play_time_hours)
         `)
         .in('id', pageIds)
+        .or(GAME_CATEGORY_OR_FILTER)
 
       const orderMap = new Map(pageIds.map((id, i) => [id, i]))
       rawGames = (browseGames ?? []).sort((a: any, b: any) =>
@@ -254,6 +181,7 @@ if (tab === 'games') {
           reviews!reviews_game_id_fkey(score, play_time_hours)
         `)
         .order('date_released', { ascending: false })
+        .or(GAME_CATEGORY_OR_FILTER)
         .limit(48)
 
       if (genreFilter || platformFilter) {
@@ -567,9 +495,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
               <span class="igdb-label">Not yet in Chekpoint — click to add</span>
               <div class="game-grid">
                 {igdbGames.map((game: any) => (
-                  <form method="POST" class="igdb-import-form">
-                    <input type="hidden" name="igdb_id" value={game.id} />
-                    <button type="submit" class="igdb-import-btn" style="width:100%;background:none;border:none;padding:0;cursor:pointer;text-align:left">
+                  <div class="igdb-import-form">
+                    <button type="button" class="igdb-import-btn" data-igdb-id={game.id} style="width:100%;background:none;border:none;padding:0;cursor:pointer;text-align:left">
                       <div class="game-card">
                         <div class="game-cover">
                           {game.cover?.url
@@ -587,7 +514,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
                         </div>
                       </div>
                     </button>
-                  </form>
+                  </div>
                 ))}
               </div>
             </div>
@@ -745,17 +672,26 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     box-shadow: 0 4px 24px rgba(0,0,0,0.18); scrollbar-width: thin;
   }
   .search-dropdown.open { display: block; }
-  .sd-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 12px; cursor: pointer; transition: background 0.1s;
+  /* :global — these classes are applied to elements created client-side via
+     document.createElement, which never receive Astro's scoped data attribute. */
+  :global(.sd-section-label) {
+    padding: 8px 12px 4px; font-size: 10.5px; font-weight: 500; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--text-tertiary);
   }
-  .sd-item:first-child { border-radius: 10px 10px 0 0; }
-  .sd-item:last-child  { border-radius: 0 0 10px 10px; }
-  .sd-item:only-child  { border-radius: 10px; }
-  .sd-item:hover { background: var(--bg-hover); }
-  .sd-title { font-size: 14px; font-weight: 500; color: var(--text-primary); line-height: 1.3; }
-  .sd-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
-  .sd-empty { padding: 12px 14px; font-size: 13px; color: var(--text-tertiary); text-align: center; }
+  :global(.sd-section-label:not(:first-child)) { border-top: 1px solid var(--border-subtle); margin-top: 4px; }
+  :global(.sd-item) {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 7px 12px; cursor: pointer; transition: background 0.1s;
+  }
+  :global(.sd-item:hover) { background: var(--bg-hover); }
+  :global(.sd-left) { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+  :global(.sd-title) {
+    font-size: 13px; color: var(--text-primary); line-height: 1.3;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  :global(.sd-plus) { font-size: 15px; color: var(--accent); line-height: 1; flex-shrink: 0; }
+  :global(.sd-year) { font-size: 12px; color: var(--text-tertiary); flex-shrink: 0; margin-left: 8px; }
+  :global(.sd-empty) { padding: 12px 14px; font-size: 13px; color: var(--text-tertiary); text-align: center; }
   .search-btn {
     background: var(--accent); color: var(--accent-text); border: none;
     border-radius: 10px; padding: 10px 20px; font-size: 14px; font-weight: 500;
@@ -899,6 +835,42 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     if (!e.target.closest('.search-input-wrap')) closeDropdown();
   });
 
+  function makeSuggestionItem(game) {
+    var item = document.createElement('div');
+    item.className = 'sd-item';
+    var titleHtml = '<span class="sd-title">' + game.title.replace(/</g, '&lt;') + '</span>';
+    var yearHtml = game.year ? '<span class="sd-year">' + game.year + '</span>' : '';
+    item.innerHTML = game.source === 'igdb'
+      ? '<span class="sd-left"><span class="sd-plus">+</span>' + titleHtml + '</span>' + yearHtml
+      : titleHtml + yearHtml;
+    item.addEventListener('click', function() {
+      closeDropdown();
+      if (game.source === 'db') {
+        window.location.href = '/games/' + game.slug;
+        return;
+      }
+      // IGDB game — import then navigate
+      if (!searchIsLoggedIn) {
+        window.location.href = '/search?q=' + encodeURIComponent(game.title) + '&tab=games';
+        return;
+      }
+      mainSearchInput.value = game.title;
+      item.style.opacity = '0.5';
+      item.style.pointerEvents = 'none';
+      fetch('/api/games/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ igdb_id: game.igdb_id }),
+      }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data && data.slug) window.location.href = '/games/' + data.slug;
+        else window.location.href = '/search?q=' + encodeURIComponent(game.title) + '&tab=games';
+      }).catch(function() {
+        window.location.href = '/search?q=' + encodeURIComponent(game.title) + '&tab=games';
+      });
+    });
+    return item;
+  }
+
   async function fetchSuggestions(q) {
     try {
       var res = await fetch('/api/games/search?q=' + encodeURIComponent(q));
@@ -909,39 +881,23 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         searchDropdown.classList.add('open');
         return;
       }
-      games.forEach(function(game) {
-        var item = document.createElement('div');
-        item.className = 'sd-item';
-        item.innerHTML =
-          '<div class="sd-title">' + game.title.replace(/</g, '&lt;') + '</div>' +
-          (game.source === 'igdb' ? '<div class="sd-sub">Add to Chekpoint</div>' : '');
-        item.addEventListener('click', function() {
-          closeDropdown();
-          if (game.source === 'db') {
-            window.location.href = '/games/' + game.slug;
-            return;
-          }
-          // IGDB game — import then navigate
-          if (!searchIsLoggedIn) {
-            window.location.href = '/search?q=' + encodeURIComponent(game.title) + '&tab=games';
-            return;
-          }
-          mainSearchInput.value = game.title;
-          var subEl = item.querySelector('.sd-sub');
-          if (subEl) subEl.textContent = 'Importing…';
-          fetch('/api/games/import', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ igdb_id: game.igdb_id }),
-          }).then(function(r) { return r.json(); }).then(function(data) {
-            if (data && data.slug) window.location.href = '/games/' + data.slug;
-            else window.location.href = '/search?q=' + encodeURIComponent(game.title) + '&tab=games';
-          }).catch(function() {
-            window.location.href = '/search?q=' + encodeURIComponent(game.title) + '&tab=games';
-          });
-        });
-        searchDropdown.appendChild(item);
-      });
+      var dbGames = games.filter(function(g) { return g.source === 'db'; });
+      var igdbGames = games.filter(function(g) { return g.source === 'igdb'; });
+
+      if (dbGames.length) {
+        var dbLabel = document.createElement('div');
+        dbLabel.className = 'sd-section-label';
+        dbLabel.textContent = 'In Chekpoint';
+        searchDropdown.appendChild(dbLabel);
+        dbGames.forEach(function(game) { searchDropdown.appendChild(makeSuggestionItem(game)); });
+      }
+      if (igdbGames.length) {
+        var igdbLabel = document.createElement('div');
+        igdbLabel.className = 'sd-section-label';
+        igdbLabel.textContent = 'Add from IGDB';
+        searchDropdown.appendChild(igdbLabel);
+        igdbGames.forEach(function(game) { searchDropdown.appendChild(makeSuggestionItem(game)); });
+      }
       searchDropdown.classList.add('open');
     } catch(err) {
       console.error('[search dropdown]', err);
@@ -950,12 +906,38 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 </script>
 
 <script>
-  document.querySelectorAll('.igdb-import-form').forEach(function(form) {
-    form.addEventListener('submit', function() {
-      var overlay = form.querySelector('.import-loading-overlay')
-      var btn = form.querySelector('.igdb-import-btn') as HTMLButtonElement | null
+  document.querySelectorAll('.igdb-import-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var button = btn as HTMLButtonElement
+      var igdbId = button.dataset.igdbId
+      if (!igdbId || button.disabled) return
+
+      if (!(window as any).searchIsLoggedIn) {
+        window.location.href = '/signin'
+        return
+      }
+
+      var overlay = button.querySelector('.import-loading-overlay')
       if (overlay) overlay.classList.add('active')
-      if (btn) btn.disabled = true
+      button.disabled = true
+
+      fetch('/api/games/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ igdb_id: parseInt(igdbId, 10) }),
+      }).then(function(r) { return r.json() }).then(function(data) {
+        if (data && data.slug) {
+          window.location.href = '/games/' + data.slug
+        } else {
+          var params = new URLSearchParams(window.location.search)
+          params.set('error', 'import_failed')
+          window.location.href = '/search?' + params.toString()
+        }
+      }).catch(function() {
+        var params = new URLSearchParams(window.location.search)
+        params.set('error', 'import_failed')
+        window.location.href = '/search?' + params.toString()
+      })
     })
   })
 </script>

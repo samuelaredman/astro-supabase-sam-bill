@@ -32,6 +32,7 @@ Read it fully before writing or modifying any code.
 src/
   utils/
     database.ts         ← All Supabase client factories. Read before any DB work.
+    api.ts              ← requireAuth helper + json() + shared types. Use in every new route.
     igdb.ts             ← IGDB API helpers (cover URLs, search)
   pages/
     api/                ← Netlify serverless endpoints. One file = one endpoint.
@@ -81,10 +82,10 @@ supabase/
 
 ## Database schema
 
-> ⚠️ `supabase/types.ts` is stale and inaccurate. Do not trust it for column names or types.
-> After every migration run: `supabase gen types typescript --local > supabase/types.ts`
-> The `as any` casts in the codebase are a workaround for this — they are not
-> permission to skip verifying that columns exist before querying them.
+> ⚠️ `supabase/types.ts` must be regenerated after every migration or it will be out of date.
+> Run: `npx supabase gen types typescript --project-id <project-id> > supabase/types.ts`
+> The DB client is typed against this file. If a table is missing from types, the build will
+> error — regenerate types, do NOT add `as any` casts to work around it.
 
 ### Core tables
 
@@ -365,7 +366,7 @@ const userClient = createSupabaseServerClientFromContext(context);
 const { data: { user } } = await userClient.auth.getUser();
 if (!user) return json({ error: "Unauthorized" }, 401);
 
-const db = getSupabaseAdmin() as any;
+const db = getSupabaseAdmin(); // typed — do NOT cast as any
 ```
 
 ### profiles.id ≠ auth.users.id
@@ -385,32 +386,24 @@ if (!profile) return json({ error: "Profile not found." }, 404);
 
 ### Standard structure
 
+New routes must use `requireAuth` from `src/utils/api.ts`. It handles auth, profile
+resolution, and returns a typed `db` client in one call. Do not inline this logic.
+
 ```typescript
 import type { APIRoute } from "astro";
-import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
-
-const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+import { requireAuth, json } from "../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
-  // 1. Auth
-  const userClient = createSupabaseServerClientFromContext(context);
-  const { data: { user } } = await userClient.auth.getUser();
-  if (!user) return json({ error: "Unauthorized" }, 401);
+  // 1. Auth + profile resolution
+  const { auth, response } = await requireAuth(context);
+  if (!auth) return response;
+  const { profile, db } = auth;
 
-  // 2. Admin DB client
-  const db = getSupabaseAdmin() as any;
-
-  // 3. Resolve profile
-  const { data: profile } = await db
-    .from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return json({ error: "Profile not found." }, 404);
-
-  // 4. Validate input before touching DB
+  // 2. Validate input before touching DB
   const body = await context.request.json();
   if (!body.required_field) return json({ error: "Missing required_field." }, 400);
 
-  // 5. DB operation with full error logging
+  // 3. DB operation with full error logging
   const { error } = await db.from('table').insert({ ... });
   if (error) {
     console.error('[route-name] insert error:', JSON.stringify(error));
@@ -420,6 +413,9 @@ export const POST: APIRoute = async (context) => {
   return json({ success: true });
 };
 ```
+
+`db` returned by `requireAuth` is fully typed via `supabase/types.ts`. If `db.from('some_table')`
+produces a TypeScript error, the fix is to regenerate types — not to cast as any.
 
 ### Notification pattern — always fire-and-forget
 
@@ -475,6 +471,35 @@ console.error('[route-name] operation error:', JSON.stringify(error));
 8. **One published review per user per game.** The `reviews_one_published_per_game`
    partial unique index enforces this. Inserting a second published review for the
    same user+game will throw a constraint violation.
+
+9. **Supabase returns at most 1000 rows by default.** Any query that could return
+   more than 1000 rows must paginate using `.range(start, end)`. This applies to
+   scripts, data exports, and any table that grows unbounded (games, reviews, etc.).
+   Forgetting this causes silent data truncation with no error.
+
+10. **Use `.update()` not `.upsert()` for partial column updates on existing rows.**
+    `upsert` evaluates NOT NULL constraints on the INSERT branch even when a conflict
+    will resolve it. If your object omits a NOT NULL column (e.g. `title` on `games`),
+    the upsert fails even though the row already exists. Use `.update().eq('id', id)`
+    when you know the row exists and only want to touch specific columns.
+
+---
+
+## Pre-flight checklist — before writing any significant code
+
+Do this before writing a new API route, script, or feature that touches the DB:
+
+1. **Read existing patterns first.** Check a similar route in `src/pages/api/` before
+   writing a new one. The codebase has established conventions — don't invent new ones.
+2. **Check the data volume.** If the operation touches a table with unbounded rows
+   (games, reviews, etc.), account for pagination from the start. The 1000-row default
+   cap will silently truncate results if you don't.
+3. **Verify every column name against the schema tables in this file.** TypeScript
+   won't catch a wrong column name if the type is `any` or the types file is stale.
+4. **Reason through INSERT vs UPDATE vs UPSERT.** Know which rows exist before
+   deciding the operation. Upsert is not a safe default for partial updates — see rule 10.
+5. **Regenerate types after every migration** before writing code that queries new tables.
+   A missing table in types.ts is a build error, not a reason to add `as any`.
 
 ---
 
@@ -599,7 +624,7 @@ Currently duplicated in `ReviewCard.astro` and `games/[slug].astro`.
 | Anon client for DB writes | RLS blocks it, returns empty data with no JS error |
 | `single()` when row may not exist | Throws, causes unhandled 500 |
 | `.eq('col', null)` after a failed select | Matches nothing or everything depending on PostgREST version |
-| `(supabase as any)` casts | Workaround for stale types only — does NOT confirm the column exists |
+| `as any` on the DB client | This is an antipattern. If `db.from('table')` errors, regenerate types — do not cast away the error |
 | Notification insert in main try/catch | Notification failure crashes the entire request |
 | `review_comments.body` history | Previously had a VARCHAR CHECK constraint that silently rejected long comments. Now `text`. Always grep migrations before inserting into a column for the first time. |
 | Querying draft reviews with anon client | RLS hides `status != 'published'` rows — result looks like the review doesn't exist |
