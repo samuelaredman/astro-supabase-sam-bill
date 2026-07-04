@@ -24,9 +24,18 @@ export const POST: APIRoute = async (context) => {
     if (!profile) return json({ error: 'Profile not found' }, 404);
 
     const { data: membership } = await db
-      .from('group_members').select('role')
+      .from('group_members').select('role, custom_role_id')
       .eq('group_id', groupId).eq('profile_id', profile.id).maybeSingle();
-    if (!membership || !['owner', 'admin'].includes(membership.role)) {
+    if (!membership) return json({ error: 'Not authorized' }, 403);
+
+    const isOwnerOrAdmin = ['owner', 'admin'].includes(membership.role);
+    let hasEditGroup = false;
+    if (!isOwnerOrAdmin && membership.custom_role_id) {
+      const { data: cr } = await db.from('group_roles')
+        .select('can_edit_group').eq('id', membership.custom_role_id).maybeSingle();
+      hasEditGroup = !!cr?.can_edit_group;
+    }
+    if (!isOwnerOrAdmin && !hasEditGroup) {
       return json({ error: 'Not authorized' }, 403);
     }
 
