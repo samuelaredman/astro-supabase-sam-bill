@@ -14,6 +14,7 @@ let currentProfile: { id: string; username: string; avatar_url: string | null } 
 let recommendations: any[] = [];
 let myReviewCount = 0;
 let similarUserCount = 0;
+let isFallback = false;
 
 if (user) {
   const { data: cpData } = await serverClient
@@ -85,6 +86,46 @@ if (currentProfile) {
       }
     }
   }
+
+  // Not enough reviews (or not enough overlap with other reviewers) to
+  // personalize — fall back to the most-reviewed games site-wide, shown in
+  // the same grid.
+  if (recommendations.length === 0) {
+    isFallback = true;
+
+    const { data: fallbackRows } = await (supabase as any)
+      .from('reviews').select('game_id, score').eq('status', 'published');
+
+    const gameStats: Record<string, { count: number; scoreSum: number }> = {};
+    for (const r of fallbackRows ?? []) {
+      if (!gameStats[r.game_id]) gameStats[r.game_id] = { count: 0, scoreSum: 0 };
+      gameStats[r.game_id].count++;
+      gameStats[r.game_id].scoreSum += r.score;
+    }
+
+    const rankedFallback = Object.entries(gameStats)
+      .filter(([gameId]) => !myGameIds.has(gameId))
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 24);
+
+    if (rankedFallback.length > 0) {
+      const topIds = rankedFallback.map(([gameId]) => gameId);
+      const { data: gameRows } = await (supabase as any)
+        .from('games').select('id, title, slug, cover_img_url').in('id', topIds).or(GAME_CATEGORY_OR_FILTER);
+
+      const gameById: Record<string, any> = {};
+      for (const g of gameRows ?? []) gameById[g.id] = g;
+
+      recommendations = rankedFallback
+        .map(([gameId, d]) => ({
+          gameId,
+          recommenderCount: d.count,
+          weightedAvg: d.scoreSum / d.count,
+        }))
+        .map(r => ({ ...r, game: gameById[r.gameId] }))
+        .filter(r => r.game);
+    }
+  }
 }
 ---
 
@@ -102,11 +143,13 @@ if (currentProfile) {
         <div class="feed-subtitle">
           {!isLoggedIn
             ? 'Sign in to get personalized recommendations'
-            : recommendations.length > 0
+            : recommendations.length === 0
+            ? 'No reviews yet — check back soon'
+            : !isFallback
             ? `${recommendations.length} games picked from ${similarUserCount} reviewers with similar taste`
             : myReviewCount === 0
-            ? 'Write some reviews to get recommendations'
-            : 'Not enough data yet — keep reviewing'
+            ? 'Write a few reviews for personalized picks — here are the most-reviewed games for now'
+            : 'Not enough overlap yet for personalized picks — here are the most-reviewed games for now'
           }
         </div>
       </div>
@@ -118,16 +161,10 @@ if (currentProfile) {
         <p>We'll recommend games based on what reviewers with similar taste have played.</p>
         <a href="/signin" class="empty-cta">Sign in</a>
       </div>
-    ) : myReviewCount === 0 ? (
-      <div class="empty-state">
-        <div class="empty-state-title">No reviews yet</div>
-        <p>Write a few reviews and we'll find games you'll love based on what similar reviewers have played.</p>
-        <a href="/?compose=1" class="empty-cta">Start reviewing</a>
-      </div>
     ) : recommendations.length === 0 ? (
       <div class="empty-state">
         <div class="empty-state-title">Nothing to show yet</div>
-        <p>We couldn't find enough reviewers with overlapping games. Try reviewing more games to improve your recommendations.</p>
+        <p>No reviews on Chekpoint yet. Be the first!</p>
         <a href="/search" class="empty-cta">Find games</a>
       </div>
     ) : (
@@ -143,7 +180,12 @@ if (currentProfile) {
             </div>
             <div class="rec-info">
               <div class="rec-title">{game.title}</div>
-              <div class="rec-meta">{recommenderCount} reviewer{recommenderCount !== 1 ? 's' : ''} like you played this</div>
+              <div class="rec-meta">
+                {isFallback
+                  ? `${recommenderCount} review${recommenderCount !== 1 ? 's' : ''}`
+                  : `${recommenderCount} reviewer${recommenderCount !== 1 ? 's' : ''} like you played this`
+                }
+              </div>
             </div>
           </a>
         ))}
