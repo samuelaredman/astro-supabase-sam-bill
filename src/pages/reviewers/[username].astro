@@ -410,12 +410,12 @@ try {
   libSettingsRow = data;
 } catch (_) { /* columns not yet available, use defaults below */ }
 
-// Fetch library with is_hidden; fall back to query without it if column missing
+// Fetch library with is_hidden/is_owned; fall back to query without them if columns missing
 let libraryData: any[] | null = null;
 try {
   const { data, error } = await db
     .from('user_game_status')
-    .select('status, is_hidden, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
+    .select('status, is_hidden, is_owned, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
     .eq('profile_id', reviewer.id)
     .order('updated_at', { ascending: false });
   if (!error) {
@@ -614,6 +614,7 @@ const libraryJson = JSON.stringify(allLibraryItems.map((item: any) => ({
   slug:     item.games?.slug ?? '',
   cover:    item.games?.cover_img_url ?? null,
   status:   item.status,
+  owned:    item.is_owned ?? false,
   isHidden: item.is_hidden ?? false,
   updatedAt: item.updated_at ?? '',
   playtime: item.steam_playtime_minutes ?? null,
@@ -2556,7 +2557,10 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         if (it.isHidden) return false
       }
       if (_libFilter !== 'all') {
-        if (_libFilter === 'completed') {
+        if (_libFilter === 'owned') {
+          // Owned is an independent flag, not tied to a single status
+          if (!it.owned) return false
+        } else if (_libFilter === 'completed') {
           if (it.status !== 'completed' && it.status !== 'hundred_percent') return false
         } else {
           if (it.status !== _libFilter) return false
@@ -2644,14 +2648,17 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     if (!row) return
     var counts = {}
     _libItems.forEach(function(it) { counts[it.status] = (counts[it.status] || 0) + 1 })
+    var ownedCount = _libItems.filter(function(it) { return it.owned }).length
     var total = _libItems.length
     var pills = [{ key: 'all', label: 'All', count: total }]
     var order = ['playing','completed','hundred_percent','want_to_play','owned','dropped']
     var hiddenTabsSet = new Set(_libIsOwn ? [] : (_libSettings.hiddenTabs || []))
     order.forEach(function(s) {
-      if (!counts[s]) return
+      var count = s === 'owned' ? ownedCount
+        : s === 'completed' ? (counts['completed'] || 0) + (counts['hundred_percent'] || 0)
+        : counts[s]
+      if (!count) return
       if (!_libIsOwn && hiddenTabsSet.has(s)) return  // hidden from public view
-      var count = s === 'completed' ? (counts['completed'] || 0) + (counts['hundred_percent'] || 0) : counts[s]
       pills.push({ key: s, label: (STATUS_META[s]?.icon || '') + ' ' + STATUS_META[s]?.label, count: count })
     })
     var pillsHtml = pills.map(function(p) {
@@ -2699,7 +2706,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     if (res.ok) {
       ids.forEach(function(gid) {
         var it = _libItems.find(function(x) { return x.gameId === gid })
-        if (it) it.status = status
+        if (it) { it.status = status; it.owned = status !== 'want_to_play' }
       })
       _libSelected.clear()
       if (sel) sel.value = ''
