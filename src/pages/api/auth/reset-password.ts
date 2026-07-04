@@ -23,7 +23,12 @@ export const POST: APIRoute = async (context) => {
     { auth: { flowType: "implicit", persistSession: false } }
   );
 
-  const redirectTo = new URL("/reset-password-confirm", context.url.origin).toString();
+  // Use the configured `site` (astro.config.ts), not context.url.origin —
+  // the request-derived origin doesn't reliably match Supabase's Redirect
+  // URLs allowlist behind Netlify, which silently bounces the email link to
+  // the fallback Site URL with #error=access_denied&error_code=otp_expired
+  // instead of landing on this page.
+  const redirectTo = new URL("/reset-password-confirm", context.site ?? context.url.origin).toString();
 
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
     redirectTo,
