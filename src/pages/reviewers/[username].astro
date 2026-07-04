@@ -7,6 +7,7 @@ import ReportModal from '../../components/ReportModal.astro';
 import EditModal from '../../components/EditModal.astro';
 import CropModal from '../../components/CropModal.astro';
 import ReviewCard from '../../components/ReviewCard.astro';
+import ListCard from '../../components/ListCard.astro';
 import ShareButton from '../../components/ShareButton.astro';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
@@ -117,6 +118,184 @@ if (user) {
     }
   }
 }
+
+// ── LISTS ──
+const { data: profileListsRaw } = await (supabase as any)
+  .from('lists')
+  .select('id, title, is_ranked, visibility, cover_image_url, updated_at')
+  .eq('profile_id', reviewer.id)
+  .order('updated_at', { ascending: false });
+
+const profileListIds = (profileListsRaw ?? []).map((l: any) => l.id);
+
+const [{ data: coverEntriesRaw }, { data: allEntriesRaw }] = profileListIds.length > 0
+  ? await Promise.all([
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id, games(id, cover_img_url, date_released)')
+        .in('list_id', profileListIds)
+        .order('position', { ascending: true, nullsFirst: false })
+        .order('added_at', { ascending: true }),
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id')
+        .in('list_id', profileListIds),
+    ])
+  : [{ data: [] }, { data: [] }];
+
+const coversByListId: Record<string, string[]> = {};
+const gameIdsByListId: Record<string, string[]> = {};
+const yearsByListId: Record<string, number[]> = {};
+for (const e of coverEntriesRaw ?? []) {
+  const cover = igdbCover(e.games?.cover_img_url, 't_cover_big');
+  if (cover) {
+    if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
+    if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
+  }
+  if (e.games?.id) {
+    if (!gameIdsByListId[e.list_id]) gameIdsByListId[e.list_id] = [];
+    gameIdsByListId[e.list_id].push(e.games.id);
+  }
+  if (e.games?.date_released) {
+    const yr = new Date(e.games.date_released).getFullYear();
+    if (!yearsByListId[e.list_id]) yearsByListId[e.list_id] = [];
+    yearsByListId[e.list_id].push(yr);
+  }
+}
+const entryCountByListId: Record<string, number> = {};
+for (const e of allEntriesRaw ?? []) {
+  entryCountByListId[e.list_id] = (entryCountByListId[e.list_id] ?? 0) + 1;
+}
+let profileLists = (profileListsRaw ?? []).map((l: any) => ({
+  ...l,
+  coverUrls: coversByListId[l.id] ?? [],
+  entryCount: entryCountByListId[l.id] ?? 0,
+}));
+
+// ── SAVED LISTS ──
+let savedLists: any[] = []
+const savedGameIdsByListId: Record<string, string[]> = {};
+const savedYearsByListId: Record<string, number[]> = {};
+{
+  const { data: savedRaw } = await (supabase as any)
+    .from('list_saves')
+    .select('list_id, is_hidden, lists(id, title, is_ranked, visibility, cover_image_url, updated_at, profiles(id, username, avatar_url))')
+    .eq('profile_id', reviewer.id)
+    .order('created_at', { ascending: false })
+
+  // Owners see all saves; others only see non-hidden ones
+  const rawSavedLists = (savedRaw ?? [])
+    .filter((s: any) => s.lists && (isOwnProfile || !s.is_hidden))
+    .map((s: any) => ({ ...s.lists, isHidden: s.is_hidden ?? false }))
+
+  if (rawSavedLists.length > 0) {
+    const savedListIds = rawSavedLists.map((l: any) => l.id)
+    const [{ data: savedCoversRaw }, { data: savedEntriesRaw }] = await Promise.all([
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id, games(id, cover_img_url, date_released)')
+        .in('list_id', savedListIds)
+        .order('position', { ascending: true, nullsFirst: false })
+        .order('added_at', { ascending: true }),
+      (supabase as any)
+        .from('list_entries')
+        .select('list_id')
+        .in('list_id', savedListIds),
+    ])
+    const savedCoversByListId: Record<string, string[]> = {}
+    for (const e of savedCoversRaw ?? []) {
+      const cover = igdbCover(e.games?.cover_img_url, 't_cover_big')
+      if (cover) {
+        if (!savedCoversByListId[e.list_id]) savedCoversByListId[e.list_id] = []
+        if (savedCoversByListId[e.list_id].length < 4) savedCoversByListId[e.list_id].push(cover)
+      }
+      if (e.games?.id) {
+        if (!savedGameIdsByListId[e.list_id]) savedGameIdsByListId[e.list_id] = [];
+        savedGameIdsByListId[e.list_id].push(e.games.id);
+      }
+      if (e.games?.date_released) {
+        const yr = new Date(e.games.date_released).getFullYear();
+        if (!savedYearsByListId[e.list_id]) savedYearsByListId[e.list_id] = [];
+        savedYearsByListId[e.list_id].push(yr);
+      }
+    }
+    const savedEntryCountByListId: Record<string, number> = {}
+    for (const e of savedEntriesRaw ?? []) {
+      savedEntryCountByListId[e.list_id] = (savedEntryCountByListId[e.list_id] ?? 0) + 1
+    }
+    savedLists = rawSavedLists.map((l: any) => ({
+      ...l,
+      ownerUsername: l.profiles?.username,
+      ownerAvatar: l.profiles?.avatar_url,
+      coverUrls: savedCoversByListId[l.id] ?? [],
+      entryCount: savedEntryCountByListId[l.id] ?? 0,
+    }))
+  }
+}
+
+// ── LIST METADATA for genre/platform/dev filters ──
+{
+  const allGameIds = [...new Set([
+    ...Object.values(gameIdsByListId).flat(),
+    ...Object.values(savedGameIdsByListId).flat(),
+  ])];
+  if (allGameIds.length > 0) {
+    const [{ data: genreRows }, { data: platformRows }, { data: companyRows }] = await Promise.all([
+      (supabase as any).from('game_genres').select('game_id, genres(name)').in('game_id', allGameIds),
+      (supabase as any).from('game_platforms').select('game_id, platforms(name)').in('game_id', allGameIds),
+      (supabase as any).from('game_companies').select('game_id, role, developers(name)').eq('role', 'developer').in('game_id', allGameIds),
+    ]);
+    const genresByGameId: Record<string, string[]> = {};
+    const platformsByGameId: Record<string, string[]> = {};
+    const devsByGameId: Record<string, string[]> = {};
+    for (const row of genreRows ?? []) {
+      if (row.genres?.name) { if (!genresByGameId[row.game_id]) genresByGameId[row.game_id] = []; genresByGameId[row.game_id].push(row.genres.name); }
+    }
+    for (const row of platformRows ?? []) {
+      if (row.platforms?.name) { if (!platformsByGameId[row.game_id]) platformsByGameId[row.game_id] = []; platformsByGameId[row.game_id].push(row.platforms.name); }
+    }
+    for (const row of companyRows ?? []) {
+      if (row.developers?.name) { if (!devsByGameId[row.game_id]) devsByGameId[row.game_id] = []; devsByGameId[row.game_id].push(row.developers.name); }
+    }
+    function buildListMeta(listId: string, gids: Record<string, string[]>, yrs: Record<string, number[]>) {
+      const ids = gids[listId] ?? [];
+      const genres = [...new Set(ids.flatMap((id: string) => genresByGameId[id] ?? []))].sort();
+      const platforms = [...new Set(ids.flatMap((id: string) => platformsByGameId[id] ?? []))].sort();
+      const devs = [...new Set(ids.flatMap((id: string) => devsByGameId[id] ?? []))].sort();
+      const years = yrs[listId] ?? [];
+      return { genres, platforms, devs, minYear: years.length ? Math.min(...years) : null, maxYear: years.length ? Math.max(...years) : null };
+    }
+    profileLists = profileLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, gameIdsByListId, yearsByListId) }));
+    savedLists = savedLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, savedGameIdsByListId, savedYearsByListId) }));
+  }
+}
+
+// Per-list review metrics (avg score + total hours from user's own reviews)
+{
+  const reviewByGameId: Record<string, { score: number; hours: number }> = {};
+  for (const r of publishedReviews) {
+    if ((r as any).games?.id) {
+      reviewByGameId[(r as any).games.id] = { score: (r as any).score, hours: (r as any).play_time_hours ?? 0 };
+    }
+  }
+  function buildListReviewMeta(gameIds: string[]) {
+    const reviews = gameIds.map(id => reviewByGameId[id]).filter(Boolean);
+    const avgScore = reviews.length > 0
+      ? reviews.reduce((s: number, r: any) => s + r.score, 0) / reviews.length
+      : null;
+    const totalHours = reviews.reduce((s: number, r: any) => s + r.hours, 0);
+    return { avgScore, totalHours };
+  }
+  profileLists = profileLists.map((l: any) => ({ ...l, ...buildListReviewMeta(gameIdsByListId[l.id] ?? []) }));
+  savedLists = savedLists.map((l: any) => ({ ...l, ...buildListReviewMeta(savedGameIdsByListId[l.id] ?? []) }));
+}
+
+const myGenres = [...new Set(profileLists.flatMap((l: any) => l.genres ?? []))].sort() as string[];
+const myPlatforms = [...new Set(profileLists.flatMap((l: any) => l.platforms ?? []))].sort() as string[];
+const myDevs = [...new Set(profileLists.flatMap((l: any) => l.devs ?? []))].sort() as string[];
+const savedGenres = [...new Set(savedLists.flatMap((l: any) => l.genres ?? []))].sort() as string[];
+const savedPlatforms = [...new Set(savedLists.flatMap((l: any) => l.platforms ?? []))].sort() as string[];
+const savedDevs = [...new Set(savedLists.flatMap((l: any) => l.devs ?? []))].sort() as string[];
 
 // favorite game — find reviewer's own review of it
 const favGame = reviewer.favorite_game ?? null
@@ -659,6 +838,35 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     .expand-btn{font-size:11px;color:var(--accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;padding:0;font-weight:500}
     .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
     .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
+    .empty-state-tab{padding:60px 0;text-align:center;color:var(--text-tertiary)}
+    .lists-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;padding:4px 0}
+    .btn-create-list{display:inline-flex;align-items:center;gap:6px;padding:9px 22px;border-radius:22px;background:var(--accent);color:#fff;font-size:13px;font-weight:500;font-family:inherit;text-decoration:none;border:none;cursor:pointer;transition:opacity .15s}
+    .btn-create-list:hover{opacity:.85}
+    .saved-list-wrap{position:relative}
+    .saved-hide-btn{position:absolute;top:6px;right:6px;z-index:3;background:rgba(0,0,0,.55);border:none;border-radius:6px;padding:3px 6px;font-size:13px;line-height:1;cursor:pointer;opacity:0;transition:opacity .15s}
+    .saved-list-wrap:hover .saved-hide-btn{opacity:1}
+    .saved-list-wrap.is-hidden .list-card{opacity:.5}
+    .saved-list-wrap.is-hidden::after{content:'';position:absolute;inset:0;border:2px dashed rgba(150,150,150,.35);border-radius:14px;pointer-events:none}
+    /* edit mode — always show hide buttons */
+    .saved-edit-mode .saved-hide-btn{opacity:1}
+    /* list section header */
+    .list-section-hdr{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+    .list-section-title{font-size:15px;font-weight:700;color:var(--text-primary)}
+    .list-section-count{font-size:12px;color:var(--text-tertiary);background:var(--tag-bg);border:1px solid var(--border);border-radius:10px;padding:1px 8px}
+    .list-section-actions{margin-left:auto;display:flex;align-items:center;gap:6px}
+    .list-settings-btn{background:none;border:1px solid var(--border);border-radius:8px;padding:4px 9px;font-size:12px;color:var(--text-secondary);cursor:pointer;font-family:inherit;transition:all .15s}
+    .list-settings-btn:hover,.list-settings-btn.active{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    /* filter bar */
+    .lf-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+    .lf-search{background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;outline:none;min-width:140px;max-width:200px}
+    .lf-search:focus{border-color:var(--accent)}
+    .lf-select{background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;padding:5px 28px 5px 10px;font-size:12px;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
+    .lf-select:focus{border-color:var(--accent)}
+    .lf-select.has-value{border-color:var(--accent);color:var(--accent)}
+    .lf-checkbox{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap}
+    .lf-checkbox input{accent-color:var(--accent);cursor:pointer}
+    /* no-results */
+    .list-no-results{padding:32px 0;text-align:center;color:var(--text-tertiary);font-size:13px}
     .watchlist-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:14px;padding:20px 0}
     .watchlist-card{display:block;text-decoration:none}
     .watchlist-cover{width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15)}
@@ -978,6 +1186,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     <a href={`/reviewers/${reviewer.username}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`}>Stats</a>
     <a href={`/reviewers/${reviewer.username}?tab=library`} class={`tab-link ${activeTab === 'library' ? 'active' : ''}`}>Library</a>
     <a href={`/reviewers/${reviewer.username}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>Reviews {publishedReviews.length > 0 && <span class="tab-count">{publishedReviews.length}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {(profileLists.length + savedLists.length) > 0 && <span class="tab-count">{profileLists.length + savedLists.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Game Recs</a>
     <a href={`/reviewers/${reviewer.username}?tab=followers`} class={`tab-link ${activeTab === 'followers' ? 'active' : ''}`}>Followers {followerCount ? `(${followerCount})` : ''}</a>
     <a href={`/reviewers/${reviewer.username}?tab=following`} class={`tab-link ${activeTab === 'following' ? 'active' : ''}`}>Following {followingCount ? `(${followingCount})` : ''}</a>
@@ -1394,6 +1603,209 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         ))}
       </div>
     )}
+  </div>
+
+  <!-- ── LISTS TAB ── -->
+  <div class={`tab-panel ${activeTab === 'lists' ? 'active' : ''}`} data-tab="lists">
+
+    <!-- Section switcher (only shown when saved lists exist) -->
+    {(savedLists.length > 0 || isOwnProfile) && (
+      <div class="sort-tabs" style="margin-bottom: 20px">
+        <button class="sort-tab list-filter-tab active" onclick="switchListsSection('my', this)">
+          {isOwnProfile ? 'My Lists' : `${reviewer.username}'s Lists`}
+        </button>
+        <button class="sort-tab list-filter-tab" onclick="switchListsSection('saved', this)">
+          Saved {savedLists.length > 0 && <span style="opacity:.6">({savedLists.length})</span>}
+        </button>
+      </div>
+    )}
+
+    <!-- ── MY LISTS SECTION ── -->
+    <div id="lists-my-section">
+      {profileLists.length === 0 ? (
+        <div class="empty-state-tab">
+          <div class="empty-title">{isOwnProfile ? "You haven't created any lists yet" : `@${reviewer.username} hasn't created any lists yet`}</div>
+          {isOwnProfile && (
+            <button class="btn-create-list" onclick="createNewList(this)">+ Create your first list</button>
+          )}
+        </div>
+      ) : (
+        <>
+          <!-- Filter bar -->
+          <div class="lf-bar">
+            <input class="lf-search" type="text" placeholder="Search lists…" oninput="searchLists('my',this.value)" />
+            <select class="lf-select" onchange="setListSort('my',this.value)">
+              <option value="recent">Recent</option>
+              <option value="oldest">Oldest</option>
+              <option value="az">A–Z</option>
+              <option value="most-games">Most Games</option>
+              <option value="highest-rated">Highest Rated</option>
+              <option value="lowest-rated">Lowest Rated</option>
+              <option value="most-hours">Most Hours</option>
+            </select>
+            {myGenres.length > 0 && (
+              <select class="lf-select" onchange="setListFilter('my','genre',this.value,this)">
+                <option value="">All Genres</option>
+                {myGenres.map((g: string) => <option value={g}>{g}</option>)}
+              </select>
+            )}
+            {myPlatforms.length > 0 && (
+              <select class="lf-select" onchange="setListFilter('my','platform',this.value,this)">
+                <option value="">All Platforms</option>
+                {myPlatforms.map((p: string) => <option value={p}>{p}</option>)}
+              </select>
+            )}
+            {myDevs.length > 0 && (
+              <select class="lf-select" onchange="setListFilter('my','dev',this.value,this)">
+                <option value="">All Devs</option>
+                {myDevs.map((d: string) => <option value={d}>{d}</option>)}
+              </select>
+            )}
+            <label class="lf-checkbox">
+              <input type="checkbox" onchange="setListCheckboxFilter('my','ranked',this.checked)" /> Ranked
+            </label>
+            {isOwnProfile && (
+              <label class="lf-checkbox">
+                <input type="checkbox" onchange="setListCheckboxFilter('my','private',this.checked)" /> Private
+              </label>
+            )}
+          </div>
+
+          <div class="lists-grid" id="my-lists-grid">
+            {profileLists.map((list: any) => (
+              <div class="list-card-wrapper"
+                data-title={list.title}
+                data-updated={list.updated_at}
+                data-count={list.entryCount}
+                data-genres={(list.genres ?? []).join(',')}
+                data-platforms={(list.platforms ?? []).join(',')}
+                data-devs={(list.devs ?? []).join(',')}
+                data-min-year={list.minYear ?? ''}
+                data-avg-score={list.avgScore != null ? list.avgScore.toFixed(2) : ''}
+                data-total-hours={list.totalHours ?? 0}
+                data-ranked={list.is_ranked ? 'true' : 'false'}
+                data-visibility={list.visibility}
+              >
+                <ListCard
+                  id={list.id}
+                  title={list.title}
+                  isRanked={list.is_ranked}
+                  visibility={list.visibility}
+                  entryCount={list.entryCount}
+                  coverUrls={list.coverUrls}
+                  coverImageUrl={list.cover_image_url}
+                  showOwner={false}
+                />
+              </div>
+            ))}
+          </div>
+          <div class="list-no-results" id="my-no-results" style="display:none">No lists match these filters.</div>
+          {isOwnProfile && (
+            <div style="margin-top: 20px">
+              <button class="btn-create-list" onclick="createNewList(this)">+ New list</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+
+    <!-- ── SAVED LISTS SECTION ── -->
+    <div id="lists-saved-section" style="display: none">
+      {savedLists.length === 0 ? (
+        <div class="empty-state-tab">
+          <div class="empty-title">{isOwnProfile ? "No saved lists yet" : `@${reviewer.username} hasn't saved any public lists yet`}</div>
+          {isOwnProfile && <p style="font-size: 13px; color: var(--text-tertiary); margin-top: 8px">Browse public lists and hit "Save list" to bookmark them here</p>}
+        </div>
+      ) : (
+        <>
+          <!-- Filter bar + settings button -->
+          <div class="lf-bar">
+            <input class="lf-search" type="text" placeholder="Search lists…" oninput="searchLists('saved',this.value)" />
+            <select class="lf-select" onchange="setListSort('saved',this.value)">
+              <option value="recent">Recent</option>
+              <option value="oldest">Oldest</option>
+              <option value="az">A–Z</option>
+              <option value="most-games">Most Games</option>
+              <option value="highest-rated">Highest Rated</option>
+              <option value="lowest-rated">Lowest Rated</option>
+              <option value="most-hours">Most Hours</option>
+            </select>
+            {savedGenres.length > 0 && (
+              <select class="lf-select" onchange="setListFilter('saved','genre',this.value,this)">
+                <option value="">All Genres</option>
+                {savedGenres.map((g: string) => <option value={g}>{g}</option>)}
+              </select>
+            )}
+            {savedPlatforms.length > 0 && (
+              <select class="lf-select" onchange="setListFilter('saved','platform',this.value,this)">
+                <option value="">All Platforms</option>
+                {savedPlatforms.map((p: string) => <option value={p}>{p}</option>)}
+              </select>
+            )}
+            {savedDevs.length > 0 && (
+              <select class="lf-select" onchange="setListFilter('saved','dev',this.value,this)">
+                <option value="">All Devs</option>
+                {savedDevs.map((d: string) => <option value={d}>{d}</option>)}
+              </select>
+            )}
+            <label class="lf-checkbox">
+              <input type="checkbox" onchange="setListCheckboxFilter('saved','ranked',this.checked)" /> Ranked
+            </label>
+            {isOwnProfile && (
+              <label class="lf-checkbox">
+                <input type="checkbox" onchange="setListCheckboxFilter('saved','hidden',this.checked)" /> Hidden
+              </label>
+            )}
+            {isOwnProfile && (
+              <button id="saved-settings-btn" class="list-settings-btn" style="margin-left:auto" onclick="toggleSavedEditMode(this)" title="Manage saved list visibility">
+                ⚙ Manage
+              </button>
+            )}
+          </div>
+
+          <div class="lists-grid" id="saved-lists-grid">
+            {savedLists.map((list: any) => (
+              <div class={`list-card-wrapper saved-list-wrap${list.isHidden ? ' is-hidden' : ''}`}
+                data-title={list.title}
+                data-updated={list.updated_at}
+                data-count={list.entryCount}
+                data-genres={(list.genres ?? []).join(',')}
+                data-platforms={(list.platforms ?? []).join(',')}
+                data-devs={(list.devs ?? []).join(',')}
+                data-min-year={list.minYear ?? ''}
+                data-avg-score={list.avgScore != null ? list.avgScore.toFixed(2) : ''}
+                data-total-hours={list.totalHours ?? 0}
+                data-ranked={list.is_ranked ? 'true' : 'false'}
+                data-hidden={list.isHidden ? 'true' : 'false'}
+              >
+                <ListCard
+                  id={list.id}
+                  title={list.title}
+                  isRanked={list.is_ranked}
+                  visibility={list.visibility}
+                  entryCount={list.entryCount}
+                  coverUrls={list.coverUrls}
+                  coverImageUrl={list.cover_image_url}
+                  ownerUsername={list.ownerUsername}
+                  ownerAvatar={list.ownerAvatar}
+                  showOwner={true}
+                />
+                {isOwnProfile && (
+                  <button
+                    class="saved-hide-btn"
+                    data-list-id={list.id}
+                    data-hidden={String(list.isHidden)}
+                    onclick="toggleSaveHidden(this)"
+                    title={list.isHidden ? 'Show on profile' : 'Hide from profile'}
+                  >{list.isHidden ? '👁' : '🫥'}</button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div class="list-no-results" id="saved-no-results" style="display:none">No lists match these filters.</div>
+        </>
+      )}
+    </div>
   </div>
 
 </div>
@@ -1978,6 +2390,138 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   cards.forEach(function(card) { list.appendChild(card) })
 }
   window.sortReviews = sortReviews
+
+  // ── SWITCH LISTS SECTION ──
+  function switchListsSection(type, btn) {
+    document.querySelectorAll('.list-filter-tab').forEach(function(b) { b.classList.remove('active') })
+    btn.classList.add('active')
+    var mySection = document.getElementById('lists-my-section')
+    var savedSection = document.getElementById('lists-saved-section')
+    if (mySection) mySection.style.display = type === 'my' ? '' : 'none'
+    if (savedSection) savedSection.style.display = type === 'saved' ? '' : 'none'
+  }
+  window.switchListsSection = switchListsSection
+
+  // ── LIST FILTER STATE ──
+  var _listState = {
+    my:    { sort: 'recent', genre: '', platform: '', dev: '', search: '', ranked: false, private: false },
+    saved: { sort: 'recent', genre: '', platform: '', dev: '', search: '', ranked: false, hidden: false },
+  }
+
+  function applyListFilters(section) {
+    var grid = document.getElementById(section + '-lists-grid')
+    var noResults = document.getElementById(section + '-no-results')
+    if (!grid) return
+    var state = _listState[section]
+    var items = Array.from(grid.querySelectorAll('.list-card-wrapper'))
+
+    // filter
+    items.forEach(function(item) {
+      var show = true
+      if (state.search) {
+        var q = state.search.toLowerCase()
+        if ((item.dataset.title || '').toLowerCase().indexOf(q) === -1) show = false
+      }
+      if (show && state.genre) {
+        var genres = (item.dataset.genres || '').split(',')
+        if (genres.indexOf(state.genre) === -1) show = false
+      }
+      if (show && state.platform) {
+        var platforms = (item.dataset.platforms || '').split(',')
+        if (platforms.indexOf(state.platform) === -1) show = false
+      }
+      if (show && state.dev) {
+        var devs = (item.dataset.devs || '').split(',')
+        if (devs.indexOf(state.dev) === -1) show = false
+      }
+      if (show && state.ranked && item.dataset.ranked !== 'true') show = false
+      if (show && state.private && item.dataset.visibility !== 'private') show = false
+      if (show && state.hidden && item.dataset.hidden !== 'true') show = false
+      item.style.display = show ? '' : 'none'
+    })
+
+    // sort visible
+    var visible = items.filter(function(i) { return i.style.display !== 'none' })
+    visible.sort(function(a, b) {
+      if (state.sort === 'oldest') return new Date(a.dataset.updated) - new Date(b.dataset.updated)
+      if (state.sort === 'az') return (a.dataset.title || '').localeCompare(b.dataset.title || '')
+      if (state.sort === 'most-games') return parseInt(b.dataset.count || '0') - parseInt(a.dataset.count || '0')
+      if (state.sort === 'highest-rated') {
+        var as = parseFloat(a.dataset.avgScore || '-1'), bs = parseFloat(b.dataset.avgScore || '-1')
+        if (as < 0 && bs < 0) return 0
+        if (as < 0) return 1
+        if (bs < 0) return -1
+        return bs - as
+      }
+      if (state.sort === 'lowest-rated') {
+        var as = parseFloat(a.dataset.avgScore || '-1'), bs = parseFloat(b.dataset.avgScore || '-1')
+        if (as < 0 && bs < 0) return 0
+        if (as < 0) return 1
+        if (bs < 0) return -1
+        return as - bs
+      }
+      if (state.sort === 'most-hours') return parseInt(b.dataset.totalHours || '0') - parseInt(a.dataset.totalHours || '0')
+      return new Date(b.dataset.updated) - new Date(a.dataset.updated) // recent default
+    })
+    visible.forEach(function(i) { grid.appendChild(i) })
+
+    if (noResults) noResults.style.display = visible.length === 0 ? '' : 'none'
+  }
+
+  window.setListSort = function(section, sortKey) {
+    _listState[section].sort = sortKey
+    applyListFilters(section)
+  }
+
+  window.setListFilter = function(section, type, value, selectEl) {
+    _listState[section][type] = value
+    if (selectEl) selectEl.classList.toggle('has-value', !!value)
+    applyListFilters(section)
+  }
+
+  window.searchLists = function(section, value) {
+    _listState[section].search = value.trim()
+    applyListFilters(section)
+  }
+
+  window.setListCheckboxFilter = function(section, type, checked) {
+    _listState[section][type] = checked
+    applyListFilters(section)
+  }
+
+  window.toggleSavedEditMode = function(btn) {
+    var grid = document.getElementById('saved-lists-grid')
+    if (!grid) return
+    var active = grid.classList.toggle('saved-edit-mode')
+    btn.textContent = active ? '✓ Done' : '⚙ Manage'
+    btn.classList.toggle('active', active)
+  }
+
+  // ── TOGGLE SAVED LIST HIDDEN ──
+  window.toggleSaveHidden = async function(btn) {
+    var listId = btn.dataset.listId
+    var isHidden = btn.dataset.hidden === 'true'
+    var newHidden = !isHidden
+    btn.disabled = true
+    try {
+      var res = await fetch('/api/lists/toggle-save-hidden', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ list_id: listId, hidden: newHidden })
+      })
+      if (!res.ok) { var d = await res.json(); throw new Error(d.error || 'Failed') }
+      btn.dataset.hidden = newHidden ? 'true' : 'false'
+      btn.title = newHidden ? 'Show on profile' : 'Hide from profile'
+      btn.textContent = newHidden ? '👁' : '🫥'
+      var wrap = btn.closest('.saved-list-wrap')
+      if (wrap) {
+        wrap.classList.toggle('is-hidden', newHidden)
+        wrap.dataset.hidden = newHidden ? 'true' : 'false'
+        if (_listState.saved.hidden) applyListFilters('saved')
+      }
+    } catch(e) { console.error('[toggle-save-hidden]', e) }
+    btn.disabled = false
+  }
 
   // ── LIBRARY ──
   var _libItems = JSON.parse(libraryJson)
@@ -3211,6 +3755,30 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       btn.textContent = 'Sync now';
     }
   };
+</script>
+
+<script is:inline>
+async function createNewList(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+  try {
+    var res = await fetch('/api/lists/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Untitled List', visibility: 'public', shared_to_feed: false }),
+    });
+    var data = await res.json();
+    if (res.ok && data.list_id) {
+      window.location.href = '/lists/' + data.list_id + '/edit';
+    } else {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.label || '+ New list';
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = btn.dataset.label || '+ New list';
+  }
+}
 </script>
 <ReportModal />
 <EditModal />
