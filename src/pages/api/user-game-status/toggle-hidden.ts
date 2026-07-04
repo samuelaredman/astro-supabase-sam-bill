@@ -26,6 +26,7 @@ export const POST: APIRoute = async (context) => {
       game_id,
       status: "owned",
       is_hidden: hidden,
+      is_owned: true,
       updated_at: new Date().toISOString(),
     });
     if (error) {

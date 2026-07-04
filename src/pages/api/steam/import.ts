@@ -145,6 +145,7 @@ export const POST: APIRoute = async (context) => {
         profile_id: profile.id,
         game_id: game.id,
         status: 'owned',
+        is_owned: true,
         steam_playtime_minutes: playtime,
       });
     } else {

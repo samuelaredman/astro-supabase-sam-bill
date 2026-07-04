@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
 
-const VALID_STATUSES = ["playing", "want_to_play", "owned", "completed", "hundred_percent", "dropped", "hidden"] as const;
+const VALID_STATUSES = ["playing", "want_to_play", "owned", "completed", "hundred_percent", "dropped"] as const;
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -30,11 +30,14 @@ export const POST: APIRoute = async (context) => {
     return json({ affected: game_ids.length });
   }
 
-  // set_status — upsert all
+  // set_status — upsert all. Owned is not mutually exclusive with status —
+  // every status except want_to_play implies ownership by default.
+  const isOwned = status !== "want_to_play";
   const rows = game_ids.map((game_id: string) => ({
     profile_id: profile.id,
     game_id,
     status,
+    is_owned: isOwned,
     updated_at: new Date().toISOString(),
   }));
   const { error } = await db.from("user_game_status")

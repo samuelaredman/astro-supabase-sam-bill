@@ -61,11 +61,15 @@ const { count: wantToPlayCount } = await db
   .eq('game_id', game.id).eq('status', 'want_to_play');
 
 let currentGameStatus: string | null = null;
+let currentGameOwned = false;
+let currentGameHidden = false;
 if (currentProfileId) {
   const { data: statusRow } = await db
-    .from('user_game_status').select('status')
+    .from('user_game_status').select('status, is_owned, is_hidden')
     .eq('profile_id', currentProfileId).eq('game_id', game.id).maybeSingle();
   currentGameStatus = statusRow?.status ?? null;
+  currentGameOwned = statusRow?.is_owned ?? false;
+  currentGameHidden = statusRow?.is_hidden ?? false;
 }
 
 // ── SOCIAL TRACKING — people the current user follows who have tracked this game ──
@@ -609,6 +613,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .track-pill[data-status="completed"].active{background:rgba(34,197,94,.1);border-color:#22c55e;color:#22c55e}
     .track-pill[data-status="hundred_percent"].active{background:rgba(251,191,36,.1);border-color:#fbbf24;color:#fbbf24}
     .track-pill[data-status="dropped"].active{background:rgba(239,68,68,.08);border-color:#ef4444;color:#ef4444}
+    .track-toggles{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px}
+    .owned-toggle{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text-secondary);cursor:pointer;width:fit-content}
+    .owned-toggle input{width:14px;height:14px;accent-color:#94a3b8;cursor:pointer}
     .review-nudge{display:none;margin-top:12px;padding:10px 14px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);border-radius:10px;font-size:12px;color:var(--text-secondary);display:none;align-items:center;justify-content:space-between;gap:10px}
     .review-nudge-text{line-height:1.4}
     .review-nudge-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
@@ -848,7 +855,6 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
           { s: 'completed',       icon: '✓',  label: 'Completed',    title: "I'm done with this game" },
           { s: 'hundred_percent', icon: '💯', label: '100%',         title: 'Completed everything — all achievements/trophies' },
           { s: 'dropped',         icon: '✗',  label: 'Dropped',      title: 'Started it, moved on' },
-          ...(isLoggedIn ? [{ s: 'hidden' as const, icon: '🫥', label: 'Hidden', title: 'In your library but hidden from others' }] : []),
         ] as const).map(({ s, icon, label, title }) => (
           <button
             class={`track-pill${currentGameStatus === s ? ' active' : ''}`}
@@ -863,6 +869,22 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
             )}
           </button>
         ))}
+      </div>
+      <div class="track-toggles">
+        <label
+          class="owned-toggle"
+          id="ownedToggle"
+          style={`display:${currentGameStatus && currentGameStatus !== 'owned' ? 'flex' : 'none'}`}
+        >
+          <input type="checkbox" id="ownedCheckbox" data-game-id={game.id} checked={currentGameOwned} />
+          <span>📦 I own this</span>
+        </label>
+        {isLoggedIn && (
+          <label class="owned-toggle" id="hiddenToggle" title="Keep this out of your public library">
+            <input type="checkbox" id="hiddenCheckbox" data-game-id={game.id} checked={currentGameHidden} />
+            <span>🫥 Hide from others</span>
+          </label>
+        )}
       </div>
       <div class="review-nudge" id="reviewNudge">
         <span class="review-nudge-text">Nice! Want to share your thoughts on <strong>{game.title}</strong>?</span>
@@ -1193,22 +1215,91 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         var nudge = document.getElementById('reviewNudge');
         if (nudge) nudge.style.display = (newStatus === 'completed' || newStatus === 'hundred_percent') ? 'flex' : 'none';
 
+        // Untracking the game clears hidden too — the row it lived on is gone
+        var hiddenCheckboxEl = document.getElementById('hiddenCheckbox');
+        var prevHiddenChecked = hiddenCheckboxEl ? hiddenCheckboxEl.checked : false;
+        if (!newStatus && hiddenCheckboxEl) hiddenCheckboxEl.checked = false;
+
+        // Owned is not mutually exclusive with status — every status except
+        // want_to_play auto-selects it, but the "owned" pill itself makes the
+        // separate checkbox redundant. The checkbox can still be manually
+        // unchecked afterwards (e.g. played it on a friend's console).
+        var ownedToggle = document.getElementById('ownedToggle');
+        var ownedCheckbox = document.getElementById('ownedCheckbox');
+        var prevOwnedDisplay = ownedToggle ? ownedToggle.style.display : 'none';
+        var prevOwnedChecked = ownedCheckbox ? ownedCheckbox.checked : false;
+        var newOwned = !!newStatus && newStatus !== 'want_to_play';
+        if (ownedToggle) ownedToggle.style.display = (newStatus && newStatus !== 'owned') ? 'flex' : 'none';
+        if (ownedCheckbox) ownedCheckbox.checked = newOwned;
+
         try {
           var res = await fetch('/api/user-game-status/set', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ game_id: pill.dataset.gameId, status: newStatus }),
+            body: JSON.stringify({ game_id: pill.dataset.gameId, status: newStatus, owned: newOwned }),
           });
           if (!res.ok) throw new Error();
         } catch(e) {
           // Revert on failure
           trackPills.querySelectorAll('.track-pill').forEach(function(p) {
-            p.classList.toggle('active', p.dataset.status === clickedStatus && !isActive);
+            p.classList.toggle('active', p.dataset.status === clickedStatus && isActive);
           });
           if (nudge) nudge.style.display = 'none';
+          if (ownedToggle) ownedToggle.style.display = prevOwnedDisplay;
+          if (ownedCheckbox) ownedCheckbox.checked = prevOwnedChecked;
+          if (hiddenCheckboxEl) hiddenCheckboxEl.checked = prevHiddenChecked;
           alert('Could not update status. Please try again.');
         }
       });
+
+      var ownedCheckboxEl = document.getElementById('ownedCheckbox');
+      if (ownedCheckboxEl) {
+        ownedCheckboxEl.addEventListener('change', async function() {
+          var checked = ownedCheckboxEl.checked;
+          try {
+            var res = await fetch('/api/user-game-status/set', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ game_id: ownedCheckboxEl.dataset.gameId, owned: checked }),
+            });
+            if (!res.ok) throw new Error();
+          } catch (e) {
+            ownedCheckboxEl.checked = !checked;
+            alert('Could not update owned status. Please try again.');
+          }
+        });
+      }
+
+      var hiddenCheckboxToggle = document.getElementById('hiddenCheckbox');
+      if (hiddenCheckboxToggle) {
+        hiddenCheckboxToggle.addEventListener('change', async function() {
+          var checked = hiddenCheckboxToggle.checked;
+          var wasUntracked = !trackPills.querySelector('.track-pill.active');
+          try {
+            var res = await fetch('/api/user-game-status/toggle-hidden', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ game_id: hiddenCheckboxToggle.dataset.gameId, hidden: checked }),
+            });
+            if (!res.ok) throw new Error();
+            // Hiding an untracked game auto-adds it to the library as "owned"
+            if (checked && wasUntracked) {
+              trackPills.querySelectorAll('.track-pill').forEach(function(p) {
+                p.classList.toggle('active', p.dataset.status === 'owned');
+              });
+              var ownedToggleEl = document.getElementById('ownedToggle');
+              if (ownedToggleEl) ownedToggleEl.style.display = 'none';
+              var ownedCheckboxAfterHide = document.getElementById('ownedCheckbox');
+              if (ownedCheckboxAfterHide) ownedCheckboxAfterHide.checked = true;
+              var hint = document.querySelector('.track-hint');
+              if (hint) hint.remove();
+            }
+          } catch (e) {
+            hiddenCheckboxToggle.checked = !checked;
+            alert('Could not update hidden status. Please try again.');
+          }
+        });
+      }
     }
 
     // ── Legacy watch button fallback (keeps old inline calls working) ─────────

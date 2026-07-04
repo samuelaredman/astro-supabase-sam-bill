@@ -1916,6 +1916,7 @@ export type Database = {
           game_id: string
           id: string
           is_hidden: boolean
+          is_owned: boolean
           profile_id: string
           status: string
           steam_playtime_minutes: number | null
@@ -1926,6 +1927,7 @@ export type Database = {
           game_id: string
           id?: string
           is_hidden?: boolean
+          is_owned?: boolean
           profile_id: string
           status: string
           steam_playtime_minutes?: number | null
@@ -1936,6 +1938,7 @@ export type Database = {
           game_id?: string
           id?: string
           is_hidden?: boolean
+          is_owned?: boolean
           profile_id?: string
           status?: string
           steam_playtime_minutes?: number | null
