@@ -382,6 +382,80 @@ if (!profile) return json({ error: "Profile not found." }, 404);
 
 ---
 
+## Authentication email flows — read this before touching ANY of these files
+
+This area has regressed multiple times across separate, unrelated commits (each individually
+reasonable, collectively broke signup/reset for real users — an estimated ~6 lost signups
+before this was caught). It is the single most fragile part of the app. Treat any change
+touching the files below as high-risk regardless of how small the diff looks.
+
+**Files in scope:** `src/pages/api/auth/signup.ts`, `signin.ts`, `reset-password.ts`,
+`update-password.ts`, `set-session.ts`, `src/pages/auth/confirm.astro`,
+`src/pages/reset-password-confirm.astro`, `src/pages/welcome.astro`, `src/pages/signup.astro`,
+`src/pages/signin.astro`, `src/pages/forgot-password.astro`.
+
+### Rule 1 — never use `context.url.origin` / `new URL(request.url).origin` for a redirect URL sent to Supabase
+
+Use `context.site` (from `astro.config.ts`'s `site: 'https://chekpoint.gg'`) instead, via
+`new URL(path, context.site ?? context.url.origin).toString()`. `context.url.origin` is
+derived from the incoming request and does not reliably match Supabase's Redirect URLs
+allowlist behind Netlify — a mismatch makes Supabase silently bounce the email link to the
+fallback Site URL with `#error=access_denied&error_code=otp_expired`, which looks to the user
+like "this link is invalid or expired," even though nothing in our own error handling fired.
+This exact bug hit both `reset-password.ts` and `signup.ts` (the latter via `emailRedirectTo`)
+and was fixed 2026-07-03/04. If you ever see `context.url.origin` reappear in an
+`emailRedirectTo`/`redirectTo` value, it's a regression — revert it back to `context.site`.
+
+### Rule 2 — any redirect path passed to Supabase must correspond to an actual route, and must be in the Supabase Redirect URLs allowlist
+
+`signup.ts`'s `emailRedirectTo` pointed at `/welcome` directly for a long stretch — but
+`/welcome` only checks for an existing cookie session; it never exchanges a confirmation
+token for one. Confirmation links must land on `/auth/confirm` (`src/pages/auth/confirm.astro`),
+which does the actual exchange and sets the session cookie, then forwards to `/welcome`.
+Before changing any redirect path, confirm the target file actually exists at that route
+(check `src/pages/`, not just what "should" be there) and that the path is listed in
+Supabase → Authentication → URL Configuration → Redirect URLs.
+
+### Rule 3 — Supabase delivers confirmation/recovery tokens via a URL **hash fragment**, not a query param
+
+Hitting Supabase's hosted `/auth/v1/verify` endpoint (what the default `{{ .ConfirmationURL }}`
+email template links to) redirects the browser to our `redirectTo` with
+`#access_token=...&refresh_token=...&type=...` in the hash — never `?code=` or `?token_hash=`.
+Hash fragments are never sent to the server, so a plain API route (`.ts`) can NEVER read them;
+only client-side JS can (`window.location.hash`). This is why `/auth/confirm` is an `.astro`
+page, not an API route: its frontmatter handles the (rarer) query-param case
+(`code`/`token_hash`+`type`, in case the email template is ever customized to link directly
+with those), and its client `<script>` handles the hash-fragment case by reading the hash and
+POSTing the tokens to `/api/auth/set-session`, which uses the cookie-syncing
+`createSupabaseServerClientFromContext` client to call `setSession()` and actually set a
+server-readable auth cookie. Do not "simplify" this back down to a single mechanism — both
+paths are load-bearing for different possible email template configurations.
+
+### Verification standard for any change in this area
+
+`npx astro check` passing is not sufficient evidence this works — the historical bugs above
+all passed type-checking. Before considering an auth-flow change done, generate a real link
+via the Supabase admin client and drive an actual browser through it:
+
+```typescript
+const db = createClient(SUPABASE_DATABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+const { data } = await db.auth.admin.generateLink({
+  type: 'signup', // or 'recovery'
+  email: 'disposable-test@example.com',
+  password: '...', // required for type: 'signup'
+  options: { redirectTo: 'https://chekpoint.gg/auth/confirm' }, // must be an allowlisted URL
+});
+const res = await fetch(data.properties.action_link, { redirect: 'manual' });
+// res.headers.get('location') is exactly what a real user's browser would be sent to —
+// navigate an actual browser (mcp Preview tools) to that URL (rewriting the host to your
+// local dev server) and confirm it lands logged-in on the right page, not /signin or /404.
+```
+
+Always delete the disposable test user afterward (`db.auth.admin.deleteUser(id)`) — never run
+this against a real user's account, including your own.
+
+---
+
 ## Mandatory API route patterns
 
 ### Standard structure

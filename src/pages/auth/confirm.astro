@@ -1,0 +1,73 @@
+---
+export const prerender = false;
+import Layout from "../../components/Layout.astro";
+import { createSupabaseServerClientFromContext } from "../../utils/database";
+import type { EmailOtpType } from "@supabase/supabase-js";
+
+// Supabase's default hosted /auth/v1/verify endpoint (what {{ .ConfirmationURL }}
+// points to in the stock email templates) redirects here with the session
+// delivered as a URL hash fragment (#access_token=...&refresh_token=...) —
+// never as a query param. Hash fragments are never sent to the server, so
+// they can't be handled here in frontmatter; the client script below handles
+// that case. The query-param branches below exist for the alternate case
+// where the Supabase email template is customized to link directly here with
+// ?token_hash=...&type=... (bypassing the hosted verify redirect) — keeping
+// both means this works regardless of which template format is configured.
+const supabase = createSupabaseServerClientFromContext(Astro);
+const url = new URL(Astro.request.url);
+const token_hash = url.searchParams.get("token_hash");
+const type = url.searchParams.get("type") as EmailOtpType | null;
+const code = url.searchParams.get("code");
+
+if (code) {
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+  if (!error) return Astro.redirect("/welcome");
+}
+
+if (token_hash && type) {
+  const { error } = await supabase.auth.verifyOtp({ type, token_hash });
+  if (!error) return Astro.redirect("/welcome");
+}
+---
+
+<Layout title="Confirming your account — Chekpoint" variant="centered">
+  <div style="min-height:60vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:40px 16px">
+    <p id="confirmStatus" style="color:var(--text-secondary);font-size:15px">Confirming your account…</p>
+  </div>
+</Layout>
+
+<script>
+  async function init() {
+    const hash = window.location.hash.substring(1);
+    const params = new URLSearchParams(hash);
+
+    const accessToken = params.get('access_token');
+    const refreshToken = params.get('refresh_token');
+
+    history.replaceState(null, '', window.location.pathname);
+
+    if (!accessToken || !refreshToken) {
+      window.location.href = '/signin?error=confirmation_failed';
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/auth/set-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken }),
+      });
+
+      if (!res.ok) {
+        window.location.href = '/signin?error=confirmation_failed';
+        return;
+      }
+
+      window.location.href = '/welcome';
+    } catch {
+      window.location.href = '/signin?error=confirmation_failed';
+    }
+  }
+
+  init();
+</script>

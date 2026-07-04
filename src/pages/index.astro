@@ -225,7 +225,7 @@ const profileMissingText = profileMissingLabels.length <= 1
 
 // "Recommended for you" — a compact preview for the sidebar widget. The full
 // breakdown (per-game/genre/social, with more results) lives on /recommendations.
-const RECS_SEED_LIMIT = 3
+const RECS_SEED_LIMIT = 4
 const RECS_PER_SEED = 4
 const RECS_DISPLAY_LIMIT = 4
 let recommendedForYou: { id: string; title: string; slug: string; cover_img_url: string | null }[] = []
@@ -244,19 +244,24 @@ if (currentProfile) {
   if (topOwnReviews && topOwnReviews.length > 0) {
     const seedGames = (topOwnReviews as any[]).map(r => r.games).filter(Boolean)
 
-    const combined = new Map<string, { id: string; title: string; slug: string; cover_img_url: string | null; score: number }>()
     const recLists = await Promise.all(
       seedGames.map((g: any) => getSimilarGames(db, g.id, RECS_PER_SEED, excludedIds))
     )
+
+    // One pick per seed grouping (not a flattened/merged pool) — otherwise
+    // whichever single seed's list happened to score highest dominates all
+    // 4 slots. Falls through to the next-best game in a group if its top
+    // pick was already used by an earlier group, so slots don't duplicate.
+    const seen = new Set<string>()
+    const picks: any[] = []
     for (const recs of recLists) {
-      for (const rec of recs) {
-        const existing = combined.get(rec.id)
-        combined.set(rec.id, existing ? { ...existing, score: existing.score + rec.score } : rec)
+      const next = recs.find((r: any) => !seen.has(r.id))
+      if (next) {
+        seen.add(next.id)
+        picks.push(next)
       }
     }
-    recommendedForYou = [...combined.values()]
-      .sort((a, b) => b.score - a.score)
-      .slice(0, RECS_DISPLAY_LIMIT)
+    recommendedForYou = picks.slice(0, RECS_DISPLAY_LIMIT)
   }
 }
 
@@ -1140,7 +1145,7 @@ const initialFollowingDone = followingReviews.length < 20
       </div>
     )}
 
-    {recommendedForYou.length > 0 && (
+    {recommendedForYou.length > 0 ? (
       <div class="widget" style="margin-top:4px">
         <div class="widget-title">Recommended for you</div>
         <div style="display:flex;flex-direction:column;gap:10px">
@@ -1158,7 +1163,15 @@ const initialFollowingDone = followingReviews.length < 20
         </div>
         <a href="/recommendations" class="rec-widget-seeall">See all recommendations →</a>
       </div>
-    )}
+    ) : currentProfile ? (
+      <div class="widget" style="margin-top:4px">
+        <div class="widget-title">Recommended for you</div>
+        <div class="rec-widget-empty">
+          Rate a few games 7+ and we'll start picking things for you.
+        </div>
+        <a href="/discover" class="rec-widget-seeall">Find something to review →</a>
+      </div>
+    ) : null}
 
     <div class="widget" style="margin-top:4px">
       <div class="widget-title">Site stats</div>
@@ -1198,12 +1211,14 @@ const initialFollowingDone = followingReviews.length < 20
   .profile-nag-cta:hover { text-decoration: underline; }
   .profile-nag-dismiss { flex-shrink: 0; background: none; border: none; color: var(--text-tertiary); font-size: 14px; cursor: pointer; padding: 4px 6px; border-radius: 4px; line-height: 1; transition: color 0.15s; }
   .profile-nag-dismiss:hover { color: var(--text-primary); }
-  .rec-widget-item { display: flex; }
+  .rec-widget-item { display: flex; padding: 8px; margin: 0 -8px; border-radius: 8px; transition: background 0.15s; }
+  .rec-widget-item:hover { background: var(--bg-hover); }
   .rec-widget-cover { flex-shrink: 0; width: 32px; height: 43px; border-radius: 5px; overflow: hidden; background: var(--tag-bg); border: 1px solid var(--border); margin-right: 10px; }
   .rec-widget-cover img { width: 100%; height: 100%; object-fit: cover; }
   .rec-widget-title { font-size: 13px; color: var(--text-primary); line-height: 1.3; align-self: center; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .rec-widget-seeall { display: block; text-align: center; font-size: 12px; color: var(--accent); margin-top: 10px; text-decoration: none; }
   .rec-widget-seeall:hover { text-decoration: underline; }
+  .rec-widget-empty { font-size: 12px; color: var(--text-tertiary); line-height: 1.4; }
   .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
   .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.4; filter: blur(2px) saturate(1.4); transform: scale(1.05); }
   .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.6) 50%, rgba(10,10,10,0.2) 100%); }
