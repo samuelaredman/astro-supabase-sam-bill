@@ -87,10 +87,14 @@ const [{ data: genreRows }, { data: companyRows }] = await Promise.all([
 
 // Genres
 const genreCount: Record<string, number> = {};
+const genreNamesByGameId: Record<string, string[]> = {};
 for (const row of (genreRows ?? []) as any[]) {
-  if (row.genres?.name) genreCount[row.genres.name] = (genreCount[row.genres.name] ?? 0) + 1;
+  if (!row.genres?.name) continue;
+  genreCount[row.genres.name] = (genreCount[row.genres.name] ?? 0) + 1;
+  (genreNamesByGameId[row.game_id] ??= []).push(row.genres.name);
 }
 const topGenres = Object.entries(genreCount).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name, count]) => ({ name, count }));
+const allGenreNames = Object.keys(genreCount).sort((a, b) => a.localeCompare(b));
 
 // Developers & publishers
 const devCount: Record<string, number> = {};
@@ -116,6 +120,7 @@ const releaseYears = (entryList as any[])
   .filter((y): y is number => y !== null);
 const minYear = releaseYears.length > 0 ? Math.min(...releaseYears) : null;
 const maxYear = releaseYears.length > 0 ? Math.max(...releaseYears) : null;
+const allReleaseYears = [...new Set(releaseYears)].sort((a, b) => b - a);
 
 // Most played platform (from the owner's reviews)
 const platformIds = [...new Set(reviewedEntries.map(r => r.platform_played_on).filter((p): p is string => !!p))];
@@ -311,7 +316,7 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
   /* ── List controls: search, sort, view toggle ── */
   .list-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
   .list-controls-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; flex-wrap: wrap; }
-  .entry-search-wrap { position: relative; flex: 1; min-width: 140px; max-width: 240px; }
+  .entry-search-wrap { position: relative; flex: 0 1 160px; min-width: 120px; max-width: 160px; }
   .entry-search-wrap svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--text-tertiary); pointer-events: none; }
   .entry-search { width: 100%; padding: 6px 10px 6px 28px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 13px; font-family: inherit; }
   .entry-search:focus { outline: none; border-color: var(--accent); }
@@ -860,6 +865,22 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
                   <option value="added-desc">Recently added</option>
                   <option value="alpha">A–Z</option>
                 </select>
+                {allGenreNames.length > 0 && (
+                  <select id="entry-genre-filter" class="entry-sort">
+                    <option value="">All genres</option>
+                    {allGenreNames.map((name) => (
+                      <option value={name}>{name}</option>
+                    ))}
+                  </select>
+                )}
+                {allReleaseYears.length > 0 && (
+                  <select id="entry-year-filter" class="entry-sort">
+                    <option value="">All years</option>
+                    {allReleaseYears.map((year) => (
+                      <option value={year}>{year}</option>
+                    ))}
+                  </select>
+                )}
               </div>
               <div class="view-toggle-row">
                 <button class="view-toggle-btn active" id="view-grid" title="Grid view">
@@ -874,6 +895,8 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
               {entryList.map((entry: any, i: number) => {
                 const cover = igdbImage(entry.games?.cover_img_url, "t_cover_big");
                 const gameReview = entry.games?.id ? reviewByGameId[entry.games.id] : null;
+                const entryGenres = entry.games?.id ? (genreNamesByGameId[entry.games.id] ?? []) : [];
+                const entryYear = entry.games?.date_released ? new Date(entry.games.date_released).getFullYear() : "";
                 return (
                   <div
                     class="entry-item"
@@ -882,6 +905,8 @@ function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCas
                     data-score={gameReview ? gameReview.score : ""}
                     data-hours={gameReview?.play_time_hours ?? ""}
                     data-added={new Date(entry.added_at).getTime()}
+                    data-genres={entryGenres.join("|")}
+                    data-year={entryYear}
                   >
                     {list.is_ranked && <div class="entry-rank-inline">{entry.position ?? i + 1}</div>}
                     <div class="entry-cover-wrap">
@@ -1969,6 +1994,8 @@ if (lcSubmit) {
 (function() {
   var searchInput = document.getElementById('entry-search');
   var sortSelect = document.getElementById('entry-sort');
+  var genreSelect = document.getElementById('entry-genre-filter');
+  var yearSelect = document.getElementById('entry-year-filter');
   var entryListEl = document.getElementById('entry-list');
   var emptyFiltered = document.getElementById('entry-empty-filtered');
   if (!entryListEl) return;
@@ -1989,6 +2016,8 @@ if (lcSubmit) {
   function applyFilterSort() {
     var q = ((searchInput && searchInput.value) || '').trim().toLowerCase();
     var sortBy = sortSelect ? sortSelect.value : 'default';
+    var genreFilter = genreSelect ? genreSelect.value : '';
+    var yearFilter = yearSelect ? yearSelect.value : '';
 
     var sorted = items.slice().sort(function(a, b) {
       var idxA = parseInt(a.dataset.idx, 10);
@@ -2016,6 +2045,13 @@ if (lcSubmit) {
     var visibleCount = 0;
     items.forEach(function(item) {
       var matches = !q || item.dataset.title.indexOf(q) !== -1;
+      if (matches && genreFilter) {
+        var genres = (item.dataset.genres || '').split('|');
+        matches = genres.indexOf(genreFilter) !== -1;
+      }
+      if (matches && yearFilter) {
+        matches = item.dataset.year === yearFilter;
+      }
       item.style.display = matches ? '' : 'none';
       if (matches) visibleCount++;
     });
@@ -2026,5 +2062,7 @@ if (lcSubmit) {
 
   if (searchInput) searchInput.addEventListener('input', applyFilterSort);
   if (sortSelect) sortSelect.addEventListener('change', applyFilterSort);
+  if (genreSelect) genreSelect.addEventListener('change', applyFilterSort);
+  if (yearSelect) yearSelect.addEventListener('change', applyFilterSort);
 })();
 </script>
