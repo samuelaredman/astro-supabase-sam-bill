@@ -1,6 +1,8 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
+import { classifyText } from "../../../utils/moderation/openaiModeration";
+import { fileAutoReport } from "../../../utils/moderation/autoReport";
 
 export const POST: APIRoute = async (context) => {
   const userClient = createSupabaseServerClientFromContext(context);
@@ -33,6 +35,18 @@ export const POST: APIRoute = async (context) => {
     const msg = insertError.message ?? "Failed to post comment.";
     return json({ error: msg }, 500);
   }
+
+  // ── Screen the text for explicit content — never fails the request, but must be
+  // awaited: on serverless the function freezes once the response is sent, so a
+  // detached promise would be killed before the report is filed. There's no other
+  // async work after this, so it's awaited directly (adds one classify round-trip).
+  await classifyText(body.trim())
+    .then((result) => {
+      if (result.flagged) {
+        return fileAutoReport(db, { targetType: "comment", targetId: inserted.id, categories: result.categories });
+      }
+    })
+    .catch((e) => console.error("[comments/create] moderation error (non-fatal):", e));
 
   // Return the comment with the profile already resolved server-side
   // (avoids a fragile chained join on the insert call)

@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { validateName } from "../../../utils/moderation/nameRules";
 
 function randomCode(len = 8) {
   return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
@@ -33,7 +34,11 @@ export const POST: APIRoute = async (context) => {
 
   const updates: Record<string, any> = {};
 
-  if (name !== undefined)         updates.name        = name.trim();
+  if (name !== undefined) {
+    const nameCheck = validateName(name);
+    if (!nameCheck.ok) return json({ error: nameCheck.error }, 400);
+    updates.name = name.trim();
+  }
   if (description !== undefined)  updates.description = description?.trim() || null;
   if (join_prompt !== undefined)  updates.join_prompt = join_prompt?.trim() || null;
   if (stats_config !== undefined) updates.stats_config = stats_config;

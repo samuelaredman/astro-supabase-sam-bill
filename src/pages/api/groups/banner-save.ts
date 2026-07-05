@@ -2,6 +2,7 @@ export const prerender = false;
 import type { APIRoute } from 'astro';
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
 import { json } from '../../../utils/api';
+import { classifyImageUrl } from '../../../utils/moderation/openaiModeration';
 
 export const POST: APIRoute = async (context) => {
   try {
@@ -29,6 +30,12 @@ export const POST: APIRoute = async (context) => {
     }
 
     const { data: { publicUrl } } = db.storage.from('banners').getPublicUrl(path);
+
+    const moderation = await classifyImageUrl(publicUrl);
+    if (moderation.flagged) {
+      await db.storage.from('banners').remove([path]);
+      return json({ error: "This image isn't allowed." }, 400);
+    }
 
     const { error: updateError } = await db
       .from('groups')

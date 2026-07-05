@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { validateName } from "../../../utils/moderation/nameRules";
 
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
@@ -7,6 +8,14 @@ export const POST: APIRoute = async (context) => {
 
   if (!email || !password || !username) {
     return new Response(JSON.stringify({ error: "All fields are required." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const nameCheck = validateName(username);
+  if (!nameCheck.ok) {
+    return new Response(JSON.stringify({ error: nameCheck.error }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });

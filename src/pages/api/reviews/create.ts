@@ -1,5 +1,7 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { classifyText } from "../../../utils/moderation/openaiModeration";
+import { fileAutoReport } from "../../../utils/moderation/autoReport";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -43,6 +45,19 @@ export const POST: APIRoute = async (context) => {
     console.error('[reviews/create] insert error:', JSON.stringify(insertError));
     return json({ error: insertError.message }, 500);
   }
+
+  // ── Screen the text for explicit content — never fails the request, but must be
+  // awaited before returning: on serverless the function freezes once the response
+  // is sent, so a detached promise would be killed before the report is filed.
+  // Kicked off here and awaited right before the return so it runs concurrently
+  // with the DB work below (near-zero added latency).
+  const moderationDone = classifyText(`${title}\n${reviewBody}`)
+    .then((result) => {
+      if (result.flagged) {
+        return fileAutoReport(db, { targetType: "review", targetId: inserted.id, categories: result.categories });
+      }
+    })
+    .catch((e) => console.error("[reviews/create] moderation error (non-fatal):", e));
 
   // ── Auto-track the reviewed game as completed (if not already in library) ──
   try {
@@ -102,6 +117,10 @@ export const POST: APIRoute = async (context) => {
   const communityAvg = reviewCount > 0
     ? Math.round(((communityReviews ?? []).reduce((s: number, r: any) => s + r.score, 0) / reviewCount) * 10) / 10
     : score;
+
+  // Ensure the moderation classify+report finishes before the serverless function
+  // freezes on return (it has been running concurrently with the work above).
+  await moderationDone;
 
   return json({
     success: true,
