@@ -9,6 +9,9 @@ import Layout from '../../components/Layout.astro'
 import ReviewCard from '../../components/ReviewCard.astro'
 import ReportModal from '../../components/ReportModal.astro'
 import ListCard from '../../components/ListCard.astro'
+import RecommendationFeedCard from '../../components/RecommendationFeedCard.astro'
+import RecommendationComposer from '../../components/RecommendationComposer.astro'
+import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed'
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await serverClient.auth.getUser();
@@ -55,6 +58,15 @@ if (user) {
 
 // Game status counts (public) + current user's status
 const db = getSupabaseAdmin() as any;
+
+// Recommendations involving this game (as source or target), most-recent-first
+const { data: gameRecsRaw } = await db
+  .from('recommendations')
+  .select(REC_SELECT)
+  .or(`source_game_id.eq.${game.id},target_game_id.eq.${game.id}`)
+  .order('created_at', { ascending: false })
+  .limit(50);
+const gameRecs = (gameRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfileId));
 
 const { count: wantToPlayCount } = await db
   .from('user_game_status').select('*', { count: 'exact', head: true })
@@ -953,6 +965,16 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         <div class="tab-label">Stats</div>
         <div class="tab-meta">Rankings &amp; comparisons</div>
       </a>
+      <a href={`/games/${game.slug}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
+        {gameRecs.length > 0 && <span class="tab-count-badge">{gameRecs.length}</span>}
+        <div class="tab-icon">
+          <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9h8M9 6l3 3-3 3"/><circle cx="3" cy="9" r="1"/>
+          </svg>
+        </div>
+        <div class="tab-label">Recommendations</div>
+        <div class="tab-meta">{gameRecs.length > 0 ? `${gameRecs.length} pairing${gameRecs.length !== 1 ? 's' : ''}` : 'None yet'}</div>
+      </a>
     </nav>
 
     <!-- ── OVERVIEW TAB ── -->
@@ -1106,7 +1128,51 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       )}
     </div>
 
+    <!-- ── RECOMMENDATIONS TAB ── -->
+    <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:4px 0 16px">
+        <div>
+          <div style="font-size:16px;font-weight:600;color:var(--text-primary);margin-bottom:4px">If you liked {game.title}…</div>
+          <div style="font-size:13px;color:var(--text-tertiary);line-height:1.5;max-width:460px">Community picks for what to play next — and the games {game.title} gets recommended for.</div>
+        </div>
+        {isLoggedIn
+          ? <button class="write-review-btn" onclick="openRecComposer()">+ Add a recommendation</button>
+          : <a href={`/signin?next=${encodeURIComponent(`/games/${game.slug}?tab=recommendations`)}`} class="write-review-btn">+ Add a recommendation</a>
+        }
+      </div>
+      {gameRecs.length === 0 ? (
+        <div class="empty-state">
+          <div class="empty-title">No recommendations yet</div>
+          <p style="font-size:14px;color:var(--text-tertiary)">Be the first to suggest what fans of {game.title} should play next.</p>
+        </div>
+      ) : (
+        <div>
+          {gameRecs.map((rec: any) => (
+            <RecommendationFeedCard
+              id={rec.id}
+              sourceGame={rec.sourceGame}
+              targetGame={rec.targetGame}
+              body={rec.body}
+              containsSpoilers={rec.containsSpoilers}
+              ownerUsername={rec.ownerUsername}
+              ownerAvatar={rec.ownerAvatar}
+              createdAt={rec.createdAt}
+              upVotes={rec.upVotes}
+              downVotes={rec.downVotes}
+              myVote={rec.myVote}
+              commentCount={rec.commentCount}
+              reactions={rec.reactions}
+              isLoggedIn={isLoggedIn}
+              currentProfileId={currentProfileId}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+
   </div>
+
+  {isLoggedIn && <RecommendationComposer sourceGame={{ id: game.id, title: game.title, cover_img_url: game.cover_img_url }} />}
 
   <div class="lightbox" id="lightbox" onclick="closeLightbox()">
     <div class="lightbox-inner" onclick="event.stopPropagation()">

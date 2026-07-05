@@ -9,6 +9,9 @@ import CropModal from '../../components/CropModal.astro';
 import ReviewCard from '../../components/ReviewCard.astro';
 import ListCard from '../../components/ListCard.astro';
 import ShareButton from '../../components/ShareButton.astro';
+import RecommendationFeedCard from '../../components/RecommendationFeedCard.astro';
+import RecommendationComposer from '../../components/RecommendationComposer.astro';
+import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
@@ -398,6 +401,15 @@ if (currentProfile && !isOwnProfile) {
 }
 
 const db = getSupabaseAdmin() as any;
+
+// This reviewer's authored recommendations (rendered most-recent-first; re-sortable client-side)
+const { data: reviewerRecsRaw } = await db
+  .from('recommendations')
+  .select(REC_SELECT)
+  .eq('profile_id', reviewer.id)
+  .order('created_at', { ascending: false })
+  .limit(100);
+const reviewerRecs = (reviewerRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
 
 // Fetch library settings with fallback in case migration hasn't run yet
 let libSettingsRow: any = null;
@@ -1188,7 +1200,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     <a href={`/reviewers/${reviewer.username}?tab=library`} class={`tab-link ${activeTab === 'library' ? 'active' : ''}`}>Library</a>
     <a href={`/reviewers/${reviewer.username}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>Reviews {publishedReviews.length > 0 && <span class="tab-count">{publishedReviews.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {(profileLists.length + savedLists.length) > 0 && <span class="tab-count">{profileLists.length + savedLists.length}</span>}</a>
-    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Game Recs</a>
+    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Recommendations {reviewerRecs.length > 0 && <span class="tab-count">{reviewerRecs.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=followers`} class={`tab-link ${activeTab === 'followers' ? 'active' : ''}`}>Followers {followerCount ? `(${followerCount})` : ''}</a>
     <a href={`/reviewers/${reviewer.username}?tab=following`} class={`tab-link ${activeTab === 'following' ? 'active' : ''}`}>Following {followingCount ? `(${followingCount})` : ''}</a>
   </nav>
@@ -1368,11 +1380,50 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
   )}
 </div>
 
-  <!-- ── RECOMMENDATIONS TAB ── -->
+  <!-- ── RECOMMENDATIONS TAB — this reviewer's authored "if you liked A, try B" posts ── -->
   <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
-    <div id="recsContent" class="recs-compact" data-username={reviewer.username}>
-      <div class="recs-loading">Loading recommendations…</div>
+    <div class="prof-recs-head">
+      {reviewerRecs.length > 0 && (
+        <div class="prof-recs-sorts">
+          <button class="prof-rec-sort active" data-sort="recent">Recent</button>
+          <button class="prof-rec-sort" data-sort="most_up">Most upvoted</button>
+          <button class="prof-rec-sort" data-sort="least_up">Least upvoted</button>
+          <button class="prof-rec-sort" data-sort="oldest">Oldest</button>
+        </div>
+      )}
+      {isOwnProfile && <button class="prof-rec-add" onclick="openRecComposer()">+ Add a recommendation</button>}
     </div>
+    {reviewerRecs.length === 0 ? (
+      <div class="prof-recs-empty">
+        <div class="prof-recs-empty-title">No recommendations yet</div>
+        <p>{isOwnProfile ? "Share a “if you liked X, you’ll like Y” pairing and it’ll show up here and in the feed." : `${reviewer.username} hasn’t recommended any games yet.`}</p>
+        {isOwnProfile && <button class="prof-rec-add" onclick="openRecComposer()" style="margin-top:14px">+ Add a recommendation</button>}
+      </div>
+    ) : (
+      <div id="profRecsList">
+        {reviewerRecs.map((rec: any) => (
+          <div class="prof-rec-item" data-created={rec.createdAt} data-net={rec.upVotes - rec.downVotes}>
+            <RecommendationFeedCard
+              id={rec.id}
+              sourceGame={rec.sourceGame}
+              targetGame={rec.targetGame}
+              body={rec.body}
+              containsSpoilers={rec.containsSpoilers}
+              ownerUsername={rec.ownerUsername}
+              ownerAvatar={rec.ownerAvatar}
+              createdAt={rec.createdAt}
+              upVotes={rec.upVotes}
+              downVotes={rec.downVotes}
+              myVote={rec.myVote}
+              commentCount={rec.commentCount}
+              reactions={rec.reactions}
+              isLoggedIn={!!user}
+              currentProfileId={currentProfile?.id ?? null}
+            />
+          </div>
+        ))}
+      </div>
+    )}
   </div>
 
   <!-- ── LIBRARY TAB ── -->
@@ -3691,7 +3742,6 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       if (panel) panel.classList.add('active')
       history.replaceState({}, '', '?tab=' + tab)
       if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
-      if (tab === 'recommendations') loadRecommendations()
     })
   })
 
@@ -3704,21 +3754,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
     var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
     if (panel) panel.classList.add('active')
     if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
-    if (tab === 'recommendations') loadRecommendations()
   })
-</script>
-<script>
-  import { loadRecommendationsInto } from '../../utils/recsRender';
-
-  function loadRecommendations() {
-    const container = document.getElementById('recsContent');
-    if (!container || container.dataset.loaded) return;
-    container.dataset.loaded = 'true';
-    loadRecommendationsInto(container, container.dataset.username || '');
-  }
-  (window as any).loadRecommendations = loadRecommendations;
-
-  if (new URLSearchParams(location.search).get('tab') === 'recommendations') loadRecommendations();
 </script>
 <script>
   // Strip ?steam= param left by the OAuth callback — no auto-action, user syncs manually
@@ -3794,4 +3830,48 @@ async function createNewList(btn) {
 <ReportModal />
 <EditModal />
 <CropModal />
+{isOwnProfile && <RecommendationComposer />}
+
+<style is:global>
+  .prof-recs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .prof-recs-sorts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .prof-rec-sort { padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; font-family: inherit; color: var(--text-secondary); background: var(--tag-bg); border: 1px solid var(--border); cursor: pointer; transition: all 0.15s; }
+  .prof-rec-sort:hover { color: var(--text-primary); background: var(--bg-hover); }
+  .prof-rec-sort.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .prof-rec-add { padding: 7px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; background: var(--accent); color: var(--accent-text); border: none; cursor: pointer; transition: opacity 0.15s; }
+  .prof-rec-add:hover { opacity: 0.9; }
+  .prof-recs-empty { text-align: center; padding: 48px 24px; }
+  .prof-recs-empty-title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
+  .prof-recs-empty p { font-size: 14px; color: var(--text-tertiary); line-height: 1.6; max-width: 380px; margin: 0 auto; }
+</style>
+
+<script is:inline>
+  (function () {
+    var list = document.getElementById('profRecsList');
+    if (!list) return;
+    var btns = document.querySelectorAll('.prof-rec-sort');
+    function sortBy(mode) {
+      var items = Array.prototype.slice.call(list.querySelectorAll('.prof-rec-item'));
+      items.sort(function (a, b) {
+        var ca = new Date(a.dataset.created).getTime();
+        var cb = new Date(b.dataset.created).getTime();
+        var na = parseInt(a.dataset.net, 10);
+        var nb = parseInt(b.dataset.net, 10);
+        if (mode === 'recent') return cb - ca;
+        if (mode === 'oldest') return ca - cb;
+        if (mode === 'most_up') return (nb - na) || (cb - ca);
+        if (mode === 'least_up') return (na - nb) || (cb - ca);
+        return 0;
+      });
+      items.forEach(function (it) { list.appendChild(it); });
+    }
+    btns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        btns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        sortBy(btn.dataset.sort);
+      });
+    });
+  })();
+</script>
 </Layout>

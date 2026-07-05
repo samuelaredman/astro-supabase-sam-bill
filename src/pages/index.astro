@@ -6,9 +6,10 @@ import EditModal from "../components/EditModal.astro";
 import ReviewCard from "../components/ReviewCard.astro";
 import ListCard from "../components/ListCard.astro";
 import ListFeedCard from "../components/ListFeedCard.astro";
+import RecommendationFeedCard from "../components/RecommendationFeedCard.astro";
 import { igdbImage, timeAgo, scoreClass } from '../utils/format';
 import { GAME_CATEGORY_OR_FILTER } from '../utils/games';
-import { getSimilarGames, getExcludedGameIds } from '../utils/recommendations';
+import { REC_SELECT, shapeRec } from '../utils/recommendationsFeed';
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
@@ -148,6 +149,15 @@ const recentLists = (recentListsRaw ?? []).map((l: any) => ({
   reactions: listReactionsByListId[l.id] ?? [],
 }));
 
+// ── Recent recommendations (site-wide) — merged into the feed and shown in the sidebar ──
+const { data: recentRecsRaw, error: recsError } = await adminDb
+  .from('recommendations')
+  .select(REC_SELECT)
+  .order('created_at', { ascending: false })
+  .limit(20);
+if (recsError) console.error('[index] recommendations query error:', JSON.stringify(recsError));
+const recentRecs = (recentRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
+
 type Platform = { id: string; name: string; slug: string; };
 type Review = {
   id: string; score: number; title: string; body: string;
@@ -159,10 +169,11 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// Merge reviews and shared lists into a single chronological feed
+// Merge reviews, shared lists, and recommendations into a single chronological feed
 const feedItems: any[] = [
   ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
   ...recentLists.map((l: any) => ({ ...l, _date: l.created_at })),
+  ...recentRecs,
 ].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>
@@ -223,48 +234,6 @@ const profileMissingText = profileMissingLabels.length <= 1
     ? profileMissingLabels.join(' and ')
     : profileMissingLabels.slice(0, -1).join(', ') + ', and ' + profileMissingLabels[profileMissingLabels.length - 1]
 
-// "Recommended for you" — a compact preview for the sidebar widget. The full
-// breakdown (per-game/genre/social, with more results) lives on /recommendations.
-const RECS_SEED_LIMIT = 4
-const RECS_PER_SEED = 4
-const RECS_DISPLAY_LIMIT = 4
-let recommendedForYou: { id: string; title: string; slug: string; cover_img_url: string | null }[] = []
-if (currentProfile) {
-  const excludedIds = await getExcludedGameIds(db, currentProfile.id)
-
-  const { data: topOwnReviews } = await db
-    .from('reviews')
-    .select('game_id, score, games(id, title, slug, cover_img_url)')
-    .eq('profile_id', currentProfile.id)
-    .eq('status', 'published')
-    .gte('score', 7)
-    .order('score', { ascending: false })
-    .limit(RECS_SEED_LIMIT)
-
-  if (topOwnReviews && topOwnReviews.length > 0) {
-    const seedGames = (topOwnReviews as any[]).map(r => r.games).filter(Boolean)
-
-    const recLists = await Promise.all(
-      seedGames.map((g: any) => getSimilarGames(db, g.id, RECS_PER_SEED, excludedIds))
-    )
-
-    // One pick per seed grouping (not a flattened/merged pool) — otherwise
-    // whichever single seed's list happened to score highest dominates all
-    // 4 slots. Falls through to the next-best game in a group if its top
-    // pick was already used by an earlier group, so slots don't duplicate.
-    const seen = new Set<string>()
-    const picks: any[] = []
-    for (const recs of recLists) {
-      const next = recs.find((r: any) => !seen.has(r.id))
-      if (next) {
-        seen.add(next.id)
-        picks.push(next)
-      }
-    }
-    recommendedForYou = picks.slice(0, RECS_DISPLAY_LIMIT)
-  }
-}
-
 const totalReviews = reviewCountRes.count ?? 0
 const totalGames = gameCountRes.count ?? 0
 const totalReviewers = profileCountRes.count ?? 0
@@ -272,6 +241,7 @@ const totalReviewers = profileCountRes.count ?? 0
 const { data: genres } = genresRes
 
 let followingReviews: any[] = []
+let followingRecs: any[] = []
 let lastReview: any = null
 if (user && currentProfile) {
   const [lastReviewRes, followRowsRes] = await Promise.all([
@@ -287,16 +257,82 @@ if (user && currentProfile) {
   lastReview = lastReviewRes.data ?? null
   const followingIds = (followRowsRes.data ?? []).map((r: any) => r.following_id)
   if (followingIds.length > 0) {
-    const { data: fRevs } = await db
-      .from('reviews')
-      .select(REVIEW_FIELDS)
-      .eq('status', 'published')
-      .in('profile_id', followingIds)
-      .order('published_at', { ascending: false })
-      .limit(20)
+    const [{ data: fRevs }, { data: fRecsRaw }] = await Promise.all([
+      db.from('reviews')
+        .select(REVIEW_FIELDS)
+        .eq('status', 'published')
+        .in('profile_id', followingIds)
+        .order('published_at', { ascending: false })
+        .limit(20),
+      adminDb.from('recommendations')
+        .select(REC_SELECT)
+        .in('profile_id', followingIds)
+        .order('created_at', { ascending: false })
+        .limit(20),
+    ])
     followingReviews = (fRevs ?? []) as any[]
+    followingRecs = (fRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile.id))
   }
 }
+
+// Merge following reviews + recommendations into one chronological list
+const followingItems: any[] = [
+  ...followingReviews.map((r: any) => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
+  ...followingRecs,
+].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime())
+
+// ── Hot Takes tab: published reviews scoring ≥2.5 away from their game's
+// consensus average, ordered most-recent-first. Only computed for logged-in
+// users (the pill row is logged-in only). ──
+const HT_MIN_DEVIATION = 2.5
+let hotTakes: any[] = []
+if (isLoggedIn) {
+  const HT_FIELDS = `
+    id, score, title, body, play_time_hours,
+    contains_spoilers, status, published_at, created_at,
+    game_id,
+    played_on:platform_played_on ( id, name, slug ),
+    games ( id, title, slug, cover_img_url ),
+    profiles ( id, username, avatar_url ),
+    review_votes( vote, profile_id ),
+    review_reactions( reaction_type, profile_id ),
+    review_comments( id )
+  `
+  const { data: htRaw } = await db
+    .from('reviews')
+    .select(HT_FIELDS)
+    .eq('status', 'published')
+    .order('published_at', { ascending: false })
+    .limit(500)
+  const htReviews: any[] = htRaw ?? []
+
+  const htScores: Record<string, number[]> = {}
+  for (const r of htReviews) {
+    if (r.game_id == null || r.score == null) continue
+    ;(htScores[r.game_id] ||= []).push(r.score)
+  }
+  const htAvg: Record<string, number> = {}
+  for (const [id, s] of Object.entries(htScores)) {
+    if (s.length >= 2) htAvg[id] = s.reduce((a, b) => a + b, 0) / s.length
+  }
+
+  hotTakes = htReviews
+    .filter(r => r.game_id != null && htAvg[r.game_id] !== undefined)
+    .map(r => ({
+      ...r,
+      _htAvg: htAvg[r.game_id],
+      _htDeviation: r.score - htAvg[r.game_id],
+      _htAbs: Math.abs(r.score - htAvg[r.game_id]),
+      _htCount: htScores[r.game_id].length,
+    }))
+    .filter(h => h._htAbs >= HT_MIN_DEVIATION)
+    .sort((a, b) =>
+      new Date(b.published_at || b.created_at).getTime() -
+      new Date(a.published_at || a.created_at).getTime()
+    )
+    .slice(0, 30)
+}
+function htFmt(n: number): string { return n.toFixed(1) }
 
 function formatCount(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
@@ -415,6 +451,7 @@ const initialFollowingDone = followingReviews.length < 20
       <div class="feed-tabs">
         <button class="feed-tab active" data-tab="recent">Recent</button>
         <button class="feed-tab" data-tab="following">Following</button>
+        <button class="feed-tab" data-tab="hot-takes">Hot Takes</button>
       </div>
     )}
 
@@ -426,7 +463,25 @@ const initialFollowingDone = followingReviews.length < 20
         </div>
       ) : (
         feedItems.map((item: any) => (
-          item._isListItem ? (
+          item._isRecommendation ? (
+            <RecommendationFeedCard
+              id={item.id}
+              sourceGame={item.sourceGame}
+              targetGame={item.targetGame}
+              body={item.body}
+              containsSpoilers={item.containsSpoilers}
+              ownerUsername={item.ownerUsername}
+              ownerAvatar={item.ownerAvatar}
+              createdAt={item.createdAt}
+              upVotes={item.upVotes}
+              downVotes={item.downVotes}
+              myVote={item.myVote}
+              commentCount={item.commentCount}
+              reactions={item.reactions}
+              isLoggedIn={isLoggedIn}
+              currentProfileId={currentProfile?.id ?? null}
+            />
+          ) : item._isListItem ? (
             <ListFeedCard
               id={item.id}
               title={item.title}
@@ -465,22 +520,42 @@ const initialFollowingDone = followingReviews.length < 20
 
     {isLoggedIn && (
       <div id="tab-following" style="display:none">
-        {followingReviews.length === 0 ? (
+        {followingItems.length === 0 ? (
           <div class="empty-state">
             <div class="empty-state-title">Nothing here yet</div>
             <p>Follow reviewers to see their latest reviews here.</p>
             <a href="/search?tab=reviewers" class="empty-cta" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 24px;border-radius:22px;font-size:14px;font-weight:500;margin-top:16px">Find reviewers</a>
           </div>
         ) : (
-          followingReviews.map((review: any) => (
-            <ReviewCard
-              review={review}
-              isLoggedIn={isLoggedIn}
-              showReviewer={true}
-              showGame={true}
-              currentProfileId={currentProfile?.id ?? null}
-              isOwnProfile={!!(currentProfile && review.profiles?.id === currentProfile.id)}
+          followingItems.map((item: any) => (
+            item._isRecommendation ? (
+              <RecommendationFeedCard
+                id={item.id}
+                sourceGame={item.sourceGame}
+                targetGame={item.targetGame}
+                body={item.body}
+                containsSpoilers={item.containsSpoilers}
+                ownerUsername={item.ownerUsername}
+                ownerAvatar={item.ownerAvatar}
+                createdAt={item.createdAt}
+                upVotes={item.upVotes}
+                downVotes={item.downVotes}
+                myVote={item.myVote}
+                commentCount={item.commentCount}
+                reactions={item.reactions}
+                isLoggedIn={isLoggedIn}
+                currentProfileId={currentProfile?.id ?? null}
               />
+            ) : (
+              <ReviewCard
+                review={item}
+                isLoggedIn={isLoggedIn}
+                showReviewer={true}
+                showGame={true}
+                currentProfileId={currentProfile?.id ?? null}
+                isOwnProfile={!!(currentProfile && item.profiles?.id === currentProfile.id)}
+                />
+            )
           ))
         )}
         <div id="sentinel-following" style="height:1px;margin:0"></div>
@@ -489,6 +564,38 @@ const initialFollowingDone = followingReviews.length < 20
         <div style="padding:16px 20px;text-align:center">
           <a href="/following" style="font-size:13px;color:var(--text-tertiary)">View full feed →</a>
         </div>
+      </div>
+    )}
+
+    {isLoggedIn && (
+      <div id="tab-hot-takes" style="display:none">
+        {hotTakes.length === 0 ? (
+          <div class="empty-state">
+            <div class="empty-state-title">Everybody agrees… for now.</div>
+            <p>No reviews yet diverge far enough from the consensus to qualify. Post a spicy take and you might end up here.</p>
+          </div>
+        ) : (
+          hotTakes.map((item: any) => (
+            <div class="ht-item">
+              <div class={`ht-badge ${item._htDeviation > 0 ? 'ht-badge-up' : 'ht-badge-down'}`}>
+                <div class="ht-badge-delta">
+                  {item._htDeviation > 0 ? '▲' : '▼'} {htFmt(item._htAbs)} pts
+                </div>
+                <div class="ht-badge-avg">
+                  avg <strong>{htFmt(item._htAvg)}</strong> across {item._htCount} reviews
+                </div>
+              </div>
+              <ReviewCard
+                review={item}
+                isLoggedIn={isLoggedIn}
+                showReviewer={true}
+                showGame={true}
+                currentProfileId={currentProfile?.id ?? null}
+                isOwnProfile={!!(currentProfile && item.profiles?.id === currentProfile.id)}
+              />
+            </div>
+          ))
+        )}
       </div>
     )}
   </main>
@@ -639,9 +746,10 @@ const initialFollowingDone = followingReviews.length < 20
         document.querySelectorAll('.feed-tab').forEach(function(b) { b.classList.remove('active') })
         btn.classList.add('active')
         var tab = btn.dataset.tab
-        document.getElementById('tab-recent').style.display = tab === 'recent' ? '' : 'none'
-        var followingEl = document.getElementById('tab-following')
-        if (followingEl) followingEl.style.display = tab === 'following' ? '' : 'none'
+        ;['recent', 'following', 'hot-takes'].forEach(function(name) {
+          var el = document.getElementById('tab-' + name)
+          if (el) el.style.display = tab === name ? '' : 'none'
+        })
       })
     })
     document.getElementById('cancelComposer').addEventListener('click', closeComposer)
@@ -1145,33 +1253,35 @@ const initialFollowingDone = followingReviews.length < 20
       </div>
     )}
 
-    {recommendedForYou.length > 0 ? (
+    {recentRecs.length > 0 && (
       <div class="widget" style="margin-top:4px">
-        <div class="widget-title">Recommended for you</div>
-        <div style="display:flex;flex-direction:column;gap:10px">
-          {recommendedForYou.map((game) => (
-            <a href={`/games/${game.slug}`} class="rec-widget-item">
-              <div class="rec-widget-cover">
-                {igdbImage(game.cover_img_url)
-                  ? <img src={igdbImage(game.cover_img_url) ?? ''} alt={game.title} loading="lazy" />
-                  : <span style="display:flex;align-items:center;justify-content:center;height:100%;font-size:16px">🎮</span>
-                }
+        <div class="widget-title">Recent recommendations</div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          {recentRecs.slice(0, 3).map((rec: any) => (
+            <a href={`/recommendations/${rec.id}`} class="rec-panel-item">
+              <div class="rec-panel-covers">
+                <div class="rec-panel-cover">
+                  {igdbImage(rec.sourceGame?.cover_img_url)
+                    ? <img src={igdbImage(rec.sourceGame.cover_img_url) ?? ''} alt={rec.sourceGame?.title} loading="lazy" />
+                    : <span>🎮</span>}
+                </div>
+                <span class="rec-panel-arrow">→</span>
+                <div class="rec-panel-cover">
+                  {igdbImage(rec.targetGame?.cover_img_url)
+                    ? <img src={igdbImage(rec.targetGame.cover_img_url) ?? ''} alt={rec.targetGame?.title} loading="lazy" />
+                    : <span>🎮</span>}
+                </div>
               </div>
-              <div class="rec-widget-title">{game.title}</div>
+              <div class="rec-panel-text">
+                <span class="rec-panel-titles">{rec.sourceGame?.title} → {rec.targetGame?.title}</span>
+                <span class="rec-panel-by">by @{rec.ownerUsername}</span>
+              </div>
             </a>
           ))}
         </div>
-        <a href="/recommendations" class="rec-widget-seeall">See all recommendations →</a>
+        <a href="/recommendations" class="rec-panel-seeall">See all recommendations →</a>
       </div>
-    ) : currentProfile ? (
-      <div class="widget" style="margin-top:4px">
-        <div class="widget-title">Recommended for you</div>
-        <div class="rec-widget-empty">
-          Rate a few games 7+ and we'll start picking things for you.
-        </div>
-        <a href="/discover" class="rec-widget-seeall">Find something to review →</a>
-      </div>
-    ) : null}
+    )}
 
     <div class="widget" style="margin-top:4px">
       <div class="widget-title">Site stats</div>
@@ -1211,14 +1321,28 @@ const initialFollowingDone = followingReviews.length < 20
   .profile-nag-cta:hover { text-decoration: underline; }
   .profile-nag-dismiss { flex-shrink: 0; background: none; border: none; color: var(--text-tertiary); font-size: 14px; cursor: pointer; padding: 4px 6px; border-radius: 4px; line-height: 1; transition: color 0.15s; }
   .profile-nag-dismiss:hover { color: var(--text-primary); }
-  .rec-widget-item { display: flex; padding: 8px; margin: 0 -8px; border-radius: 8px; transition: background 0.15s; }
-  .rec-widget-item:hover { background: var(--bg-hover); }
-  .rec-widget-cover { flex-shrink: 0; width: 32px; height: 43px; border-radius: 5px; overflow: hidden; background: var(--tag-bg); border: 1px solid var(--border); margin-right: 10px; }
-  .rec-widget-cover img { width: 100%; height: 100%; object-fit: cover; }
-  .rec-widget-title { font-size: 13px; color: var(--text-primary); line-height: 1.3; align-self: center; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .rec-widget-seeall { display: block; text-align: center; font-size: 12px; color: var(--accent); margin-top: 10px; text-decoration: none; }
-  .rec-widget-seeall:hover { text-decoration: underline; }
-  .rec-widget-empty { font-size: 12px; color: var(--text-tertiary); line-height: 1.4; }
+  /* ── Hot Takes tab: deviation badge sits flush above each ReviewCard ── */
+  .ht-item { border-bottom: 1px solid var(--border-subtle); }
+  .ht-item:last-child { border-bottom: none; }
+  .ht-badge { display: flex; align-items: center; gap: 10px; padding: 8px 20px 0; }
+  .ht-badge-delta { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px; letter-spacing: 0.02em; flex-shrink: 0; }
+  .ht-badge-avg { font-size: 11px; color: var(--text-tertiary); }
+  .ht-badge-avg strong { color: var(--text-secondary); font-weight: 600; }
+  .ht-badge-down .ht-badge-delta { background: rgba(248, 113, 113, 0.12); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.25); }
+  .ht-badge-up .ht-badge-delta { background: rgba(52, 211, 153, 0.12); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.2); }
+
+  /* ── Sidebar "Recent recommendations" panel ── */
+  .rec-panel-item { display: flex; align-items: center; gap: 10px; padding: 8px; margin: 0 -8px; border-radius: 8px; text-decoration: none; transition: background 0.15s; }
+  .rec-panel-item:hover { background: var(--bg-hover); }
+  .rec-panel-covers { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+  .rec-panel-cover { width: 26px; height: 35px; border-radius: 4px; overflow: hidden; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 12px; }
+  .rec-panel-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .rec-panel-arrow { color: var(--accent); font-size: 11px; font-weight: 700; }
+  .rec-panel-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .rec-panel-titles { font-size: 12px; color: var(--text-primary); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .rec-panel-by { font-size: 11px; color: var(--text-tertiary); }
+  .rec-panel-seeall { display: block; text-align: center; font-size: 12px; color: var(--accent); margin-top: 10px; text-decoration: none; }
+  .rec-panel-seeall:hover { text-decoration: underline; }
   .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
   .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.4; filter: blur(2px) saturate(1.4); transform: scale(1.05); }
   .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.6) 50%, rgba(10,10,10,0.2) 100%); }

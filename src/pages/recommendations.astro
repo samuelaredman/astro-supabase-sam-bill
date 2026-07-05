@@ -1,67 +1,111 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from '../utils/database';
+import { getSupabase, createSupabaseServerClientFromContext } from '../utils/database';
 import Layout from '../components/Layout.astro';
+import ReportModal from '../components/ReportModal.astro';
+import RecommendationFeedCard from '../components/RecommendationFeedCard.astro';
+import { REC_SELECT, shapeRec } from '../utils/recommendationsFeed';
 
+const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
+
 const { data: { user } } = await serverClient.auth.getUser();
 const isLoggedIn = !!user;
 
+const db = supabase as any;
+
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
 if (user) {
-  const { data: cpData } = await serverClient
-    .from('profiles')
-    .select('id, username, avatar_url')
-    .eq('auth_user_id', user.id)
-    .single();
-  currentProfile = cpData;
+  const { data: cp } = await db
+    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = cp ?? null;
 }
+
+const { data: recsRaw } = await db
+  .from('recommendations')
+  .select(REC_SELECT)
+  .order('created_at', { ascending: false })
+  .limit(50);
+const recs = (recsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
+
+if (!isLoggedIn) {
+  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=120, stale-while-revalidate=600');
+  Astro.response.headers.set('Cache-Control', 'no-store');
+} else {
+  Astro.response.headers.set('Cache-Control', 'private, no-store');
+}
+Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 ---
 
 <Layout
   title="Recommendations — Chekpoint"
-  description="Games picked for you based on what you've loved, your favorite genres, and people you follow."
+  description="Community game recommendations — if you liked one game, discover what to play next."
   isLoggedIn={isLoggedIn}
   currentProfile={currentProfile}
   activeNav="recommendations"
+  variant="two-col"
 >
-  <main class="feed">
-    <div class="feed-header">
-      <div>
-        <div class="feed-title">Recommendations</div>
-        <div class="feed-subtitle">
-          {!currentProfile
-            ? 'Sign in to get personalized picks'
-            : 'Based on games you loved, your favorite genres, and people you follow'}
-        </div>
-      </div>
+  <main class="feed rec-main">
+    <div class="rec-page-header">
+      <h1 class="rec-page-title">Recommendations</h1>
+      <p class="rec-page-subtitle">
+        "If you liked this, you'll like that." Real pairings from the community — pick up your next game from someone who gets your taste.
+      </p>
     </div>
 
-    {!currentProfile ? (
+    {recs.length === 0 ? (
       <div class="empty-state">
-        <div class="empty-state-title">Sign in to see your recommendations</div>
-        <p>We'll pick games based on what you've reviewed highly, your favorite genres, and people you follow.</p>
-        <a href="/signin" class="empty-cta">Sign in</a>
+        <div class="empty-state-title">No recommendations yet</div>
+        <p>Head to any game page and be the first to recommend what to play next.</p>
       </div>
     ) : (
-      <div style="padding: 20px;">
-        <div id="recsContent" data-username={currentProfile.username}>
-          <div class="recs-loading">Loading recommendations…</div>
-        </div>
+      <div class="rec-feed">
+        {recs.map((rec: any) => (
+          <RecommendationFeedCard
+            id={rec.id}
+            sourceGame={rec.sourceGame}
+            targetGame={rec.targetGame}
+            body={rec.body}
+            containsSpoilers={rec.containsSpoilers}
+            ownerUsername={rec.ownerUsername}
+            ownerAvatar={rec.ownerAvatar}
+            createdAt={rec.createdAt}
+            upVotes={rec.upVotes}
+            downVotes={rec.downVotes}
+            myVote={rec.myVote}
+            commentCount={rec.commentCount}
+            reactions={rec.reactions}
+            isLoggedIn={isLoggedIn}
+            currentProfileId={currentProfile?.id ?? null}
+          />
+        ))}
       </div>
     )}
   </main>
+
+  <ReportModal />
 </Layout>
 
-<script>
-  import { loadRecommendationsInto } from '../utils/recsRender';
-
-  const container = document.getElementById('recsContent');
-  if (container) {
-    loadRecommendationsInto(
-      container,
-      container.dataset.username || '',
-      "No recommendations yet — rate a few games 7/10 or higher and we'll start picking things for you."
-    );
+<style>
+  .rec-main { min-width: 0; }
+  .rec-page-header {
+    padding: 24px 24px 18px;
+    border-bottom: 1px solid var(--border-subtle);
   }
-</script>
+  .rec-page-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 26px;
+    font-weight: 400;
+    color: var(--text-primary);
+    margin: 0 0 6px;
+    line-height: 1.2;
+  }
+  .rec-page-subtitle {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin: 0;
+    max-width: 520px;
+  }
+  .rec-feed { display: flex; flex-direction: column; }
+</style>
