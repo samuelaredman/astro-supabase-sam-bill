@@ -129,17 +129,20 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   // ── Bottom overlay: profile + username, with the review's own title next
   // to them in the same row — all laid over the full card (cover + score +
   // game title), with a gradient scrim behind for legibility.
+  const AVATAR_SIZE = 72;
   const avatar = data.reviewerAvatarDataUri
-    ? h("div", {
-        style: {
-          width: 60, height: 60, borderRadius: 30, backgroundImage: `url(${data.reviewerAvatarDataUri})`,
-          backgroundSize: "cover", backgroundPosition: "center", display: "flex", flexShrink: 0,
-        },
+    // A real <img> with objectFit, not a div with a backgroundImage — satori
+    // renders backgroundSize/backgroundPosition on a div unreliably (visibly
+    // off-center crops, confirmed against a plain square test image), the
+    // same bug already found and fixed on the cover art.
+    ? h("img", {
+        src: data.reviewerAvatarDataUri,
+        style: { width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, objectFit: "cover", display: "flex", flexShrink: 0 },
       })
     : h("div", {
         style: {
-          width: 60, height: 60, borderRadius: 30, background: ACCENT, display: "flex",
-          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 22, fontWeight: 700, flexShrink: 0,
+          width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, background: ACCENT, display: "flex",
+          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 26, fontWeight: 700, flexShrink: 0,
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
 
@@ -147,14 +150,14 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     avatar,
     h("div", {
       style: {
-        fontSize: 32, fontWeight: 700, color: "#f0ede8", display: "flex", flexShrink: 0,
+        fontSize: 36, fontWeight: 700, color: "#f0ede8", display: "flex", flexShrink: 0,
         maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       },
     }, `@${truncate(data.reviewerUsername, 24)}`),
   ];
   if (data.reviewTitle) {
     bottomRowChildren.push(
-      h("div", { style: { width: 1, height: 44, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } }),
+      h("div", { style: { width: 1, height: 52, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } }),
       h("div", {
         style: {
           fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.reviewTitle), color: "#f8f6f2",
