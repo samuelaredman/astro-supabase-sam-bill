@@ -38,21 +38,20 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     leftChildren.push(
       // Slightly oversized soft-tinted rect behind the cover reads as a frame/glow
       // without relying on box-shadow, which satori/resvg render inconsistently.
-      // The inner image uses "contain", not "cover" — box art isn't reliably
-      // exactly 264:374, so "cover" was cropping games whose real aspect ratio
-      // didn't match the box exactly.
+      // The cover is a real <img> with objectFit "contain", not a div with a
+      // backgroundImage — satori's backgroundSize:"contain" is broken (renders
+      // an unscaled, top-left-anchored corner of the image instead of scaling
+      // it to fit); <img>+objectFit doesn't have that bug and box art isn't
+      // reliably exactly 264:374, so plain "cover" would crop some games.
       h("div", {
         style: {
           width: coverW + 16, height: coverH + 16, borderRadius: 20,
           background: hexToRgba(ACCENT, 0.16), display: "flex", alignItems: "center", justifyContent: "center",
         },
       }, [
-        h("div", {
-          style: {
-            width: coverW, height: coverH, borderRadius: 14,
-            backgroundImage: `url(${data.coverDataUri})`, backgroundSize: "contain", backgroundPosition: "center",
-            backgroundRepeat: "no-repeat", display: "flex",
-          },
+        h("img", {
+          src: data.coverDataUri,
+          style: { width: coverW, height: coverH, borderRadius: 14, objectFit: "contain", display: "flex" },
         }),
       ])
     );
