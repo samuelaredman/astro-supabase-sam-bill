@@ -17,6 +17,13 @@ const LEFT_W = 420;
 const RIGHT_W = WIDTH - LEFT_W;
 const PAD = 56;
 const BADGE_SIZE = 200;
+// Past this length, the single-line review title in the bottom row would just get
+// ellipsized anyway — wrapping it to two (smaller) lines shows more of it instead.
+const LONG_REVIEW_TITLE_THRESHOLD = 28;
+
+function reviewTitleFontSize(title: string): number {
+  return title.length <= 40 ? 40 : 34;
+}
 
 export function buildReviewOgTree(data: ReviewOgData): any {
   const badgeBg = scoreBadgeBg(data.score);
@@ -146,6 +153,11 @@ export function buildReviewOgTree(data: ReviewOgData): any {
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
 
+  // Long titles wrap to two smaller lines instead of ellipsizing after a few words —
+  // in that mode the row is centered (not baseline-aligned) so the avatar/username
+  // sit centered between the two title lines rather than pinned to the first line's baseline.
+  const isLongReviewTitle = !!data.reviewTitle && data.reviewTitle.length > LONG_REVIEW_TITLE_THRESHOLD;
+
   const bottomRowChildren: any[] = [
     avatar,
     h("div", {
@@ -157,15 +169,25 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   ];
   if (data.reviewTitle) {
     bottomRowChildren.push(
-      h("div", { style: { width: 1, height: 52, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } }),
-      h("div", {
-        style: {
-          fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.reviewTitle), color: "#f8f6f2",
-          lineHeight: 1.08, display: "flex", minWidth: 0, flex: 1,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          textShadow: "0 2px 16px rgba(0,0,0,0.6)",
-        },
-      }, truncate(data.reviewTitle, 60))
+      h("div", { style: { width: 1, height: isLongReviewTitle ? 78 : 52, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } }),
+      isLongReviewTitle
+        ? h("div", {
+            style: {
+              fontFamily: "DM Serif Display", fontSize: reviewTitleFontSize(data.reviewTitle), color: "#f8f6f2",
+              lineHeight: 1.22, minWidth: 0, flex: 1,
+              display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
+              overflow: "hidden", textOverflow: "ellipsis",
+              textShadow: "0 2px 16px rgba(0,0,0,0.6)",
+            },
+          }, truncate(data.reviewTitle, 120))
+        : h("div", {
+            style: {
+              fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.reviewTitle), color: "#f8f6f2",
+              lineHeight: 1.08, display: "flex", minWidth: 0, flex: 1,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              textShadow: "0 2px 16px rgba(0,0,0,0.6)",
+            },
+          }, truncate(data.reviewTitle, 60))
     );
   }
 
@@ -176,13 +198,14 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     // since the badge sits well within the scrim's height range.
     h("div", {
       style: {
-        position: "absolute", left: 0, width: LEFT_W + 40, bottom: 0, height: 280, display: "flex",
+        position: "absolute", left: 0, width: LEFT_W + 40, bottom: 0, height: isLongReviewTitle ? 320 : 280, display: "flex",
         backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.96) 0%, rgba(9,9,10,0.8) 38%, rgba(9,9,10,0.32) 68%, rgba(9,9,10,0) 100%)`,
       },
     }),
     h("div", {
       style: {
-        position: "absolute", left: 56, right: 56, bottom: 44, display: "flex", alignItems: "baseline", gap: 18,
+        position: "absolute", left: 56, right: 56, bottom: isLongReviewTitle ? 40 : 44, display: "flex",
+        alignItems: isLongReviewTitle ? "center" : "baseline", gap: 18,
       },
     }, bottomRowChildren),
   ];
