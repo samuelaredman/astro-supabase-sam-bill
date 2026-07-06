@@ -5,9 +5,27 @@ function truncate(text: string, max: number): string {
 }
 
 function titleFontSize(title: string): number {
-  if (title.length <= 24) return 64;
-  if (title.length <= 40) return 52;
-  return 42;
+  if (title.length <= 24) return 70;
+  if (title.length <= 40) return 56;
+  return 46;
+}
+
+// Mirrors src/utils/format.ts's scoreClass() buckets, mapped to the site's
+// dark-theme score colors (see games/[slug].astro's :root[data-theme="dark"]).
+function scoreColor(score: number): string {
+  if (score === 10) return "#ffffff";
+  if (score >= 9) return "#4ade80";
+  if (score >= 8) return "#2dd4bf";
+  if (score >= 7) return "#60a5fa";
+  if (score >= 5) return "#fbbf24";
+  if (score >= 3) return "#fb923c";
+  return "#f87171";
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 export interface ListOgData {
@@ -25,24 +43,27 @@ const HEIGHT = 630;
 const ACCENT = "#8b7bf0";
 const BG = "#09090a";
 
+const GRID_GAP = 5;
+
 export function buildListOgTree(data: ListOgData): any {
   const { rowCounts, shown } = coverGridRows(data.coverDataUris.length);
   const covers = data.coverDataUris.slice(0, shown);
-  const cellH = rowCounts.length > 0 ? HEIGHT / rowCounts.length : 0;
+  const cellH = rowCounts.length > 0 ? (HEIGHT - (rowCounts.length - 1) * GRID_GAP) / rowCounts.length : 0;
 
   const gridRows: any[] = [];
   let cursor = 0;
   for (const count of rowCounts) {
     const rowCovers = covers.slice(cursor, cursor + count);
     cursor += count;
-    const cellW = WIDTH / count;
+    const cellW = (WIDTH - (count - 1) * GRID_GAP) / count;
     gridRows.push(
-      h("div", { style: { display: "flex", width: WIDTH, height: cellH, flexShrink: 0 } },
+      h("div", { style: { display: "flex", width: WIDTH, height: cellH, flexShrink: 0, gap: GRID_GAP } },
         rowCovers.map((src) =>
           h("div", {
             style: {
               width: cellW,
               height: cellH,
+              borderRadius: 10,
               backgroundImage: `url(${src})`,
               backgroundSize: "cover",
               backgroundPosition: "center",
@@ -84,19 +105,41 @@ export function buildListOgTree(data: ListOgData): any {
     metaParts.push(h("div", { style: { fontSize: 21, color: ACCENT, fontWeight: 700, display: "flex" } }, "Ranked"));
   }
   if (data.avgScore !== null) {
+    const c = scoreColor(data.avgScore);
     metaParts.push(h("div", { style: { fontSize: 21, color: "#6a6866", display: "flex" } }, "·"));
-    metaParts.push(h("div", { style: { fontSize: 21, color: "#c9c6c0", display: "flex" } }, `avg ${data.avgScore.toFixed(1)}`));
+    metaParts.push(
+      h("div", {
+        style: {
+          display: "flex", alignItems: "center", gap: 6, fontSize: 19, fontWeight: 700, color: c,
+          background: hexToRgba(c, 0.14), border: `1px solid ${hexToRgba(c, 0.4)}`,
+          borderRadius: 8, padding: "3px 11px",
+        },
+      }, [
+        h("div", { style: { width: 6, height: 6, borderRadius: 3, background: c, display: "flex" } }),
+        h("div", { style: { display: "flex" } }, data.avgScore.toFixed(1)),
+      ])
+    );
   }
 
   const children: any[] = [];
 
   if (shown > 0) {
     children.push(
-      h("div", { style: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, display: "flex", flexDirection: "column" } }, gridRows),
+      h("div", { style: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, display: "flex", flexDirection: "column", gap: GRID_GAP } }, gridRows),
+      // Thin top vignette so the wordmark stays legible over bright cover art
+      // without darkening much of the actual artwork.
       h("div", {
         style: {
-          position: "absolute", left: 0, right: 0, bottom: 0, height: 400, display: "flex",
-          backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.99) 0%, rgba(9,9,10,0.88) 38%, rgba(9,9,10,0) 100%)`,
+          position: "absolute", left: 0, right: 0, top: 0, height: 130, display: "flex",
+          backgroundImage: `linear-gradient(to bottom, rgba(9,9,10,0.55) 0%, rgba(9,9,10,0) 100%)`,
+        },
+      }),
+      // Bottom fade, tightened to the text block itself rather than half the
+      // canvas — keeps the cover art the dominant, visible part of the image.
+      h("div", {
+        style: {
+          position: "absolute", left: 0, right: 0, bottom: 0, height: 250, display: "flex",
+          backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.96) 0%, rgba(9,9,10,0.75) 32%, rgba(9,9,10,0.28) 62%, rgba(9,9,10,0) 100%)`,
         },
       })
     );
@@ -116,15 +159,13 @@ export function buildListOgTree(data: ListOgData): any {
   children.push(
     h("div", {
       style: {
-        position: "absolute", top: 32, right: 40, display: "flex", alignItems: "center", gap: 9,
+        position: "absolute", top: 24, right: 32, display: "flex", alignItems: "center", gap: 9,
+        background: "rgba(9,9,10,0.45)", borderRadius: 20, padding: "8px 16px 8px 14px",
       },
     }, [
       h("div", { style: { width: 9, height: 9, borderRadius: 5, background: ACCENT, display: "flex" } }),
       h("div", {
-        style: {
-          fontSize: 21, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.92)",
-          textShadow: "0 2px 10px rgba(0,0,0,0.8)",
-        },
+        style: { fontSize: 21, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.95)" },
       }, "CHEKPOINT"),
     ])
   );

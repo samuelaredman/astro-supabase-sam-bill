@@ -52,7 +52,9 @@ export const GET: APIRoute = async ({ params }) => {
   }
 
   const coverUrls = ((topEntries ?? []) as any[])
-    .map((e) => igdbImage(e.games?.cover_img_url, "t_cover_big"))
+    // Full resolution — a small list stretches 1-4 covers across large grid cells,
+    // and t_cover_big (264x374) upscales visibly soft at that size.
+    .map((e) => igdbImage(e.games?.cover_img_url, "t_original"))
     .filter(Boolean) as string[];
 
   const [coverDataUris, ownerAvatarDataUri] = await Promise.all([
