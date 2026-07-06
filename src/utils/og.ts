@@ -1,10 +1,12 @@
 // Shared machinery for generating share-preview (Open Graph) images.
 // satori lays out a plain object tree (a React-element shape, but built by hand
-// here — no React/JSX involved) into SVG; @resvg/resvg-wasm rasterizes that SVG to PNG.
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+// here — no React/JSX involved) into SVG; @resvg/resvg-js rasterizes that SVG to PNG.
+// (resvg-js is the native NAPI build, not the wasm one — benchmarked ~4x faster
+// or better for our SVGs, which matters a lot given this runs synchronously on
+// every cache-miss request. Netlify's function bundler traces and ships native
+// NAPI binaries like this routinely — same mechanism it already uses for `sharp`.)
 import satori from "satori";
-import { initWasm, Resvg } from "@resvg/resvg-wasm";
+import { Resvg } from "@resvg/resvg-js";
 // `?inline` makes Vite embed these as base64 data URIs directly in the built JS,
 // rather than a filesystem path. A path resolved from `import.meta.url` at request
 // time breaks once bundling relocates this module to a different directory depth
@@ -13,22 +15,6 @@ import { initWasm, Resvg } from "@resvg/resvg-wasm";
 import dmSansRegularUri from "../assets/og-fonts/DMSans-Regular.ttf?inline";
 import dmSansBoldUri from "../assets/og-fonts/DMSans-Bold.ttf?inline";
 import dmSerifDisplayUri from "../assets/og-fonts/DMSerifDisplay-Regular.ttf?inline";
-
-const require = createRequire(import.meta.url);
-
-// resvg's wasm module can only be initialized once per process — cache the promise
-// so concurrent/warm-invocation requests reuse it instead of re-initializing.
-// Unlike the fonts above, this is resolved via real Node package resolution
-// (require.resolve walks up looking for node_modules), which stays correct
-// regardless of how deep the bundler nests this module.
-let resvgReady: Promise<void> | null = null;
-function ensureResvgReady(): Promise<void> {
-  if (!resvgReady) {
-    const wasmPath = require.resolve("@resvg/resvg-wasm/index_bg.wasm");
-    resvgReady = initWasm(readFileSync(wasmPath));
-  }
-  return resvgReady;
-}
 
 type OgFont = { name: string; data: Buffer; weight: 400 | 700; style: "normal" };
 
@@ -55,9 +41,10 @@ export function h(type: string, props: Record<string, any> = {}, children?: any)
 
 export async function renderOgPng(tree: any, width: number, height: number): Promise<Buffer> {
   const svg = await satori(tree, { width, height, fonts: loadOgFonts() });
-  await ensureResvgReady();
-  const resvg = new Resvg(svg);
-  return Buffer.from(resvg.render().asPng());
+  // satori already vectorizes all text into paths, so resvg never needs to resolve
+  // a font — skip its system-font scan, which otherwise runs on every cold start.
+  const resvg = new Resvg(svg, { font: { loadSystemFonts: false } });
+  return resvg.render().asPng();
 }
 
 /**
