@@ -3,14 +3,24 @@
 // here — no React/JSX involved) into SVG; @resvg/resvg-wasm rasterizes that SVG to PNG.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import satori from "satori";
 import { initWasm, Resvg } from "@resvg/resvg-wasm";
+// `?inline` makes Vite embed these as base64 data URIs directly in the built JS,
+// rather than a filesystem path. A path resolved from `import.meta.url` at request
+// time breaks once bundling relocates this module to a different directory depth
+// than the source tree (which is exactly what happens in the deployed function —
+// confirmed by inspecting the built output; it was serving a 500 in production).
+import dmSansRegularUri from "../assets/og-fonts/DMSans-Regular.ttf?inline";
+import dmSansBoldUri from "../assets/og-fonts/DMSans-Bold.ttf?inline";
+import dmSerifDisplayUri from "../assets/og-fonts/DMSerifDisplay-Regular.ttf?inline";
 
 const require = createRequire(import.meta.url);
 
 // resvg's wasm module can only be initialized once per process — cache the promise
 // so concurrent/warm-invocation requests reuse it instead of re-initializing.
+// Unlike the fonts above, this is resolved via real Node package resolution
+// (require.resolve walks up looking for node_modules), which stays correct
+// regardless of how deep the bundler nests this module.
 let resvgReady: Promise<void> | null = null;
 function ensureResvgReady(): Promise<void> {
   if (!resvgReady) {
@@ -22,14 +32,17 @@ function ensureResvgReady(): Promise<void> {
 
 type OgFont = { name: string; data: Buffer; weight: 400 | 700; style: "normal" };
 
+function dataUriToBuffer(dataUri: string): Buffer {
+  return Buffer.from(dataUri.slice(dataUri.indexOf(",") + 1), "base64");
+}
+
 let fontsCache: OgFont[] | null = null;
 function loadOgFonts(): OgFont[] {
   if (!fontsCache) {
-    const dir = fileURLToPath(new URL("../assets/og-fonts/", import.meta.url));
     fontsCache = [
-      { name: "DM Sans", data: readFileSync(dir + "DMSans-Regular.ttf"), weight: 400, style: "normal" },
-      { name: "DM Sans", data: readFileSync(dir + "DMSans-Bold.ttf"), weight: 700, style: "normal" },
-      { name: "DM Serif Display", data: readFileSync(dir + "DMSerifDisplay-Regular.ttf"), weight: 400, style: "normal" },
+      { name: "DM Sans", data: dataUriToBuffer(dmSansRegularUri), weight: 400, style: "normal" },
+      { name: "DM Sans", data: dataUriToBuffer(dmSansBoldUri), weight: 700, style: "normal" },
+      { name: "DM Serif Display", data: dataUriToBuffer(dmSerifDisplayUri), weight: 400, style: "normal" },
     ];
   }
   return fontsCache;
