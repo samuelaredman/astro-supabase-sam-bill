@@ -1,0 +1,133 @@
+---
+// Global onboarding tour host. Mounted once (in Layout.astro) for logged-in users.
+// Exposes window.startTour(name) and auto-starts from a ?tour=<name> URL param.
+// Tours are driven by driver.js. Username is passed via a data-attribute because a
+// bundled module <script> (needed for `import`) can't use Astro's define:vars.
+interface Props { username?: string | null }
+const { username = null } = Astro.props;
+---
+
+<div id="ck-tour-root" data-username={username ?? ''} hidden></div>
+
+<script>
+  import { driver } from 'driver.js';
+  import 'driver.js/dist/driver.css';
+
+  const me = document.getElementById('ck-tour-root')?.dataset.username || '';
+  const profilePath = me ? `/reviewers/${me}` : '/';
+
+  // Each tour is an array of steps. step = { selector?, page, popover }.
+  // No selector ⇒ centered "concept" popover.
+  const TOURS: Record<string, { selector?: string; page: string; popover: any }[]> = {
+    avatar: [{
+      selector: '.avatar-container', page: profilePath,
+      popover: { title: 'Add a profile picture', description: 'Click your avatar to upload and crop a photo so other reviewers recognize you.' },
+    }],
+    favorite: [{
+      selector: '.fav-empty, .fav-game-card', page: profilePath,
+      popover: { title: 'Pick a favorite game', description: 'Set the game that defines your taste — click here to search and choose it.' },
+    }],
+    review: [{
+      selector: '#openComposer', page: '/',
+      popover: { title: 'Write your first review', description: 'Score a game 1–10 and share your thoughts. Click here to start.' },
+    }],
+    site: [
+      { page: '/', popover: { title: 'Welcome to Chekpoint 👋', description: 'A 30-second tour of how things work. You can skip anytime.' } },
+      { selector: '.feed-tabs', page: '/', popover: { title: 'Your feed', description: 'Switch between Recent (everything new), Following (people you follow), and Hot Takes (scores that buck the consensus).' } },
+      { selector: '.rc', page: '/', popover: { title: 'Reviews', description: 'A review is one person’s score and take on a single game.' } },
+      { selector: '.rfc', page: '/', popover: { title: 'Recommendations', description: '“If you liked this game, try that one.” A pairing with a reason behind it.' } },
+      { selector: '.lfc', page: '/', popover: { title: 'Lists', description: 'A curated — and optionally ranked — collection of games.' } },
+      { selector: 'a[href="/discover"]', page: '/', popover: { title: 'Discover', description: 'Browse games by genre, platform and studio to find your next play.' } },
+      { selector: '#openComposer', page: '/', popover: { title: 'Share something', description: 'When you’re ready, write your first review right here.' } },
+    ],
+  };
+
+  function currentPath() { return window.location.pathname.replace(/\/$/, '') || '/'; }
+
+  // Steps for the current page whose target element (if any) exists.
+  function stepsForHere(name: string) {
+    const steps = TOURS[name] || [];
+    return steps
+      .filter((s) => (s.page.replace(/\/$/, '') || '/') === currentPath())
+      .filter((s) => !s.selector || document.querySelector(s.selector))
+      .map((s) => ({ element: s.selector || undefined, popover: s.popover }));
+  }
+
+  function drive(steps: any[]) {
+    if (!steps.length) return;
+    const d = driver({
+      showProgress: steps.length > 1,
+      allowClose: true,
+      overlayColor: 'rgba(0,0,0,0.65)',
+      nextBtnText: 'Next',
+      prevBtnText: 'Back',
+      doneBtnText: 'Done',
+      steps,
+      onDestroyed: () => { try { localStorage.setItem('ck_tour_done', '1'); } catch (e) {} },
+    });
+    d.drive();
+  }
+
+  (window as any).startTour = function (name: string) {
+    const tour = TOURS[name];
+    if (!tour) return;
+    const firstPage = tour[0].page.replace(/\/$/, '') || '/';
+    if (firstPage === currentPath()) {
+      drive(stepsForHere(name));
+    } else {
+      window.location.href = (tour[0].page) + '?tour=' + encodeURIComponent(name);
+    }
+  };
+
+  // Delegated launcher: any [data-start-tour="<name>"] button starts that tour.
+  document.addEventListener('click', function (e) {
+    const btn = (e.target as HTMLElement)?.closest?.('[data-start-tour]') as HTMLElement | null;
+    if (!btn) return;
+    e.preventDefault();
+    (window as any).startTour(btn.dataset.startTour);
+  });
+
+  // Auto-start from ?tour= (strip the param first so refresh/back won't re-trigger).
+  const params = new URLSearchParams(window.location.search);
+  const auto = params.get('tour');
+  if (auto && TOURS[auto]) {
+    params.delete('tour');
+    const qs = params.toString();
+    history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash);
+    setTimeout(() => drive(stepsForHere(auto)), 300);
+  }
+</script>
+
+<style is:global>
+  /* Theme driver.js popovers to match the dark UI */
+  .driver-popover {
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    max-width: 320px;
+  }
+  .driver-popover-title { color: var(--text-primary); font-weight: 600; font-family: inherit; font-size: 15px; }
+  .driver-popover-description { color: var(--text-secondary); font-family: inherit; font-size: 13px; line-height: 1.6; }
+  .driver-popover-progress-text { color: var(--text-tertiary); font-size: 11px; }
+  .driver-popover-close-btn { color: var(--text-tertiary); }
+  .driver-popover-close-btn:hover { color: var(--text-primary); }
+  .driver-popover-footer button {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    text-shadow: none;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 5px 12px;
+  }
+  .driver-popover-footer button:hover { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  /* Arrow follows the popover background */
+  .driver-popover-arrow-side-top.driver-popover-arrow { border-top-color: var(--bg-card); }
+  .driver-popover-arrow-side-bottom.driver-popover-arrow { border-bottom-color: var(--bg-card); }
+  .driver-popover-arrow-side-left.driver-popover-arrow { border-left-color: var(--bg-card); }
+  .driver-popover-arrow-side-right.driver-popover-arrow { border-right-color: var(--bg-card); }
+</style>
