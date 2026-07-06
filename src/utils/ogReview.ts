@@ -25,6 +25,18 @@ function reviewTitleFontSize(title: string): number {
   return title.length <= 40 ? 40 : 34;
 }
 
+// Wraps the game title up to 4 lines instead of ellipsizing after a handful of
+// words on one line — the badge stays the taller flex item at every tier (max
+// 4 lines * 38px well under the 200px badge), so it keeps centering cleanly
+// against the title block regardless of how many lines it wraps to.
+function gameTitleLayout(title: string): { fontSize: number; maxLines: number } {
+  const len = title.length;
+  if (len <= 20) return { fontSize: 70, maxLines: 1 };
+  if (len <= 34) return { fontSize: 56, maxLines: 2 };
+  if (len <= 55) return { fontSize: 46, maxLines: 3 };
+  return { fontSize: 38, maxLines: 4 };
+}
+
 export function buildReviewOgTree(data: ReviewOgData): any {
   const badgeBg = scoreBadgeBg(data.score);
   const badgeText = scoreBadgeText(data.score);
@@ -103,13 +115,24 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     }, String(data.score)),
   ]);
 
-  const gameTitleBlock = h("div", {
-    style: {
-      fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.gameTitle), color: "#f8f6f2",
-      lineHeight: 1.1, display: "flex", minWidth: 0, maxWidth: RIGHT_W - PAD * 2 - BADGE_SIZE - 32,
-      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-    },
-  }, truncate(data.gameTitle, 40));
+  const { fontSize: gameTitleFontSize, maxLines: gameTitleMaxLines } = gameTitleLayout(data.gameTitle);
+  const gameTitleMaxWidth = RIGHT_W - PAD * 2 - BADGE_SIZE - 32;
+  const gameTitleBlock = gameTitleMaxLines === 1
+    ? h("div", {
+        style: {
+          fontFamily: "DM Serif Display", fontSize: gameTitleFontSize, color: "#f8f6f2",
+          lineHeight: 1.1, display: "flex", minWidth: 0, maxWidth: gameTitleMaxWidth,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        },
+      }, truncate(data.gameTitle, 40))
+    : h("div", {
+        style: {
+          fontFamily: "DM Serif Display", fontSize: gameTitleFontSize, color: "#f8f6f2",
+          lineHeight: 1.15, minWidth: 0, maxWidth: gameTitleMaxWidth,
+          display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: gameTitleMaxLines,
+          overflow: "hidden", textOverflow: "ellipsis",
+        },
+      }, truncate(data.gameTitle, 200));
 
   const scoreRow = h("div", { style: { display: "flex", alignItems: "center", gap: 32 } }, [
     scoreBadge,
