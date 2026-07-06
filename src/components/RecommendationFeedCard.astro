@@ -24,6 +24,8 @@ interface Props {
   reactions?: { reaction_type: string; profile_id: string }[];
   isLoggedIn?: boolean;
   currentProfileId?: string | null;
+  /** The author's profile id — used to detect ownership in the feed menu. */
+  profileId?: string | null;
   /** Detail (slug) view: shows the full body, hides the comment bubble, disables
       body-click navigation, and (when isOwner) exposes Edit/Delete in the action bar. */
   detailView?: boolean;
@@ -35,9 +37,11 @@ const {
   ownerUsername, ownerAvatar, createdAt,
   upVotes = 0, downVotes = 0, myVote = 0,
   commentCount = 0, reactions = [],
-  isLoggedIn = false, currentProfileId = null,
+  isLoggedIn = false, currentProfileId = null, profileId = null,
   detailView = false, isOwner = false,
 } = Astro.props;
+
+const ownerIsMe = isOwner || (!!currentProfileId && !!profileId && currentProfileId === profileId);
 
 const initials = ownerUsername ? ownerUsername.slice(0, 2).toUpperCase() : '??';
 const sourceCover = igdbImage(sourceGame?.cover_img_url, 't_cover_big');
@@ -67,6 +71,18 @@ const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => 
 ---
 
 <article class={`rfc${detailView ? ' rfc-detail' : ''}`} data-rec-id={id}>
+  {!detailView && (
+    <div class="rfc-menu-wrap">
+      <button class="rfc-menu-btn" data-menu-id={id} aria-label="More options">⋯</button>
+      <div class="rfc-menu-dropdown" id={`rfcm-${id}`} style="display:none">
+        {ownerIsMe
+          ? <button class="rfc-menu-item rfc-menu-delete" data-rec-id={id}>Delete</button>
+          : <button class="rfc-menu-item rfc-menu-report" data-rec-id={id} data-logged-in={isLoggedIn ? 'true' : 'false'}>Report</button>
+        }
+      </div>
+    </div>
+  )}
+
   <div class="rfc-reviewer">
     <a href={`/reviewers/${ownerUsername}`} class="rfc-avatar">
       {ownerAvatar
@@ -225,6 +241,7 @@ if (!window.__rfcInit) {
         document.querySelectorAll('#rfc-emote-grid .rfc-emoji-pick').forEach(function(btn) { btn.style.display = ''; });
       }
     }
+    document.querySelectorAll('.rfc-menu-dropdown').forEach(function(d) { d.style.display = 'none'; });
   }
 
   function applyRfcReaction(recId, reactionType, reacted, count) {
@@ -265,7 +282,43 @@ if (!window.__rfcInit) {
   }
 
   document.addEventListener('click', async function(e) {
-    // Owner: delete recommendation
+    // Feed menu (⋯) toggle
+    var menuBtn = e.target.closest('.rfc-menu-btn');
+    if (menuBtn) {
+      var dropdown = document.getElementById('rfcm-' + menuBtn.dataset.menuId);
+      if (!dropdown) return;
+      var isOpen = dropdown.style.display !== 'none';
+      closeRfcPanels();
+      if (!isOpen) dropdown.style.display = 'block';
+      return;
+    }
+
+    // Feed menu → Report
+    var reportBtn = e.target.closest('.rfc-menu-report');
+    if (reportBtn) {
+      closeRfcPanels();
+      if (reportBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+      if (typeof window.openReport === 'function') window.openReport('recommendation', reportBtn.dataset.recId);
+      return;
+    }
+
+    // Feed menu → Delete (owner) — removes the card in place
+    var menuDel = e.target.closest('.rfc-menu-delete');
+    if (menuDel) {
+      closeRfcPanels();
+      if (!confirm('Delete this recommendation? This cannot be undone.')) return;
+      var mres = await fetch('/api/recommendations/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recommendation_id: menuDel.dataset.recId }),
+      });
+      if (mres.ok) {
+        var card = menuDel.closest('.rfc');
+        if (card) card.remove();
+      }
+      return;
+    }
+
+    // Owner: delete recommendation (detail action bar)
     var delBtn = e.target.closest('.rfc-delete-btn');
     if (delBtn) {
       if (!confirm('Delete this recommendation? This cannot be undone.')) return;
@@ -473,11 +526,34 @@ if (!window.__rfcInit) {
 
 <style is:global>
   .rfc {
+    position: relative;
     padding: 16px 20px 14px;
     border-bottom: 1px solid var(--border-subtle);
     transition: background 0.12s;
   }
   .rfc:last-child { border-bottom: none; }
+
+  /* ── Three-dot menu (top-right, feed view) ── */
+  .rfc-menu-wrap { position: absolute; top: 12px; right: 14px; z-index: 5; }
+  .rfc-menu-btn {
+    background: none; border: none; cursor: pointer; color: var(--text-tertiary);
+    font-size: 15px; line-height: 1; padding: 3px 5px; border-radius: 5px;
+    opacity: 0.35; transition: opacity 0.15s, color 0.15s, background 0.15s;
+    letter-spacing: 1px; font-family: inherit;
+  }
+  .rfc:hover .rfc-menu-btn { opacity: 1; }
+  .rfc-menu-btn:hover { color: var(--text-primary); background: var(--bg-hover); opacity: 1; }
+  .rfc-menu-dropdown {
+    position: absolute; right: 0; top: calc(100% + 4px);
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12); min-width: 110px; z-index: 20; overflow: hidden;
+  }
+  .rfc-menu-item {
+    display: block; width: 100%; text-align: left; padding: 9px 14px; font-size: 13px;
+    background: none; border: none; cursor: pointer; font-family: inherit;
+    color: var(--text-secondary); transition: background 0.1s, color 0.1s;
+  }
+  .rfc-menu-item:hover { background: rgba(248,113,113,0.08); color: #f87171; }
 
   /* ── Reviewer row ── */
   .rfc-reviewer {
