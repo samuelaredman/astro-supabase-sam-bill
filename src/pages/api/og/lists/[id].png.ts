@@ -51,10 +51,16 @@ export const GET: APIRoute = async ({ params }) => {
     }
   }
 
+  // Only 1-4 covers means a single row of full-height cells (up to 1200px wide) —
+  // t_cover_big (264x374) visibly upscales at that size, so ask IGDB for more.
+  // Once there are 5+, cells top out around 300px wide and t_cover_big is already
+  // sharp there; requesting bigger images anyway was the actual cause of the
+  // slow generation reported after the previous change (some originals are
+  // multi-MB — fine for one cover, not fine fetching a dozen of them).
+  const coverCount = (topEntries ?? []).length;
+  const coverSize = coverCount <= 4 ? "t_1080p" : "t_cover_big";
   const coverUrls = ((topEntries ?? []) as any[])
-    // Full resolution — a small list stretches 1-4 covers across large grid cells,
-    // and t_cover_big (264x374) upscales visibly soft at that size.
-    .map((e) => igdbImage(e.games?.cover_img_url, "t_original"))
+    .map((e) => igdbImage(e.games?.cover_img_url, coverSize))
     .filter(Boolean) as string[];
 
   const [coverDataUris, ownerAvatarDataUri] = await Promise.all([
