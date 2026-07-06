@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../../utils/database";
-import { igdbImage, timeAgo } from "../../../../utils/format";
+import { igdbImage } from "../../../../utils/format";
 import { renderOgPng, fetchImageDataUri } from "../../../../utils/og";
 import { buildReviewOgTree } from "../../../../utils/ogReview";
 
@@ -17,7 +17,7 @@ export const GET: APIRoute = async ({ params }) => {
   const { data: review } = await db
     .from("reviews")
     .select(`
-      score, published_at, created_at, status,
+      score, title, status,
       games ( title, cover_img_url ),
       profiles ( username, avatar_url )
     `)
@@ -41,9 +41,9 @@ export const GET: APIRoute = async ({ params }) => {
     gameTitle: review.games?.title ?? "Unknown game",
     coverDataUri,
     score: review.score,
+    reviewTitle: review.title ?? null,
     reviewerUsername: review.profiles?.username ?? "unknown",
     reviewerAvatarDataUri,
-    timeAgoLabel: timeAgo(review.published_at ?? review.created_at),
   });
 
   const png = await renderOgPng(tree, 1200, 630);

@@ -1,41 +1,48 @@
-import { h, truncate, scoreColor, hexToRgba, bigTitleFontSize, OG_ACCENT, OG_BG } from "./og";
+import { h, truncate, scoreColor, hexToRgba, OG_ACCENT, OG_BG } from "./og";
 
 export interface ReviewOgData {
   gameTitle: string;
   coverDataUri: string | null;
   score: number;
+  reviewTitle: string | null;
   reviewerUsername: string;
   reviewerAvatarDataUri: string | null;
-  timeAgoLabel: string;
 }
 
 const WIDTH = 1200;
 const HEIGHT = 630;
 const ACCENT = OG_ACCENT;
 const BG = OG_BG;
-const PAD = 56;
-const COVER_W = 340;
-const COVER_H = Math.round(COVER_W * (374 / 264));
-const COVER_X = 64;
+const PAD = 64;
+// Card content (cover + score + game title) gets the top band; the reviewer
+// strip is a distinct overlay confined to the bottom band so it never covers
+// the card itself.
+const MAIN_H = 500;
+const OVERLAY_H = HEIGHT - MAIN_H;
+const COVER_H = 380;
+const COVER_W = Math.round(COVER_H * (264 / 374));
 
-// Cover art keeps its real aspect ratio (a full-bleed crop of portrait box art
-// can chop off the part that actually identifies the game — tried it, looked
-// bad). Score + reviewer become a single floating chip bottom-left, not a
-// paragraph — a preview thumbnail (Discord, iMessage, Twitter cards) scales
-// this whole 1200x630 canvas down to a few hundred px wide, so only a short
-// label or a big chip reads at that size, never body-text-sized prose.
+function cardTitleFontSize(title: string): number {
+  if (title.length <= 16) return 56;
+  if (title.length <= 28) return 46;
+  if (title.length <= 42) return 36;
+  return 28;
+}
+
 export function buildReviewOgTree(data: ReviewOgData): any {
+  const c = scoreColor(data.score);
+
   const children: any[] = [
     h("div", {
       style: {
         position: "absolute", top: -160, right: -160, width: 560, height: 560, borderRadius: 280,
-        backgroundImage: `radial-gradient(circle, ${hexToRgba(ACCENT, 0.16)} 0%, ${hexToRgba(ACCENT, 0)} 70%)`,
+        backgroundImage: `radial-gradient(circle, ${hexToRgba(ACCENT, 0.14)} 0%, ${hexToRgba(ACCENT, 0)} 70%)`,
         display: "flex",
       },
     }),
   ];
 
-  // ── Cover art / poster ──
+  // ── The card: cover, score, and title are the main event ──
   const posterInner = data.coverDataUri
     ? h("div", {
         style: {
@@ -55,38 +62,51 @@ export function buildReviewOgTree(data: ReviewOgData): any {
         }, data.gameTitle.slice(0, 1).toUpperCase()),
       ]);
 
-  children.push(
-    h("div", {
-      style: {
-        position: "absolute", left: COVER_X, top: (HEIGHT - COVER_H) / 2 - 8,
-        width: COVER_W + 16, height: COVER_H + 16, borderRadius: 20,
-        background: hexToRgba(ACCENT, 0.14), display: "flex", alignItems: "center", justifyContent: "center",
-      },
-    }, [posterInner])
-  );
+  const poster = h("div", {
+    style: {
+      flexShrink: 0, width: COVER_W + 16, height: COVER_H + 16, borderRadius: 20,
+      background: hexToRgba(ACCENT, 0.14), display: "flex", alignItems: "center", justifyContent: "center",
+    },
+  }, [posterInner]);
 
-  // ── Right of the poster: label + game title only, kept large and simple ──
-  const textX = COVER_X + COVER_W + 56;
-  const textW = WIDTH - PAD - textX;
+  // Big colored score, with a soft glow of the same color behind it — the
+  // score reads as a graded stat, not a caption.
+  const scoreBox = h("div", {
+    style: { position: "relative", width: 240, height: 190, display: "flex", alignItems: "center", flexShrink: 0 },
+  }, [
+    h("div", {
+      style: {
+        position: "absolute", top: -5, left: 10, width: 220, height: 200, borderRadius: 110, display: "flex",
+        backgroundImage: `radial-gradient(circle, ${hexToRgba(c, 0.32)} 0%, ${hexToRgba(c, 0)} 72%)`,
+      },
+    }),
+    h("div", {
+      style: {
+        position: "relative", fontFamily: "DM Serif Display", fontSize: 190, fontWeight: 700,
+        color: c, lineHeight: 1, display: "flex",
+      },
+    }, String(data.score)),
+  ]);
+
+  const titleBlock = h("div", {
+    style: {
+      fontFamily: "DM Serif Display", fontSize: cardTitleFontSize(data.gameTitle), color: "#f8f6f2",
+      lineHeight: 1.15, display: "flex", minWidth: 0, width: "100%",
+      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+    },
+  }, truncate(data.gameTitle, 40));
+
+  const scoreAndTitle = h("div", {
+    style: { display: "flex", flexDirection: "column", justifyContent: "center", gap: 12, minWidth: 0, flex: 1 },
+  }, [scoreBox, titleBlock]);
+
   children.push(
     h("div", {
       style: {
-        position: "absolute", left: textX, top: 0, height: HEIGHT, width: textW,
-        display: "flex", flexDirection: "column", justifyContent: "center", gap: 16,
+        position: "absolute", top: 0, left: 0, right: 0, height: MAIN_H, display: "flex",
+        alignItems: "center", paddingLeft: PAD, paddingRight: PAD, gap: 56,
       },
-    }, [
-      h("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, [
-        h("div", { style: { width: 8, height: 8, borderRadius: 4, background: ACCENT, display: "flex" } }),
-        h("div", { style: { fontSize: 18, fontWeight: 700, letterSpacing: 2, color: ACCENT, textTransform: "uppercase", display: "flex" } }, "Review"),
-      ]),
-      h("div", {
-        style: {
-          fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.gameTitle), color: "#f8f6f2",
-          lineHeight: 1.12, display: "flex", maxWidth: textW,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        },
-      }, truncate(data.gameTitle, 40)),
-    ])
+    }, [poster, scoreAndTitle])
   );
 
   // ── Wordmark, top-right ──
@@ -102,47 +122,45 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     ])
   );
 
-  // ── Floating score + reviewer chip, bottom-left ──
-  const c = scoreColor(data.score);
-  const scorePill = h("div", {
-    style: {
-      display: "flex", alignItems: "center", gap: 7, fontSize: 20, fontWeight: 700, color: c,
-      background: hexToRgba(c, 0.18), border: `1px solid ${hexToRgba(c, 0.5)}`,
-      borderRadius: 9, padding: "5px 13px",
-    },
-  }, [
-    h("div", { style: { width: 7, height: 7, borderRadius: 4, background: c, display: "flex" } }),
-    h("div", { style: { display: "flex" } }, `${data.score}/10`),
-  ]);
-
+  // ── Reviewer overlay strip, confined to the bottom band ──
   const avatar = data.reviewerAvatarDataUri
     ? h("div", {
         style: {
-          width: 32, height: 32, borderRadius: 16, backgroundImage: `url(${data.reviewerAvatarDataUri})`,
+          width: 46, height: 46, borderRadius: 23, backgroundImage: `url(${data.reviewerAvatarDataUri})`,
           backgroundSize: "cover", backgroundPosition: "center", display: "flex", flexShrink: 0,
         },
       })
     : h("div", {
         style: {
-          width: 32, height: 32, borderRadius: 16, background: ACCENT, display: "flex",
-          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 13, fontWeight: 700, flexShrink: 0,
+          width: 46, height: 46, borderRadius: 23, background: ACCENT, display: "flex",
+          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 17, fontWeight: 700, flexShrink: 0,
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
+
+  const captionLines: any[] = [
+    h("div", { style: { fontSize: 22, fontWeight: 700, color: "#f0ede8", display: "flex" } }, `@${data.reviewerUsername}`),
+  ];
+  if (data.reviewTitle) {
+    captionLines.push(
+      h("div", {
+        style: {
+          fontSize: 21, color: "#c9c6c0", display: "flex", maxWidth: WIDTH - PAD * 2 - 46 - 20,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        },
+      }, truncate(data.reviewTitle, 64))
+    );
+  }
 
   children.push(
     h("div", {
       style: {
-        position: "absolute", left: 40, bottom: 40, display: "flex", alignItems: "center", gap: 12,
-        background: "rgba(9,9,10,0.55)", borderRadius: 16, padding: "10px 18px 10px 12px",
-        border: "1px solid rgba(255,255,255,0.08)",
+        position: "absolute", left: 0, right: 0, bottom: 0, height: OVERLAY_H, display: "flex",
+        alignItems: "center", paddingLeft: PAD, paddingRight: PAD, gap: 18,
+        backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.94) 0%, rgba(9,9,10,0.8) 55%, rgba(9,9,10,0) 100%)`,
       },
     }, [
       avatar,
-      h("div", { style: { fontSize: 19, fontWeight: 700, color: "#f0ede8", display: "flex" } }, `@${data.reviewerUsername}`),
-      h("div", { style: { fontSize: 19, color: "#6a6866", display: "flex" } }, "·"),
-      h("div", { style: { fontSize: 17, color: "#c9c6c0", display: "flex" } }, data.timeAgoLabel),
-      h("div", { style: { fontSize: 19, color: "#6a6866", display: "flex" } }, "·"),
-      scorePill,
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 5, minWidth: 0 } }, captionLines),
     ])
   );
 
@@ -153,3 +171,4 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     },
   }, children);
 }
+
