@@ -129,7 +129,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   // ── Bottom overlay: profile + username, with the review's own title next
   // to them in the same row — all laid over the full card (cover + score +
   // game title), with a gradient scrim behind for legibility.
-  const AVATAR_SIZE = 72;
+  const AVATAR_SIZE = 84;
   const avatar = data.reviewerAvatarDataUri
     // A real <img> with objectFit, not a div with a backgroundImage — satori
     // renders backgroundSize/backgroundPosition on a div unreliably (visibly
@@ -142,7 +142,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     : h("div", {
         style: {
           width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, background: ACCENT, display: "flex",
-          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 26, fontWeight: 700, flexShrink: 0,
+          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 30, fontWeight: 700, flexShrink: 0,
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
 
@@ -150,7 +150,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     avatar,
     h("div", {
       style: {
-        fontSize: 36, fontWeight: 700, color: "#f0ede8", display: "flex", flexShrink: 0,
+        fontSize: 42, fontWeight: 700, color: "#f0ede8", display: "flex", flexShrink: 0,
         maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       },
     }, `@${truncate(data.reviewerUsername, 24)}`),
@@ -182,7 +182,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     }),
     h("div", {
       style: {
-        position: "absolute", left: 56, right: 56, bottom: 44, display: "flex", alignItems: "center", gap: 18,
+        position: "absolute", left: 56, right: 56, bottom: 44, display: "flex", alignItems: "baseline", gap: 18,
       },
     }, bottomRowChildren),
   ];
