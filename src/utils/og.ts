@@ -39,6 +39,51 @@ export function h(type: string, props: Record<string, any> = {}, children?: any)
   return children !== undefined ? { type, props: { ...props, children } } : { type, props };
 }
 
+// Shared brand constants + score-color mapping for every OG image (lists, reviews, ...).
+export const OG_ACCENT = "#8b7bf0";
+export const OG_BG = "#09090a";
+
+// Mirrors src/utils/format.ts's scoreClass() buckets, mapped to the site's
+// dark-theme score colors (see games/[slug].astro's :root[data-theme="dark"]).
+export function scoreColor(score: number): string {
+  if (score === 10) return "#ffffff";
+  if (score >= 9) return "#4ade80";
+  if (score >= 8) return "#2dd4bf";
+  if (score >= 7) return "#60a5fa";
+  if (score >= 5) return "#fbbf24";
+  if (score >= 3) return "#fb923c";
+  return "#f87171";
+}
+
+export function hexToRgba(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// Mirrors the dark-theme `.score-badge`/`.score-*` pairs in src/styles/shared.css —
+// a solid dark tint behind the bright scoreColor() text, so an OG score badge
+// reads as the same "chip" the site itself uses, not a new invented style.
+// Score 10 inverts to a solid white chip (see `.score-perfect`), so it needs its
+// own text color rather than scoreColor()'s white-on-dark for that bucket.
+export function scoreBadgeBg(score: number): string {
+  if (score === 10) return "#ffffff";
+  if (score >= 9) return "#112e1c";
+  if (score >= 8) return "#082d2a";
+  if (score >= 7) return "#0e2240";
+  if (score >= 5) return "#271e00";
+  if (score >= 3) return "#2c160a";
+  return "#300e0e";
+}
+
+export function scoreBadgeText(score: number): string {
+  return score === 10 ? "#09090a" : scoreColor(score);
+}
+
+export function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max).trimEnd() + "…" : text;
+}
+
 export async function renderOgPng(tree: any, width: number, height: number): Promise<Buffer> {
   const svg = await satori(tree, { width, height, fonts: loadOgFonts() });
   // satori already vectorizes all text into paths, so resvg never needs to resolve

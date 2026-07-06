@@ -1,31 +1,9 @@
-import { h, coverGridRows } from "./og";
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max).trimEnd() + "…" : text;
-}
+import { h, coverGridRows, truncate, scoreColor, hexToRgba, OG_ACCENT, OG_BG } from "./og";
 
 function titleFontSize(title: string): number {
   if (title.length <= 24) return 70;
   if (title.length <= 40) return 56;
   return 46;
-}
-
-// Mirrors src/utils/format.ts's scoreClass() buckets, mapped to the site's
-// dark-theme score colors (see games/[slug].astro's :root[data-theme="dark"]).
-function scoreColor(score: number): string {
-  if (score === 10) return "#ffffff";
-  if (score >= 9) return "#4ade80";
-  if (score >= 8) return "#2dd4bf";
-  if (score >= 7) return "#60a5fa";
-  if (score >= 5) return "#fbbf24";
-  if (score >= 3) return "#fb923c";
-  return "#f87171";
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 export interface ListOgData {
@@ -40,8 +18,8 @@ export interface ListOgData {
 
 const WIDTH = 1200;
 const HEIGHT = 630;
-const ACCENT = "#8b7bf0";
-const BG = "#09090a";
+const ACCENT = OG_ACCENT;
+const BG = OG_BG;
 
 const GRID_GAP = 5;
 
