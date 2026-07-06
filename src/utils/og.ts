@@ -84,6 +84,15 @@ export function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max).trimEnd() + "…" : text;
 }
 
+// Scale for a DM Serif Display headline sized to span the full 1200-wide canvas
+// (list titles, game titles on the review OG image) — longer strings need a
+// smaller size to keep a single line from overflowing.
+export function bigTitleFontSize(title: string): number {
+  if (title.length <= 24) return 70;
+  if (title.length <= 40) return 56;
+  return 46;
+}
+
 export async function renderOgPng(tree: any, width: number, height: number): Promise<Buffer> {
   const svg = await satori(tree, { width, height, fonts: loadOgFonts() });
   // satori already vectorizes all text into paths, so resvg never needs to resolve

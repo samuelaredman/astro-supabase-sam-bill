@@ -1,10 +1,4 @@
-import { h, coverGridRows, truncate, scoreColor, hexToRgba, OG_ACCENT, OG_BG } from "./og";
-
-function titleFontSize(title: string): number {
-  if (title.length <= 24) return 70;
-  if (title.length <= 40) return 56;
-  return 46;
-}
+import { h, coverGridRows, truncate, scoreColor, hexToRgba, bigTitleFontSize, OG_ACCENT, OG_BG } from "./og";
 
 export interface ListOgData {
   title: string;
@@ -160,7 +154,7 @@ export function buildListOgTree(data: ListOgData): any {
       ]),
       h("div", {
         style: {
-          fontFamily: "DM Serif Display", fontSize: titleFontSize(data.title), color: "#f8f6f2",
+          fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.title), color: "#f8f6f2",
           lineHeight: 1.08, display: "flex", maxWidth: WIDTH - 112,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           textShadow: "0 2px 16px rgba(0,0,0,0.6)",
