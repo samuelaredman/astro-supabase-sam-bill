@@ -126,45 +126,45 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     h("div", { style: { fontSize: 21, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.95)" } }, "CHEKPOINT"),
   ]);
 
-  // ── Bottom overlay: profile, username, then the review's own title — all
-  // laid over the full card (cover + score + game title), same treatment as
-  // ogList's bottom title block (gradient scrim + DM Serif Display headline).
+  // ── Bottom overlay: profile + username, with the review's own title next
+  // to them in the same row — all laid over the full card (cover + score +
+  // game title), with a gradient scrim behind for legibility.
   const avatar = data.reviewerAvatarDataUri
     ? h("div", {
         style: {
-          width: 34, height: 34, borderRadius: 17, backgroundImage: `url(${data.reviewerAvatarDataUri})`,
+          width: 60, height: 60, borderRadius: 30, backgroundImage: `url(${data.reviewerAvatarDataUri})`,
           backgroundSize: "cover", backgroundPosition: "center", display: "flex", flexShrink: 0,
         },
       })
     : h("div", {
         style: {
-          width: 34, height: 34, borderRadius: 17, background: ACCENT, display: "flex",
-          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 14, fontWeight: 700, flexShrink: 0,
+          width: 60, height: 60, borderRadius: 30, background: ACCENT, display: "flex",
+          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 22, fontWeight: 700, flexShrink: 0,
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
 
-  // Title on top (big, like ogList's title), meta row below it closest to
-  // the edge — matches ogList's own title-then-meta order and keeps the
-  // tallest element clear of the canvas edge instead of flush against it.
-  const bottomChildren: any[] = [];
+  const bottomRowChildren: any[] = [
+    avatar,
+    h("div", {
+      style: {
+        fontSize: 32, fontWeight: 700, color: "#f0ede8", display: "flex", flexShrink: 0,
+        maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      },
+    }, `@${truncate(data.reviewerUsername, 24)}`),
+  ];
   if (data.reviewTitle) {
-    bottomChildren.push(
+    bottomRowChildren.push(
+      h("div", { style: { width: 1, height: 44, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } }),
       h("div", {
         style: {
           fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.reviewTitle), color: "#f8f6f2",
-          lineHeight: 1.08, display: "flex", maxWidth: WIDTH - PAD * 2,
+          lineHeight: 1.08, display: "flex", minWidth: 0, flex: 1,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           textShadow: "0 2px 16px rgba(0,0,0,0.6)",
         },
       }, truncate(data.reviewTitle, 60))
     );
   }
-  bottomChildren.push(
-    h("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, [
-      avatar,
-      h("div", { style: { fontSize: 21, fontWeight: 700, color: "#f0ede8", display: "flex" } }, `@${truncate(data.reviewerUsername, 24)}`),
-    ])
-  );
 
   const bottomOverlay: any[] = [
     // Gradient scrim over the poster only — that's the only region where
@@ -179,9 +179,9 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     }),
     h("div", {
       style: {
-        position: "absolute", left: 56, right: 56, bottom: 44, display: "flex", flexDirection: "column", gap: 14,
+        position: "absolute", left: 56, right: 56, bottom: 44, display: "flex", alignItems: "center", gap: 18,
       },
-    }, bottomChildren),
+    }, bottomRowChildren),
   ];
 
   return h("div", {
