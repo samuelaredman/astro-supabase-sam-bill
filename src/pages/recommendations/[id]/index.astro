@@ -4,7 +4,8 @@ import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../.
 import Layout from "../../../components/Layout.astro";
 import RecommendationFeedCard from "../../../components/RecommendationFeedCard.astro";
 import ReportModal from "../../../components/ReportModal.astro";
-import { timeAgo } from "../../../utils/format";
+import ShareButton from "../../../components/ShareButton.astro";
+import { timeAgo, igdbImage } from "../../../utils/format";
 import { IMAGE_EMOTE_MAP } from "../../../utils/reactions";
 import { REC_SELECT, shapeRec } from "../../../utils/recommendationsFeed";
 
@@ -64,6 +65,16 @@ for (const c of commentList) {
 function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
 const commentCount = commentList.length;
 const isOwner = currentProfile?.id === rec.profileId;
+
+// Sidebar: more recommendations from the same author
+const { data: moreRecsRaw } = await db
+  .from("recommendations")
+  .select("id, source_game:games!source_game_id ( title, slug, cover_img_url ), target_game:games!target_game_id ( title, slug, cover_img_url )")
+  .eq("profile_id", rec.profileId)
+  .neq("id", id)
+  .order("created_at", { ascending: false })
+  .limit(3);
+const moreRecs = moreRecsRaw ?? [];
 ---
 
 <Layout
@@ -71,13 +82,15 @@ const isOwner = currentProfile?.id === rec.profileId;
   description={`If you liked ${rec.sourceGame?.title}, try ${rec.targetGame?.title}.`}
   isLoggedIn={isLoggedIn}
   currentProfile={currentProfile}
-  variant="two-col"
 >
   <main class="feed rec-detail-main">
-    <button class="rec-detail-back" onclick="history.length > 1 ? history.back() : (window.location.href='/recommendations')">
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
-      Back
-    </button>
+    <div class="rec-detail-topbar">
+      <button class="rec-detail-back" onclick="history.length > 1 ? history.back() : (window.location.href='/recommendations')">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
+        Back
+      </button>
+      <ShareButton url={`/recommendations/${rec.id}`} />
+    </div>
 
     <div class="rec-detail-post">
       <RecommendationFeedCard
@@ -96,12 +109,9 @@ const isOwner = currentProfile?.id === rec.profileId;
         reactions={rec.reactions}
         isLoggedIn={isLoggedIn}
         currentProfileId={currentProfile?.id ?? null}
+        detailView={true}
+        isOwner={isOwner}
       />
-      {isOwner && (
-        <div class="rec-detail-owner-actions">
-          <button class="rec-detail-delete" data-rec-id={rec.id}>Delete recommendation</button>
-        </div>
-      )}
     </div>
 
     <!-- ── Comments ── -->
@@ -188,19 +198,96 @@ const isOwner = currentProfile?.id === rec.profileId;
     </div>
   </main>
 
+  <div slot="sidebar-right">
+    <div class="widget">
+      <div class="widget-title">The games</div>
+      {[rec.sourceGame, rec.targetGame].map((g: any, i: number) => g && (
+        <a href={`/games/${g.slug}`} class="rec-side-game">
+          <div class="rec-side-cover">
+            {igdbImage(g.cover_img_url)
+              ? <img src={igdbImage(g.cover_img_url) ?? ''} alt={g.title} />
+              : <span>🎮</span>}
+          </div>
+          <div class="rec-side-info">
+            <div class="rec-side-role">{i === 0 ? 'If you liked' : 'Try'}</div>
+            <div class="rec-side-title">{g.title}</div>
+            <div class="rec-side-cta">View game →</div>
+          </div>
+        </a>
+      ))}
+    </div>
+
+    <div class="widget">
+      <div class="widget-title">Recommended by</div>
+      <a href={`/reviewers/${rec.ownerUsername}`} style="display:flex;gap:12px;align-items:center;text-decoration:none">
+        <div class="rec-side-avatar">
+          {rec.ownerAvatar
+            ? <img src={rec.ownerAvatar} alt={rec.ownerUsername} />
+            : <span>{getInitials(rec.ownerUsername)}</span>}
+        </div>
+        <div>
+          <div style="font-size:13px;font-weight:500">@{rec.ownerUsername}</div>
+          <div style="font-size:12px;color:var(--text-tertiary)">View profile →</div>
+        </div>
+      </a>
+    </div>
+
+    {moreRecs.length > 0 && (
+      <div class="widget">
+        <div class="widget-title">More from @{rec.ownerUsername}</div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          {moreRecs.map((m: any) => (
+            <a href={`/recommendations/${m.id}`} class="rec-side-more">
+              <div class="rec-side-more-covers">
+                <div class="rec-side-more-cover">
+                  {igdbImage(m.source_game?.cover_img_url)
+                    ? <img src={igdbImage(m.source_game.cover_img_url) ?? ''} alt="" />
+                    : <span>🎮</span>}
+                </div>
+                <span class="rec-side-more-arrow">→</span>
+                <div class="rec-side-more-cover">
+                  {igdbImage(m.target_game?.cover_img_url)
+                    ? <img src={igdbImage(m.target_game.cover_img_url) ?? ''} alt="" />
+                    : <span>🎮</span>}
+                </div>
+              </div>
+              <div class="rec-side-more-titles">{m.source_game?.title} → {m.target_game?.title}</div>
+            </a>
+          ))}
+        </div>
+      </div>
+    )}
+  </div>
+
   <ReportModal />
 </Layout>
 
 <style is:global>
-  .rec-detail-main { min-width: 0; padding: 20px 16px 60px; max-width: 720px; }
-  .rec-detail-back { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-family: inherit; color: var(--text-tertiary); background: none; border: none; cursor: pointer; padding: 0 0 16px; transition: color .15s; }
+  .rec-detail-main { min-width: 0; padding: 20px 16px 60px; }
+  .rec-detail-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  .rec-detail-back { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-family: inherit; color: var(--text-tertiary); background: none; border: none; cursor: pointer; padding: 0; transition: color .15s; }
   .rec-detail-back:hover { color: var(--text-secondary); }
   .rec-detail-post { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 20px; }
-  /* Full body on the detail page — override the feed card's line clamp */
-  .rec-detail-post .rfc-body { -webkit-line-clamp: unset; }
-  .rec-detail-owner-actions { padding: 0 20px 16px 52px; }
-  .rec-detail-delete { background: none; border: 1px solid var(--border); color: var(--text-tertiary); font-size: 12px; font-family: inherit; padding: 5px 12px; border-radius: 8px; cursor: pointer; transition: all .15s; }
-  .rec-detail-delete:hover { border-color: #f87171; color: #f87171; }
+
+  /* ── Sidebar widgets ── */
+  .rec-side-game { display: flex; gap: 12px; align-items: flex-start; text-decoration: none; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
+  .rec-side-game:last-child { border-bottom: none; }
+  .rec-side-cover { flex-shrink: 0; width: 46px; height: 62px; border-radius: 7px; overflow: hidden; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  .rec-side-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .rec-side-info { min-width: 0; }
+  .rec-side-role { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-tertiary); margin-bottom: 3px; }
+  .rec-side-title { font-size: 13px; font-weight: 500; color: var(--text-primary); line-height: 1.3; margin-bottom: 4px; }
+  .rec-side-game:hover .rec-side-title { color: var(--accent); }
+  .rec-side-cta { font-size: 12px; color: var(--text-tertiary); }
+  .rec-side-avatar { width: 40px; height: 40px; border-radius: 50%; overflow: hidden; background: var(--tag-bg); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; color: var(--text-secondary); }
+  .rec-side-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .rec-side-more { display: flex; align-items: center; gap: 10px; padding: 8px; margin: 0 -8px; border-radius: 8px; text-decoration: none; transition: background .15s; }
+  .rec-side-more:hover { background: var(--bg-hover); }
+  .rec-side-more-covers { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+  .rec-side-more-cover { width: 24px; height: 32px; border-radius: 4px; overflow: hidden; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 11px; }
+  .rec-side-more-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .rec-side-more-arrow { color: var(--accent); font-size: 11px; font-weight: 700; }
+  .rec-side-more-titles { font-size: 12px; color: var(--text-primary); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 
   .list-comments { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
   .list-comments-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-tertiary); margin-bottom: 16px; }
@@ -331,20 +418,9 @@ const isOwner = currentProfile?.id === rec.profileId;
       }
     }
 
-    // ── Delegated actions: vote, reply, edit, delete ──
+    // ── Delegated actions: comment vote, reply, edit, delete ──
+    // (Recommendation post vote/react/edit/delete are handled inside RecommendationFeedCard.)
     document.addEventListener('click', async function (e) {
-      // Delete the whole recommendation
-      var recDel = e.target.closest('.rec-detail-delete');
-      if (recDel) {
-        if (!confirm('Delete this recommendation? This cannot be undone.')) return;
-        var res = await fetch('/api/recommendations/delete', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ recommendation_id: recDel.dataset.recId }),
-        });
-        if (res.ok) window.location.href = '/recommendations';
-        return;
-      }
-
       // Comment vote
       var voteBtn = e.target.closest('.lcv-btn');
       if (voteBtn) {
