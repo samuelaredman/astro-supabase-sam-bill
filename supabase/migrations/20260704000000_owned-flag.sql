@@ -3,5 +3,3 @@
 ALTER TABLE user_game_status
   ADD COLUMN IF NOT EXISTS is_owned boolean NOT NULL DEFAULT false;
 
-
-
