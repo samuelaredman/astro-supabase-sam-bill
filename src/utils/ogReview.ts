@@ -1,4 +1,7 @@
-import { h, truncate, scoreBadgeBg, scoreBadgeText, scoreColor, hexToRgba, OG_ACCENT, OG_BG } from "./og";
+import {
+  h, truncate, scoreBadgeBg, scoreBadgeText, scoreColor, hexToRgba, OG_ACCENT, OG_BG,
+  BOTTOM_TITLE_WRAP_THRESHOLD, bottomTitleFontSize, bottomTitleFontSizeShort,
+} from "./og";
 
 export interface ReviewOgData {
   gameTitle: string;
@@ -17,20 +20,6 @@ const LEFT_W = 420;
 const RIGHT_W = WIDTH - LEFT_W;
 const PAD = 56;
 const BADGE_SIZE = 200;
-// Past this length, the single-line review title in the bottom row would just get
-// ellipsized anyway — wrapping it to two (smaller) lines shows more of it instead.
-const LONG_REVIEW_TITLE_THRESHOLD = 28;
-
-// Single-line review title (<=LONG_REVIEW_TITLE_THRESHOLD chars) — sized larger
-// than the shared bigTitleFontSize() tiers since this only ever needs to cover
-// short strings, unlike that function's list/game-title callers.
-function shortReviewTitleFontSize(title: string): number {
-  return title.length <= 24 ? 74 : 60;
-}
-
-function reviewTitleFontSize(title: string): number {
-  return title.length <= 40 ? 44 : 38;
-}
 
 // Wraps the game title up to 4 lines instead of ellipsizing after a handful of
 // words on one line — the badge stays the taller flex item at every tier (max
@@ -205,7 +194,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   // Long titles wrap to two smaller lines instead of ellipsizing after a few words —
   // in that mode the row is centered (not baseline-aligned) so the avatar/username
   // sit centered between the two title lines rather than pinned to the first line's baseline.
-  const isLongReviewTitle = !!data.reviewTitle && data.reviewTitle.length > LONG_REVIEW_TITLE_THRESHOLD;
+  const isLongReviewTitle = !!data.reviewTitle && data.reviewTitle.length > BOTTOM_TITLE_WRAP_THRESHOLD;
 
   const bottomRowChildren: any[] = [
     avatar,
@@ -222,7 +211,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
       isLongReviewTitle
         ? h("div", {
             style: {
-              fontFamily: "DM Serif Display", fontSize: reviewTitleFontSize(data.reviewTitle), color: "#f8f6f2",
+              fontFamily: "DM Serif Display", fontSize: bottomTitleFontSize(data.reviewTitle), color: "#f8f6f2",
               lineHeight: 1.22, minWidth: 0, flex: 1,
               display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
               overflow: "hidden", textOverflow: "ellipsis",
@@ -231,7 +220,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
           }, truncate(data.reviewTitle, 120))
         : h("div", {
             style: {
-              fontFamily: "DM Serif Display", fontSize: shortReviewTitleFontSize(data.reviewTitle), color: "#f8f6f2",
+              fontFamily: "DM Serif Display", fontSize: bottomTitleFontSizeShort(data.reviewTitle), color: "#f8f6f2",
               lineHeight: 1.08, display: "flex", minWidth: 0, flex: 1,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               textShadow: "0 2px 16px rgba(0,0,0,0.6)",

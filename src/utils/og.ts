@@ -84,13 +84,22 @@ export function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max).trimEnd() + "…" : text;
 }
 
-// Scale for a DM Serif Display headline sized to span the full 1200-wide canvas
-// (list titles, game titles on the review OG image) — longer strings need a
-// smaller size to keep a single line from overflowing.
-export function bigTitleFontSize(title: string): number {
-  if (title.length <= 24) return 70;
-  if (title.length <= 40) return 56;
-  return 46;
+// Shared sizing for the bottom-row title (review title on the review OG card,
+// list title on the list OG card) — both sit next to the avatar/username at
+// the same font, so review and list cards read as the same family of card.
+// Past this length the single-line title would just get ellipsized anyway —
+// wrapping it to two (smaller) lines shows more of it instead.
+export const BOTTOM_TITLE_WRAP_THRESHOLD = 28;
+
+// Single-line variant (<=BOTTOM_TITLE_WRAP_THRESHOLD chars) — sized larger
+// since it only ever needs to cover short strings.
+export function bottomTitleFontSizeShort(title: string): number {
+  return title.length <= 24 ? 74 : 60;
+}
+
+// Two-line wrapped variant, for titles past the threshold above.
+export function bottomTitleFontSize(title: string): number {
+  return title.length <= 40 ? 44 : 38;
 }
 
 export async function renderOgPng(tree: any, width: number, height: number): Promise<Buffer> {

@@ -1,4 +1,7 @@
-import { h, coverGridRows, truncate, scoreColor, hexToRgba, bigTitleFontSize, OG_ACCENT, OG_BG } from "./og";
+import {
+  h, coverGridRows, truncate, scoreColor, hexToRgba, OG_ACCENT, OG_BG,
+  BOTTOM_TITLE_WRAP_THRESHOLD, bottomTitleFontSize, bottomTitleFontSizeShort,
+} from "./og";
 
 export interface ListOgData {
   title: string;
@@ -48,41 +51,23 @@ export function buildListOgTree(data: ListOgData): any {
     );
   }
 
-  const metaParts: any[] = [];
-  if (data.ownerAvatarDataUri) {
-    metaParts.push(
-      h("div", {
-        style: {
-          width: 30, height: 30, borderRadius: 15, backgroundImage: `url(${data.ownerAvatarDataUri})`,
-          backgroundSize: "cover", backgroundPosition: "center", display: "flex", flexShrink: 0,
-        },
-      })
-    );
-  } else {
-    metaParts.push(
-      h("div", {
-        style: {
-          width: 30, height: 30, borderRadius: 15, background: ACCENT, display: "flex",
-          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 13, fontWeight: 700, flexShrink: 0,
-        },
-      }, data.ownerUsername.slice(0, 2).toUpperCase())
-    );
-  }
-  metaParts.push(h("div", { style: { fontSize: 21, fontWeight: 700, color: "#f0ede8" } }, `@${data.ownerUsername}`));
-  metaParts.push(h("div", { style: { fontSize: 21, color: "#6a6866", display: "flex" } }, "·"));
-  metaParts.push(h("div", { style: { fontSize: 21, color: "#c9c6c0", display: "flex" } },
+  // Small caption line above the main avatar/username/title row — game count,
+  // Ranked, and avg score still show up, just demoted to a caption now that
+  // the row below carries the avatar+username+title (matching the review card).
+  const captionParts: any[] = [];
+  captionParts.push(h("div", { style: { fontSize: 19, color: "#c9c6c0", display: "flex" } },
     `${data.entryCountTotal} game${data.entryCountTotal === 1 ? "" : "s"}`));
   if (data.isRanked) {
-    metaParts.push(h("div", { style: { fontSize: 21, color: "#6a6866", display: "flex" } }, "·"));
-    metaParts.push(h("div", { style: { fontSize: 21, color: ACCENT, fontWeight: 700, display: "flex" } }, "Ranked"));
+    captionParts.push(h("div", { style: { fontSize: 19, color: "#6a6866", display: "flex" } }, "·"));
+    captionParts.push(h("div", { style: { fontSize: 19, color: ACCENT, fontWeight: 700, display: "flex" } }, "Ranked"));
   }
   if (data.avgScore !== null) {
     const c = scoreColor(data.avgScore);
-    metaParts.push(h("div", { style: { fontSize: 21, color: "#6a6866", display: "flex" } }, "·"));
-    metaParts.push(
+    captionParts.push(h("div", { style: { fontSize: 19, color: "#6a6866", display: "flex" } }, "·"));
+    captionParts.push(
       h("div", {
         style: {
-          display: "flex", alignItems: "center", gap: 6, fontSize: 19, fontWeight: 700, color: c,
+          display: "flex", alignItems: "center", gap: 6, fontSize: 17, fontWeight: 700, color: c,
           background: hexToRgba(c, 0.14), border: `1px solid ${hexToRgba(c, 0.4)}`,
           borderRadius: 8, padding: "3px 11px",
         },
@@ -92,6 +77,52 @@ export function buildListOgTree(data: ListOgData): any {
       ])
     );
   }
+
+  // Avatar + username + divider + list title — same sizes/alignment as the
+  // review OG card's bottom row, so the two card types read as one family.
+  const AVATAR_SIZE = 84;
+  const avatar = data.ownerAvatarDataUri
+    ? h("img", {
+        src: data.ownerAvatarDataUri,
+        style: { width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, objectFit: "cover", display: "flex", flexShrink: 0 },
+      })
+    : h("div", {
+        style: {
+          width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, background: ACCENT, display: "flex",
+          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 30, fontWeight: 700, flexShrink: 0,
+        },
+      }, data.ownerUsername.slice(0, 2).toUpperCase());
+
+  const isLongListTitle = data.title.length > BOTTOM_TITLE_WRAP_THRESHOLD;
+
+  const mainRowChildren: any[] = [
+    avatar,
+    h("div", {
+      style: {
+        fontSize: 42, fontWeight: 700, color: "#f0ede8", display: "flex", flexShrink: 0,
+        maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      },
+    }, `@${truncate(data.ownerUsername, 24)}`),
+    h("div", { style: { width: 1, height: isLongListTitle ? 78 : 52, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } }),
+    isLongListTitle
+      ? h("div", {
+          style: {
+            fontFamily: "DM Serif Display", fontSize: bottomTitleFontSize(data.title), color: "#f8f6f2",
+            lineHeight: 1.22, minWidth: 0, flex: 1,
+            display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
+            overflow: "hidden", textOverflow: "ellipsis",
+            textShadow: "0 2px 16px rgba(0,0,0,0.6)",
+          },
+        }, truncate(data.title, 120))
+      : h("div", {
+          style: {
+            fontFamily: "DM Serif Display", fontSize: bottomTitleFontSizeShort(data.title), color: "#f8f6f2",
+            lineHeight: 1.08, display: "flex", minWidth: 0, flex: 1,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            textShadow: "0 2px 16px rgba(0,0,0,0.6)",
+          },
+        }, truncate(data.title, 60)),
+  ];
 
   const children: any[] = [];
 
@@ -110,7 +141,7 @@ export function buildListOgTree(data: ListOgData): any {
       // canvas — keeps the cover art the dominant, visible part of the image.
       h("div", {
         style: {
-          position: "absolute", left: 0, right: 0, bottom: 0, height: 250, display: "flex",
+          position: "absolute", left: 0, right: 0, bottom: 0, height: isLongListTitle ? 360 : 320, display: "flex",
           backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.96) 0%, rgba(9,9,10,0.75) 32%, rgba(9,9,10,0.28) 62%, rgba(9,9,10,0) 100%)`,
         },
       })
@@ -127,6 +158,24 @@ export function buildListOgTree(data: ListOgData): any {
       })
     );
   }
+
+  // Small "LIST" tag mirrors the CHEKPOINT wordmark's chip style, on the
+  // opposite corner — the bottom row no longer has its own "List" label
+  // (that space is now the avatar/username/title row), so this is what
+  // identifies the card as a list rather than a review at a glance.
+  children.push(
+    h("div", {
+      style: {
+        position: "absolute", top: 24, left: 32, display: "flex", alignItems: "center", gap: 9,
+        background: "rgba(9,9,10,0.45)", borderRadius: 20, padding: "8px 16px 8px 14px",
+      },
+    }, [
+      h("div", { style: { width: 9, height: 9, borderRadius: 5, background: ACCENT, display: "flex" } }),
+      h("div", {
+        style: { fontSize: 16, fontWeight: 700, letterSpacing: 2, color: "rgba(240,237,232,0.95)", textTransform: "uppercase" },
+      }, "List"),
+    ])
+  );
 
   children.push(
     h("div", {
@@ -145,22 +194,14 @@ export function buildListOgTree(data: ListOgData): any {
   children.push(
     h("div", {
       style: {
-        position: "absolute", left: 56, right: 56, bottom: 44, display: "flex", flexDirection: "column", gap: 14,
+        position: "absolute", left: 56, right: 56, bottom: isLongListTitle ? 40 : 44, display: "flex",
+        flexDirection: "column", gap: 10,
       },
     }, [
-      h("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, [
-        h("div", { style: { width: 7, height: 7, borderRadius: 4, background: ACCENT, display: "flex" } }),
-        h("div", { style: { fontSize: 16, fontWeight: 700, letterSpacing: 2, color: ACCENT, textTransform: "uppercase", display: "flex" } }, "List"),
-      ]),
+      h("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, captionParts),
       h("div", {
-        style: {
-          fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.title), color: "#f8f6f2",
-          lineHeight: 1.08, display: "flex", maxWidth: WIDTH - 112,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          textShadow: "0 2px 16px rgba(0,0,0,0.6)",
-        },
-      }, truncate(data.title, 60)),
-      h("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, metaParts),
+        style: { display: "flex", alignItems: isLongListTitle ? "center" : "baseline", gap: 18 },
+      }, mainRowChildren),
     ])
   );
 
