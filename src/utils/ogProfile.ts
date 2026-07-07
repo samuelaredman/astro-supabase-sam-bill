@@ -11,18 +11,26 @@ export interface ProfileOgData {
 }
 
 const WIDTH = 1200;
-const HEIGHT = 630;
+// Shorter than the 1200x630 review/list cards on purpose — a sleeker, more
+// banner-like strip for a profile share, not a poster.
+const HEIGHT = 500;
 const ACCENT = OG_ACCENT;
 const BG = OG_BG;
-const AVATAR_SIZE = 148;
+const AVATAR_SIZE = 168;
 
 // The username is a handle, not a headline — always a single line (never
-// wrapped), just scaled down a tier as it gets longer so it never crowds
-// the stats caption line below it.
+// wrapped), just scaled down a tier as it gets longer. It's the largest text
+// on the card, bigger than any of the stat values below it.
 function usernameFontSize(username: string): number {
-  if (username.length <= 12) return 74;
-  if (username.length <= 20) return 60;
-  return 48;
+  if (username.length <= 12) return 104;
+  if (username.length <= 20) return 82;
+  return 64;
+}
+
+interface StatTile {
+  value: string;
+  label: string;
+  color?: string;
 }
 
 export function buildProfileOgTree(data: ProfileOgData): any {
@@ -44,7 +52,7 @@ export function buildProfileOgTree(data: ProfileOgData): any {
       // Thin top vignette so the corner tags stay legible over bright banners.
       h("div", {
         style: {
-          position: "absolute", left: 0, right: 0, top: 0, height: 140, display: "flex",
+          position: "absolute", left: 0, right: 0, top: 0, height: 110, display: "flex",
           backgroundImage: `linear-gradient(to bottom, rgba(9,9,10,0.55) 0%, rgba(9,9,10,0) 100%)`,
         },
       }),
@@ -52,7 +60,7 @@ export function buildProfileOgTree(data: ProfileOgData): any {
       h("div", {
         style: {
           position: "absolute", left: 0, right: 0, bottom: 0, height: 360, display: "flex",
-          backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.96) 0%, rgba(9,9,10,0.8) 38%, rgba(9,9,10,0.32) 68%, rgba(9,9,10,0) 100%)`,
+          backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.97) 0%, rgba(9,9,10,0.85) 42%, rgba(9,9,10,0.35) 72%, rgba(9,9,10,0) 100%)`,
         },
       })
     );
@@ -107,56 +115,68 @@ export function buildProfileOgTree(data: ProfileOgData): any {
     : h("div", {
         style: {
           width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, background: ACCENT, display: "flex",
-          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 54, fontWeight: 700, flexShrink: 0,
+          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 60, fontWeight: 700, flexShrink: 0,
         },
       }, data.username.slice(0, 2).toUpperCase());
 
-  // Caption line: review count always shows; avg score and top genre join in
-  // only when there's data for them, so a brand-new profile's card doesn't
-  // read as broken with empty stats.
-  const captionParts: any[] = [];
-  captionParts.push(h("div", { style: { fontSize: 21, color: "#c9c6c0", display: "flex" } },
-    `${data.reviewCount} game${data.reviewCount === 1 ? "" : "s"} reviewed`));
+  // The three stats are their own tile row now, not a caption line — each is
+  // a (value, label) pair per the stat-tile contract: value in the plain sans
+  // (never the serif display face reserved for the username headline),
+  // label small/muted/uppercase underneath. Avg score's value keeps the
+  // site's semantic score color; the other two stay plain text — color
+  // signals status, not decoration. Tiles only appear when there's real data
+  // for them, so a brand-new profile's card doesn't show empty/placeholder stats.
+  const tiles: StatTile[] = [
+    { value: String(data.reviewCount), label: data.reviewCount === 1 ? "game reviewed" : "games reviewed" },
+  ];
   if (data.avgScore !== null) {
-    const c = scoreColor(data.avgScore);
-    captionParts.push(h("div", { style: { fontSize: 21, color: "#6a6866", display: "flex" } }, "·"));
-    captionParts.push(
-      h("div", {
-        style: {
-          display: "flex", alignItems: "center", gap: 6, fontSize: 19, fontWeight: 700, color: c,
-          background: hexToRgba(c, 0.14), border: `1px solid ${hexToRgba(c, 0.4)}`,
-          borderRadius: 8, padding: "3px 11px",
-        },
-      }, [
-        h("div", { style: { width: 6, height: 6, borderRadius: 3, background: c, display: "flex" } }),
-        h("div", { style: { display: "flex" } }, `Avg ${data.avgScore.toFixed(1)}`),
-      ])
-    );
+    tiles.push({ value: data.avgScore.toFixed(1), label: "avg score", color: scoreColor(data.avgScore) });
   }
   if (data.topGenre) {
-    captionParts.push(h("div", { style: { fontSize: 21, color: "#6a6866", display: "flex" } }, "·"));
-    captionParts.push(h("div", { style: { fontSize: 21, color: "#c9c6c0", display: "flex" } }, `Mostly ${data.topGenre}`));
+    tiles.push({ value: truncate(data.topGenre, 26), label: "top genre" });
   }
+
+  const statRowChildren: any[] = [];
+  tiles.forEach((tile, i) => {
+    if (i > 0) {
+      statRowChildren.push(
+        h("div", { style: { width: 1, height: 64, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } })
+      );
+    }
+    statRowChildren.push(
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 } }, [
+        h("div", {
+          style: {
+            fontSize: 52, fontWeight: 700, color: tile.color ?? "#f8f6f2", display: "flex",
+            lineHeight: 1, textShadow: "0 2px 16px rgba(0,0,0,0.6)",
+          },
+        }, tile.value),
+        h("div", {
+          style: { fontSize: 16, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#9a9793", display: "flex" },
+        }, tile.label),
+      ])
+    );
+  });
 
   children.push(
     h("div", {
       style: {
-        position: "absolute", left: 56, right: 56, bottom: 48, display: "flex",
-        flexDirection: "column", gap: 18,
+        position: "absolute", left: 56, right: 56, bottom: 44, display: "flex",
+        flexDirection: "column", gap: 28,
       },
     }, [
-      h("div", { style: { display: "flex", alignItems: "center", gap: 28 } }, [
+      h("div", { style: { display: "flex", alignItems: "center", gap: 30 } }, [
         avatar,
         h("div", {
           style: {
             fontFamily: "DM Serif Display", fontSize: usernameFontSize(data.username), color: "#f8f6f2",
-            lineHeight: 1.1, display: "flex", minWidth: 0, maxWidth: WIDTH - 112 - AVATAR_SIZE - 28,
+            lineHeight: 1.1, display: "flex", minWidth: 0, maxWidth: WIDTH - 112 - AVATAR_SIZE - 30,
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
             textShadow: "0 2px 16px rgba(0,0,0,0.6)",
           },
         }, `@${truncate(data.username, 24)}`),
       ]),
-      h("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, captionParts),
+      h("div", { style: { display: "flex", alignItems: "center", gap: 28 } }, statRowChildren),
     ])
   );
 

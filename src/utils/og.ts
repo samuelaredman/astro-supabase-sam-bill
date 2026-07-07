@@ -122,11 +122,18 @@ export async function fetchImageDataUri(url: string, timeoutMs = 4000): Promise<
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // Logged (not just swallowed) so a card silently missing its
+      // image (e.g. banner/avatar falling back to empty) is diagnosable
+      // from function logs instead of just looking like a blank card.
+      console.error(`[fetchImageDataUri] non-OK response: ${res.status} ${res.statusText} for ${url}`);
+      return null;
+    }
     const contentType = res.headers.get("content-type") ?? "image/jpeg";
     const buf = Buffer.from(await res.arrayBuffer());
     return `data:${contentType};base64,${buf.toString("base64")}`;
-  } catch {
+  } catch (err) {
+    console.error(`[fetchImageDataUri] fetch failed for ${url}:`, err);
     return null;
   }
 }

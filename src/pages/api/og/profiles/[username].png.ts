@@ -61,7 +61,7 @@ export const GET: APIRoute = async ({ params }) => {
     topGenre,
   });
 
-  const png = await renderOgPng(tree, 1200, 630);
+  const png = await renderOgPng(tree, 1200, 500);
 
   return new Response(new Uint8Array(png), {
     status: 200,
