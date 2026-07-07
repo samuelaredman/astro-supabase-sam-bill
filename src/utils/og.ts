@@ -7,6 +7,7 @@
 // NAPI binaries like this routinely — same mechanism it already uses for `sharp`.)
 import satori from "satori";
 import { Resvg } from "@resvg/resvg-js";
+import sharp from "sharp";
 // `?inline` makes Vite embed these as base64 data URIs directly in the built JS,
 // rather than a filesystem path. A path resolved from `import.meta.url` at request
 // time breaks once bundling relocates this module to a different directory depth
@@ -134,6 +135,89 @@ export async function fetchImageDataUri(url: string, timeoutMs = 4000): Promise<
     return `data:${contentType};base64,${buf.toString("base64")}`;
   } catch (err) {
     console.error(`[fetchImageDataUri] fetch failed for ${url}:`, err);
+    return null;
+  }
+}
+
+function parseObjectPositionPct(position: string | null): [number, number] {
+  if (!position || position === "center") return [50, 50];
+  const toPct = (token: string | undefined): number | null => {
+    if (!token) return null;
+    const m = /^(-?[\d.]+)%$/.exec(token);
+    if (m) return parseFloat(m[1]);
+    if (token === "left" || token === "top") return 0;
+    if (token === "right" || token === "bottom") return 100;
+    if (token === "center") return 50;
+    return null;
+  };
+  const parts = position.trim().split(/\s+/);
+  return [toPct(parts[0]) ?? 50, toPct(parts[1]) ?? 50];
+}
+
+/**
+ * Fetches an image and returns it pre-cropped + resized to exactly
+ * (targetW, targetH), replicating CSS `object-fit: cover` + `object-position`
+ * — but done as a real pixel crop via sharp, not a layout instruction.
+ *
+ * This exists because satori/resvg cannot be trusted to scale an image far
+ * beyond the target box themselves: satori's own `objectFit: "cover"` simply
+ * renders nothing for a source image whose aspect ratio is far from the
+ * container's (confirmed with a real 3685x300 banner in a 1200x500 box), and
+ * a manual layout-based fit (sizing the <img> itself to the scaled-up
+ * dimensions, e.g. 6142x500 to cover-fit that same banner) crashes resvg's
+ * native Rust renderer outright (`Option::unwrap() on a None value` in its
+ * geometry code) once the rendered size is ~5x the canvas. User-uploaded
+ * banners can be any aspect ratio, so cropping to the final pixel size before
+ * it ever reaches satori sidesteps both failure modes — the embedded image is
+ * always exactly canvas-sized, never scaled up in the SVG at all.
+ *
+ * Position math matches this app's own banner positioner (CropModal.astro's
+ * openGifPositioner): percentage = how far the image is shifted across its
+ * own overflow, the same formula browsers use for object-position.
+ */
+export async function fetchAndCropCover(
+  url: string, targetW: number, targetH: number, position: string | null, timeoutMs = 4000
+): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.error(`[fetchAndCropCover] non-OK response: ${res.status} ${res.statusText} for ${url}`);
+      return null;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    const meta = await sharp(buf).metadata();
+    const naturalW = meta.width, naturalH = meta.height;
+    if (!naturalW || !naturalH) {
+      console.error(`[fetchAndCropCover] could not read dimensions for ${url}`);
+      return null;
+    }
+
+    const containerAspect = targetW / targetH;
+    const naturalAspect = naturalW / naturalH;
+    let cropW: number, cropH: number;
+    if (naturalAspect > containerAspect) {
+      cropH = naturalH;
+      cropW = Math.round(naturalH * containerAspect);
+    } else {
+      cropW = naturalW;
+      cropH = Math.round(naturalW / containerAspect);
+    }
+    const [xPct, yPct] = parseObjectPositionPct(position);
+    // Clamp so rounding never pushes the extract region outside the source image.
+    const left = Math.min(Math.max(0, Math.round((naturalW - cropW) * (xPct / 100))), naturalW - cropW);
+    const top = Math.min(Math.max(0, Math.round((naturalH - cropH) * (yPct / 100))), naturalH - cropH);
+
+    const outBuf = await sharp(buf)
+      .extract({ left, top, width: cropW, height: cropH })
+      .resize(targetW, targetH)
+      .jpeg({ quality: 85 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${outBuf.toString("base64")}`;
+  } catch (err) {
+    console.error(`[fetchAndCropCover] failed for ${url}:`, err);
     return null;
   }
 }

@@ -3,8 +3,10 @@ import { h, truncate, scoreColor, hexToRgba, OG_ACCENT, OG_BG } from "./og";
 export interface ProfileOgData {
   username: string;
   avatarDataUri: string | null;
+  // Pre-cropped by fetchAndCropCover to exactly the card's canvas size —
+  // never sized/positioned again here (see that function's doc comment for
+  // why doing the crop in the layout tree instead crashes resvg).
   bannerDataUri: string | null;
-  bannerPosition: string | null;
   reviewCount: number;
   avgScore: number | null;
   topGenre: string | null;
@@ -38,16 +40,11 @@ export function buildProfileOgTree(data: ProfileOgData): any {
 
   if (data.bannerDataUri) {
     children.push(
-      // A real <img> with objectFit/objectPosition, not a div with a
-      // backgroundImage — satori renders background-position on a div
-      // unreliably (same bug already found and fixed on covers/avatars
-      // elsewhere in these OG builders).
+      // Already cropped to exactly WIDTHxHEIGHT server-side (fetchAndCropCover) —
+      // just a plain full-bleed image, no fit/position logic needed here.
       h("img", {
         src: data.bannerDataUri,
-        style: {
-          position: "absolute", top: 0, left: 0, width: WIDTH, height: HEIGHT,
-          objectFit: "cover", objectPosition: data.bannerPosition ?? "center", display: "flex",
-        },
+        style: { position: "absolute", top: 0, left: 0, width: WIDTH, height: HEIGHT, display: "flex" },
       }),
       // Thin top vignette so the corner tags stay legible over bright banners.
       h("div", {

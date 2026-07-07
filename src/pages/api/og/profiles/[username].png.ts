@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../../utils/database";
-import { renderOgPng, fetchImageDataUri } from "../../../../utils/og";
+import { renderOgPng, fetchImageDataUri, fetchAndCropCover } from "../../../../utils/og";
 import { buildProfileOgTree } from "../../../../utils/ogProfile";
 
 export const prerender = false;
@@ -48,14 +48,17 @@ export const GET: APIRoute = async ({ params }) => {
 
   const [avatarDataUri, bannerDataUri] = await Promise.all([
     profile.avatar_url ? fetchImageDataUri(profile.avatar_url, IMAGE_FETCH_TIMEOUT_MS) : Promise.resolve(null),
-    profile.banner_url ? fetchImageDataUri(profile.banner_url, IMAGE_FETCH_TIMEOUT_MS) : Promise.resolve(null),
+    // Cropped server-side to exactly the card's canvas size — see
+    // fetchAndCropCover's doc comment in utils/og.ts for why.
+    profile.banner_url
+      ? fetchAndCropCover(profile.banner_url, 1200, 500, profile.banner_position ?? null, IMAGE_FETCH_TIMEOUT_MS)
+      : Promise.resolve(null),
   ]);
 
   const tree = buildProfileOgTree({
     username: profile.username,
     avatarDataUri,
     bannerDataUri,
-    bannerPosition: profile.banner_position ?? null,
     reviewCount,
     avgScore,
     topGenre,
