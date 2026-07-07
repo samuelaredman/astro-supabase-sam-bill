@@ -2,6 +2,7 @@ export const prerender = false;
 import type { APIRoute } from 'astro';
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
 import { json } from '../../../utils/api';
+import { classifyImageUrl } from '../../../utils/moderation/openaiModeration';
 
 export const POST: APIRoute = async (context) => {
   const userClient = createSupabaseServerClientFromContext(context);
@@ -35,6 +36,13 @@ export const POST: APIRoute = async (context) => {
   if (!isOwnerOrAdmin && !hasEditGroup) {
     return json({ error: 'Not authorized' }, 403);
   }
+
+  // Only screen the image once the caller is confirmed authorized for this group.
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const dataUrl = `data:${file.type};base64,${buffer.toString('base64')}`;
+  const moderation = await classifyImageUrl(dataUrl);
+  if (moderation.flagged) return json({ error: "This image isn't allowed." }, 400);
+
   const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
   const path = `groups/${groupId}/avatar.${ext}`;
 

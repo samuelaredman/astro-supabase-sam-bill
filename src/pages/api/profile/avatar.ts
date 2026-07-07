@@ -2,6 +2,7 @@ export const prerender = false;
 import type { APIRoute } from 'astro';
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
 import { json } from '../../../utils/api';
+import { classifyImageUrl } from '../../../utils/moderation/openaiModeration';
 
 export const POST: APIRoute = async (context) => {
   const userClient = createSupabaseServerClientFromContext(context);
@@ -14,6 +15,11 @@ export const POST: APIRoute = async (context) => {
 
   if (file.size > 5 * 1024 * 1024)
     return json({ error: 'File must be under 5MB.' }, 400);
+
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const dataUrl = `data:${file.type};base64,${buffer.toString('base64')}`;
+  const moderation = await classifyImageUrl(dataUrl);
+  if (moderation.flagged) return json({ error: "This image isn't allowed." }, 400);
 
   const ext = file.name.split('.').pop()?.toLowerCase() ?? 'jpg';
   const path = `${user.id}/avatar.${ext}`;
