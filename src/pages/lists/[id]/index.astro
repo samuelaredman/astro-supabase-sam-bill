@@ -142,9 +142,16 @@ const maxYear = releaseYears.length > 0 ? Math.max(...releaseYears) : null;
 const allReleaseYears = [...new Set(releaseYears)].sort((a, b) => b - a);
 const uniqueDecades = new Set(releaseYears.map((y) => Math.floor(y / 10) * 10));
 const useDecadeFilter = entryList.length >= 10 && uniqueDecades.size > 1;
-const yearFilterOptions = useDecadeFilter
-  ? [...uniqueDecades].sort((a, b) => b - a).map((d) => ({ value: String(d), label: `${d}–${d + 9}` }))
-  : allReleaseYears.map((y) => ({ value: String(y), label: String(y) }));
+// value prefix distinguishes a whole-decade selection ("d:2000") from a single year ("y:2007")
+// so both can be selected at once and matched independently.
+const yearFilterOptions: { value: string; label: string; indent?: boolean }[] = useDecadeFilter
+  ? [...uniqueDecades].sort((a, b) => b - a).flatMap((d) => [
+      { value: `d:${d}`, label: `${d}–${d + 9}` },
+      ...allReleaseYears
+        .filter((y) => Math.floor(y / 10) * 10 === d)
+        .map((y) => ({ value: `y:${y}`, label: String(y), indent: true })),
+    ])
+  : allReleaseYears.map((y) => ({ value: `y:${y}`, label: String(y) }));
 
 // Most played platform (from the owner's reviews)
 const platformIds = [...new Set(reviewedEntries.map(r => r.platform_played_on).filter((p): p is string => !!p))];
@@ -368,6 +375,7 @@ const ogImage = list.visibility !== "private"
   .ms-filter-option { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 6px; font-size: 13px; color: var(--text-secondary); white-space: nowrap; cursor: pointer; }
   .ms-filter-option:hover { background: var(--bg-hover); color: var(--text-primary); }
   .ms-filter-option input { accent-color: var(--accent); cursor: pointer; }
+  .ms-filter-option--nested { padding-left: 22px; font-size: 12px; color: var(--text-tertiary); }
 
   /* ── View toggle ── */
   .view-toggle-row { display: flex; gap: 4px; flex-shrink: 0; }
@@ -927,14 +935,14 @@ const ogImage = list.visibility !== "private"
                   </div>
                 )}
                 {yearFilterOptions.length > 0 && (
-                  <div class="ms-filter" id="year-filter" data-default-label="All years" data-noun="year" data-mode={useDecadeFilter ? 'decade' : 'year'}>
+                  <div class="ms-filter" id="year-filter" data-default-label="All years" data-noun="year">
                     <button type="button" class="entry-sort ms-filter-btn" id="year-filter-btn" aria-haspopup="true" aria-expanded="false">
                       <span class="ms-filter-label">All years</span>
                       <svg class="ms-filter-caret" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 3.5L5 6.5L8 3.5"/></svg>
                     </button>
                     <div class="ms-filter-panel" id="year-filter-panel" hidden>
                       {yearFilterOptions.map((opt) => (
-                        <label class="ms-filter-option">
+                        <label class={`ms-filter-option${opt.indent ? ' ms-filter-option--nested' : ''}`}>
                           <input type="checkbox" value={opt.value} />
                           <span>{opt.label}</span>
                         </label>
@@ -2159,8 +2167,6 @@ if (lcSubmit) {
   var genreFilterCtl = initMsFilter('genre-filter', applyFilterSort);
   var yearFilterCtl = initMsFilter('year-filter', applyFilterSort);
   var devFilterCtl = initMsFilter('dev-filter', applyFilterSort);
-  var yearFilterEl = document.getElementById('year-filter');
-  var yearMode = yearFilterEl ? yearFilterEl.getAttribute('data-mode') : 'year';
 
   function applyFilterSort() {
     var q = ((searchInput && searchInput.value) || '').trim().toLowerCase();
@@ -2200,13 +2206,12 @@ if (lcSubmit) {
         matches = genreFilters.some(function(g) { return genres.indexOf(g) !== -1; });
       }
       if (matches && yearFilters.length) {
-        if (yearMode === 'decade') {
-          var yr = parseInt(item.dataset.year, 10);
-          var decade = isNaN(yr) ? null : String(Math.floor(yr / 10) * 10);
-          matches = decade !== null && yearFilters.indexOf(decade) !== -1;
-        } else {
-          matches = yearFilters.indexOf(item.dataset.year) !== -1;
-        }
+        var yr = parseInt(item.dataset.year, 10);
+        matches = !isNaN(yr) && yearFilters.some(function(v) {
+          // "d:2000" matches the whole decade, "y:2007" matches that exact year
+          if (v.charAt(0) === 'd') return Math.floor(yr / 10) * 10 === parseInt(v.slice(2), 10);
+          return yr === parseInt(v.slice(2), 10);
+        });
       }
       if (matches && devFilters.length) {
         var devs = (item.dataset.dev || '').split('|');
