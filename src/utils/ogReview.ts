@@ -1,4 +1,4 @@
-import { h, truncate, scoreBadgeBg, scoreBadgeText, bigTitleFontSize, hexToRgba, OG_ACCENT, OG_BG } from "./og";
+import { h, truncate, scoreBadgeBg, scoreBadgeText, hexToRgba, OG_ACCENT, OG_BG } from "./og";
 
 export interface ReviewOgData {
   gameTitle: string;
@@ -21,20 +21,27 @@ const BADGE_SIZE = 200;
 // ellipsized anyway — wrapping it to two (smaller) lines shows more of it instead.
 const LONG_REVIEW_TITLE_THRESHOLD = 28;
 
+// Single-line review title (<=LONG_REVIEW_TITLE_THRESHOLD chars) — sized larger
+// than the shared bigTitleFontSize() tiers since this only ever needs to cover
+// short strings, unlike that function's list/game-title callers.
+function shortReviewTitleFontSize(title: string): number {
+  return title.length <= 24 ? 74 : 60;
+}
+
 function reviewTitleFontSize(title: string): number {
-  return title.length <= 40 ? 40 : 34;
+  return title.length <= 40 ? 44 : 38;
 }
 
 // Wraps the game title up to 4 lines instead of ellipsizing after a handful of
 // words on one line — the badge stays the taller flex item at every tier (max
-// 4 lines * 38px well under the 200px badge), so it keeps centering cleanly
+// 4 lines * 42px well under the 200px badge), so it keeps centering cleanly
 // against the title block regardless of how many lines it wraps to.
 function gameTitleLayout(title: string): { fontSize: number; maxLines: number } {
   const len = title.length;
-  if (len <= 20) return { fontSize: 70, maxLines: 1 };
-  if (len <= 34) return { fontSize: 56, maxLines: 2 };
-  if (len <= 55) return { fontSize: 46, maxLines: 3 };
-  return { fontSize: 38, maxLines: 4 };
+  if (len <= 20) return { fontSize: 74, maxLines: 1 };
+  if (len <= 34) return { fontSize: 60, maxLines: 2 };
+  if (len <= 55) return { fontSize: 50, maxLines: 3 };
+  return { fontSize: 42, maxLines: 4 };
 }
 
 export function buildReviewOgTree(data: ReviewOgData): any {
@@ -205,7 +212,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
           }, truncate(data.reviewTitle, 120))
         : h("div", {
             style: {
-              fontFamily: "DM Serif Display", fontSize: bigTitleFontSize(data.reviewTitle), color: "#f8f6f2",
+              fontFamily: "DM Serif Display", fontSize: shortReviewTitleFontSize(data.reviewTitle), color: "#f8f6f2",
               lineHeight: 1.08, display: "flex", minWidth: 0, flex: 1,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               textShadow: "0 2px 16px rgba(0,0,0,0.6)",
