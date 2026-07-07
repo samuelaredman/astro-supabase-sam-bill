@@ -1462,6 +1462,8 @@ export type Database = {
           library_hidden_tabs: string[]
           library_show_hours: boolean
           library_visibility: string
+          search_indexable: boolean
+          search_indexable_at: string | null
           showcase_games: Json | null
           steam_id: string | null
           steam_synced_at: string | null
@@ -1485,6 +1487,8 @@ export type Database = {
           library_hidden_tabs?: string[]
           library_show_hours?: boolean
           library_visibility?: string
+          search_indexable?: boolean
+          search_indexable_at?: string | null
           showcase_games?: Json | null
           steam_id?: string | null
           steam_synced_at?: string | null
@@ -1508,6 +1512,8 @@ export type Database = {
           library_hidden_tabs?: string[]
           library_show_hours?: boolean
           library_visibility?: string
+          search_indexable?: boolean
+          search_indexable_at?: string | null
           showcase_games?: Json | null
           steam_id?: string | null
           steam_synced_at?: string | null

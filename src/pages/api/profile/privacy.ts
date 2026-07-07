@@ -9,7 +9,7 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json();
-  const updates: Record<string, string> = {};
+  const updates: Record<string, string | boolean | null> = {};
 
   if (body.want_to_play_privacy !== undefined) {
     if (!VALID_PRIVACY.includes(body.want_to_play_privacy)) {
@@ -22,6 +22,17 @@ export const POST: APIRoute = async (context) => {
       return json({ error: "Invalid dropped_privacy value" }, 400);
     }
     updates.dropped_privacy = body.dropped_privacy;
+  }
+
+  // GDPR opt-in consent for search-engine indexing of the user's public profile
+  // and authored content. Record the consent timestamp when enabling; clear it
+  // on withdrawal so the audit trail reflects only currently-valid consent.
+  if (body.search_indexable !== undefined) {
+    if (typeof body.search_indexable !== "boolean") {
+      return json({ error: "Invalid search_indexable value" }, 400);
+    }
+    updates.search_indexable = body.search_indexable;
+    updates.search_indexable_at = body.search_indexable ? new Date().toISOString() : null;
   }
 
   if (Object.keys(updates).length === 0) {

@@ -13,6 +13,16 @@ const serverClient = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await serverClient.auth.getUser();
 const isLoggedIn = !!user;
 
+// Cache the anonymous render at the CDN edge to cut function invocations under
+// crawl load; logged-in (personalized) responses are never shared-cached.
+if (!isLoggedIn) {
+  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+  Astro.response.headers.set('Cache-Control', 'no-store');
+} else {
+  Astro.response.headers.set('Cache-Control', 'private, no-store');
+}
+Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
+
 const { id } = Astro.params;
 
 const { data: review, error } = await (supabase as any)
@@ -22,7 +32,7 @@ const { data: review, error } = await (supabase as any)
     contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
     games ( id, title, slug, cover_img_url ),
-    profiles ( id, username, avatar_url ),
+    profiles ( id, username, avatar_url, search_indexable ),
     review_votes ( vote, profile_id ),
     review_reactions ( reaction_type, profile_id )
   `)
@@ -144,6 +154,7 @@ const { data: moreReviews } = await (supabase as any)
   ogImage={ogImage}
   isLoggedIn={isLoggedIn}
   currentProfile={currentProfile}
+  noindex={!review.profiles?.search_indexable}
 >
   <main class="review-detail">
 
