@@ -225,6 +225,7 @@ const savedYearsByListId: Record<string, number[]> = {};
     }
     savedLists = rawSavedLists.map((l: any) => ({
       ...l,
+      ownerId: l.profiles?.id ?? null,
       ownerUsername: l.profiles?.username,
       ownerAvatar: l.profiles?.avatar_url,
       coverUrls: savedCoversByListId[l.id] ?? [],
@@ -603,9 +604,12 @@ const showcaseJson = JSON.stringify(
   Array.isArray(reviewer.showcase_games) ? reviewer.showcase_games : []
 )
 const reviewScoreByGameId: Record<string, number> = {}
+const reviewHoursByGameId: Record<string, number> = {}
 for (const r of publishedReviews) {
   const gid = (r as any).games?.id
-  if (gid) reviewScoreByGameId[gid] = (r as any).score
+  if (!gid) continue
+  reviewScoreByGameId[gid] = (r as any).score
+  if ((r as any).play_time_hours != null) reviewHoursByGameId[gid] = (r as any).play_time_hours
 }
 
 const libraryJson = JSON.stringify(allLibraryItems.map((item: any) => ({
@@ -617,7 +621,10 @@ const libraryJson = JSON.stringify(allLibraryItems.map((item: any) => ({
   owned:    item.is_owned ?? false,
   isHidden: item.is_hidden ?? false,
   updatedAt: item.updated_at ?? '',
+  // Steam-imported minutes take priority; fall back to hours logged on the
+  // reviewer's own review when Steam hasn't supplied playtime for this game.
   playtime: item.steam_playtime_minutes ?? null,
+  reviewHours: reviewHoursByGameId[item.games?.id] ?? null,
   hasReview: reviewedGameIdsSet.has(item.games?.id),
   reviewScore: reviewScoreByGameId[item.games?.id] ?? null,
   genres:   (item.games?.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean),
@@ -1696,6 +1703,10 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
                   coverUrls={list.coverUrls}
                   coverImageUrl={list.cover_image_url}
                   showOwner={false}
+                  showActions={true}
+                  ownerId={reviewer.id}
+                  isLoggedIn={!!user}
+                  currentProfileId={currentProfile?.id ?? null}
                 />
               </div>
             ))}
@@ -1790,6 +1801,10 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
                   ownerUsername={list.ownerUsername}
                   ownerAvatar={list.ownerAvatar}
                   showOwner={true}
+                  showActions={true}
+                  ownerId={list.ownerId}
+                  isLoggedIn={!!user}
+                  currentProfileId={currentProfile?.id ?? null}
                 />
                 {isOwnProfile && (
                   <button
@@ -2526,6 +2541,13 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
 
   // ── LIBRARY ──
   var _libItems = JSON.parse(libraryJson)
+  // Steam-imported hours take priority; fall back to hours logged on the
+  // reviewer's own review when Steam hasn't supplied playtime for this game.
+  _libItems.forEach(function(it) {
+    it.displayHours = it.playtime != null ? Math.round(it.playtime / 60)
+      : it.reviewHours != null ? Math.round(it.reviewHours)
+      : null
+  })
   var _libIsOwn = JSON.parse(libraryIsOwn)
   var _libSettings = JSON.parse(librarySettingsJson)
   var _libFilter = 'all'
@@ -2581,7 +2603,7 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
       if (_libSort === 'alpha')   return a.title.localeCompare(b.title)
       if (_libSort === 'recent')  return (b.updatedAt || '').localeCompare(a.updatedAt || '')
       if (_libSort === 'review')  return (b.hasReview ? 1 : 0) - (a.hasReview ? 1 : 0)
-      if (_libSort === 'hours')   return (b.playtime || 0) - (a.playtime || 0)
+      if (_libSort === 'hours')   return (b.displayHours || 0) - (a.displayHours || 0)
       return 0
     })
     return items
@@ -2610,8 +2632,8 @@ const reviewerOgImage = reviewer.avatar_url ?? undefined
         ? '<div class="lib-score-badge ' + libScoreClass(it.reviewScore) + '">' + it.reviewScore + '</div>'
         : ''
       var showHrs = _libIsOwn || _libSettings.showHours
-      var hrs = (showHrs && it.playtime != null) ? Math.round(it.playtime / 60) : null
-      var hoursHtml = hrs != null && it.playtime > 0
+      var hrs = showHrs ? it.displayHours : null
+      var hoursHtml = hrs != null && hrs > 0
         ? '<div class="lib-hours-badge">' + hrs + 'h</div>'
         : ''
       var hiddenBadge = (it.isHidden && _libIsOwn)

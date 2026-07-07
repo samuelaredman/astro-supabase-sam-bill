@@ -74,79 +74,90 @@ const [
 const currentProfile = profileRes.data ?? null
 const { data: platforms } = platformsRes
 
-// ── Recent lists shared to feed ──
+// ── Lists shared to feed ──
 const adminDb = getSupabaseAdmin() as any;
-const { data: recentListsRaw, error: listsError } = await adminDb
-  .from('lists')
-  .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, profiles(id, username, avatar_url)')
-  .eq('visibility', 'public')
-  .eq('shared_to_feed', true)
-  .order('created_at', { ascending: false })
-  .limit(2);
-if (listsError) console.error('[index] lists query error:', JSON.stringify(listsError));
 
-const recentListIds = (recentListsRaw ?? []).map((l: any) => l.id);
-const [
-  { data: recentListEntries },
-  { data: recentListEntryCounts },
-  { data: listVotesRaw },
-  { data: listCommentsRaw },
-  { data: listReactionsRaw },
-] = recentListIds.length > 0
-  ? await Promise.all([
-      adminDb.from('list_entries').select('list_id, games(cover_img_url)').in('list_id', recentListIds).order('position', { ascending: true, nullsFirst: false }).order('added_at', { ascending: true }),
-      adminDb.from('list_entries').select('list_id').in('list_id', recentListIds),
-      adminDb.from('list_votes').select('list_id, vote, profile_id').in('list_id', recentListIds),
-      adminDb.from('list_comments').select('list_id').in('list_id', recentListIds),
-      adminDb.from('list_reactions').select('list_id, reaction_type, profile_id').in('list_id', recentListIds),
-    ])
-  : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }];
+async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit: number) {
+  if (profileIdFilter && profileIdFilter.length === 0) return [];
 
-const recentListCoversByListId: Record<string, string[]> = {};
-for (const e of recentListEntries ?? []) {
-  const cover = igdbImage(e.games?.cover_img_url, 't_cover_big');
-  if (cover) {
-    if (!recentListCoversByListId[e.list_id]) recentListCoversByListId[e.list_id] = [];
-    if (recentListCoversByListId[e.list_id].length < 10) recentListCoversByListId[e.list_id].push(cover);
+  let listsQuery = adminDb
+    .from('lists')
+    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, profiles(id, username, avatar_url)')
+    .eq('visibility', 'public')
+    .eq('shared_to_feed', true)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (profileIdFilter) listsQuery = listsQuery.in('profile_id', profileIdFilter);
+
+  const { data: listsRaw, error: listsError } = await listsQuery;
+  if (listsError) console.error('[index] lists query error:', JSON.stringify(listsError));
+
+  const listIds = (listsRaw ?? []).map((l: any) => l.id);
+  const [
+    { data: listEntries },
+    { data: listEntryCounts },
+    { data: listVotesRaw },
+    { data: listCommentsRaw },
+    { data: listReactionsRaw },
+  ] = listIds.length > 0
+    ? await Promise.all([
+        adminDb.from('list_entries').select('list_id, games(cover_img_url)').in('list_id', listIds).order('position', { ascending: true, nullsFirst: false }).order('added_at', { ascending: true }),
+        adminDb.from('list_entries').select('list_id').in('list_id', listIds),
+        adminDb.from('list_votes').select('list_id, vote, profile_id').in('list_id', listIds),
+        adminDb.from('list_comments').select('list_id').in('list_id', listIds),
+        adminDb.from('list_reactions').select('list_id, reaction_type, profile_id').in('list_id', listIds),
+      ])
+    : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }];
+
+  const listCoversByListId: Record<string, string[]> = {};
+  for (const e of listEntries ?? []) {
+    const cover = igdbImage(e.games?.cover_img_url, 't_cover_big');
+    if (cover) {
+      if (!listCoversByListId[e.list_id]) listCoversByListId[e.list_id] = [];
+      if (listCoversByListId[e.list_id].length < 10) listCoversByListId[e.list_id].push(cover);
+    }
   }
-}
-const recentListCountByListId: Record<string, number> = {};
-for (const e of recentListEntryCounts ?? []) {
-  recentListCountByListId[e.list_id] = (recentListCountByListId[e.list_id] ?? 0) + 1;
+  const listCountByListId: Record<string, number> = {};
+  for (const e of listEntryCounts ?? []) {
+    listCountByListId[e.list_id] = (listCountByListId[e.list_id] ?? 0) + 1;
+  }
+
+  // Aggregate votes, comments, reactions by list_id
+  const listUpByListId: Record<string, number> = {};
+  const listDownByListId: Record<string, number> = {};
+  const listMyVoteByListId: Record<string, number> = {};
+  for (const v of listVotesRaw ?? []) {
+    if (v.vote === 1) listUpByListId[v.list_id] = (listUpByListId[v.list_id] ?? 0) + 1;
+    else listDownByListId[v.list_id] = (listDownByListId[v.list_id] ?? 0) + 1;
+    if (currentProfile && v.profile_id === currentProfile.id) listMyVoteByListId[v.list_id] = v.vote;
+  }
+  const listCommentCountByListId: Record<string, number> = {};
+  for (const c of listCommentsRaw ?? []) {
+    listCommentCountByListId[c.list_id] = (listCommentCountByListId[c.list_id] ?? 0) + 1;
+  }
+  const listReactionsByListId: Record<string, { reaction_type: string; profile_id: string }[]> = {};
+  for (const r of listReactionsRaw ?? []) {
+    if (!listReactionsByListId[r.list_id]) listReactionsByListId[r.list_id] = [];
+    listReactionsByListId[r.list_id].push({ reaction_type: r.reaction_type, profile_id: r.profile_id });
+  }
+
+  return (listsRaw ?? []).map((l: any) => ({
+    ...l,
+    _isListItem: true,
+    ownerId: l.profiles?.id ?? null,
+    ownerUsername: l.profiles?.username,
+    ownerAvatar: l.profiles?.avatar_url,
+    coverUrls: listCoversByListId[l.id] ?? [],
+    entryCount: listCountByListId[l.id] ?? 0,
+    upVotes: listUpByListId[l.id] ?? 0,
+    downVotes: listDownByListId[l.id] ?? 0,
+    myVote: listMyVoteByListId[l.id] ?? 0,
+    commentCount: listCommentCountByListId[l.id] ?? 0,
+    reactions: listReactionsByListId[l.id] ?? [],
+  }));
 }
 
-// Aggregate votes, comments, reactions by list_id
-const listUpByListId: Record<string, number> = {};
-const listDownByListId: Record<string, number> = {};
-const listMyVoteByListId: Record<string, number> = {};
-for (const v of listVotesRaw ?? []) {
-  if (v.vote === 1) listUpByListId[v.list_id] = (listUpByListId[v.list_id] ?? 0) + 1;
-  else listDownByListId[v.list_id] = (listDownByListId[v.list_id] ?? 0) + 1;
-  if (currentProfile && v.profile_id === currentProfile.id) listMyVoteByListId[v.list_id] = v.vote;
-}
-const listCommentCountByListId: Record<string, number> = {};
-for (const c of listCommentsRaw ?? []) {
-  listCommentCountByListId[c.list_id] = (listCommentCountByListId[c.list_id] ?? 0) + 1;
-}
-const listReactionsByListId: Record<string, { reaction_type: string; profile_id: string }[]> = {};
-for (const r of listReactionsRaw ?? []) {
-  if (!listReactionsByListId[r.list_id]) listReactionsByListId[r.list_id] = [];
-  listReactionsByListId[r.list_id].push({ reaction_type: r.reaction_type, profile_id: r.profile_id });
-}
-
-const recentLists = (recentListsRaw ?? []).map((l: any) => ({
-  ...l,
-  _isListItem: true,
-  ownerUsername: l.profiles?.username,
-  ownerAvatar: l.profiles?.avatar_url,
-  coverUrls: recentListCoversByListId[l.id] ?? [],
-  entryCount: recentListCountByListId[l.id] ?? 0,
-  upVotes: listUpByListId[l.id] ?? 0,
-  downVotes: listDownByListId[l.id] ?? 0,
-  myVote: listMyVoteByListId[l.id] ?? 0,
-  commentCount: listCommentCountByListId[l.id] ?? 0,
-  reactions: listReactionsByListId[l.id] ?? [],
-}));
+const recentLists = await fetchSharedListFeedItems(null, 2);
 
 type Platform = { id: string; name: string; slug: string; };
 type Review = {
@@ -272,6 +283,7 @@ const totalReviewers = profileCountRes.count ?? 0
 const { data: genres } = genresRes
 
 let followingReviews: any[] = []
+let followingLists: any[] = []
 let lastReview: any = null
 if (user && currentProfile) {
   const [lastReviewRes, followRowsRes] = await Promise.all([
@@ -287,16 +299,25 @@ if (user && currentProfile) {
   lastReview = lastReviewRes.data ?? null
   const followingIds = (followRowsRes.data ?? []).map((r: any) => r.following_id)
   if (followingIds.length > 0) {
-    const { data: fRevs } = await db
-      .from('reviews')
-      .select(REVIEW_FIELDS)
-      .eq('status', 'published')
-      .in('profile_id', followingIds)
-      .order('published_at', { ascending: false })
-      .limit(20)
+    const [{ data: fRevs }, fLists] = await Promise.all([
+      db.from('reviews')
+        .select(REVIEW_FIELDS)
+        .eq('status', 'published')
+        .in('profile_id', followingIds)
+        .order('published_at', { ascending: false })
+        .limit(20),
+      fetchSharedListFeedItems(followingIds, 2),
+    ])
     followingReviews = (fRevs ?? []) as any[]
+    followingLists = fLists
   }
 }
+
+// Merge followed reviewers' reviews and shared lists into a single chronological feed
+const followingFeedItems: any[] = [
+  ...followingReviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
+  ...followingLists.map((l: any) => ({ ...l, _date: l.created_at })),
+].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 function formatCount(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
@@ -435,6 +456,7 @@ const initialFollowingDone = followingReviews.length < 20
               entryCount={item.entryCount}
               coverUrls={item.coverUrls}
               coverImageUrl={item.cover_image_url}
+              ownerId={item.ownerId}
               ownerUsername={item.ownerUsername}
               ownerAvatar={item.ownerAvatar ?? null}
               createdAt={item.created_at}
@@ -465,22 +487,45 @@ const initialFollowingDone = followingReviews.length < 20
 
     {isLoggedIn && (
       <div id="tab-following" style="display:none">
-        {followingReviews.length === 0 ? (
+        {followingFeedItems.length === 0 ? (
           <div class="empty-state">
             <div class="empty-state-title">Nothing here yet</div>
             <p>Follow reviewers to see their latest reviews here.</p>
             <a href="/search?tab=reviewers" class="empty-cta" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 24px;border-radius:22px;font-size:14px;font-weight:500;margin-top:16px">Find reviewers</a>
           </div>
         ) : (
-          followingReviews.map((review: any) => (
-            <ReviewCard
-              review={review}
-              isLoggedIn={isLoggedIn}
-              showReviewer={true}
-              showGame={true}
-              currentProfileId={currentProfile?.id ?? null}
-              isOwnProfile={!!(currentProfile && review.profiles?.id === currentProfile.id)}
+          followingFeedItems.map((item: any) => (
+            item._isListItem ? (
+              <ListFeedCard
+                id={item.id}
+                title={item.title}
+                description={item.description ?? null}
+                isRanked={item.is_ranked}
+                entryCount={item.entryCount}
+                coverUrls={item.coverUrls}
+                coverImageUrl={item.cover_image_url}
+                ownerId={item.ownerId}
+                ownerUsername={item.ownerUsername}
+                ownerAvatar={item.ownerAvatar ?? null}
+                createdAt={item.created_at}
+                upVotes={item.upVotes}
+                downVotes={item.downVotes}
+                myVote={item.myVote}
+                commentCount={item.commentCount}
+                reactions={item.reactions}
+                isLoggedIn={isLoggedIn}
+                currentProfileId={currentProfile?.id ?? null}
               />
+            ) : (
+              <ReviewCard
+                review={item}
+                isLoggedIn={isLoggedIn}
+                showReviewer={true}
+                showGame={true}
+                currentProfileId={currentProfile?.id ?? null}
+                isOwnProfile={!!(currentProfile && item.profiles?.id === currentProfile.id)}
+                />
+            )
           ))
         )}
         <div id="sentinel-following" style="height:1px;margin:0"></div>
@@ -645,7 +690,6 @@ const initialFollowingDone = followingReviews.length < 20
       })
     })
     document.getElementById('cancelComposer').addEventListener('click', closeComposer)
-    document.getElementById('composerOverlay').addEventListener('click', closeComposer)
     if (isLoggedIn && new URLSearchParams(window.location.search).get('compose') === '1') {
       history.replaceState(null, '', '/')
       openComposer()
