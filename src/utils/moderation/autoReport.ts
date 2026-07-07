@@ -5,7 +5,7 @@ function botProfileId(): string | undefined {
 }
 
 export interface AutoReportParams {
-  targetType: "review" | "comment";
+  targetType: "review" | "comment" | "recommendation";
   targetId: string;
   categories: string[];
 }

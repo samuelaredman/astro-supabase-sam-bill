@@ -6,9 +6,9 @@ export const GET: APIRoute = async () => {
   const base = 'https://chekpoint.gg';
 
   const staticPages = [
-    { url: base + '/',          changefreq: 'daily',   priority: '1.0' },
-    { url: base + '/hot-takes', changefreq: 'daily',   priority: '0.9' },
-    { url: base + '/discover',  changefreq: 'daily',   priority: '0.8' },
+    { url: base + '/',               changefreq: 'daily',   priority: '1.0' },
+    { url: base + '/recommendations', changefreq: 'daily',  priority: '0.9' },
+    { url: base + '/discover',       changefreq: 'daily',   priority: '0.8' },
     { url: base + '/rankings',  changefreq: 'daily',   priority: '0.8' },
     { url: base + '/search',    changefreq: 'weekly',  priority: '0.8' },
     { url: base + '/groups',    changefreq: 'weekly',  priority: '0.6' },
