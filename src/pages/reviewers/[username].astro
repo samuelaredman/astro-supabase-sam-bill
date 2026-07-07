@@ -122,6 +122,13 @@ if (user) {
   }
 }
 
+// Contextual nudge: prompt logged-in users who have content but haven't opted
+// into search indexing to turn it on. GDPR-clean — separate, specific, opt-in,
+// and only shown to someone who actually has content to surface. This is the
+// page people actually land on for their own profile (Layout's nav points
+// here, not at /profile), so the nudge belongs here rather than there.
+const showSearchNudge = isOwnProfile && !reviewer.search_indexable && publishedReviews.length > 0;
+
 // ── LISTS ──
 const { data: profileListsRaw } = await (supabase as any)
   .from('lists')
@@ -767,6 +774,20 @@ const reviewerOgImage = new URL(`/api/og/profiles/${reviewer.username}.png`, Ast
     /* EDIT MODE */
     .edit-profile-btn{padding:8px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);transition:all .15s;display:flex;align-items:center;gap:7px}
     .edit-profile-btn:hover{border-color:var(--accent);color:var(--accent)}
+    /* ── Search visibility nudge ── */
+    .search-nudge{display:flex;align-items:center;gap:16px;justify-content:space-between;flex-wrap:wrap;max-width:980px;margin:16px auto 0;padding:14px 16px 14px 28px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px}
+    .search-nudge-text{min-width:0}
+    .search-nudge-title{font-size:14px;font-weight:600;margin-bottom:3px}
+    .search-nudge-sub{font-size:12.5px;color:var(--text-secondary);line-height:1.5;max-width:56ch}
+    .search-nudge-sub a{color:var(--text-primary)}
+    .search-nudge-actions{display:flex;gap:8px;flex-shrink:0;padding-right:12px}
+    .search-nudge-enable{background:var(--accent);color:var(--accent-text);border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity .15s}
+    .search-nudge-enable:hover{opacity:.85}
+    .search-nudge-enable:disabled{opacity:.5;cursor:default}
+    .search-nudge-dismiss{background:none;border:1px solid var(--border);color:var(--text-secondary);border-radius:8px;padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer;transition:border-color .15s,color .15s}
+    .search-nudge-dismiss:hover{border-color:var(--text-secondary);color:var(--text-primary)}
+    @media (max-width:768px){.search-nudge{padding-left:16px}.search-nudge-actions{width:100%}.search-nudge-enable{flex:1}}
+
     .edit-mode-bar{display:none;position:sticky;top:54px;z-index:25;background:var(--bg-card);border-bottom:1px solid var(--border);padding:10px 28px;align-items:center;justify-content:space-between;gap:12px;backdrop-filter:blur(12px)}
     .edit-mode-bar.visible{display:flex}
     .edit-mode-label{font-size:13px;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:8px}
@@ -1190,6 +1211,63 @@ const reviewerOgImage = new URL(`/api/og/profiles/${reviewer.username}.png`, Ast
     </div>
   </div>
 </div>
+
+<!-- SEARCH VISIBILITY NUDGE — hidden by default; shown by script when not snoozed -->
+{showSearchNudge && (
+  <div class="search-nudge" id="searchNudge" style="display:none">
+    <div class="search-nudge-text">
+      <div class="search-nudge-title">🌱 Help us grow Chekpoint</div>
+      <div class="search-nudge-sub">Every reviewer who lets us index their posts makes Chekpoint more visible across the internet — more players discovering the site, and more reviews for everyone. Flip on search visibility to let your profile and reviews show up in Google. It's off by default and you can turn it back off anytime in <a href="/settings#search-visibility" style="text-decoration:underline">settings</a>.</div>
+    </div>
+    <div class="search-nudge-actions">
+      <button class="search-nudge-enable" id="searchNudgeEnable">Count me in!</button>
+      <button class="search-nudge-dismiss" id="searchNudgeDismiss">Maybe later</button>
+    </div>
+  </div>
+)}
+
+{showSearchNudge && (
+  <script is:inline define:vars={{ reviewerId: reviewer.id }}>
+    // Search-visibility nudge — snoozed rather than permanently dismissed, so it
+    // re-presents the opt-in after a while instead of nagging every visit.
+    // Keyed per-profile so one account's snooze/opt-in on a shared browser
+    // doesn't suppress the nudge for other accounts viewed there afterward.
+    (function() {
+      var nudge = document.getElementById('searchNudge');
+      if (!nudge) return;
+      var SNOOZE_KEY = 'search-nudge-snooze-until:' + reviewerId;
+      var SNOOZE_MS = 14 * 24 * 60 * 60 * 1000; // re-present after 14 days
+      var DONE_MS = 3650 * 24 * 60 * 60 * 1000;  // effectively permanent once enabled
+      var until = parseInt(localStorage.getItem(SNOOZE_KEY) || '0', 10);
+      if (until && Date.now() < until) return; // still snoozed — leave hidden
+      nudge.style.display = 'flex';
+      var enableBtn = document.getElementById('searchNudgeEnable');
+      var dismissBtn = document.getElementById('searchNudgeDismiss');
+      dismissBtn.addEventListener('click', function() {
+        localStorage.setItem(SNOOZE_KEY, String(Date.now() + SNOOZE_MS));
+        nudge.style.display = 'none';
+      });
+      enableBtn.addEventListener('click', async function() {
+        enableBtn.disabled = true;
+        enableBtn.textContent = 'Enabling…';
+        try {
+          var res = await fetch('/api/profile/privacy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ search_indexable: true }),
+          });
+          if (!res.ok) throw new Error('failed');
+          nudge.innerHTML = '<div class="search-nudge-text"><div class="search-nudge-title">🎉 Thank you — you\'re helping us grow!</div><div class="search-nudge-sub">Your profile and reviews can now appear in search engines. It can take a few days for them to show up. You can turn it off anytime in settings.</div></div>';
+          localStorage.setItem(SNOOZE_KEY, String(Date.now() + DONE_MS));
+        } catch (e) {
+          enableBtn.disabled = false;
+          enableBtn.textContent = 'Count me in!';
+          alert('Something went wrong. Please try again, or use the toggle in Settings.');
+        }
+      });
+    })();
+  </script>
+)}
 
 <!-- EDIT MODE BAR -->
 <div class="edit-mode-bar" id="editModeBar">
