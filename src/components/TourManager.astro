@@ -16,9 +16,11 @@ const { username = null } = Astro.props;
   const me = document.getElementById('ck-tour-root')?.dataset.username || '';
   const profilePath = me ? `/reviewers/${me}` : '/';
 
-  // Each tour is an array of steps. step = { selector?, page, popover }.
-  // No selector ⇒ centered "concept" popover.
-  const TOURS: Record<string, { selector?: string; page: string; popover: any }[]> = {
+  // Each tour is an array of steps. step = { selector?, onBeforeHighlight?, page, popover }.
+  // No selector ⇒ centered "concept" popover. `onBeforeHighlight` runs just before driver.js
+  // measures the target — use it to reveal something (e.g. switch tabs) that `selector`
+  // sits inside of but that isn't visible/positioned until then.
+  const TOURS: Record<string, { selector?: string; onBeforeHighlight?: () => void; page: string; popover: any }[]> = {
     // One guided sequence covering the whole profile setup.
     profile: [
       { selector: '#editProfileBtn', page: profilePath, popover: { title: 'Edit your profile', description: 'This is how you edit all the elements of your profile — click it to make changes, then Save when you’re done.' } },
@@ -26,7 +28,12 @@ const { username = null } = Astro.props;
       { selector: '.profile-bio-wrap', page: profilePath, popover: { title: 'Your bio', description: 'Add a line or two about the games and genres you love so people know your taste.' } },
       { selector: '.fav-empty, .fav-game-card', page: profilePath, popover: { title: 'Your favorite game', description: 'Set the game that defines your taste — click the card to search and choose it.' } },
       { selector: 'a[href$="?tab=library"]', page: profilePath, popover: { title: 'Your library', description: 'You can track and manage all the games you have played, are currently playing, and want to play — click the Library tab to check it out.' } },
-      { page: profilePath, popover: { title: 'Import from Steam', description: 'Already have a Steam library? Head to the Library tab and click Connect Steam to automatically bring in your owned games and playtime.' } },
+      {
+        selector: '.steam-cta-btn, .steam-sync-bar',
+        onBeforeHighlight: () => { (document.querySelector('a[href$="?tab=library"]') as HTMLElement | null)?.click(); },
+        page: profilePath,
+        popover: { title: 'Import from Steam', description: 'Already have a Steam library? Click Connect Steam to automatically bring in your owned games and playtime.' },
+      },
     ],
     review: [
       { selector: 'a[href="/discover"]', page: '/', popover: { title: 'Need a game to review?', description: 'Stuck on what to review? Discover surfaces games reviewed by people with similar taste — and the more you review, the sharper it gets.' } },
@@ -55,7 +62,12 @@ const { username = null } = Astro.props;
   function existingSteps(name: string) {
     return (TOURS[name] || [])
       .filter((s) => s.selector ? document.querySelector(s.selector) : window.location.pathname === s.page)
-      .map((s) => ({ element: s.selector || undefined, popover: s.popover }));
+      .map((s) => ({
+        element: s.onBeforeHighlight
+          ? () => { s.onBeforeHighlight!(); return s.selector ? document.querySelector(s.selector) : null; }
+          : (s.selector || undefined),
+        popover: s.popover,
+      }));
   }
 
   function drive(steps: any[]) {
