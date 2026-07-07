@@ -14,7 +14,7 @@ if (!user) {
 // Fetch profile for logged-in user
 const { data: profile } = await (serverClient as any)
   .from("profiles")
-  .select("id, username, bio, avatar_url, created_at")
+  .select("id, username, bio, avatar_url, created_at, search_indexable")
   .eq("auth_user_id", user.id)
   .single();
 
@@ -86,6 +86,11 @@ if (profile) {
     .eq('follower_id', profile.id);
   followingCount = fic ?? 0;
 }
+
+// Contextual nudge: prompt logged-in users who have content but haven't opted
+// into search indexing to turn it on. GDPR-clean — separate, specific, opt-in,
+// and only shown to someone who actually has content to surface.
+const showSearchNudge = !!profile && !profile.search_indexable && reviewCount > 0;
 
 ---
 
@@ -275,6 +280,20 @@ if (profile) {
       .mn-label { font-size: 9px; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap; }
     }
 
+    /* ── Search visibility nudge ── */
+    .search-nudge { display: flex; align-items: center; gap: 16px; justify-content: space-between; flex-wrap: wrap; margin: 16px 20px 0; padding: 14px 16px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; }
+    .search-nudge-text { min-width: 0; }
+    .search-nudge-title { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+    .search-nudge-sub { font-size: 12.5px; color: var(--text-secondary); line-height: 1.5; max-width: 56ch; }
+    .search-nudge-sub a { color: var(--text-primary); }
+    .search-nudge-actions { display: flex; gap: 8px; flex-shrink: 0; }
+    .search-nudge-enable { background: var(--accent); color: var(--accent-text); border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
+    .search-nudge-enable:hover { opacity: 0.85; }
+    .search-nudge-enable:disabled { opacity: 0.5; cursor: default; }
+    .search-nudge-dismiss { background: none; border: 1px solid var(--border); color: var(--text-secondary); border-radius: 8px; padding: 8px 14px; font-size: 13px; font-family: inherit; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+    .search-nudge-dismiss:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+    @media (max-width: 768px) { .search-nudge-actions { width: 100%; } .search-nudge-enable { flex: 1; } }
+
   </style>
 </head>
 
@@ -338,6 +357,20 @@ if (profile) {
         }
       </div>
     </div>
+
+    <!-- SEARCH VISIBILITY NUDGE — hidden by default; shown by script when not snoozed -->
+    {showSearchNudge && (
+      <div class="search-nudge" id="searchNudge" style="display:none">
+        <div class="search-nudge-text">
+          <div class="search-nudge-title">🌱 Help us grow Chekpoint</div>
+          <div class="search-nudge-sub">Every reviewer who lets us index their posts makes Chekpoint more visible across the internet — more players discovering the site, and more reviews for everyone. Flip on search visibility to let your profile and reviews show up in Google. It's off by default and you can turn it back off anytime in <a href="/settings#search-visibility" style="text-decoration:underline">settings</a>.</div>
+        </div>
+        <div class="search-nudge-actions">
+          <button class="search-nudge-enable" id="searchNudgeEnable">Count me in!</button>
+          <button class="search-nudge-dismiss" id="searchNudgeDismiss">Maybe later</button>
+        </div>
+      </div>
+    )}
 
     <!-- REVIEWS -->
     {reviews.length === 0 ? (
@@ -515,6 +548,42 @@ if (profile) {
     });
   });
 });
+
+  // Search-visibility nudge — snoozed rather than permanently dismissed, so it
+  // re-presents the opt-in after a while instead of nagging every visit.
+  (function() {
+    var nudge = document.getElementById('searchNudge');
+    if (!nudge) return;
+    var SNOOZE_MS = 14 * 24 * 60 * 60 * 1000; // re-present after 14 days
+    var DONE_MS = 3650 * 24 * 60 * 60 * 1000;  // effectively permanent once enabled
+    var until = parseInt(localStorage.getItem('search-nudge-snooze-until') || '0', 10);
+    if (until && Date.now() < until) return; // still snoozed — leave hidden
+    nudge.style.display = 'flex';
+    var enableBtn = document.getElementById('searchNudgeEnable');
+    var dismissBtn = document.getElementById('searchNudgeDismiss');
+    dismissBtn.addEventListener('click', function() {
+      localStorage.setItem('search-nudge-snooze-until', String(Date.now() + SNOOZE_MS));
+      nudge.style.display = 'none';
+    });
+    enableBtn.addEventListener('click', async function() {
+      enableBtn.disabled = true;
+      enableBtn.textContent = 'Enabling…';
+      try {
+        var res = await fetch('/api/profile/privacy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ search_indexable: true }),
+        });
+        if (!res.ok) throw new Error('failed');
+        nudge.innerHTML = '<div class="search-nudge-text"><div class="search-nudge-title">🎉 Thank you — you\'re helping us grow!</div><div class="search-nudge-sub">Your profile and reviews can now appear in search engines. It can take a few days for them to show up. You can turn it off anytime in settings.</div></div>';
+        localStorage.setItem('search-nudge-snooze-until', String(Date.now() + DONE_MS));
+      } catch (e) {
+        enableBtn.disabled = false;
+        enableBtn.textContent = 'Count me in!';
+        alert('Something went wrong. Please try again, or use the toggle in Settings.');
+      }
+    });
+  })();
 </script>
 
 <nav class="mobile-nav" aria-label="Mobile navigation">

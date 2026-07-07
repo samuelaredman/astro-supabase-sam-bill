@@ -12,6 +12,16 @@ import { REC_SELECT, shapeRec } from "../../../utils/recommendationsFeed";
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
 const isLoggedIn = !!user;
+
+// Cache the anonymous render at the CDN edge to cut function invocations under
+// crawl load; logged-in (personalized) responses are never shared-cached.
+if (!isLoggedIn) {
+  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+  Astro.response.headers.set('Cache-Control', 'no-store');
+} else {
+  Astro.response.headers.set('Cache-Control', 'private, no-store');
+}
+Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 const { id } = Astro.params;
 
 const db = getSupabaseAdmin() as any;
@@ -31,6 +41,14 @@ if (user) {
 }
 
 const rec = shapeRec(recRow, currentProfile?.id ?? null);
+
+// Only index this recommendation if its author has opted into search indexing.
+const { data: recAuthor } = await db
+  .from("profiles")
+  .select("search_indexable")
+  .eq("id", rec.profileId)
+  .maybeSingle();
+const authorIndexable = !!recAuthor?.search_indexable;
 
 const { data: commentsRaw } = await db
   .from("recommendation_comments")
@@ -82,6 +100,7 @@ const moreRecs = moreRecsRaw ?? [];
   description={`If you liked ${rec.sourceGame?.title}, try ${rec.targetGame?.title}.`}
   isLoggedIn={isLoggedIn}
   currentProfile={currentProfile}
+  noindex={!authorIndexable}
 >
   <main class="feed rec-detail-main">
     <div class="rec-detail-topbar">

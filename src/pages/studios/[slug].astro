@@ -1,6 +1,6 @@
 ---
 export const prerender = false;
-import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/database'
+import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database'
 import { igdbFetch } from '../../utils/igdb'
 import { igdbImage } from '../../utils/format'
 import { isAllowedGameCategory } from '../../utils/games'
@@ -21,6 +21,18 @@ const { data: studio } = await supabase
   .single()
 
 if (!studio) return Astro.redirect('/404')
+
+// Authoritative indexability gate: does ANY of this studio's games have a
+// published review? Runs against the full company↔game↔review relationship (not
+// the category-filtered display list), matching the sitemap's inclusion rule.
+// Admin client — under RLS the anon client silently drops the nested review rows.
+const { data: reviewedInStudio } = await (getSupabaseAdmin() as any)
+  .from('game_companies')
+  .select('company_id, games!inner(reviews!inner(id))')
+  .eq('company_id', studio.id)
+  .eq('games.reviews.status', 'published')
+  .limit(1)
+const hasReviewedGame = (reviewedInStudio?.length ?? 0) > 0
 
 const { data: developedRaw } = await supabase
   .from('game_companies')
@@ -157,6 +169,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   <meta name="theme-color" id="meta-theme-color" content="#f9f8f6" />
   <title>{studio.name} — Checkpoint</title>
   <meta name="description" content={studio.description?.slice(0, 160) ?? `${studio.name} games and reviews on Checkpoint.`} />
+  {!hasReviewedGame && <meta name="robots" content="noindex, nofollow" />}
   <meta property="og:title" content={`${studio.name} — Checkpoint`} />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

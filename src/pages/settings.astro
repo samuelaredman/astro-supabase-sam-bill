@@ -11,7 +11,7 @@ if (!user) return Astro.redirect('/signin');
 const db = getSupabaseAdmin() as any;
 const { data: profile } = await db
   .from('profiles')
-  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, steam_id, steam_username, steam_synced_at')
+  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at')
   .eq('auth_user_id', user.id)
   .single();
 
@@ -116,6 +116,23 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           "Friends" means people you mutually follow. Playing and Completed are always public.
         </div>
         <div id="privacyMsg" style="font-size:12px;min-height:16px;margin-top:4px"></div>
+      </div>
+
+      <!-- Search engine visibility — GDPR opt-in consent, off by default -->
+      <div class="settings-row" id="search-visibility" style="flex-direction:column;align-items:stretch;gap:0;margin-top:14px">
+        <div class="priv-row">
+          <div class="settings-row-text">
+            <div class="settings-row-label">🔎 Search engine visibility</div>
+            <div class="settings-row-sub">
+              Let search engines like Google index your public profile, reviews, recommendations, comments and lists so they can appear in search results. Off by default — your content stays on Chekpoint until you opt in, and you can turn this off again at any time.
+            </div>
+          </div>
+          <div class="priv-toggle" data-field="search_indexable">
+            <button class={`priv-opt${profile.search_indexable ? '' : ' active'}`} data-value="off" onclick="setSearchIndexable(false, this)">Off</button>
+            <button class={`priv-opt${profile.search_indexable ? ' active' : ''}`} data-value="on" onclick="setSearchIndexable(true, this)">On</button>
+          </div>
+        </div>
+        <div id="searchIndexableMsg" style="font-size:12px;min-height:16px;margin-top:8px"></div>
       </div>
     </section>
 
@@ -497,6 +514,7 @@ declare global {
     togglePwForm: () => void;
     changePassword: () => Promise<void>;
     setPrivacy: (field: string, value: string, btn: HTMLElement) => Promise<void>;
+    setSearchIndexable: (value: boolean, btn: HTMLElement) => Promise<void>;
     steamSync: () => Promise<void>;
     steamDisconnect: () => Promise<void>;
   }
@@ -536,6 +554,42 @@ async function setPrivacy(field: string, value: string, btn: HTMLElement) {
   }
 }
 window.setPrivacy = setPrivacy;
+
+async function setSearchIndexable(value: boolean, btn: HTMLElement) {
+  const toggle = btn.closest('.priv-toggle') as HTMLElement | null;
+  if (!toggle) return;
+  const prevActive = toggle.querySelector('.priv-opt.active') as HTMLElement | null;
+  // Optimistic UI update
+  toggle.querySelectorAll('.priv-opt').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const msg = document.getElementById('searchIndexableMsg');
+  if (msg) { msg.textContent = ''; }
+  try {
+    const res = await fetch('/api/profile/privacy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ search_indexable: value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Failed to save');
+    if (msg) {
+      msg.textContent = value
+        ? 'Your content can now appear in search engines. It may take days for changes to show up.'
+        : 'Search engines will no longer index your content.';
+      (msg as HTMLElement).style.color = 'var(--score-great, #4ade80)';
+      setTimeout(() => { if (msg) msg.textContent = ''; }, 4000);
+    }
+  } catch (e: any) {
+    // Revert optimistic update on failure
+    toggle.querySelectorAll('.priv-opt').forEach(b => b.classList.remove('active'));
+    prevActive?.classList.add('active');
+    if (msg) {
+      msg.textContent = e.message ?? 'Something went wrong.';
+      (msg as HTMLElement).style.color = '#f87171';
+    }
+  }
+}
+window.setSearchIndexable = setSearchIndexable;
 
 function togglePwForm() {
   const form = document.getElementById('pwForm');

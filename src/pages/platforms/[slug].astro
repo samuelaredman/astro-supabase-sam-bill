@@ -1,6 +1,6 @@
 ---
 export const prerender = false;
-import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/database'
+import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database'
 import { igdbFetch } from '../../utils/igdb'
 import { igdbImage, timeAgo } from '../../utils/format'
 import { isAllowedGameCategory } from '../../utils/games'
@@ -17,6 +17,18 @@ const { data: platform } = await supabase
   .single()
 
 if (!platform) return Astro.redirect('/404')
+
+// Authoritative indexability gate: does ANY game on this platform have a
+// published review? Runs against the full platform↔game↔review relationship (not
+// the capped/category-filtered display list), matching the sitemap's rule.
+// Admin client — under RLS the anon client silently drops the nested review rows.
+const { data: reviewedOnPlatform } = await (getSupabaseAdmin() as any)
+  .from('game_platforms')
+  .select('platform_id, games!inner(reviews!inner(id))')
+  .eq('platform_id', platform.id)
+  .eq('games.reviews.status', 'published')
+  .limit(1)
+const hasReviewedGame = (reviewedOnPlatform?.length ?? 0) > 0
 
 const { data: gamePlatforms } = await supabase
   .from('game_platforms')
@@ -558,6 +570,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   <meta name="theme-color" id="meta-theme-color" content="#f9f8f6" />
   <title>{platform.name} — Chekpoint</title>
   <meta name="description" content={summary?.slice(0, 160) ?? `Browse all ${platform.name} games and reviews on Chekpoint.`} />
+  {!hasReviewedGame && <meta name="robots" content="noindex, nofollow" />}
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Serif+Display&family=Press+Start+2P&display=swap" rel="stylesheet" />
