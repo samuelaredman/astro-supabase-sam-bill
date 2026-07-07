@@ -1,0 +1,270 @@
+---
+// Shared "create a recommendation" modal. Include once per page and trigger with
+// the global window.openRecComposer(). On a game page, pass `sourceGame` to
+// pre-fill (and lock) the first game — otherwise the user searches for both.
+import { igdbImage } from '../utils/format';
+
+interface Props {
+  sourceGame?: { id: string; title: string; cover_img_url?: string | null } | null;
+}
+const { sourceGame = null } = Astro.props;
+const fixedSourceCover = sourceGame ? igdbImage(sourceGame.cover_img_url, 't_cover_big') : null;
+---
+
+<div id="recComposerOverlay" class="rcx-overlay"></div>
+
+<div id="recComposer" class="rcx-modal" role="dialog" aria-modal="true" aria-label="Create a recommendation">
+  <div class="rcx-head">
+    <div class="rcx-title">Recommend a game</div>
+    <button id="cancelRecComposer" class="rcx-close" aria-label="Close">×</button>
+  </div>
+
+  <p class="rcx-intro">Loved one game? Point people who enjoyed it toward another they should try next.</p>
+
+  <div class="rcx-pair">
+    <!-- Source game -->
+    <div class="rcx-slot">
+      <label class="rcx-label">If you liked</label>
+      {sourceGame ? (
+        <>
+          <div class="rcx-fixed">
+            <div class="rcx-fixed-cover">
+              {fixedSourceCover
+                ? <img src={fixedSourceCover} alt={sourceGame.title} />
+                : <span>🎮</span>}
+            </div>
+            <div class="rcx-fixed-title">{sourceGame.title}</div>
+          </div>
+          <input type="hidden" id="recSourceId" value={sourceGame.id} />
+        </>
+      ) : (
+        <div class="rcx-autocomplete">
+          <input type="text" id="recSourceSearch" class="rcx-input" placeholder="Search for a game..." autocomplete="off" />
+          <div class="rcx-results" id="recSourceResults"></div>
+          <input type="hidden" id="recSourceId" />
+        </div>
+      )}
+    </div>
+
+    <div class="rcx-arrow" aria-hidden="true">→</div>
+
+    <!-- Target game -->
+    <div class="rcx-slot">
+      <label class="rcx-label">You'll like</label>
+      <div class="rcx-autocomplete">
+        <input type="text" id="recTargetSearch" class="rcx-input" placeholder="Search for a game..." autocomplete="off" />
+        <div class="rcx-results" id="recTargetResults"></div>
+        <input type="hidden" id="recTargetId" />
+      </div>
+    </div>
+  </div>
+
+  <div class="rcx-field">
+    <label class="rcx-label">Why does this recommendation make sense?</label>
+    <textarea id="recBody" class="rcx-textarea" placeholder="Explain the connection — shared vibe, mechanics, story, whatever makes this a good next pick..." rows="5" maxlength="5000"></textarea>
+    <div class="rcx-charcount" id="recCharCount">0 / 5000</div>
+  </div>
+
+  <div class="rcx-actions">
+    <label class="rcx-spoiler">
+      <input type="checkbox" id="recSpoiler" />
+      <span>Contains spoilers</span>
+    </label>
+    <button class="rcx-submit" id="recSubmit">Post recommendation</button>
+  </div>
+  <div class="rcx-error" id="recError"></div>
+</div>
+
+<script is:inline>
+if (!window.__recComposerInit) {
+  window.__recComposerInit = true;
+
+  var overlay = document.getElementById('recComposerOverlay');
+  var modal = document.getElementById('recComposer');
+
+  function openRecComposer() {
+    if (!modal) return;
+    overlay.style.display = 'block';
+    modal.style.display = 'block';
+  }
+  function closeRecComposer() {
+    overlay.style.display = 'none';
+    modal.style.display = 'none';
+    var err = document.getElementById('recError');
+    if (err) err.textContent = '';
+  }
+  window.openRecComposer = openRecComposer;
+
+  var cancelBtn = document.getElementById('cancelRecComposer');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeRecComposer);
+  overlay.addEventListener('click', closeRecComposer);
+
+  // ── Game typeahead (source + target), reusing /api/games/search + import ──
+  function wireGameSearch(inputId, resultsId, hiddenId) {
+    var input = document.getElementById(inputId);
+    var results = document.getElementById(resultsId);
+    var hidden = document.getElementById(hiddenId);
+    if (!input || !results || !hidden) return; // fixed source has no search input
+    var t;
+    input.addEventListener('input', function () {
+      hidden.value = '';
+      clearTimeout(t);
+      var q = input.value.trim();
+      if (q.length < 2) { results.classList.remove('open'); return; }
+      t = setTimeout(function () { runSearch(q); }, 150);
+    });
+    async function runSearch(q) {
+      var res = await fetch('/api/games/search?q=' + encodeURIComponent(q));
+      var games = await res.json();
+      results.innerHTML = '';
+      if (!games.length) {
+        results.innerHTML = '<div class="rcx-result" style="color:var(--text-tertiary)">No games found</div>';
+      } else {
+        games.forEach(function (game) {
+          var item = document.createElement('div');
+          item.className = 'rcx-result';
+          item.innerHTML = '<div class="rcx-result-title">' + game.title + '</div>'
+            + (game.source === 'igdb' ? '<div class="rcx-result-sub">Add to Chekpoint</div>' : '');
+          item.addEventListener('click', function () {
+            input.value = game.title;
+            results.classList.remove('open');
+            var errEl = document.getElementById('recError');
+            if (game.source === 'igdb') {
+              hidden.value = '';
+              if (errEl) errEl.textContent = 'Importing game...';
+              fetch('/api/games/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ igdb_id: game.igdb_id }),
+              }).then(async function (r) {
+                var data = await r.json();
+                if (!r.ok) { if (errEl) errEl.textContent = data.error || 'Failed to import game, try again.'; return; }
+                hidden.value = data.id;
+                if (errEl) errEl.textContent = '';
+              }).catch(function () { if (errEl) errEl.textContent = 'Failed to import game, try again.'; });
+            } else {
+              hidden.value = game.id;
+            }
+          });
+          results.appendChild(item);
+        });
+      }
+      results.classList.add('open');
+    }
+  }
+  wireGameSearch('recSourceSearch', 'recSourceResults', 'recSourceId');
+  wireGameSearch('recTargetSearch', 'recTargetResults', 'recTargetId');
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.rcx-autocomplete')) {
+      document.querySelectorAll('.rcx-results').forEach(function (r) { r.classList.remove('open'); });
+    }
+  });
+
+  var bodyEl = document.getElementById('recBody');
+  if (bodyEl) {
+    bodyEl.addEventListener('input', function () {
+      var el = document.getElementById('recCharCount');
+      var n = bodyEl.value.length;
+      el.textContent = n + ' / 5000';
+      el.style.color = n > 4500 ? (n >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)';
+    });
+  }
+
+  var submitBtn = document.getElementById('recSubmit');
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async function () {
+      var errEl = document.getElementById('recError');
+      errEl.textContent = '';
+      var sourceId = document.getElementById('recSourceId').value;
+      var targetId = document.getElementById('recTargetId').value;
+      var body = document.getElementById('recBody').value.trim();
+      var spoilers = document.getElementById('recSpoiler').checked;
+      if (!sourceId) { errEl.textContent = 'Pick the game you liked.'; return; }
+      if (!targetId) { errEl.textContent = 'Pick the game you’re recommending.'; return; }
+      if (sourceId === targetId) { errEl.textContent = 'Pick two different games.'; return; }
+      if (!body) { errEl.textContent = 'Add a few words on why this works.'; return; }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Posting...';
+      try {
+        var res = await fetch('/api/recommendations/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_game_id: sourceId,
+            target_game_id: targetId,
+            body: body,
+            contains_spoilers: spoilers,
+          }),
+        });
+        var data = await res.json();
+        if (!res.ok) {
+          errEl.textContent = data.error || 'Something went wrong.';
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Post recommendation';
+          return;
+        }
+        window.location.href = '/recommendations/' + data.recommendation_id;
+      } catch (err) {
+        errEl.textContent = 'Something went wrong.';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Post recommendation';
+      }
+    });
+  }
+}
+</script>
+
+<style is:global>
+  .rcx-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 150; }
+  .rcx-modal {
+    display: none; position: fixed; top: 72px; left: 50%; transform: translateX(-50%);
+    width: 560px; max-width: calc(100vw - 32px); background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 16px; z-index: 160; padding: 24px;
+    max-height: calc(100dvh - 100px); overflow-y: auto;
+  }
+  .rcx-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .rcx-title { font-size: 17px; font-weight: 500; letter-spacing: -0.2px; }
+  .rcx-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-tertiary); line-height: 1; padding: 4px; }
+  .rcx-intro { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0 0 18px; }
+
+  .rcx-pair { display: flex; align-items: flex-end; gap: 12px; margin-bottom: 16px; }
+  .rcx-slot { flex: 1; min-width: 0; }
+  .rcx-arrow { color: var(--accent); font-size: 20px; font-weight: 700; padding-bottom: 8px; flex-shrink: 0; }
+  .rcx-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+
+  .rcx-autocomplete { position: relative; }
+  .rcx-input, .rcx-textarea {
+    width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg-hover); color: var(--text-primary);
+    font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s;
+  }
+  .rcx-input:focus, .rcx-textarea:focus { border-color: var(--accent); }
+  .rcx-textarea { resize: vertical; line-height: 1.6; }
+  .rcx-results {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    max-height: 240px; overflow-y: auto; z-index: 5; box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+  }
+  .rcx-results.open { display: block; }
+  .rcx-result { padding: 9px 12px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--border-subtle); }
+  .rcx-result:last-child { border-bottom: none; }
+  .rcx-result:hover { background: var(--bg-hover); }
+  .rcx-result-title { color: var(--text-primary); }
+  .rcx-result-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
+
+  .rcx-fixed { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--bg-hover); border: 1px solid var(--border); }
+  .rcx-fixed-cover { width: 32px; height: 43px; border-radius: 5px; overflow: hidden; background: var(--tag-bg); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .rcx-fixed-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .rcx-fixed-title { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.3; }
+
+  .rcx-field { margin-bottom: 4px; }
+  .rcx-charcount { text-align: right; font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
+
+  .rcx-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+  .rcx-spoiler { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
+  .rcx-submit { margin-left: auto; padding: 9px 18px; border: none; border-radius: 10px; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
+  .rcx-submit:hover { opacity: 0.9; }
+  .rcx-submit:disabled { opacity: 0.5; cursor: default; }
+  .rcx-error { font-size: 13px; color: #f87171; margin-top: 10px; min-height: 16px; }
+</style>

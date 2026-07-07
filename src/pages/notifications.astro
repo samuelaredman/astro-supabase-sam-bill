@@ -28,7 +28,8 @@ const { data: rawNotifs } = await db
     games ( id, title, slug, cover_img_url ),
     groups ( id, name ),
     lists ( id, title, cover_image_url ),
-    comment:comment_id ( id, body, review_id )
+    comment:comment_id ( id, body, review_id ),
+    recommendation:recommendation_id ( id, source_game:games!source_game_id ( title ), target_game:games!target_game_id ( title ) )
   `)
   .eq('profile_id', profile.id)
   .order('created_at', { ascending: false })
@@ -170,6 +171,20 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           const isCommentDownvote = n.type === 'comment_downvote';
           const isReaction = n.type === 'review_reaction';
           const isCommentReaction = n.type === 'comment_reaction';
+          // ── Recommendation notification types ──
+          const rec = n.recommendation;
+          const recPair = rec ? `${rec.source_game?.title ?? 'a game'} → ${rec.target_game?.title ?? 'another'}` : 'a recommendation';
+          const isFollowRec = n.type === 'follow_recommendation';
+          const isRecUpvote = n.type === 'recommendation_upvote';
+          const isRecDownvote = n.type === 'recommendation_downvote';
+          const isRecReaction = n.type === 'recommendation_reaction';
+          const isRecComment = n.type === 'recommendation_comment';
+          const isRecCommentUpvote = n.type === 'recommendation_comment_upvote';
+          const isRecCommentDownvote = n.type === 'recommendation_comment_downvote';
+          const isRecCommentReaction = n.type === 'recommendation_comment_reaction';
+          const isRec = isFollowRec || isRecUpvote || isRecDownvote || isRecReaction || isRecComment || isRecCommentUpvote || isRecCommentDownvote || isRecCommentReaction;
+          const recReactionPath = (isRecReaction || isRecCommentReaction) && n.reaction_type ? IMAGE_EMOTE_MAP[n.reaction_type] : null;
+          // ── List notification types ──
           const isListComment = n.type === 'list_comment';
           const isListReaction = n.type === 'list_reaction';
           const isListUpvote = n.type === 'list_upvote';
@@ -189,19 +204,21 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           const commentReviewId = comment?.review_id ?? review?.id;
           const href = isNewFollower
             ? `/reviewers/${actor?.username ?? ''}`
-            : isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected
-              ? (group?.id ? `/groups/${group.id}` : '#')
-              : (isCommentUpvote || isCommentDownvote)
-                ? (commentReviewId ? `/reviews/${commentReviewId}` : '#')
-                : isListType
-                  ? (list?.id ? `/lists/${list.id}` : '#')
-                  : review ? `/reviews/${review.id}` : (game ? `/games/${game.slug}` : '#');
+            : isRec
+              ? (rec?.id ? `/recommendations/${rec.id}` : '#')
+              : isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected
+                ? (group?.id ? `/groups/${group.id}` : '#')
+                : (isCommentUpvote || isCommentDownvote)
+                  ? (commentReviewId ? `/reviews/${commentReviewId}` : '#')
+                  : isListType
+                    ? (list?.id ? `/lists/${list.id}` : '#')
+                    : review ? `/reviews/${review.id}` : (game ? `/games/${game.slug}` : '#');
 
           return (
             <a href={href} class={`notif-item${n.read ? '' : ' unread'}${isNewFollower ? ' notif-item-follower' : ''}`}>
               {/* Cover thumbnail / actor avatar / group icon */}
               <div class="notif-cover">
-                {isNewFollower || isGroupJoinRequest ? (
+                {isNewFollower || isGroupJoinRequest || isRec ? (
                   actor?.avatar_url
                     ? <img src={actor.avatar_url} alt={actor.username} class="notif-actor-avatar" />
                     : <span class="notif-actor-initials">{getInitials(actor?.username ?? '?')}</span>
@@ -224,6 +241,37 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                   {isNewFollower ? (
                     <>
                       <strong>@{actor?.username ?? 'Someone'}</strong> started following you
+                    </>
+                  ) : isFollowRec ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> you follow posted a recommendation
+                      {' '}<strong>{recPair}</strong>
+                    </>
+                  ) : isRecUpvote ? (
+                    <><strong>@{actor?.username ?? 'Someone'}</strong> upvoted your recommendation <strong>{recPair}</strong></>
+                  ) : isRecDownvote ? (
+                    <><strong>@{actor?.username ?? 'Someone'}</strong> downvoted your recommendation <strong>{recPair}</strong></>
+                  ) : isRecComment ? (
+                    <><strong>@{actor?.username ?? 'Someone'}</strong> commented on your recommendation <strong>{recPair}</strong></>
+                  ) : isRecCommentUpvote ? (
+                    <><strong>@{actor?.username ?? 'Someone'}</strong> upvoted your comment on a recommendation</>
+                  ) : isRecCommentDownvote ? (
+                    <><strong>@{actor?.username ?? 'Someone'}</strong> downvoted your comment on a recommendation</>
+                  ) : isRecReaction ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> reacted{' '}
+                      {recReactionPath
+                        ? <img src={recReactionPath} class="notif-emote" alt={`:${n.reaction_type}:`} title={`:${n.reaction_type}:`} />
+                        : n.reaction_type ? <span class="notif-reaction-code">:{n.reaction_type}:</span> : null}
+                      {' '}to your recommendation <strong>{recPair}</strong>
+                    </>
+                  ) : isRecCommentReaction ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> reacted{' '}
+                      {recReactionPath
+                        ? <img src={recReactionPath} class="notif-emote" alt={`:${n.reaction_type}:`} title={`:${n.reaction_type}:`} />
+                        : n.reaction_type ? <span class="notif-reaction-code">:{n.reaction_type}:</span> : null}
+                      {' '}to your comment on a recommendation
                     </>
                   ) : isUpvote ? (
                     <>
@@ -347,8 +395,8 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                   )}
                 </div>
                 <div class="notif-meta">
-                  <span class={`notif-type-badge ${isNewFollower ? 'badge-new-follower' : (isUpvote || isListUpvote) ? 'badge-upvote' : (isDownvote || isListDownvote) ? 'badge-downvote' : (isCommentUpvote || isListCommentUpvote) ? 'badge-upvote' : (isCommentDownvote || isListCommentDownvote) ? 'badge-downvote' : (isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected) ? 'badge-group' : isWatchlist ? 'badge-watchlist' : (isReaction || isCommentReaction || isListReaction || isListCommentReaction) ? 'badge-reaction' : (isListComment) ? 'badge-list' : 'badge-follow'}`}>
-                    {isNewFollower ? 'New Follower' : isUpvote ? 'Upvote' : isDownvote ? 'Downvote' : isCommentUpvote ? 'Comment Upvote' : isCommentDownvote ? 'Comment Downvote' : isGroupInvite ? 'Group Invite' : isGroupJoinRequest ? 'Join Request' : isGroupJoinAccepted ? 'Joined!' : isGroupJoinRejected ? 'Not Accepted' : isWatchlist ? 'Watchlist' : isReaction ? 'Reaction' : isCommentReaction ? 'Comment Reaction' : isListComment ? 'List Comment' : isListReaction ? 'List Reaction' : isListUpvote ? 'List Upvote' : isListDownvote ? 'List Downvote' : isListCommentReaction ? 'List Comment Reaction' : isListCommentUpvote ? 'List Comment Upvote' : isListCommentDownvote ? 'List Comment Downvote' : 'Following'}
+                  <span class={`notif-type-badge ${isNewFollower ? 'badge-new-follower' : (isUpvote || isListUpvote || isRecUpvote) ? 'badge-upvote' : (isDownvote || isListDownvote || isRecDownvote) ? 'badge-downvote' : (isCommentUpvote || isListCommentUpvote || isRecCommentUpvote) ? 'badge-upvote' : (isCommentDownvote || isListCommentDownvote || isRecCommentDownvote) ? 'badge-downvote' : (isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected) ? 'badge-group' : isWatchlist ? 'badge-watchlist' : (isReaction || isCommentReaction || isListReaction || isListCommentReaction || isRecReaction || isRecCommentReaction) ? 'badge-reaction' : (isListComment || isRecComment) ? 'badge-list' : 'badge-follow'}`}>
+                    {isNewFollower ? 'New Follower' : isUpvote ? 'Upvote' : isDownvote ? 'Downvote' : isCommentUpvote ? 'Comment Upvote' : isCommentDownvote ? 'Comment Downvote' : isGroupInvite ? 'Group Invite' : isGroupJoinRequest ? 'Join Request' : isGroupJoinAccepted ? 'Joined!' : isGroupJoinRejected ? 'Not Accepted' : isWatchlist ? 'Watchlist' : isReaction ? 'Reaction' : isCommentReaction ? 'Comment Reaction' : isFollowRec ? 'Recommendation' : isRecUpvote ? 'Upvote' : isRecDownvote ? 'Downvote' : isRecReaction ? 'Reaction' : isRecComment ? 'Rec Comment' : isRecCommentUpvote ? 'Comment Upvote' : isRecCommentDownvote ? 'Comment Downvote' : isRecCommentReaction ? 'Comment Reaction' : isListComment ? 'List Comment' : isListReaction ? 'List Reaction' : isListUpvote ? 'List Upvote' : isListDownvote ? 'List Downvote' : isListCommentReaction ? 'List Comment Reaction' : isListCommentUpvote ? 'List Comment Upvote' : isListCommentDownvote ? 'List Comment Downvote' : 'Following'}
                   </span>
                   <span class="notif-time">{timeAgo(n.created_at)}</span>
                 </div>
