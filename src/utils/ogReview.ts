@@ -1,4 +1,4 @@
-import { h, truncate, scoreBadgeBg, scoreBadgeText, hexToRgba, OG_ACCENT, OG_BG } from "./og";
+import { h, truncate, scoreBadgeBg, scoreBadgeText, scoreColor, hexToRgba, OG_ACCENT, OG_BG } from "./og";
 
 export interface ReviewOgData {
   gameTitle: string;
@@ -122,6 +122,25 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     }, String(data.score)),
   ]);
 
+  // A second, score-tinted glow bleeding out from behind the badge — the left
+  // panel's glow stays brand purple, so this is the one place per-review color
+  // shows up. Sized/positioned to bleed past the badge on every side, and given
+  // its own relative wrapper so it renders behind the badge without affecting
+  // scoreRow's flex layout (it's absolutely positioned, out of flow).
+  const badgeGlowSize = BADGE_SIZE + 140;
+  const scoreBadgeWrap = h("div", {
+    style: { position: "relative", display: "flex", flexShrink: 0 },
+  }, [
+    h("div", {
+      style: {
+        position: "absolute", top: -70, left: -70, width: badgeGlowSize, height: badgeGlowSize,
+        borderRadius: badgeGlowSize / 2, display: "flex",
+        backgroundImage: `radial-gradient(circle, ${hexToRgba(scoreColor(data.score), 0.30)} 0%, ${hexToRgba(scoreColor(data.score), 0)} 70%)`,
+      },
+    }),
+    scoreBadge,
+  ]);
+
   const { fontSize: gameTitleFontSize, maxLines: gameTitleMaxLines } = gameTitleLayout(data.gameTitle);
   const gameTitleMaxWidth = RIGHT_W - PAD * 2 - BADGE_SIZE - 32;
   const gameTitleBlock = gameTitleMaxLines === 1
@@ -142,7 +161,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
       }, truncate(data.gameTitle, 200));
 
   const scoreRow = h("div", { style: { display: "flex", alignItems: "center", gap: 32 } }, [
-    scoreBadge,
+    scoreBadgeWrap,
     gameTitleBlock,
   ]);
 
