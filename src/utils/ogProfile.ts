@@ -1,4 +1,4 @@
-import { h, truncate, scoreColor, hexToRgba, OG_ACCENT, OG_BG } from "./og";
+import { h, truncate, scoreColor, scoreBadgeBg, scoreBadgeText, hexToRgba, OG_ACCENT, OG_BG } from "./og";
 
 export interface ProfileOgData {
   username: string;
@@ -33,6 +33,10 @@ interface StatTile {
   value: string;
   label: string;
   color?: string;
+  // Renders `value` as a filled score-badge square (same chip used for scores
+  // on review cards site-wide) instead of plain colored text — only the avg
+  // score tile uses this.
+  badge?: boolean;
 }
 
 export function buildProfileOgTree(data: ProfileOgData): any {
@@ -127,7 +131,7 @@ export function buildProfileOgTree(data: ProfileOgData): any {
     { value: String(data.reviewCount), label: data.reviewCount === 1 ? "game reviewed" : "games reviewed" },
   ];
   if (data.avgScore !== null) {
-    tiles.push({ value: data.avgScore.toFixed(1), label: "avg score", color: scoreColor(data.avgScore) });
+    tiles.push({ value: data.avgScore.toFixed(1), label: "avg score", color: scoreColor(data.avgScore), badge: true });
   }
   if (data.topGenre) {
     tiles.push({ value: truncate(data.topGenre, 26), label: "top genre" });
@@ -140,14 +144,30 @@ export function buildProfileOgTree(data: ProfileOgData): any {
         h("div", { style: { width: 1, height: 64, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } })
       );
     }
-    statRowChildren.push(
-      h("div", { style: { display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 } }, [
-        h("div", {
+    const valueNode = tile.badge
+      // Mirrors the site's `.score-badge` chip (filled, score-tinted square) —
+      // the same treatment used for scores on review cards/OG cards, rather
+      // than inventing a plain-text style just for this one tile.
+      ? h("div", {
+          style: {
+            width: 76, height: 76, borderRadius: 18, background: scoreBadgeBg(data.avgScore as number),
+            display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+          },
+        }, [
+          h("div", {
+            style: { fontFamily: "DM Serif Display", fontSize: 38, fontWeight: 700, color: scoreBadgeText(data.avgScore as number), display: "flex", lineHeight: 1 },
+          }, tile.value),
+        ])
+      : h("div", {
           style: {
             fontSize: 52, fontWeight: 700, color: tile.color ?? "#f8f6f2", display: "flex",
             lineHeight: 1, textShadow: "0 2px 16px rgba(0,0,0,0.6)",
           },
-        }, tile.value),
+        }, tile.value);
+
+    statRowChildren.push(
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 } }, [
+        valueNode,
         h("div", {
           style: { fontSize: 16, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#9a9793", display: "flex" },
         }, tile.label),
