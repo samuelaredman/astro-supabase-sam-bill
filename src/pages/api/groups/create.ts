@@ -18,7 +18,7 @@ export const POST: APIRoute = async (context) => {
   if (!profile) return json({ error: "Profile not found" }, 404);
 
   const body = await context.request.json();
-  const { name, description, visibility } = body;
+  const { name, description, visibility, join_prompt } = body;
 
   if (!name?.trim()) return json({ error: "Name is required" }, 400);
   if (!["public", "private", "community"].includes(visibility)) {
@@ -33,6 +33,7 @@ export const POST: APIRoute = async (context) => {
     description: description?.trim() || null,
     visibility,
     invite_code: visibility === "private" ? randomCode() : null,
+    join_prompt: visibility === "private" ? (join_prompt?.trim() || null) : null,
     created_by: profile.id,
   }).select("id, invite_code").single();
 

@@ -13,10 +13,19 @@ export const POST: APIRoute = async (context) => {
   if (!session) return json({ error: "Session not found" }, 404);
 
   const { data: membership } = await db.from("group_members")
-    .select("role").eq("group_id", session.group_id).eq("profile_id", profile.id).single();
+    .select("role, custom_role_id").eq("group_id", session.group_id).eq("profile_id", profile.id).single();
   if (!membership) return json({ error: "Not a member" }, 403);
 
-  const canDelete = session.created_by === profile.id || ["owner", "admin"].includes(membership.role);
+  let canManageSessions = false;
+  if (membership.custom_role_id) {
+    const { data: cr } = await db.from("group_roles")
+      .select("can_manage_sessions, is_view_only").eq("id", membership.custom_role_id).maybeSingle();
+    canManageSessions = !!cr?.can_manage_sessions && !cr?.is_view_only;
+  }
+
+  const canDelete = session.created_by === profile.id
+    || ["owner", "admin"].includes(membership.role)
+    || canManageSessions;
   if (!canDelete) return json({ error: "Not authorized" }, 403);
 
   await db.from("group_sessions").delete().eq("id", session_id);
