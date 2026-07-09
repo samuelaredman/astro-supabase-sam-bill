@@ -86,24 +86,33 @@ if (_gameIds.length > 0 && list.profiles?.id) {
   }
 }
 
-// Fetch the list owner's owned/played status for games in this list
+// Fetch the current viewer's own owned/played status for games in this list
+// (not the list owner's — the filter and progress bars are about the person looking at the list)
 const statusByGameId: Record<string, { owned: boolean; played: boolean }> = {};
-if (_gameIds.length > 0 && list.profiles?.id) {
-  const { data: _statusRows } = await db
-    .from('user_game_status')
-    .select('game_id, is_owned, steam_playtime_minutes')
-    .eq('profile_id', list.profiles.id)
-    .in('game_id', _gameIds);
+const viewerReviewedGameIds = new Set<string>();
+if (_gameIds.length > 0 && currentProfile?.id) {
+  const [{ data: _statusRows }, { data: _viewerReviewRows }] = await Promise.all([
+    db.from('user_game_status')
+      .select('game_id, is_owned, steam_playtime_minutes')
+      .eq('profile_id', currentProfile.id)
+      .in('game_id', _gameIds),
+    db.from('reviews')
+      .select('game_id')
+      .eq('profile_id', currentProfile.id)
+      .eq('status', 'published')
+      .in('game_id', _gameIds),
+  ]);
+  for (const r of _viewerReviewRows ?? []) viewerReviewedGameIds.add(r.game_id);
   for (const s of (_statusRows ?? []) as any[]) {
     statusByGameId[s.game_id] = {
       owned: s.is_owned ?? false,
-      // A logged review implies the owner has played it even without Steam-synced hours.
-      played: (s.steam_playtime_minutes ?? 0) > 0 || !!reviewByGameId[s.game_id],
+      // A logged review implies the viewer has played it even without Steam-synced hours.
+      played: (s.steam_playtime_minutes ?? 0) > 0 || viewerReviewedGameIds.has(s.game_id),
     };
   }
 }
 
-// % of the list the owner owns / has played, for the sidebar progress bars
+// % of the list the current viewer owns / has played, for the sidebar progress bars
 const ownedCount = entryList.reduce((n: number, e: any) => {
   const gid = e.games?.id;
   return n + (gid && statusByGameId[gid]?.owned ? 1 : 0);
@@ -111,7 +120,7 @@ const ownedCount = entryList.reduce((n: number, e: any) => {
 const playedCount = entryList.reduce((n: number, e: any) => {
   const gid = e.games?.id;
   if (!gid) return n;
-  const played = (statusByGameId[gid]?.played ?? false) || !!reviewByGameId[gid];
+  const played = (statusByGameId[gid]?.played ?? false) || viewerReviewedGameIds.has(gid);
   return n + (played ? 1 : 0);
 }, 0);
 const ownedPct = entryList.length ? Math.round((ownedCount / entryList.length) * 100) : 0;
@@ -1029,12 +1038,16 @@ const ogImage = list.visibility !== "private"
                     <label class="ms-filter-option"><input type="radio" name="entry-sort-radio" value="hours-asc" /><span>Least played</span></label>
                     <label class="ms-filter-option"><input type="radio" name="entry-sort-radio" value="added-desc" /><span>Recently added</span></label>
                     <label class="ms-filter-option"><input type="radio" name="entry-sort-radio" value="alpha" /><span>A–Z</span></label>
-                    <div class="ms-filter-divider"></div>
-                    <div class="ms-filter-section-label">Show</div>
-                    <label class="ms-filter-option"><input type="checkbox" value="owned" /><span>Owned</span></label>
-                    <label class="ms-filter-option"><input type="checkbox" value="unowned" /><span>Unowned</span></label>
-                    <label class="ms-filter-option"><input type="checkbox" value="played" /><span>Played</span></label>
-                    <label class="ms-filter-option"><input type="checkbox" value="unplayed" /><span>Unplayed</span></label>
+                    {currentProfile && (
+                      <>
+                        <div class="ms-filter-divider"></div>
+                        <div class="ms-filter-section-label">Show</div>
+                        <label class="ms-filter-option"><input type="checkbox" value="owned" /><span>Owned</span></label>
+                        <label class="ms-filter-option"><input type="checkbox" value="unowned" /><span>Unowned</span></label>
+                        <label class="ms-filter-option"><input type="checkbox" value="played" /><span>Played</span></label>
+                        <label class="ms-filter-option"><input type="checkbox" value="unplayed" /><span>Unplayed</span></label>
+                      </>
+                    )}
                   </div>
                 </div>
                 {allGenreNames.length > 0 && (
@@ -1104,7 +1117,7 @@ const ogImage = list.visibility !== "private"
                 const entryYear = entry.games?.date_released ? new Date(entry.games.date_released).getFullYear() : "";
                 const entryStatus = entry.games?.id ? statusByGameId[entry.games.id] : null;
                 const isOwned = entryStatus?.owned ?? false;
-                const isPlayed = (entryStatus?.played ?? false) || !!gameReview;
+                const isPlayed = (entryStatus?.played ?? false) || (entry.games?.id ? viewerReviewedGameIds.has(entry.games.id) : false);
                 return (
                   <div
                     class="entry-item"
@@ -1328,7 +1341,7 @@ const ogImage = list.visibility !== "private"
         </div>
       </div>
 
-      {entryList.length > 0 && (
+      {currentProfile && entryList.length > 0 && (
         <div class="lst-progress">
           <div class="lst-progress-row">
             <div class="lst-progress-label"><span>Owned</span><span>{ownedPct}%</span></div>
