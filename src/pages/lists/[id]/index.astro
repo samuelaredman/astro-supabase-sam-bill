@@ -93,7 +93,7 @@ const viewerReviewedGameIds = new Set<string>();
 if (_gameIds.length > 0 && currentProfile?.id) {
   const [{ data: _statusRows }, { data: _viewerReviewRows }] = await Promise.all([
     db.from('user_game_status')
-      .select('game_id, is_owned, steam_playtime_minutes')
+      .select('game_id, status, is_owned, steam_playtime_minutes')
       .eq('profile_id', currentProfile.id)
       .in('game_id', _gameIds),
     db.from('reviews')
@@ -103,11 +103,14 @@ if (_gameIds.length > 0 && currentProfile?.id) {
       .in('game_id', _gameIds),
   ]);
   for (const r of _viewerReviewRows ?? []) viewerReviewedGameIds.add(r.game_id);
+  const PLAYED_STATUSES = new Set(['completed', 'hundred_percent', 'dropped']);
   for (const s of (_statusRows ?? []) as any[]) {
     statusByGameId[s.game_id] = {
       owned: s.is_owned ?? false,
-      // A logged review implies the viewer has played it even without Steam-synced hours.
-      played: (s.steam_playtime_minutes ?? 0) > 0 || viewerReviewedGameIds.has(s.game_id),
+      // A logged review, tracked playtime, or a completed/100%/dropped status all count as "played".
+      played: (s.steam_playtime_minutes ?? 0) > 0
+        || viewerReviewedGameIds.has(s.game_id)
+        || PLAYED_STATUSES.has(s.status),
     };
   }
 }
@@ -472,7 +475,6 @@ const ogImage = list.visibility !== "private"
     background: var(--accent);
   }
   .ms-filter-section-label { padding: 6px 8px 2px; font-size: 10px; font-weight: 700; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: .06em; }
-  .ms-filter-divider { height: 1px; background: var(--border-subtle); margin: 4px 4px; }
 
   /* ── View toggle ── */
   .view-toggle-row { display: flex; gap: 4px; flex-shrink: 0; }
@@ -576,6 +578,14 @@ const ogImage = list.visibility !== "private"
   .lst-progress-fill { height: 100%; border-radius: 3px; transition: width .3s ease; }
   .lst-progress-fill.lst-progress-owned { background: var(--accent); }
   .lst-progress-fill.lst-progress-played { background: #4ade80; }
+  .lst-progress-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px; }
+  .lst-filter-chip {
+    font-size: 11px; font-weight: 600; padding: 6px 8px; border-radius: 8px;
+    border: 1.5px solid var(--border); color: var(--text-tertiary); background: transparent;
+    cursor: pointer; font-family: inherit; transition: all 0.15s; text-align: center;
+  }
+  .lst-filter-chip:hover { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .lst-filter-chip.active { border-color: var(--accent); color: var(--accent); background: rgba(96,80,200,.1); }
 
   /* ── List stats card ── */
   .list-stats-card {
@@ -1038,16 +1048,6 @@ const ogImage = list.visibility !== "private"
                     <label class="ms-filter-option"><input type="radio" name="entry-sort-radio" value="hours-asc" /><span>Least played</span></label>
                     <label class="ms-filter-option"><input type="radio" name="entry-sort-radio" value="added-desc" /><span>Recently added</span></label>
                     <label class="ms-filter-option"><input type="radio" name="entry-sort-radio" value="alpha" /><span>A–Z</span></label>
-                    {currentProfile && (
-                      <>
-                        <div class="ms-filter-divider"></div>
-                        <div class="ms-filter-section-label">Show</div>
-                        <label class="ms-filter-option"><input type="checkbox" value="owned" /><span>Owned</span></label>
-                        <label class="ms-filter-option"><input type="checkbox" value="unowned" /><span>Unowned</span></label>
-                        <label class="ms-filter-option"><input type="checkbox" value="played" /><span>Played</span></label>
-                        <label class="ms-filter-option"><input type="checkbox" value="unplayed" /><span>Unplayed</span></label>
-                      </>
-                    )}
                   </div>
                 </div>
                 {allGenreNames.length > 0 && (
@@ -1350,6 +1350,12 @@ const ogImage = list.visibility !== "private"
           <div class="lst-progress-row">
             <div class="lst-progress-label"><span>Played</span><span>{playedPct}%</span></div>
             <div class="lst-progress-track"><div class="lst-progress-fill lst-progress-played" style={`width:${playedPct}%`}></div></div>
+          </div>
+          <div class="lst-progress-filters" id="lst-progress-filters">
+            <button type="button" class="lst-filter-chip" data-status="owned">Owned</button>
+            <button type="button" class="lst-filter-chip" data-status="unowned">Unowned</button>
+            <button type="button" class="lst-filter-chip" data-status="played">Played</button>
+            <button type="button" class="lst-filter-chip" data-status="unplayed">Unplayed</button>
           </div>
         </div>
       )}
@@ -2309,23 +2315,17 @@ if (lcSubmit) {
     var panel = root.querySelector('.ms-filter-panel');
     var labelEl = root.querySelector('.ms-filter-label');
     var radios = Array.prototype.slice.call(root.querySelectorAll('input[type="radio"]'));
-    var checkboxes = Array.prototype.slice.call(root.querySelectorAll('input[type="checkbox"]'));
 
     function getSort() {
       var checked = radios.filter(function(r) { return r.checked; })[0];
       return checked ? checked.value : 'default';
     }
 
-    function getSelectedStatus() {
-      return checkboxes.filter(function(c) { return c.checked; }).map(function(c) { return c.value; });
-    }
-
     function updateLabel() {
       var sortRadio = radios.filter(function(r) { return r.checked; })[0];
       var sortLabel = sortRadio ? sortRadio.parentElement.querySelector('span').textContent : 'List order';
-      var statusCount = checkboxes.filter(function(c) { return c.checked; }).length;
-      labelEl.textContent = statusCount > 0 ? (sortLabel + ' · ' + statusCount) : sortLabel;
-      var isDefault = (!sortRadio || sortRadio.value === 'default') && statusCount === 0;
+      labelEl.textContent = sortLabel;
+      var isDefault = !sortRadio || sortRadio.value === 'default';
       btn.classList.toggle('has-selection', !isDefault);
     }
 
@@ -2353,7 +2353,7 @@ if (lcSubmit) {
       if (panel.hidden) open(); else close();
     });
 
-    radios.concat(checkboxes).forEach(function(input) {
+    radios.forEach(function(input) {
       input.addEventListener('change', function() {
         updateLabel();
         onChange();
@@ -2364,7 +2364,30 @@ if (lcSubmit) {
       if (!root.contains(e.target)) close();
     });
 
-    return { getSort: getSort, getSelectedStatus: getSelectedStatus };
+    return { getSort: getSort };
+  }
+
+  function initProgressFilters(rootId, onChange) {
+    var root = document.getElementById(rootId);
+    if (!root) return { getSelectedStatus: function() { return []; } };
+    var chips = Array.prototype.slice.call(root.querySelectorAll('.lst-filter-chip'));
+    var OPPOSITES = { owned: 'unowned', unowned: 'owned', played: 'unplayed', unplayed: 'played' };
+
+    chips.forEach(function(chip) {
+      chip.addEventListener('click', function() {
+        var status = chip.dataset.status;
+        var opposite = root.querySelector('.lst-filter-chip[data-status="' + OPPOSITES[status] + '"]');
+        chip.classList.toggle('active');
+        if (chip.classList.contains('active') && opposite) opposite.classList.remove('active');
+        onChange();
+      });
+    });
+
+    function getSelectedStatus() {
+      return chips.filter(function(c) { return c.classList.contains('active'); }).map(function(c) { return c.dataset.status; });
+    }
+
+    return { getSelectedStatus: getSelectedStatus };
   }
 
   function numOrNull(v) {
@@ -2379,6 +2402,7 @@ if (lcSubmit) {
   }
 
   var orderFilterCtl = initOrderFilter('order-filter', applyFilterSort);
+  var progressFilterCtl = initProgressFilters('lst-progress-filters', applyFilterSort);
   var genreFilterCtl = initMsFilter('genre-filter', applyFilterSort);
   var yearFilterCtl = initMsFilter('year-filter', applyFilterSort);
   var devFilterCtl = initMsFilter('dev-filter', applyFilterSort);
@@ -2386,7 +2410,7 @@ if (lcSubmit) {
   function applyFilterSort() {
     var q = ((searchInput && searchInput.value) || '').trim().toLowerCase();
     var sortBy = orderFilterCtl ? orderFilterCtl.getSort() : 'default';
-    var statusFilters = orderFilterCtl ? orderFilterCtl.getSelectedStatus() : [];
+    var statusFilters = progressFilterCtl.getSelectedStatus();
     var genreFilters = genreFilterCtl ? genreFilterCtl.getSelected() : [];
     var yearFilters = yearFilterCtl ? yearFilterCtl.getSelected() : [];
     var devFilters = devFilterCtl ? devFilterCtl.getSelected() : [];
