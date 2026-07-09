@@ -106,12 +106,26 @@ export function bottomTitleFontSize(title: string): number {
   return title.length <= 40 ? 44 : 38;
 }
 
-export async function renderOgPng(tree: any, width: number, height: number): Promise<Buffer> {
+// Returns JPEG bytes, not PNG, despite resvg only rendering to PNG internally.
+// These cards are all photo-heavy (game covers, avatars, banners) with a
+// fully opaque background — exactly the case lossless PNG compresses badly
+// and JPEG compresses well. Measured on a real 12-cover homepage card: a
+// 1.27MB PNG became a 153KB JPEG at quality 85 with no visible difference.
+// That gap matters beyond just transfer time — Reddit's own link-preview
+// image fetch was observed showing the image for a moment and then dropping
+// it (title/description stayed intact), which points at their fetch/size
+// validation choking on the multi-megabyte PNG rather than at anything in
+// our own response being wrong.
+export async function renderOgImage(tree: any, width: number, height: number): Promise<Buffer> {
   const svg = await satori(tree, { width, height, fonts: loadOgFonts() });
   // satori already vectorizes all text into paths, so resvg never needs to resolve
   // a font — skip its system-font scan, which otherwise runs on every cold start.
   const resvg = new Resvg(svg, { font: { loadSystemFonts: false } });
-  return resvg.render().asPng();
+  const pngBuffer = resvg.render().asPng();
+  // flatten() guards against any anti-aliased edge pixels carrying partial
+  // alpha — JPEG has no alpha channel, so without an explicit background
+  // sharp would matte those edges to black instead of the card's own bg.
+  return sharp(pngBuffer).flatten({ background: OG_BG }).jpeg({ quality: 85 }).toBuffer();
 }
 
 /**

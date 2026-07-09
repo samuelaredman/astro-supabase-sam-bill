@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
 import { GAME_CATEGORY_OR_FILTER } from "../../../utils/games";
-import { renderOgPng, fetchImageDataUri } from "../../../utils/og";
+import { renderOgImage, fetchImageDataUri } from "../../../utils/og";
 import { buildHomeOgTree } from "../../../utils/ogHome";
 
 export const prerender = false;
@@ -57,12 +57,12 @@ export const GET: APIRoute = async () => {
     coverDataUris,
   });
 
-  const png = await renderOgPng(tree, 1200, 630);
+  const image = await renderOgImage(tree, 1200, 630);
 
-  return new Response(new Uint8Array(png), {
+  return new Response(new Uint8Array(image), {
     status: 200,
     headers: {
-      "Content-Type": "image/png",
+      "Content-Type": "image/jpeg",
       // Homepage content (stat counts, recent covers) moves much more slowly
       // than a single profile/review, so cache far longer than those cards.
       "Cache-Control": "public, max-age=1800",

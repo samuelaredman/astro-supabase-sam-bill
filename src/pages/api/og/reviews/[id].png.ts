@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../../utils/database";
 import { igdbImage } from "../../../../utils/format";
-import { renderOgPng, fetchImageDataUri } from "../../../../utils/og";
+import { renderOgImage, fetchImageDataUri } from "../../../../utils/og";
 import { buildReviewOgTree } from "../../../../utils/ogReview";
 
 export const prerender = false;
@@ -46,12 +46,12 @@ export const GET: APIRoute = async ({ params }) => {
     reviewerAvatarDataUri,
   });
 
-  const png = await renderOgPng(tree, 1200, 630);
+  const image = await renderOgImage(tree, 1200, 630);
 
-  return new Response(new Uint8Array(png), {
+  return new Response(new Uint8Array(image), {
     status: 200,
     headers: {
-      "Content-Type": "image/png",
+      "Content-Type": "image/jpeg",
       "Cache-Control": "public, max-age=300",
       "Netlify-CDN-Cache-Control": "public, max-age=1800, stale-while-revalidate=86400",
     },

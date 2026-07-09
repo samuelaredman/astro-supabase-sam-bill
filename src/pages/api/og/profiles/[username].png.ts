@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../../utils/database";
-import { renderOgPng, fetchImageDataUri, fetchAndCropCover } from "../../../../utils/og";
+import { renderOgImage, fetchImageDataUri, fetchAndCropCover } from "../../../../utils/og";
 import { buildProfileOgTree } from "../../../../utils/ogProfile";
 
 export const prerender = false;
@@ -64,12 +64,12 @@ export const GET: APIRoute = async ({ params }) => {
     topGenre,
   });
 
-  const png = await renderOgPng(tree, 1200, 500);
+  const image = await renderOgImage(tree, 1200, 500);
 
-  return new Response(new Uint8Array(png), {
+  return new Response(new Uint8Array(image), {
     status: 200,
     headers: {
-      "Content-Type": "image/png",
+      "Content-Type": "image/jpeg",
       "Cache-Control": "public, max-age=300",
       "Netlify-CDN-Cache-Control": "public, max-age=1800, stale-while-revalidate=86400",
     },
