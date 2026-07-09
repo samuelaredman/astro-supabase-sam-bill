@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
-import { getSupabaseAdmin } from "../../../../utils/database";
-import { renderOgImage, fetchImageDataUri, fetchAndCropCover } from "../../../../utils/og";
-import { buildProfileOgTree } from "../../../../utils/ogProfile";
+import { getSupabaseAdmin } from "../../../utils/database";
+import { renderOgImage, fetchImageDataUri, fetchAndCropCover } from "../../../utils/og";
+import { buildProfileOgTree } from "../../../utils/ogProfile";
 
 export const prerender = false;
 

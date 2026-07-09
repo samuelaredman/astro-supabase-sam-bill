@@ -1,9 +1,9 @@
 import type { APIRoute } from "astro";
-import { getSupabaseAdmin } from "../../../utils/database";
-import { igdbImage } from "../../../utils/format";
-import { GAME_CATEGORY_OR_FILTER } from "../../../utils/games";
-import { renderOgImage, fetchImageDataUri } from "../../../utils/og";
-import { buildHomeOgTree } from "../../../utils/ogHome";
+import { getSupabaseAdmin } from "../../utils/database";
+import { igdbImage } from "../../utils/format";
+import { GAME_CATEGORY_OR_FILTER } from "../../utils/games";
+import { renderOgImage, fetchImageDataUri } from "../../utils/og";
+import { buildHomeOgTree } from "../../utils/ogHome";
 
 export const prerender = false;
 

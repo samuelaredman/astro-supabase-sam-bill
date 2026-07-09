@@ -1,8 +1,8 @@
 import type { APIRoute } from "astro";
-import { getSupabaseAdmin } from "../../../../utils/database";
-import { igdbImage } from "../../../../utils/format";
-import { renderOgImage, fetchImageDataUri } from "../../../../utils/og";
-import { buildReviewOgTree } from "../../../../utils/ogReview";
+import { getSupabaseAdmin } from "../../../utils/database";
+import { igdbImage } from "../../../utils/format";
+import { renderOgImage, fetchImageDataUri } from "../../../utils/og";
+import { buildReviewOgTree } from "../../../utils/ogReview";
 
 export const prerender = false;
 
