@@ -63,6 +63,12 @@ export const GET: APIRoute = async () => {
     status: 200,
     headers: {
       "Content-Type": "image/jpeg",
+      // Netlify's HTTP/2 edge otherwise omits Content-Length on this response
+      // entirely (no Transfer-Encoding either) — fine for browsers, but link
+      // preview image validators that need an upfront size before accepting
+      // the download may reject or hang on a response with no declared
+      // length. We already have the full buffer, so this costs nothing.
+      "Content-Length": String(image.length),
       // Homepage content (stat counts, recent covers) moves much more slowly
       // than a single profile/review, so cache far longer than those cards.
       "Cache-Control": "public, max-age=1800",

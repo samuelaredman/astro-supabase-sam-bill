@@ -70,6 +70,8 @@ export const GET: APIRoute = async ({ params }) => {
     status: 200,
     headers: {
       "Content-Type": "image/jpeg",
+      // See home.png.ts for why this is set explicitly.
+      "Content-Length": String(image.length),
       "Cache-Control": "public, max-age=300",
       "Netlify-CDN-Cache-Control": "public, max-age=1800, stale-while-revalidate=86400",
     },
