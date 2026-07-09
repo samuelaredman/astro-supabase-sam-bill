@@ -16,6 +16,7 @@ import sharp from "sharp";
 import dmSansRegularUri from "../assets/og-fonts/DMSans-Regular.ttf?inline";
 import dmSansBoldUri from "../assets/og-fonts/DMSans-Bold.ttf?inline";
 import dmSerifDisplayUri from "../assets/og-fonts/DMSerifDisplay-Regular.ttf?inline";
+import pressStart2pUri from "../assets/og-fonts/PressStart2P-Regular.ttf?inline";
 
 type OgFont = { name: string; data: Buffer; weight: 400 | 700; style: "normal" };
 
@@ -30,6 +31,8 @@ function loadOgFonts(): OgFont[] {
       { name: "DM Sans", data: dataUriToBuffer(dmSansRegularUri), weight: 400, style: "normal" },
       { name: "DM Sans", data: dataUriToBuffer(dmSansBoldUri), weight: 700, style: "normal" },
       { name: "DM Serif Display", data: dataUriToBuffer(dmSerifDisplayUri), weight: 400, style: "normal" },
+      // Same face as the site's own arcade wordmark (.logo in shared.css).
+      { name: "Press Start 2P", data: dataUriToBuffer(pressStart2pUri), weight: 400, style: "normal" },
     ];
   }
   return fontsCache;

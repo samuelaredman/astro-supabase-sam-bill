@@ -114,16 +114,16 @@ export function buildHomeOgTree(data: HomeOgData): any {
   tiles.forEach((tile, i) => {
     if (i > 0) {
       statRowChildren.push(
-        h("div", { style: { width: 1, height: 52, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } })
+        h("div", { style: { width: 1, height: 76, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } })
       );
     }
     statRowChildren.push(
-      h("div", { style: { display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 } }, [
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 } }, [
         h("div", {
-          style: { fontSize: 38, fontWeight: 700, color: "#f8f6f2", display: "flex", lineHeight: 1, textShadow: "0 2px 16px rgba(0,0,0,0.6)" },
+          style: { fontSize: 64, fontWeight: 700, color: "#f8f6f2", display: "flex", lineHeight: 1, textShadow: "0 2px 16px rgba(0,0,0,0.6)" },
         }, tile.value),
         h("div", {
-          style: { fontSize: 15, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#9a9793", display: "flex" },
+          style: { fontSize: 20, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#b3b0aa", display: "flex" },
         }, tile.label),
       ])
     );
@@ -133,19 +133,22 @@ export function buildHomeOgTree(data: HomeOgData): any {
     h("div", {
       style: {
         position: "absolute", left: 56, right: 56, bottom: 44, display: "flex",
-        flexDirection: "column", gap: 22,
+        flexDirection: "column", gap: 36,
       },
     }, [
-      h("div", {
-        style: {
-          fontFamily: "DM Serif Display", fontSize: 104, color: "#f8f6f2", lineHeight: 1,
-          display: "flex", textShadow: "0 2px 20px rgba(0,0,0,0.6)",
-        },
-      }, "Chekpoint"),
-      h("div", {
-        style: { fontSize: 26, fontWeight: 400, color: "#d8d5cf", display: "flex", textShadow: "0 2px 12px rgba(0,0,0,0.6)" },
-      }, "Community-driven video game reviews from real players."),
-      h("div", { style: { display: "flex", alignItems: "center", gap: 24, marginTop: 6 } }, statRowChildren),
+      // Same arcade wordmark (font + accent dot) as the site's own nav logo
+      // (.logo in shared.css) — no tagline, the covers behind it already say
+      // "game reviews".
+      h("div", { style: { display: "flex", alignItems: "center", gap: 20 } }, [
+        h("div", { style: { width: 14, height: 14, borderRadius: 7, background: ACCENT, boxShadow: `0 0 20px ${ACCENT}`, display: "flex", flexShrink: 0 } }),
+        h("div", {
+          style: {
+            fontFamily: "Press Start 2P", fontSize: 52, color: "#f8f6f2", lineHeight: 1,
+            display: "flex", textShadow: "0 2px 20px rgba(0,0,0,0.6)",
+          },
+        }, "Chekpoint"),
+      ]),
+      h("div", { style: { display: "flex", alignItems: "center", gap: 32 } }, statRowChildren),
     ])
   );
 
