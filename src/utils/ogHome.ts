@@ -118,12 +118,12 @@ export function buildHomeOgTree(data: HomeOgData): any {
       );
     }
     statRowChildren.push(
-      h("div", { style: { display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 } }, [
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 } }, [
         h("div", {
-          style: { fontSize: 64, fontWeight: 700, color: "#f8f6f2", display: "flex", lineHeight: 1, textShadow: "0 2px 16px rgba(0,0,0,0.6)" },
+          style: { fontSize: 50, fontWeight: 700, color: "#f8f6f2", display: "flex", lineHeight: 1, textShadow: "0 2px 16px rgba(0,0,0,0.6)" },
         }, tile.value),
         h("div", {
-          style: { fontSize: 20, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#b3b0aa", display: "flex" },
+          style: { fontSize: 17, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: "#b3b0aa", display: "flex" },
         }, tile.label),
       ])
     );
@@ -133,22 +133,19 @@ export function buildHomeOgTree(data: HomeOgData): any {
     h("div", {
       style: {
         position: "absolute", left: 56, right: 56, bottom: 44, display: "flex",
-        flexDirection: "column", gap: 36,
+        flexDirection: "column", gap: 34,
       },
     }, [
-      // Same arcade wordmark (font + accent dot) as the site's own nav logo
-      // (.logo in shared.css) — no tagline, the covers behind it already say
-      // "game reviews".
-      h("div", { style: { display: "flex", alignItems: "center", gap: 20 } }, [
-        h("div", { style: { width: 14, height: 14, borderRadius: 7, background: ACCENT, boxShadow: `0 0 20px ${ACCENT}`, display: "flex", flexShrink: 0 } }),
-        h("div", {
-          style: {
-            fontFamily: "Press Start 2P", fontSize: 52, color: "#f8f6f2", lineHeight: 1,
-            display: "flex", textShadow: "0 2px 20px rgba(0,0,0,0.6)",
-          },
-        }, "Chekpoint"),
-      ]),
-      h("div", { style: { display: "flex", alignItems: "center", gap: 32 } }, statRowChildren),
+      // Same arcade wordmark as the site's own nav logo (.logo in
+      // shared.css) — the single most prominent element on the card, no
+      // tagline or dot competing with it.
+      h("div", {
+        style: {
+          fontFamily: "Press Start 2P", fontSize: 92, color: "#f8f6f2", lineHeight: 1,
+          display: "flex", textShadow: "0 2px 20px rgba(0,0,0,0.6)",
+        },
+      }, "Chekpoint"),
+      h("div", { style: { display: "flex", alignItems: "center", gap: 30 } }, statRowChildren),
     ])
   );
 
