@@ -63,12 +63,14 @@ export const GET: APIRoute = async () => {
     status: 200,
     headers: {
       "Content-Type": "image/jpeg",
-      // Netlify's HTTP/2 edge otherwise omits Content-Length on this response
-      // entirely (no Transfer-Encoding either) — fine for browsers, but link
-      // preview image validators that need an upfront size before accepting
-      // the download may reject or hang on a response with no declared
-      // length. We already have the full buffer, so this costs nothing.
-      "Content-Length": String(image.length),
+      // Link-preview compose UIs (Reddit's included) may load this image
+      // client-side in the sharer's own browser — e.g. to run an image-safety
+      // check via canvas before accepting it into the post — which needs CORS
+      // to read pixel data cross-origin. Without this header that read throws,
+      // and the safest failure mode for those UIs is to silently drop the
+      // thumbnail rather than show an unscanned image, which looks exactly
+      // like "the preview flashed and then disappeared."
+      "Access-Control-Allow-Origin": "*",
       // Homepage content (stat counts, recent covers) moves much more slowly
       // than a single profile/review, so cache far longer than those cards.
       "Cache-Control": "public, max-age=1800",
