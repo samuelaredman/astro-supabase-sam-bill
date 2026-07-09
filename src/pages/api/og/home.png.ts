@@ -27,15 +27,24 @@ export const GET: APIRoute = async () => {
   // Dedupe covers from the most recent reviews so the grid isn't dominated by
   // one popular game with several reviews in a row.
   const seen = new Set<string>();
-  const coverUrls: string[] = [];
+  const rawCoverUrls: string[] = [];
   for (const row of (recentReviews ?? []) as any[]) {
     const raw = row.games?.cover_img_url;
     if (raw && !seen.has(raw)) {
       seen.add(raw);
-      coverUrls.push(igdbImage(raw, "t_1080p") ?? raw);
+      rawCoverUrls.push(raw);
     }
-    if (coverUrls.length >= 12) break;
+    if (rawCoverUrls.length >= 12) break;
   }
+
+  // Same size tiering as the list OG card: only ask IGDB for full 1080p
+  // covers when there are few enough to render at near-full-cell size (1-4,
+  // one full-height row). The homepage grid almost always fills out to 8-12
+  // covers, whose cells are a few hundred px wide at most — t_1080p there
+  // was fetching/embedding images several times larger than the cell needs,
+  // which was the dominant cost in generating this card.
+  const coverSize = rawCoverUrls.length <= 4 ? "t_1080p" : "t_cover_big";
+  const coverUrls = rawCoverUrls.map((u) => igdbImage(u, coverSize) ?? u);
 
   const coverDataUris = (
     await Promise.all(coverUrls.map((u) => fetchImageDataUri(u, IMAGE_FETCH_TIMEOUT_MS)))
