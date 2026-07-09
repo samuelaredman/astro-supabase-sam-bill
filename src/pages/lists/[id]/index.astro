@@ -86,6 +86,23 @@ if (_gameIds.length > 0 && list.profiles?.id) {
   }
 }
 
+// Fetch the list owner's owned/played status for games in this list
+const statusByGameId: Record<string, { owned: boolean; played: boolean }> = {};
+if (_gameIds.length > 0 && list.profiles?.id) {
+  const { data: _statusRows } = await db
+    .from('user_game_status')
+    .select('game_id, is_owned, steam_playtime_minutes')
+    .eq('profile_id', list.profiles.id)
+    .in('game_id', _gameIds);
+  for (const s of (_statusRows ?? []) as any[]) {
+    statusByGameId[s.game_id] = {
+      owned: s.is_owned ?? false,
+      // A logged review implies the owner has played it even without Steam-synced hours.
+      played: (s.steam_playtime_minutes ?? 0) > 0 || !!reviewByGameId[s.game_id],
+    };
+  }
+}
+
 // Fetch genres and game companies in parallel
 const [{ data: genreRows }, { data: companyRows }] = await Promise.all([
   _gameIds.length > 0
@@ -955,6 +972,18 @@ const ogImage = list.visibility !== "private"
                   <option value="added-desc">Recently added</option>
                   <option value="alpha">A–Z</option>
                 </select>
+                <div class="ms-filter" id="status-filter" data-default-label="All games" data-noun="filter">
+                  <button type="button" class="entry-sort ms-filter-btn" id="status-filter-btn" aria-haspopup="true" aria-expanded="false">
+                    <span class="ms-filter-label">All games</span>
+                    <svg class="ms-filter-caret" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 3.5L5 6.5L8 3.5"/></svg>
+                  </button>
+                  <div class="ms-filter-panel" id="status-filter-panel" hidden>
+                    <label class="ms-filter-option"><input type="checkbox" value="owned" /><span>Owned</span></label>
+                    <label class="ms-filter-option"><input type="checkbox" value="unowned" /><span>Unowned</span></label>
+                    <label class="ms-filter-option"><input type="checkbox" value="played" /><span>Played</span></label>
+                    <label class="ms-filter-option"><input type="checkbox" value="unplayed" /><span>Unplayed</span></label>
+                  </div>
+                </div>
                 {allGenreNames.length > 0 && (
                   <div class="ms-filter" id="genre-filter" data-default-label="All genres" data-noun="genre">
                     <button type="button" class="entry-sort ms-filter-btn" id="genre-filter-btn" aria-haspopup="true" aria-expanded="false">
@@ -1020,6 +1049,9 @@ const ogImage = list.visibility !== "private"
                 const entryGenres = entry.games?.id ? (genreNamesByGameId[entry.games.id] ?? []) : [];
                 const entryDevs = entry.games?.id ? (devNamesByGameId[entry.games.id] ?? []) : [];
                 const entryYear = entry.games?.date_released ? new Date(entry.games.date_released).getFullYear() : "";
+                const entryStatus = entry.games?.id ? statusByGameId[entry.games.id] : null;
+                const isOwned = entryStatus?.owned ?? false;
+                const isPlayed = (entryStatus?.played ?? false) || !!gameReview;
                 return (
                   <div
                     class="entry-item"
@@ -1031,6 +1063,8 @@ const ogImage = list.visibility !== "private"
                     data-genres={entryGenres.join("|")}
                     data-dev={entryDevs.join("|")}
                     data-year={entryYear}
+                    data-owned={isOwned ? "1" : "0"}
+                    data-played={isPlayed ? "1" : "0"}
                   >
                     {list.is_ranked && <div class="entry-rank-inline">{entry.position ?? i + 1}</div>}
                     <a href={`/games/${entry.games?.slug}`} class="entry-cover-wrap">
@@ -2201,6 +2235,7 @@ if (lcSubmit) {
     return ascending ? av - bv : bv - av;
   }
 
+  var statusFilterCtl = initMsFilter('status-filter', applyFilterSort);
   var genreFilterCtl = initMsFilter('genre-filter', applyFilterSort);
   var yearFilterCtl = initMsFilter('year-filter', applyFilterSort);
   var devFilterCtl = initMsFilter('dev-filter', applyFilterSort);
@@ -2208,6 +2243,7 @@ if (lcSubmit) {
   function applyFilterSort() {
     var q = ((searchInput && searchInput.value) || '').trim().toLowerCase();
     var sortBy = sortSelect ? sortSelect.value : 'default';
+    var statusFilters = statusFilterCtl ? statusFilterCtl.getSelected() : [];
     var genreFilters = genreFilterCtl ? genreFilterCtl.getSelected() : [];
     var yearFilters = yearFilterCtl ? yearFilterCtl.getSelected() : [];
     var devFilters = devFilterCtl ? devFilterCtl.getSelected() : [];
@@ -2238,6 +2274,17 @@ if (lcSubmit) {
     var visibleCount = 0;
     items.forEach(function(item) {
       var matches = !q || item.dataset.title.indexOf(q) !== -1;
+      if (matches && statusFilters.length) {
+        var owned = item.dataset.owned === '1';
+        var played = item.dataset.played === '1';
+        matches = statusFilters.some(function(v) {
+          if (v === 'owned') return owned;
+          if (v === 'unowned') return !owned;
+          if (v === 'played') return played;
+          if (v === 'unplayed') return !played;
+          return false;
+        });
+      }
       if (matches && genreFilters.length) {
         var genres = (item.dataset.genres || '').split('|');
         matches = genreFilters.some(function(g) { return genres.indexOf(g) !== -1; });
