@@ -22,8 +22,14 @@ export const GET: APIRoute = async ({ request }) => {
   // relevance, which can bury an obscure exact title under more "popular"
   // loose substring matches (e.g. "Öoo" ranked below several unrelated
   // "Adventure Time"/"Kamen Rider" games that merely contain "ooo") — the
-  // `where name ~ *"..."*;` query guarantees a literal substring match on
-  // the name always surfaces regardless of that ranking.
+  // `where name ~ *"..."* | slug ~ *"..."*;` query guarantees a literal
+  // substring match always surfaces regardless of that ranking. Matching on
+  // `slug` too (IGDB's own diacritic-free, lowercased form of the name) is
+  // what makes this work for an unaccented query against an accented title —
+  // matching `name` alone is compared literally against IGDB's stored title
+  // text (accents intact) on IGDB's own server, so "ooo" would never
+  // literal-match a stored name of "Öoo" there no matter how we post-filter
+  // the response client-side.
   const [rpcRes, igdbSearchRes, igdbNameRes] = await Promise.all([
     supabase.rpc('search_games', { search_query: q, result_limit: 8 }),
     igdbFetch("games", `
@@ -34,7 +40,7 @@ export const GET: APIRoute = async ({ request }) => {
     `).catch(() => []),
     igdbFetch("games", `
       fields name, slug, cover.url, first_release_date;
-      where name ~ *"${escapedQ}"* & game_type = (${ALLOWED_GAME_CATEGORIES.join(',')});
+      where (name ~ *"${escapedQ}"* | slug ~ *"${escapedQ}"*) & game_type = (${ALLOWED_GAME_CATEGORIES.join(',')});
       limit 6;
     `).catch(() => []),
   ]);
