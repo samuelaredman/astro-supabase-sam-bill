@@ -86,13 +86,16 @@ export const GAME_CATEGORY_OR_FILTER =
   `igdb_category.in.(${ALLOWED_GAME_CATEGORIES.join(',')}),` +
   `and(igdb_category.eq.${BUNDLE_CATEGORY},or(${notableEditionOrClauses}))`;
 
+// Decomposes accented characters (e.g. "Ö" -> "O" + combining diaeresis) and
+// drops the combining marks, so callers can compare/transliterate titles
+// without accented letters silently failing to match their plain ASCII form.
+export function foldDiacritics(str: string): string {
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 function makeGameSlug(title: string, igdbSlug?: string): string {
   if (igdbSlug) return igdbSlug;
-  // Decompose accented characters (e.g. "Ö" -> "O" + combining diaeresis) and
-  // drop the combining marks so accented letters transliterate to their plain
-  // ASCII form instead of being deleted outright by the char-class strip below.
-  const transliterated = title.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  return transliterated.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return foldDiacritics(title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 async function upsertJunction(
