@@ -88,7 +88,11 @@ export const GAME_CATEGORY_OR_FILTER =
 
 function makeGameSlug(title: string, igdbSlug?: string): string {
   if (igdbSlug) return igdbSlug;
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  // Decompose accented characters (e.g. "Ö" -> "O" + combining diaeresis) and
+  // drop the combining marks so accented letters transliterate to their plain
+  // ASCII form instead of being deleted outright by the char-class strip below.
+  const transliterated = title.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return transliterated.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 async function upsertJunction(
