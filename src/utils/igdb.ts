@@ -1,5 +1,12 @@
 const IGDB_URL = "https://api.igdb.com/v4";
 
+// Escapes a user-supplied term for interpolation into an APIcalypse string
+// literal (e.g. `search "${term}";` / `where name ~ *"${term}"*;`) — without
+// this, a query containing a literal `"` breaks the query syntax.
+export function escapeIgdbString(term: string): string {
+  return term.replace(/[\\"]/g, '\\$&');
+}
+
 let cachedToken: string | null = null;
 let tokenExpiry: number = 0;
 

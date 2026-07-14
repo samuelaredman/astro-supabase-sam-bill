@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { getSupabase } from "../../../utils/database";
-import { igdbFetch } from "../../../utils/igdb";
+import { igdbFetch, escapeIgdbString } from "../../../utils/igdb";
 import { ALLOWED_GAME_CATEGORIES, GAME_CATEGORY_OR_FILTER, foldDiacritics } from "../../../utils/games";
 
 export const GET: APIRoute = async ({ request }) => {
@@ -14,18 +14,38 @@ export const GET: APIRoute = async ({ request }) => {
   }
 
   const supabase = getSupabase();
+  const escapedQ = escapeIgdbString(q);
 
   // Run fuzzy DB search and IGDB fetch in parallel.
   // IGDB query filters to allowed categories so live suggestions are clean.
-  const [rpcRes, igdbRes] = await Promise.all([
+  // Two IGDB queries, merged below: IGDB's own `search` operator ranks by
+  // relevance, which can bury an obscure exact title under more "popular"
+  // loose substring matches (e.g. "Öoo" ranked below several unrelated
+  // "Adventure Time"/"Kamen Rider" games that merely contain "ooo") — the
+  // `where name ~ *"..."*;` query guarantees a literal substring match on
+  // the name always surfaces regardless of that ranking.
+  const [rpcRes, igdbSearchRes, igdbNameRes] = await Promise.all([
     supabase.rpc('search_games', { search_query: q, result_limit: 8 }),
     igdbFetch("games", `
       fields name, slug, cover.url, first_release_date;
-      search "${q}";
+      search "${escapedQ}";
       where game_type = (${ALLOWED_GAME_CATEGORIES.join(',')});
       limit 6;
     `).catch(() => []),
+    igdbFetch("games", `
+      fields name, slug, cover.url, first_release_date;
+      where name ~ *"${escapedQ}"* & game_type = (${ALLOWED_GAME_CATEGORIES.join(',')});
+      limit 6;
+    `).catch(() => []),
   ]);
+
+  const seenIgdbIds = new Set<string>();
+  const igdbRes = [...(igdbSearchRes ?? []), ...(igdbNameRes ?? [])].filter((g: any) => {
+    const id = String(g.id);
+    if (seenIgdbIds.has(id)) return false;
+    seenIgdbIds.add(id);
+    return true;
+  });
 
   const rpcIds: string[] = (rpcRes.data ?? []).map((g: any) => g.id);
 

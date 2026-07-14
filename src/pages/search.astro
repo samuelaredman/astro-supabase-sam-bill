@@ -1,6 +1,6 @@
 ---
 import { getSupabase, createSupabaseServerClientFromContext } from '../utils/database'
-import { igdbFetch } from '../utils/igdb'
+import { igdbFetch, escapeIgdbString } from '../utils/igdb'
 import { igdbImage } from '../utils/format'
 import { GAME_CATEGORY_OR_FILTER } from '../utils/games'
 import Layout from '../components/Layout.astro'
@@ -41,12 +41,26 @@ if (tab === 'games') {
     if (genreFilter) rpcParams.genre_id = genreFilter
     if (platformFilter) rpcParams.platform_id = platformFilter
 
-    const [rpcRes, profilesRes, companiesRes, igdbRes] = await Promise.all([
+    const escapedQuery = escapeIgdbString(query)
+    // Two IGDB queries, merged below: IGDB's own `search` operator ranks by
+    // relevance, which can bury an obscure exact title under more "popular"
+    // loose substring matches — the `where name ~ *"..."*;` query guarantees
+    // a literal substring match on the name always surfaces regardless.
+    const [rpcRes, profilesRes, companiesRes, igdbSearchRes, igdbNameRes] = await Promise.all([
       supabase.rpc('search_games', rpcParams),
       supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
       supabase.from('developers').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
-      igdbFetch('games', `fields id, name, slug, cover.url; search "${query}"; limit 8;`)
+      igdbFetch('games', `fields id, name, slug, cover.url; search "${escapedQuery}"; limit 8;`),
+      igdbFetch('games', `fields id, name, slug, cover.url; where name ~ *"${escapedQuery}"*; limit 8;`)
     ])
+
+    const seenIgdbIds = new Set<string>()
+    const igdbRes = [...(igdbSearchRes ?? []), ...(igdbNameRes ?? [])].filter((g: any) => {
+      const id = String(g.id)
+      if (seenIgdbIds.has(id)) return false
+      seenIgdbIds.add(id)
+      return true
+    })
 
     const rawGameIds = (rpcRes.data ?? []).map((g: any) => g.id)
 
