@@ -211,16 +211,18 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
         style: {
           width: AVATAR_SIZE, height: AVATAR_SIZE,
           borderRadius: AVATAR_SIZE / 2,
+          overflow: "hidden",
           backgroundImage: `url(${data.ownerAvatarDataUri})`,
           backgroundSize: "cover", backgroundPosition: "center",
-          display: "flex", flexShrink: 0,
+          display: "flex", flexShrink: 0, alignSelf: "center",
         },
       })
     : h("div", {
         style: {
           width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2,
           background: OG_ACCENT, display: "flex", alignItems: "center",
-          justifyContent: "center", color: "#fff", fontSize: 15, fontWeight: 700, flexShrink: 0,
+          justifyContent: "center", color: "#fff", fontSize: 15, fontWeight: 700,
+          flexShrink: 0, alignSelf: "center",
         },
       }, data.ownerUsername.slice(0, 2).toUpperCase());
 
@@ -251,17 +253,25 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
       justifyContent: "center", paddingLeft: PAD, paddingRight: PAD, gap: 10,
     },
   }, [
-    h("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, [
-      h("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, [
-        h("div", { style: { width: 7, height: 7, borderRadius: 4, background: OG_ACCENT, display: "flex" } }),
+    h("div", { style: { display: "flex", alignItems: "center", gap: 12 } }, [
+      // Branding pill — purple gradient background so it stands out
+      h("div", {
+        style: {
+          display: "flex", alignItems: "center", gap: 7, flexShrink: 0,
+          background: "linear-gradient(135deg, rgba(96,80,200,0.55) 0%, rgba(139,123,240,0.35) 100%)",
+          border: "1px solid rgba(139,123,240,0.45)",
+          borderRadius: 20, padding: "6px 13px 6px 10px",
+        },
+      }, [
+        h("div", { style: { width: 7, height: 7, borderRadius: 4, background: OG_ACCENT, display: "flex", flexShrink: 0 } }),
         h("div", {
-          style: { fontSize: 11, fontWeight: 700, letterSpacing: 2.2, color: "rgba(240,237,232,0.25)", display: "flex" },
-        }, "CHEKPOINT"),
+          style: { fontSize: 12, fontWeight: 700, letterSpacing: 1.8, color: "#f0ede8", display: "flex" },
+        }, "CHEKPOINT.GG"),
       ]),
-      h("div", { style: { width: 1, height: 13, background: "rgba(255,255,255,0.08)", display: "flex" } }),
+      // Avatar + username
       avatar,
       h("div", {
-        style: { fontSize: 14, fontWeight: 600, color: "rgba(240,237,232,0.55)", display: "flex" },
+        style: { fontSize: 14, fontWeight: 600, color: "rgba(240,237,232,0.6)", display: "flex" },
       }, `@${truncate(data.ownerUsername, 30)}`),
     ]),
     h("div", {
