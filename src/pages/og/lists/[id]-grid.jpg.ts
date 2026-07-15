@@ -26,7 +26,7 @@ export const GET: APIRoute = async ({ params }) => {
 
   const { data: entries } = await db
     .from("list_entries")
-    .select("position, games ( id, title, cover_img_url )")
+    .select("position, notes, games ( id, title, cover_img_url )")
     .eq("list_id", id)
     .order("position", { ascending: true, nullsFirst: false })
     .order("added_at", { ascending: true })
@@ -39,17 +39,17 @@ export const GET: APIRoute = async ({ params }) => {
   const { CELL_W, COVER_H } = getGridDimensions(entryList.length);
 
   // Fetch owner reviews for score + hours
-  let reviewMap: Record<string, { score: number; hoursPlayed: number | null; body: string | null }> = {};
+  let reviewMap: Record<string, { score: number; hoursPlayed: number | null }> = {};
   if (gameIds.length > 0 && list.profiles?.id) {
     const { data: reviews } = await db
       .from("reviews")
-      .select("game_id, score, play_time_hours, body")
+      .select("game_id, score, play_time_hours")
       .eq("profile_id", list.profiles.id)
       .eq("status", "published")
       .in("game_id", gameIds);
 
     for (const r of (reviews ?? []) as any[]) {
-      reviewMap[r.game_id] = { score: r.score, hoursPlayed: r.play_time_hours ?? null, body: r.body ?? null };
+      reviewMap[r.game_id] = { score: r.score, hoursPlayed: r.play_time_hours ?? null };
     }
   }
 
@@ -72,7 +72,7 @@ export const GET: APIRoute = async ({ params }) => {
           gameTitle: e.games?.title ?? "",
           score: review?.score ?? null,
           hoursPlayed: review?.hoursPlayed ?? null,
-          reviewBody: review?.body ?? null,
+          notes: (e.notes as string | null) ?? null,
         };
       })
     ),

@@ -7,7 +7,7 @@ export interface ListGridEntry {
   gameTitle: string;
   score: number | null;
   hoursPlayed: number | null;
-  reviewBody: string | null;
+  notes: string | null;
 }
 
 export interface ListGridData {
@@ -22,7 +22,6 @@ export interface ListGridData {
 
 export const CANVAS_W = 1080;
 const HEADER_H = 148;
-const FOOTER_H = 36;
 
 /** Returns layout constants that depend on how many games are in the list. */
 export function getGridDimensions(count: number) {
@@ -32,8 +31,8 @@ export function getGridDimensions(count: number) {
   const GAP    = is10Col ? 5  : 10;
   const CELL_W = Math.floor((CANVAS_W - PAD * 2 - (COLS - 1) * GAP) / COLS);
   const COVER_H = Math.round(CELL_W * (4 / 3));
-  // 10-col: rank only; 5-col: rank + 2-line title + 2-line review excerpt
-  const INFO_H     = is10Col ? 20 : 96;
+  // 10-col: rank only; 5-col: rank + 2-line title + 2-line notes
+  const INFO_H     = is10Col ? 20 : 110;
   const BADGE_SIZE = is10Col ? 22 : 32;
   const BADGE_FONT = is10Col ? 11 : 15;
   const HOURS_FONT = is10Col ? 9  : 12;
@@ -47,7 +46,7 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
 
   const rows  = Math.max(1, Math.ceil(entries.length / COLS));
   const gridH = rows * (COVER_H + INFO_H) + (rows - 1) * GAP;
-  const canvasH = HEADER_H + gridH + FOOTER_H;
+  const canvasH = HEADER_H + gridH + PAD;
 
   // ── Individual game cells ─────────────────────────────────────────────────
   const cells = entries.map((entry) => {
@@ -147,9 +146,9 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
         infoChildren.push(
           h("div", {
             style: {
-              fontSize: 12, fontWeight: 700,
-              color: "rgba(240,237,232,0.38)",
-              display: "flex", marginBottom: 3,
+              fontSize: 14, fontWeight: 700,
+              color: "rgba(240,237,232,0.4)",
+              display: "flex", marginBottom: 4,
             },
           }, `#${entry.rank}`)
         );
@@ -157,30 +156,30 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
       infoChildren.push(
         h("div", {
           style: {
-            fontSize: 12, fontWeight: 600, color: "#e8e5e0",
+            fontSize: 14, fontWeight: 700, color: "#f0ede8",
             display: "-webkit-box",
             WebkitBoxOrient: "vertical",
             WebkitLineClamp: 2,
             overflow: "hidden",
             textOverflow: "ellipsis",
-            lineHeight: 1.35,
+            lineHeight: 1.3,
           },
         }, truncate(entry.gameTitle, 45))
       );
-      if (entry.reviewBody) {
+      if (entry.notes) {
         infoChildren.push(
           h("div", {
             style: {
-              fontSize: 11, fontWeight: 400, color: "rgba(240,237,232,0.42)",
+              fontSize: 13, fontWeight: 400, color: "rgba(240,237,232,0.5)",
               display: "-webkit-box",
               WebkitBoxOrient: "vertical",
               WebkitLineClamp: 2,
               overflow: "hidden",
               textOverflow: "ellipsis",
-              lineHeight: 1.45,
+              lineHeight: 1.4,
               marginTop: 5,
             },
-          }, truncate(entry.reviewBody, 120))
+          }, truncate(entry.notes, 100))
         );
       }
     }
@@ -281,22 +280,6 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
     h("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, statParts),
   ]);
 
-  const footer = h("div", {
-    style: {
-      height: FOOTER_H, display: "flex", alignItems: "center",
-      paddingLeft: PAD, paddingRight: PAD,
-      borderTop: "1px solid rgba(255,255,255,0.04)",
-      marginTop: 4,
-    },
-  }, [
-    h("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, [
-      h("div", { style: { width: 5, height: 5, borderRadius: 3, background: OG_ACCENT, display: "flex" } }),
-      h("div", {
-        style: { fontSize: 11, fontWeight: 700, letterSpacing: 1.5, color: "rgba(240,237,232,0.2)", display: "flex" },
-      }, "CHEKPOINT.GG"),
-    ]),
-  ]);
-
   return {
     tree: h("div", {
       style: {
@@ -310,7 +293,6 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
       h("div", {
         style: { display: "flex", flexDirection: "column", gap: GAP, paddingLeft: PAD, paddingRight: PAD },
       }, gridRows),
-      footer,
     ]),
     height: canvasH,
   };
