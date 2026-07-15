@@ -25,7 +25,7 @@ const FOOTER_H = 36;
 
 /** Returns layout constants that depend on how many games are in the list. */
 export function getGridDimensions(count: number) {
-  const is10Col = count > 20;
+  const is10Col = count > 50;
   const COLS   = is10Col ? 10 : 5;
   const PAD    = is10Col ? 14 : 22;
   const GAP    = is10Col ? 5  : 10;
