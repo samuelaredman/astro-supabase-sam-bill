@@ -207,14 +207,16 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
   // ── Header ────────────────────────────────────────────────────────────────
   const AVATAR_SIZE = 40;
   const avatar = data.ownerAvatarDataUri
-    ? h("div", {
+    // Use <img> + objectFit, not a div with backgroundImage — satori renders
+    // backgroundSize/backgroundPosition unreliably (off-center crops), same
+    // bug documented and fixed in ogReview.ts and ogProfile.ts.
+    ? h("img", {
+        src: data.ownerAvatarDataUri,
         style: {
           width: AVATAR_SIZE, height: AVATAR_SIZE,
           borderRadius: AVATAR_SIZE / 2,
-          overflow: "hidden",
-          backgroundImage: `url(${data.ownerAvatarDataUri})`,
-          backgroundSize: "cover", backgroundPosition: "center",
-          display: "flex", flexShrink: 0, alignSelf: "center",
+          objectFit: "cover",
+          display: "flex", flexShrink: 0,
         },
       })
     : h("div", {
@@ -222,7 +224,7 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
           width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2,
           background: OG_ACCENT, display: "flex", alignItems: "center",
           justifyContent: "center", color: "#fff", fontSize: 15, fontWeight: 700,
-          flexShrink: 0, alignSelf: "center",
+          flexShrink: 0,
         },
       }, data.ownerUsername.slice(0, 2).toUpperCase());
 
