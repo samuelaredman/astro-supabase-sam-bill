@@ -39,17 +39,17 @@ export const GET: APIRoute = async ({ params }) => {
   const { CELL_W, COVER_H } = getGridDimensions(entryList.length);
 
   // Fetch owner reviews for score + hours
-  let reviewMap: Record<string, { score: number; hoursPlayed: number | null }> = {};
+  let reviewMap: Record<string, { score: number; hoursPlayed: number | null; body: string | null }> = {};
   if (gameIds.length > 0 && list.profiles?.id) {
     const { data: reviews } = await db
       .from("reviews")
-      .select("game_id, score, play_time_hours")
+      .select("game_id, score, play_time_hours, body")
       .eq("profile_id", list.profiles.id)
       .eq("status", "published")
       .in("game_id", gameIds);
 
     for (const r of (reviews ?? []) as any[]) {
-      reviewMap[r.game_id] = { score: r.score, hoursPlayed: r.play_time_hours ?? null };
+      reviewMap[r.game_id] = { score: r.score, hoursPlayed: r.play_time_hours ?? null, body: r.body ?? null };
     }
   }
 
@@ -72,6 +72,7 @@ export const GET: APIRoute = async ({ params }) => {
           gameTitle: e.games?.title ?? "",
           score: review?.score ?? null,
           hoursPlayed: review?.hoursPlayed ?? null,
+          reviewBody: review?.body ?? null,
         };
       })
     ),

@@ -7,6 +7,7 @@ export interface ListGridEntry {
   gameTitle: string;
   score: number | null;
   hoursPlayed: number | null;
+  reviewBody: string | null;
 }
 
 export interface ListGridData {
@@ -31,8 +32,8 @@ export function getGridDimensions(count: number) {
   const GAP    = is10Col ? 5  : 10;
   const CELL_W = Math.floor((CANVAS_W - PAD * 2 - (COLS - 1) * GAP) / COLS);
   const COVER_H = Math.round(CELL_W * (4 / 3));
-  // 10-col: just rank number below; 5-col: rank + 2-line title
-  const INFO_H     = is10Col ? 20 : 68;
+  // 10-col: rank only; 5-col: rank + 2-line title + 2-line review excerpt
+  const INFO_H     = is10Col ? 20 : 96;
   const BADGE_SIZE = is10Col ? 22 : 32;
   const BADGE_FONT = is10Col ? 11 : 15;
   const HOURS_FONT = is10Col ? 9  : 12;
@@ -141,7 +142,7 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
         );
       }
     } else {
-      // 5-col: rank + 2-line title
+      // 5-col: rank + 2-line title + 2-line review excerpt
       if (data.isRanked) {
         infoChildren.push(
           h("div", {
@@ -166,6 +167,22 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
           },
         }, truncate(entry.gameTitle, 45))
       );
+      if (entry.reviewBody) {
+        infoChildren.push(
+          h("div", {
+            style: {
+              fontSize: 11, fontWeight: 400, color: "rgba(240,237,232,0.42)",
+              display: "-webkit-box",
+              WebkitBoxOrient: "vertical",
+              WebkitLineClamp: 2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              lineHeight: 1.45,
+              marginTop: 5,
+            },
+          }, truncate(entry.reviewBody, 120))
+        );
+      }
     }
 
     const infoArea = h("div", {
@@ -250,12 +267,17 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
     ]),
     h("div", {
       style: {
-        fontSize: titleSize, fontWeight: 700, color: "#f0ede8",
-        fontFamily: "DM Serif Display", display: "flex",
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        maxWidth: CANVAS_W - PAD * 2,
+        display: "flex", justifyContent: "center", width: CANVAS_W - PAD * 2,
       },
-    }, truncate(data.title, 55)),
+    }, [
+      h("div", {
+        style: {
+          fontSize: titleSize, fontWeight: 700, color: "#f0ede8",
+          fontFamily: "DM Serif Display", display: "flex",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        },
+      }, truncate(data.title, 55)),
+    ]),
     h("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, statParts),
   ]);
 
