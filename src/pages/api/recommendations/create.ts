@@ -2,28 +2,59 @@ import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
+import { notifyRecommendationPublished } from "../../../utils/recommendationPublish";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { source_game_id, target_game_id, body, contains_spoilers } = await context.request.json();
+  const { source_game_id, target_game_id, body, contains_spoilers, status } = await context.request.json();
+  const isDraft = status === "draft";
 
-  if (!source_game_id || !target_game_id || !body?.trim())
-    return json({ error: "source_game_id, target_game_id and body are required." }, 400);
+  // Both games are always required — the whole post is "if you liked A, try B".
+  if (!source_game_id || !target_game_id)
+    return json({ error: "Pick both games." }, 400);
   if (source_game_id === target_game_id)
     return json({ error: "Pick two different games." }, 400);
-  if (body.trim().length > 5000)
+  if (body && body.trim().length > 5000)
     return json({ error: "Recommendation must be 5000 characters or fewer." }, 400);
 
-  // One recommendation per author per directional game pair
+  // ── Draft path: body optional, no dedupe against published, no notifications. ──
+  if (isDraft) {
+    const { data: inserted, error: draftError } = await (db as any)
+      .from("recommendations")
+      .insert({
+        profile_id: profile.id,
+        source_game_id,
+        target_game_id,
+        body: body?.trim() ?? "",
+        contains_spoilers: contains_spoilers ?? false,
+        status: "draft",
+      })
+      .select("id")
+      .single();
+
+    if (draftError) {
+      console.error("[recommendations/create] draft insert error:", JSON.stringify(draftError));
+      return json({ error: "Failed to save draft." }, 500);
+    }
+
+    return json({ recommendation_id: inserted.id, status: "draft" });
+  }
+
+  // ── Published path ──
+  if (!body?.trim())
+    return json({ error: "source_game_id, target_game_id and body are required." }, 400);
+
+  // One published recommendation per author per directional game pair
   const { data: existing } = await (db as any)
     .from("recommendations")
     .select("id")
     .eq("profile_id", profile.id)
     .eq("source_game_id", source_game_id)
     .eq("target_game_id", target_game_id)
+    .eq("status", "published")
     .maybeSingle();
 
   if (existing) return json({ error: "You've already made this recommendation." }, 409);
@@ -36,6 +67,7 @@ export const POST: APIRoute = async (context) => {
       target_game_id,
       body: body.trim(),
       contains_spoilers: contains_spoilers ?? false,
+      status: "published",
     })
     .select("id")
     .single();
@@ -56,23 +88,7 @@ export const POST: APIRoute = async (context) => {
     })
     .catch((e) => console.error("[recommendations/create] moderation error (non-fatal):", e));
 
-  // ── Notify followers with notify = true (non-blocking) ──
-  try {
-    const { data: notifyFollowers } = await (db as any)
-      .from("follows").select("follower_id")
-      .eq("following_id", profile.id).eq("notify", true).neq("follower_id", profile.id);
-
-    const rows = (notifyFollowers ?? []).map((f: any) => ({
-      profile_id: f.follower_id,
-      type: "follow_recommendation",
-      recommendation_id: inserted.id,
-      actor_profile_id: profile.id,
-    }));
-
-    if (rows.length > 0) await (db as any).from("notifications").insert(rows);
-  } catch (e) {
-    console.error("[recommendations/create] notification error (non-fatal):", e);
-  }
+  await notifyRecommendationPublished(db, { recommendationId: inserted.id, profileId: profile.id });
 
   await moderationDone;
 

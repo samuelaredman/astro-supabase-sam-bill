@@ -70,7 +70,7 @@ const [
   db.from('reviews').select('game_id, published_at, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', yesterdayPstStart.toISOString()).limit(200),
   db.from('reviews').select('game_id, score, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
   db.from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
-  db.from('recommendations').select('*', { count: 'exact', head: true }),
+  db.from('recommendations').select('*', { count: 'exact', head: true }).eq('status', 'published'),
   db.from('games').select('*', { count: 'exact', head: true }).or(GAME_CATEGORY_OR_FILTER),
   db.from('profiles').select('*', { count: 'exact', head: true }),
   db.from('genres').select('id, name, slug').order('name'),
@@ -168,6 +168,7 @@ const recentLists = await fetchSharedListFeedItems(null, 2);
 const { data: recentRecsRaw, error: recsError } = await adminDb
   .from('recommendations')
   .select(REC_SELECT)
+  .eq('status', 'published')
   .order('created_at', { ascending: false })
   .limit(20);
 if (recsError) console.error('[index] recommendations query error:', JSON.stringify(recsError));
@@ -263,6 +264,7 @@ if (user && currentProfile) {
         .limit(20),
       adminDb.from('recommendations')
         .select(REC_SELECT)
+        .eq('status', 'published')
         .in('profile_id', followingIds)
         .order('created_at', { ascending: false })
         .limit(20),
@@ -696,6 +698,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         <span>Contains spoilers</span>
       </label>
       <div style="display:flex;gap:8px;margin-left:auto">
+        <button class="composer-draft" id="saveDraftReview" type="button">Save draft</button>
         <button class="composer-submit" id="submitReview">Post review</button>
       </div>
     </div>
@@ -880,6 +883,49 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
           platforms.map(p => `<option value="${p.id}">${p.name}</option>`).join('')
       }
     }
+    // ── Save draft: needs a game + review text; score/title/hours can come later. ──
+    document.getElementById('saveDraftReview').addEventListener('click', async () => {
+      const gameId = document.getElementById('gameId').value
+      const scoreRaw = document.getElementById('scoreVal').value
+      const title = document.getElementById('reviewTitle').value.trim()
+      const body = document.getElementById('reviewBody').value.trim()
+      const platformId = document.getElementById('platformSelect').value
+      const hours = document.getElementById('hoursPlayed').value
+      const spoilers = document.getElementById('spoilerCheck').checked
+      const errorEl = document.getElementById('composerError')
+      errorEl.textContent = ''
+      if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
+      if (!body) { errorEl.textContent = 'Write something before saving a draft.'; return; }
+      if (scoreRaw && (parseFloat(scoreRaw) < 0.1 || parseFloat(scoreRaw) > 10)) { errorEl.textContent = 'Score must be between 0.1 and 10.'; return; }
+      const dBtn = document.getElementById('saveDraftReview')
+      dBtn.disabled = true
+      dBtn.textContent = 'Saving...'
+      try {
+        const res = await fetch('/api/reviews/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            game_id: gameId,
+            score: scoreRaw ? parseFloat(scoreRaw) : null,
+            title: title || null,
+            body,
+            platform_played_on: platformId || null,
+            play_time_hours: hours ? parseInt(hours) : null,
+            contains_spoilers: spoilers,
+            status: 'draft',
+          }),
+        })
+        const data = await res.json()
+        if (!res.ok) { errorEl.textContent = data.error ?? 'Could not save draft.'; dBtn.disabled = false; dBtn.textContent = 'Save draft'; return; }
+        dBtn.textContent = 'Draft saved ✓'
+        setTimeout(() => { window.location.href = '/drafts'; }, 700)
+      } catch (e) {
+        errorEl.textContent = 'Something went wrong.'
+        dBtn.disabled = false
+        dBtn.textContent = 'Save draft'
+      }
+    })
+
     document.getElementById('submitReview').addEventListener('click', async () => {
       const gameId = document.getElementById('gameId').value
       const score = document.getElementById('scoreVal').value
@@ -1356,11 +1402,29 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         <span class="stat-value">{formatCount(totalReviewers)}</span>
       </div>
     </div>
+
+    <nav class="side-foot">
+      <div class="side-foot-links">
+        <a href="/about">About</a>
+        <a href="/terms">Terms</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/contact">Contact</a>
+      </div>
+      <div class="side-foot-copy">&copy; {new Date().getFullYear()} Chekpoint. All rights reserved.</div>
+      <a href="https://www.igdb.com" target="_blank" rel="noopener noreferrer" class="side-foot-igdb">Powered by IGDB</a>
+    </nav>
   </div>
 
 </Layout>
 
 <style>
+  /* ── Right-sidebar footer links (replaces the old global site footer) ── */
+  .side-foot { margin-top: 16px; padding: 0 4px; display: flex; flex-direction: column; gap: 8px; }
+  .side-foot-links { display: flex; flex-wrap: wrap; gap: 14px; }
+  .side-foot a { font-size: 12px; color: var(--text-tertiary); text-decoration: none; transition: color 0.15s; }
+  .side-foot a:hover { color: var(--text-secondary); }
+  .side-foot-copy { font-size: 12px; color: var(--text-tertiary); line-height: 1.5; }
+
   .welcome-banner { background: var(--accent-subtle); border-bottom: 1px solid var(--border); }
   .welcome-banner-body { display: flex; align-items: center; gap: 12px; padding: 12px 20px; }
   .welcome-banner-text { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
@@ -1506,6 +1570,9 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   .composer-submit { padding: 8px 18px; border-radius: 20px; border: none; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
   .composer-submit:hover { opacity: 0.85; }
   .composer-submit:disabled { opacity: 0.45; cursor: not-allowed; }
+  .composer-draft { padding: 8px 16px; border-radius: 20px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+  .composer-draft:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
+  .composer-draft:disabled { opacity: 0.6; cursor: default; }
   .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; margin-top: 8px; }
   .report-trigger-sm { font-size: 11px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; font-family: inherit; padding: 2px 6px; border-radius: 6px; transition: color 0.15s, background 0.15s; }
   .report-trigger-sm:hover { color: #f87171; background: rgba(248,113,113,.08); }

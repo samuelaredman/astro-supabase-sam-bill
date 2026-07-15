@@ -103,7 +103,7 @@ export const GET: APIRoute = async () => {
       // `recommendations` isn't in the generated types yet (types.ts predates that
       // migration), so this table is accessed untyped throughout the codebase.
       fetchAll<{ id: string }>((f, t) =>
-        (db as any).from('recommendations').select('id').in('profile_id', consentedIds).range(f, t)),
+        (db as any).from('recommendations').select('id').eq('status', 'published').in('profile_id', consentedIds).range(f, t)),
       fetchAll<{ id: string }>((f, t) =>
         db.from('lists').select('id').eq('visibility', 'public').in('profile_id', consentedIds).range(f, t)),
     ]);

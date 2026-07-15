@@ -1779,9 +1779,9 @@ export type Database = {
           play_time_years: number | null
           profile_id: string
           published_at: string | null
-          score: number
+          score: number | null
           status: string | null
-          title: string
+          title: string | null
           updated_at: string | null
         }
         Insert: {
@@ -1799,9 +1799,9 @@ export type Database = {
           play_time_years?: number | null
           profile_id?: string
           published_at?: string | null
-          score: number
+          score?: number | null
           status?: string | null
-          title: string
+          title?: string | null
           updated_at?: string | null
         }
         Update: {
@@ -1819,9 +1819,9 @@ export type Database = {
           play_time_years?: number | null
           profile_id?: string
           published_at?: string | null
-          score?: number
+          score?: number | null
           status?: string | null
-          title?: string
+          title?: string | null
           updated_at?: string | null
         }
         Relationships: [
