@@ -1,6 +1,7 @@
 ---
 import { timeAgo, igdbImage } from '../utils/format';
 import { IMAGE_EMOTE_MAP, IMAGE_EMOTES } from '../utils/reactions';
+import ShareButton from './ShareButton.astro';
 
 interface GameRef {
   title: string;
@@ -71,15 +72,29 @@ const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => 
 ---
 
 <article class={`rfc${detailView ? ' rfc-detail' : ''}`} data-rec-id={id}>
-  {!detailView && (
+  {!detailView && !ownerIsMe && (
     <div class="rfc-menu-wrap">
       <button class="rfc-menu-btn" data-menu-id={id} aria-label="More options">⋯</button>
       <div class="rfc-menu-dropdown" id={`rfcm-${id}`} style="display:none">
-        {ownerIsMe
-          ? <button class="rfc-menu-item rfc-menu-delete" data-rec-id={id}>Delete</button>
-          : <button class="rfc-menu-item rfc-menu-report" data-rec-id={id} data-logged-in={isLoggedIn ? 'true' : 'false'}>Report</button>
-        }
+        <button class="rfc-menu-item rfc-menu-report" data-rec-id={id} data-logged-in={isLoggedIn ? 'true' : 'false'}>Report</button>
       </div>
+    </div>
+  )}
+
+  {/* ── Card actions (bottom-right): share always, edit/delete for owner in feed ── */}
+  {!detailView && (
+    <div class="rfc-card-actions">
+      <ShareButton url={`/recommendations/${id}`} label="Share recommendation" variant="icon" />
+      {ownerIsMe && (
+        <>
+          <button class="rfc-feed-edit-btn" data-rec-id={id} title="Edit recommendation">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="rfc-feed-delete-btn" data-rec-id={id} title="Delete recommendation">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          </button>
+        </>
+      )}
     </div>
   )}
 
@@ -181,6 +196,7 @@ const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => 
 
     {detailView && (
       <div class="rfc-owner-actions">
+        <ShareButton url={`/recommendations/${id}`} label="Share recommendation" variant="pill" />
         {isLoggedIn && !isOwner && (
           <button class="rfc-action-btn rfc-report-btn" onclick={`openReport('recommendation','${id}')`} title="Report this recommendation">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h10l-2 4 2 4H3V2z"/><path d="M3 14v-4"/></svg>
@@ -302,23 +318,30 @@ if (!window.__rfcInit) {
       return;
     }
 
-    // Feed menu → Delete (owner) — removes the card in place
-    var menuDel = e.target.closest('.rfc-menu-delete');
-    if (menuDel) {
-      closeRfcPanels();
+    // Feed card: delete recommendation icon button (animate away)
+    var feedDelBtn = e.target.closest('.rfc-feed-delete-btn');
+    if (feedDelBtn) {
       if (!confirm('Delete this recommendation? This cannot be undone.')) return;
-      var mres = await fetch('/api/recommendations/delete', {
+      feedDelBtn.disabled = true;
+      var res = await fetch('/api/recommendations/delete', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ recommendation_id: menuDel.dataset.recId }),
+        body: JSON.stringify({ recommendation_id: feedDelBtn.dataset.recId }),
       });
-      if (mres.ok) {
-        var card = menuDel.closest('.rfc');
-        if (card) card.remove();
-      }
+      if (res.ok) {
+        var card = feedDelBtn.closest('.rfc');
+        if (card) {
+          card.style.transition = 'opacity 0.3s, max-height 0.4s';
+          card.style.overflow = 'hidden';
+          card.style.opacity = '0';
+          card.style.maxHeight = card.offsetHeight + 'px';
+          setTimeout(function() { card.style.maxHeight = '0'; card.style.padding = '0'; }, 50);
+          setTimeout(function() { card.remove(); }, 450);
+        }
+      } else feedDelBtn.disabled = false;
       return;
     }
 
-    // Owner: delete recommendation (detail action bar)
+    // Owner: delete recommendation (detail action bar — redirects away)
     var delBtn = e.target.closest('.rfc-delete-btn');
     if (delBtn) {
       if (!confirm('Delete this recommendation? This cannot be undone.')) return;
@@ -332,8 +355,8 @@ if (!window.__rfcInit) {
       return;
     }
 
-    // Owner: open inline editor
-    var editBtn = e.target.closest('.rfc-edit-btn');
+    // Owner: open inline editor (feed icon button or detail pill button)
+    var editBtn = e.target.closest('.rfc-edit-btn, .rfc-feed-edit-btn');
     if (editBtn) {
       var rid = editBtn.dataset.recId;
       var art = document.querySelector('.rfc[data-rec-id="' + rid + '"]');
@@ -532,6 +555,33 @@ if (!window.__rfcInit) {
     transition: background 0.12s;
   }
   .rfc:last-child { border-bottom: none; }
+
+  /* ── Card actions (bottom-right of card, feed view) ── */
+  .rfc-card-actions {
+    position: absolute;
+    bottom: 12px;
+    right: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    z-index: 3;
+  }
+  .rfc-feed-edit-btn, .rfc-feed-delete-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 3px;
+    border-radius: 5px;
+    line-height: 1;
+    transition: color 0.15s, background 0.15s;
+  }
+  .rfc-feed-edit-btn:hover { color: var(--accent); background: rgba(99, 102, 241, 0.08); }
+  .rfc-feed-delete-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); }
+  .rfc-feed-delete-btn:disabled { opacity: 0.5; cursor: default; }
 
   /* ── Three-dot menu (top-right, feed view) ── */
   .rfc-menu-wrap { position: absolute; top: 12px; right: 14px; z-index: 5; }
