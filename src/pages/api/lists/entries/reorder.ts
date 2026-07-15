@@ -20,7 +20,6 @@ export const POST: APIRoute = async (context) => {
 
   if (!list) return json({ error: "List not found." }, 404);
   if (list.profile_id !== profile.id) return json({ error: "Forbidden." }, 403);
-  if (!list.is_ranked) return json({ error: "Cannot reorder an unranked list." }, 400);
 
   // Null out all positions first to avoid unique constraint conflicts mid-update
   const { error: nullError } = await (db as any)
