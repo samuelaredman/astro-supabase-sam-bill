@@ -1,8 +1,8 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
-import { renderOgImage, fetchImageDataUri, fetchAndCropCover } from "../../../utils/og";
-import { buildListGridTree, getGridDimensions, CANVAS_W } from "../../../utils/ogListGrid";
+import { renderOgImage, fetchAndCropCover } from "../../../utils/og";
+import { buildListGridTree, getGridDimensions, CANVAS_W, AVATAR_SIZE } from "../../../utils/ogListGrid";
 
 export const prerender = false;
 
@@ -77,7 +77,7 @@ export const GET: APIRoute = async ({ params }) => {
       })
     ),
     list.profiles?.avatar_url
-      ? fetchImageDataUri(list.profiles.avatar_url, TIMEOUT_MS)
+      ? fetchAndCropCover(list.profiles.avatar_url, AVATAR_SIZE, AVATAR_SIZE, "center", TIMEOUT_MS)
       : Promise.resolve(null),
   ]);
 

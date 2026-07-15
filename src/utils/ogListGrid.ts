@@ -21,6 +21,7 @@ export interface ListGridData {
 }
 
 export const CANVAS_W = 1080;
+export const AVATAR_SIZE = 40;
 const HEADER_H = 148;
 
 /** Returns layout constants that depend on how many games are in the list. */
@@ -205,17 +206,15 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
   );
 
   // ── Header ────────────────────────────────────────────────────────────────
-  const AVATAR_SIZE = 40;
+  // Avatar is pre-cropped server-side to exactly AVATAR_SIZE×AVATAR_SIZE by
+  // fetchAndCropCover — no objectFit needed, the image is already the right
+  // square dimensions and just needs borderRadius for the circular clip.
   const avatar = data.ownerAvatarDataUri
-    // Use <img> + objectFit, not a div with backgroundImage — satori renders
-    // backgroundSize/backgroundPosition unreliably (off-center crops), same
-    // bug documented and fixed in ogReview.ts and ogProfile.ts.
     ? h("img", {
         src: data.ownerAvatarDataUri,
         style: {
           width: AVATAR_SIZE, height: AVATAR_SIZE,
           borderRadius: AVATAR_SIZE / 2,
-          objectFit: "cover",
           display: "flex", flexShrink: 0,
         },
       })
