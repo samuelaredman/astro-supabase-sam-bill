@@ -1,4 +1,4 @@
-import { h, OG_ACCENT, OG_BG, scoreColor, hexToRgba, truncate } from "./og";
+import { h, OG_ACCENT, OG_BG, scoreColor, scoreBadgeBg, scoreBadgeText, truncate } from "./og";
 
 export interface ListGridEntry {
   /** Pre-cropped to exactly CELL_W × COVER_H by the endpoint. */
@@ -40,122 +40,108 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
 
   // ── Individual game cells ─────────────────────────────────────────────────
   const cells = entries.map((entry) => {
-    const sc = entry.score !== null ? scoreColor(entry.score) : null;
+    const coverLayers: any[] = [];
 
-    // Cover art
-    const cover = entry.coverDataUri
-      ? h("div", {
-          style: {
-            width: CELL_W,
-            height: COVER_H,
-            borderRadius: 8,
-            backgroundImage: `url(${entry.coverDataUri})`,
-            backgroundSize: "100% 100%", // image is pre-cropped to exact size
-            display: "flex",
-            flexShrink: 0,
-          },
-        })
-      : h("div", {
-          style: {
-            width: CELL_W,
-            height: COVER_H,
-            borderRadius: 8,
-            background: "#18181b",
-            display: "flex",
-            flexShrink: 0,
-          },
-        });
+    // Cover background (pre-cropped to exact dimensions)
+    coverLayers.push(
+      entry.coverDataUri
+        ? h("div", {
+            style: {
+              position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+              backgroundImage: `url(${entry.coverDataUri})`,
+              backgroundSize: "100% 100%",
+              display: "flex",
+            },
+          })
+        : h("div", {
+            style: {
+              position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+              background: "#18181b", display: "flex",
+            },
+          })
+    );
 
-    // Info row: rank (left) + score badge (right)
-    const infoTopChildren: any[] = [];
-
-    if (data.isRanked) {
-      infoTopChildren.push(
+    // Top-left: hours played badge (dark pill, matching the site's library cards)
+    if (entry.hoursPlayed && entry.hoursPlayed > 0) {
+      coverLayers.push(
         h("div", {
           style: {
-            fontSize: 13,
-            fontWeight: 700,
-            color: "rgba(240,237,232,0.45)",
-            display: "flex",
-            letterSpacing: 0.3,
-          },
-        }, `#${entry.rank}`)
-      );
-    }
-
-    // Spacer pushes score to the right
-    infoTopChildren.push(h("div", { style: { flex: 1, display: "flex" } }));
-
-    if (sc !== null && entry.score !== null) {
-      infoTopChildren.push(
-        h("div", {
-          style: {
-            display: "flex",
-            alignItems: "center",
-            gap: 4,
-            background: hexToRgba(sc, 0.12),
-            border: `1px solid ${hexToRgba(sc, 0.35)}`,
-            borderRadius: 6,
-            padding: "2px 7px",
+            position: "absolute", top: 7, left: 7,
+            background: "rgba(9,9,10,0.72)",
+            borderRadius: 6, padding: "4px 8px",
+            display: "flex", alignItems: "center",
           },
         }, [
-          h("div", { style: { width: 5, height: 5, borderRadius: 3, background: sc, display: "flex", flexShrink: 0 } }),
-          h("div", { style: { fontSize: 12, fontWeight: 700, color: sc, display: "flex" } }, String(entry.score)),
+          h("div", {
+            style: { fontSize: 12, fontWeight: 700, color: "rgba(240,237,232,0.9)", display: "flex" },
+          }, `${entry.hoursPlayed}h`),
         ])
       );
     }
 
-    // Game title (up to 2 lines)
-    const titleEl = h("div", {
-      style: {
-        fontSize: 12,
-        fontWeight: 600,
-        color: "#e8e5e0",
-        display: "-webkit-box",
-        WebkitBoxOrient: "vertical",
-        WebkitLineClamp: 2,
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        lineHeight: 1.35,
-        marginTop: 4,
-      },
-    }, truncate(entry.gameTitle, 45));
-
-    // Hours (very subtle, only if available)
-    const hoursEl = entry.hoursPlayed && entry.hoursPlayed > 0
-      ? h("div", {
+    // Bottom-right: score badge — solid fill using the site's exact score color system
+    if (entry.score !== null) {
+      const bgColor = scoreBadgeBg(entry.score);
+      const textColor = scoreBadgeText(entry.score);
+      coverLayers.push(
+        h("div", {
           style: {
-            fontSize: 10,
-            fontWeight: 500,
-            color: "rgba(240,237,232,0.3)",
-            display: "flex",
-            marginTop: 3,
+            position: "absolute", bottom: 7, right: 7,
+            background: bgColor,
+            borderRadius: 7,
+            width: 32, height: 32,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            flexShrink: 0,
           },
-        }, `${entry.hoursPlayed}h`)
-      : null;
+        }, [
+          h("div", {
+            style: { fontSize: 15, fontWeight: 700, color: textColor, display: "flex" },
+          }, String(entry.score)),
+        ])
+      );
+    }
+
+    // Cover container (relative so overlays position correctly)
+    const coverEl = h("div", {
+      style: {
+        width: CELL_W, height: COVER_H,
+        borderRadius: 8, overflow: "hidden",
+        position: "relative", display: "flex", flexShrink: 0,
+      },
+    }, coverLayers);
+
+    // Info below cover: rank + title
+    const infoChildren: any[] = [];
+
+    if (data.isRanked) {
+      infoChildren.push(
+        h("div", {
+          style: { fontSize: 12, fontWeight: 700, color: "rgba(240,237,232,0.38)", display: "flex", marginBottom: 3 },
+        }, `#${entry.rank}`)
+      );
+    }
+
+    infoChildren.push(
+      h("div", {
+        style: {
+          fontSize: 12, fontWeight: 600, color: "#e8e5e0",
+          display: "-webkit-box",
+          WebkitBoxOrient: "vertical",
+          WebkitLineClamp: 2,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          lineHeight: 1.35,
+        },
+      }, truncate(entry.gameTitle, 45))
+    );
 
     const infoArea = h("div", {
-      style: {
-        width: CELL_W,
-        display: "flex",
-        flexDirection: "column",
-        paddingTop: 7,
-        flexShrink: 0,
-      },
-    }, [
-      h("div", { style: { display: "flex", alignItems: "center", width: CELL_W } }, infoTopChildren),
-      titleEl,
-      ...(hoursEl ? [hoursEl] : []),
-    ]);
+      style: { width: CELL_W, display: "flex", flexDirection: "column", paddingTop: 7, flexShrink: 0 },
+    }, infoChildren);
 
     return h("div", {
-      style: {
-        display: "flex",
-        flexDirection: "column",
-        width: CELL_W,
-        flexShrink: 0,
-      },
-    }, [cover, infoArea]);
+      style: { display: "flex", flexDirection: "column", width: CELL_W, flexShrink: 0 },
+    }, [coverEl, infoArea]);
   });
 
   // ── Grid rows ─────────────────────────────────────────────────────────────
