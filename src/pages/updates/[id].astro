@@ -1,0 +1,354 @@
+---
+export const prerender = false;
+import Layout from '../../components/Layout.astro';
+import { getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database';
+import { IMAGE_EMOTE_MAP } from '../../utils/reactions';
+
+const { id } = Astro.params;
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
+
+const db = getSupabaseAdmin() as any;
+
+const { data: post } = await db
+  .from('forum_posts')
+  .select('id, title, body, category, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url )')
+  .eq('id', id)
+  .maybeSingle();
+
+if (!post) return Astro.redirect('/404');
+
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
+let isAdmin = false;
+if (user) {
+  const { data: cp } = await db.from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = cp ?? null;
+  if (cp) {
+    const { data: adminRow } = await db.from('site_admins').select('profile_id').eq('profile_id', cp.id).maybeSingle();
+    isAdmin = !!adminRow;
+  }
+}
+
+const { data: commentsRaw } = await db
+  .from('forum_comments')
+  .select('id, body, created_at, parent_id, profiles ( id, username, avatar_url )')
+  .eq('post_id', id)
+  .order('created_at', { ascending: true });
+const allComments = commentsRaw ?? [];
+
+// Flatten to a 2-level thread: every comment is grouped under its top-level
+// ancestor, so a reply-to-a-reply still shows in the right conversation.
+const byId: Record<string, any> = {};
+for (const c of allComments) byId[c.id] = c;
+function topAncestor(c: any): any {
+  let cur = c;
+  while (cur.parent_id && byId[cur.parent_id]) cur = byId[cur.parent_id];
+  return cur;
+}
+const topLevel = allComments.filter((c: any) => !c.parent_id);
+const repliesByTop: Record<string, any[]> = {};
+for (const c of allComments) {
+  if (!c.parent_id) continue;
+  const anc = topAncestor(c);
+  if (anc.id === c.id) continue;
+  (repliesByTop[anc.id] ||= []).push(c);
+}
+
+function esc(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function renderBody(text: string): string {
+  const escaped = esc(text);
+  const withMentions = escaped.replace(/(^|\s)(@([\w]+))/g, '$1<a class="mention" href="/reviewers/$3">$2</a>');
+  return withMentions
+    .replace(/:([A-Za-z0-9_]+):/g, (_m, key) => {
+      const path = IMAGE_EMOTE_MAP[key];
+      return path ? `<img src="${path}" class="comment-emote" alt=":${key}:" title=":${key}:">` : `:${key}:`;
+    })
+    .replace(/\n/g, '<br>');
+}
+function fmtDate(s: string): string {
+  return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+const commentCount = allComments.length;
+
+if (!isLoggedIn) {
+  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=120, stale-while-revalidate=600');
+  Astro.response.headers.set('Cache-Control', 'no-store');
+} else {
+  Astro.response.headers.set('Cache-Control', 'private, no-store');
+}
+Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
+---
+
+<Layout title={`${post.title} — Updates — Chekpoint`} description={post.body.replace(/\s+/g, ' ').trim().slice(0, 160)} isLoggedIn={isLoggedIn} currentProfile={currentProfile} activeNav="updates" variant="two-col">
+  <main class="feed">
+    <a class="back" href="/updates">← Updates</a>
+
+    <article class="post" data-post-id={post.id}>
+      <div class="post-meta">
+        {post.pinned && <span class="badge pinned">📌 Pinned</span>}
+        <span class="badge category">{post.category}</span>
+        {post.is_locked && <span class="badge locked" id="lock-badge">🔒 Locked</span>}
+      </div>
+      <h1 class="post-title">{post.title}</h1>
+      <div class="post-byline">
+        <span>{post.profiles?.username ?? 'Chekpoint'}</span>
+        <span>·</span>
+        <span>{fmtDate(post.created_at)}</span>
+        {post.updated_at && <span class="edited">(edited)</span>}
+      </div>
+      <div class="post-body" set:html={renderBody(post.body)} />
+
+      {isAdmin && (
+        <div class="admin-bar">
+          <button data-action="toggle-lock">{post.is_locked ? 'Unlock comments' : 'Lock comments'}</button>
+          <button data-action="toggle-pin">{post.pinned ? 'Unpin' : 'Pin'}</button>
+          <button data-action="delete-post" class="danger">Delete post</button>
+        </div>
+      )}
+    </article>
+
+    <section class="comments">
+      <h2 class="comments-title">{commentCount} {commentCount === 1 ? 'comment' : 'comments'}</h2>
+
+      {post.is_locked ? (
+        <p class="locked-note">🔒 Commenting is closed on this post.</p>
+      ) : isLoggedIn ? (
+        <form id="comment-form" class="comment-composer">
+          <textarea id="comment-body" placeholder="Add a comment…" rows="3" maxlength="2000" required></textarea>
+          <div class="composer-row">
+            <button type="submit" id="comment-submit">Comment</button>
+          </div>
+          <div id="comment-error" class="composer-error"></div>
+        </form>
+      ) : (
+        <p class="signin-note"><a href="/signin">Sign in</a> to join the conversation.</p>
+      )}
+
+      <ul id="comment-list" class="comment-list">
+        {topLevel.map((c: any) => (
+          <li class="comment-thread" data-comment-id={c.id}>
+            <div class="comment">
+              <div class="comment-head">
+                <a href={`/reviewers/${c.profiles?.username}`} class="comment-author">{c.profiles?.username ?? 'user'}</a>
+                <span class="comment-date">{fmtDate(c.created_at)}</span>
+              </div>
+              <div class="comment-body" set:html={renderBody(c.body)} />
+              <div class="comment-actions">
+                {isLoggedIn && !post.is_locked && <button data-action="reply" data-parent={c.id}>Reply</button>}
+                {(isAdmin || (currentProfile && c.profiles?.id === currentProfile.id)) && (
+                  <button data-action="delete-comment" data-comment={c.id} class="danger">Delete</button>
+                )}
+              </div>
+            </div>
+            <ul class="reply-list">
+              {(repliesByTop[c.id] ?? []).map((r: any) => (
+                <li class="comment reply" data-comment-id={r.id}>
+                  <div class="comment-head">
+                    <a href={`/reviewers/${r.profiles?.username}`} class="comment-author">{r.profiles?.username ?? 'user'}</a>
+                    <span class="comment-date">{fmtDate(r.created_at)}</span>
+                  </div>
+                  <div class="comment-body" set:html={renderBody(r.body)} />
+                  <div class="comment-actions">
+                    {(isAdmin || (currentProfile && r.profiles?.id === currentProfile.id)) && (
+                      <button data-action="delete-comment" data-comment={r.id} class="danger">Delete</button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </section>
+  </main>
+</Layout>
+
+<script is:inline define:vars={{ postId: post.id, isLoggedIn, isAdmin, currentUsername: currentProfile?.username ?? null }}>
+  (function () {
+    function esc(t) {
+      return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function renderBody(t) {
+      return esc(t)
+        .replace(/(^|\s)(@(\w+))/g, '$1<a class="mention" href="/reviewers/$3">$2</a>')
+        .replace(/\n/g, '<br>');
+    }
+    function fmtNow() {
+      return new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+    function post(url, payload) {
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); });
+    }
+
+    function commentNode(c, isReply) {
+      var li = document.createElement('li');
+      li.className = isReply ? 'comment reply' : 'comment-thread';
+      li.setAttribute('data-comment-id', c.id);
+      var author = (c.profiles && c.profiles.username) || currentUsername || 'user';
+      var inner =
+        '<div class="comment' + (isReply ? ' reply-inner' : '') + '">' +
+          '<div class="comment-head">' +
+            '<a href="/reviewers/' + encodeURIComponent(author) + '" class="comment-author">' + esc(author) + '</a>' +
+            '<span class="comment-date">' + fmtNow() + '</span>' +
+          '</div>' +
+          '<div class="comment-body">' + renderBody(c.body) + '</div>' +
+          '<div class="comment-actions">' +
+            (!isReply && isLoggedIn ? '<button data-action="reply" data-parent="' + c.id + '">Reply</button>' : '') +
+            '<button data-action="delete-comment" data-comment="' + c.id + '" class="danger">Delete</button>' +
+          '</div>' +
+        '</div>';
+      if (isReply) { li.innerHTML = inner; return li; }
+      li.innerHTML = inner + '<ul class="reply-list"></ul>';
+      return li;
+    }
+
+    // Top-level comment submit
+    var form = document.getElementById('comment-form');
+    if (form) {
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var ta = document.getElementById('comment-body');
+        var btn = document.getElementById('comment-submit');
+        var errEl = document.getElementById('comment-error');
+        var body = ta.value.trim();
+        if (!body) return;
+        btn.disabled = true; errEl.textContent = '';
+        post('/api/forum/comments/create', { post_id: postId, body: body }).then(function (res) {
+          if (res.ok && res.d.comment) {
+            document.getElementById('comment-list').insertBefore(commentNode(res.d.comment, false), document.getElementById('comment-list').firstChild);
+            ta.value = '';
+          } else { errEl.textContent = (res.d && res.d.error) || 'Failed to comment.'; }
+          btn.disabled = false;
+        }).catch(function () { errEl.textContent = 'Network error.'; btn.disabled = false; });
+      });
+    }
+
+    // Delegated: reply toggle, reply submit, delete, admin actions
+    document.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== 'BUTTON') return;
+      var action = t.getAttribute('data-action');
+
+      if (action === 'reply') {
+        var parentId = t.getAttribute('data-parent');
+        var thread = t.closest('.comment-thread');
+        if (thread.querySelector('.reply-box')) { thread.querySelector('.reply-box').remove(); return; }
+        var box = document.createElement('div');
+        box.className = 'reply-box';
+        box.innerHTML = '<textarea rows="2" maxlength="2000" placeholder="Reply…"></textarea>' +
+          '<div class="composer-row"><button type="button" class="reply-send">Reply</button></div>' +
+          '<div class="composer-error reply-err"></div>';
+        thread.querySelector('.comment').after(box);
+        box.querySelector('.reply-send').addEventListener('click', function () {
+          var val = box.querySelector('textarea').value.trim();
+          var rerr = box.querySelector('.reply-err');
+          if (!val) return;
+          this.disabled = true;
+          post('/api/forum/comments/create', { post_id: postId, body: val, parent_id: parentId }).then(function (res) {
+            if (res.ok && res.d.comment) {
+              thread.querySelector('.reply-list').appendChild(commentNode(res.d.comment, true));
+              box.remove();
+            } else { rerr.textContent = (res.d && res.d.error) || 'Failed to reply.'; }
+          }).catch(function () { rerr.textContent = 'Network error.'; });
+        });
+        return;
+      }
+
+      if (action === 'delete-comment') {
+        if (!confirm('Delete this comment?')) return;
+        var cid = t.getAttribute('data-comment');
+        post('/api/forum/comments/delete', { comment_id: cid }).then(function (res) {
+          if (res.ok) {
+            var el = document.querySelector('[data-comment-id="' + cid + '"]');
+            if (el) el.remove();
+          } else { alert((res.d && res.d.error) || 'Failed to delete.'); }
+        });
+        return;
+      }
+
+      if (action === 'delete-post') {
+        if (!confirm('Delete this post and all its comments?')) return;
+        post('/api/forum/posts/delete', { post_id: postId }).then(function (res) {
+          if (res.ok) window.location.href = '/updates';
+          else alert((res.d && res.d.error) || 'Failed to delete.');
+        });
+        return;
+      }
+
+      if (action === 'toggle-lock' || action === 'toggle-pin') {
+        var field = action === 'toggle-lock' ? 'is_locked' : 'pinned';
+        var makeTrue = action === 'toggle-lock' ? t.textContent.indexOf('Lock ') === 0 : t.textContent === 'Pin';
+        var payload = { post_id: postId }; payload[field] = makeTrue;
+        t.disabled = true;
+        post('/api/forum/posts/update', payload).then(function (res) {
+          if (res.ok) window.location.reload();
+          else { alert((res.d && res.d.error) || 'Failed.'); t.disabled = false; }
+        });
+        return;
+      }
+    });
+  })();
+</script>
+
+<style>
+  .feed { min-width: 0; padding: 20px; max-width: 720px; }
+  .back { display: inline-block; font-size: 13px; color: var(--text-tertiary); margin-bottom: 16px; }
+  .back:hover { color: var(--text-primary); }
+
+  .post { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+  .post-meta { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: capitalize; }
+  .badge.category { background: var(--bg-hover); color: var(--text-secondary); }
+  .badge.pinned { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .badge.locked { background: var(--bg-hover); color: var(--text-tertiary); }
+  .post-title { font-family: 'DM Serif Display', serif; font-size: 28px; font-weight: 400; color: var(--text-primary); margin: 0 0 8px; }
+  .post-byline { display: flex; gap: 8px; font-size: 13px; color: var(--text-tertiary); margin-bottom: 16px; }
+  .post-body { font-size: 15px; color: var(--text-primary); line-height: 1.75; }
+  .post-body :global(.mention) { color: var(--accent); }
+  .comment-body :global(.mention) { color: var(--accent); }
+  .comment-body :global(.comment-emote), .post-body :global(.comment-emote) { height: 20px; vertical-align: middle; }
+
+  .admin-bar { display: flex; gap: 8px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-subtle, var(--border)); flex-wrap: wrap; }
+  .admin-bar button { background: var(--bg-hover); border: 1px solid var(--border); color: var(--text-secondary); border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  .admin-bar button:hover { border-color: var(--accent); color: var(--text-primary); }
+  .admin-bar button.danger:hover { border-color: var(--score-low, #e5484d); color: var(--score-low, #e5484d); }
+
+  .comments { margin-top: 28px; }
+  .comments-title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 14px; }
+
+  .comment-composer, .reply-box { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+  .reply-box { margin: 10px 0 4px; }
+  textarea { width: 100%; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; color: var(--text-primary); font: inherit; font-size: 14px; resize: vertical; }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .composer-row { display: flex; justify-content: flex-end; }
+  .composer-row button, .reply-send { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-weight: 600; font-size: 13px; cursor: pointer; }
+  .composer-row button:disabled { opacity: 0.6; }
+  .composer-error { color: var(--score-low, #e5484d); font-size: 13px; }
+  .locked-note, .signin-note { color: var(--text-secondary); font-size: 14px; margin-bottom: 20px; }
+  .signin-note a { color: var(--accent); }
+
+  .comment-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 16px; }
+  .comment-thread { border-top: 1px solid var(--border-subtle, var(--border)); padding-top: 14px; }
+  .comment-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+  .comment-author { font-weight: 600; font-size: 14px; color: var(--text-primary); text-decoration: none; }
+  .comment-author:hover { text-decoration: underline; }
+  .comment-date { font-size: 12px; color: var(--text-tertiary); }
+  .comment-body { font-size: 14px; color: var(--text-primary); line-height: 1.6; }
+  .comment-actions { display: flex; gap: 12px; margin-top: 6px; }
+  .comment-actions button { background: none; border: none; color: var(--text-tertiary); font-size: 12px; font-weight: 600; cursor: pointer; padding: 0; }
+  .comment-actions button:hover { color: var(--text-primary); }
+  .comment-actions button.danger:hover { color: var(--score-low, #e5484d); }
+  .reply-list { list-style: none; margin: 12px 0 0; padding: 0 0 0 20px; border-left: 2px solid var(--border-subtle, var(--border)); display: flex; flex-direction: column; gap: 14px; }
+  .reply-list:empty { display: none; }
+
+  @media (max-width: 600px) { .feed { padding: 14px; } .post { padding: 18px; } }
+</style>

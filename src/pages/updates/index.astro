@@ -1,0 +1,188 @@
+---
+export const prerender = false;
+import Layout from '../../components/Layout.astro';
+import { getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database';
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+const isLoggedIn = !!user;
+
+const db = getSupabaseAdmin() as any;
+
+// Resolve the viewer's profile + whether they're a site admin (may post).
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
+let isAdmin = false;
+if (user) {
+  const { data: cp } = await db.from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = cp ?? null;
+  if (cp) {
+    const { data: adminRow } = await db.from('site_admins').select('profile_id').eq('profile_id', cp.id).maybeSingle();
+    isAdmin = !!adminRow;
+  }
+}
+
+// Posts: pinned first, then newest. Degrades to an empty list if the migration
+// hasn't been applied yet (missing table returns an error, not a throw).
+const { data: postsRaw } = await db
+  .from('forum_posts')
+  .select('id, title, body, category, pinned, is_locked, created_at, profiles ( username, avatar_url )')
+  .order('pinned', { ascending: false })
+  .order('created_at', { ascending: false })
+  .limit(50);
+const posts = postsRaw ?? [];
+
+// Comment counts for the listed posts.
+const commentCounts: Record<string, number> = {};
+if (posts.length > 0) {
+  const { data: commentRows } = await db
+    .from('forum_comments').select('post_id').in('post_id', posts.map((p: any) => p.id));
+  for (const c of commentRows ?? []) commentCounts[c.post_id] = (commentCounts[c.post_id] ?? 0) + 1;
+}
+
+function fmtDate(s: string): string {
+  return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function excerpt(body: string, max = 220): string {
+  const clean = body.replace(/\s+/g, ' ').trim();
+  return clean.length <= max ? clean : clean.slice(0, max).replace(/\s+\S*$/, '') + '…';
+}
+
+// Anon renders are CDN-cacheable; logged-in (admin composer / auth state) are not.
+if (!isLoggedIn) {
+  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=120, stale-while-revalidate=600');
+  Astro.response.headers.set('Cache-Control', 'no-store');
+} else {
+  Astro.response.headers.set('Cache-Control', 'private, no-store');
+}
+Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
+---
+
+<Layout title="Updates — Chekpoint" description="Updates, announcements, and questions from the Chekpoint team." isLoggedIn={isLoggedIn} currentProfile={currentProfile} activeNav="updates" variant="two-col">
+  <main class="feed">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Updates</div>
+        <div class="feed-subtitle">News, ideas, and questions from the Chekpoint team — everyone can join the conversation in the comments.</div>
+      </div>
+    </div>
+
+    {isAdmin && (
+      <form id="post-composer" class="composer">
+        <input type="text" id="post-title" name="title" placeholder="Post title" maxlength="200" required />
+        <textarea id="post-body" name="body" placeholder="Share an update, idea, or question…" rows="4" maxlength="20000" required></textarea>
+        <div class="composer-row">
+          <label class="pin-label"><input type="checkbox" id="post-pinned" /> Pin to top</label>
+          <button type="submit" id="post-submit">Post update</button>
+        </div>
+        <div id="composer-error" class="composer-error"></div>
+      </form>
+    )}
+
+    {posts.length === 0 ? (
+      <div class="empty">
+        <p>No updates yet{isAdmin ? ' — be the first to post one above.' : '. Check back soon.'}</p>
+      </div>
+    ) : (
+      <ul class="post-list">
+        {posts.map((p: any) => (
+          <li class="post-item">
+            <a class="post-link" href={`/updates/${p.id}`}>
+              <div class="post-meta">
+                {p.pinned && <span class="badge pinned">📌 Pinned</span>}
+                <span class="badge category">{p.category}</span>
+                {p.is_locked && <span class="badge locked">🔒 Locked</span>}
+              </div>
+              <h2 class="post-title">{p.title}</h2>
+              <p class="post-excerpt">{excerpt(p.body)}</p>
+              <div class="post-footer">
+                <span>{p.profiles?.username ?? 'Chekpoint'}</span>
+                <span>·</span>
+                <span>{fmtDate(p.created_at)}</span>
+                <span>·</span>
+                <span>{commentCounts[p.id] ?? 0} {(commentCounts[p.id] ?? 0) === 1 ? 'comment' : 'comments'}</span>
+              </div>
+            </a>
+          </li>
+        ))}
+      </ul>
+    )}
+  </main>
+</Layout>
+
+<script is:inline>
+  (function () {
+    var form = document.getElementById('post-composer');
+    if (!form) return;
+    var errEl = document.getElementById('composer-error');
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var btn = document.getElementById('post-submit');
+      var title = document.getElementById('post-title').value.trim();
+      var body = document.getElementById('post-body').value.trim();
+      var pinned = document.getElementById('post-pinned').checked;
+      if (!title || !body) return;
+      btn.disabled = true;
+      errEl.textContent = '';
+      fetch('/api/forum/posts/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: title, body: body, pinned: pinned }),
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (res.ok && res.d.post_id) {
+            window.location.href = '/updates/' + res.d.post_id;
+          } else {
+            errEl.textContent = (res.d && res.d.error) || 'Failed to post.';
+            btn.disabled = false;
+          }
+        })
+        .catch(function () { errEl.textContent = 'Network error. Try again.'; btn.disabled = false; });
+    });
+  })();
+</script>
+
+<style>
+  .feed { min-width: 0; }
+  .feed-header { padding: 20px 20px 8px; }
+  .feed-title { font-family: 'DM Serif Display', serif; font-size: 28px; color: var(--text-primary); }
+  .feed-subtitle { font-size: 14px; color: var(--text-secondary); margin-top: 4px; line-height: 1.5; }
+
+  .composer {
+    margin: 12px 20px 20px; padding: 16px; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .composer input[type="text"], .composer textarea {
+    width: 100%; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; color: var(--text-primary); font: inherit; font-size: 14px; resize: vertical;
+  }
+  .composer input:focus, .composer textarea:focus { outline: none; border-color: var(--accent); }
+  .composer-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .pin-label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .composer button {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 9px 16px;
+    font-weight: 600; font-size: 14px; cursor: pointer;
+  }
+  .composer button:disabled { opacity: 0.6; cursor: default; }
+  .composer-error { color: var(--score-low, #e5484d); font-size: 13px; }
+
+  .post-list { list-style: none; padding: 0 20px 40px; margin: 0; display: flex; flex-direction: column; gap: 12px; }
+  .post-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; transition: border-color 0.15s; }
+  .post-item:hover { border-color: var(--accent); }
+  .post-link { display: block; padding: 16px 18px; text-decoration: none; color: inherit; }
+  .post-meta { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: capitalize; }
+  .badge.category { background: var(--bg-hover); color: var(--text-secondary); }
+  .badge.pinned { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .badge.locked { background: var(--bg-hover); color: var(--text-tertiary); }
+  .post-title { font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 0 0 6px; }
+  .post-excerpt { font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin: 0 0 10px; }
+  .post-footer { display: flex; gap: 8px; font-size: 12px; color: var(--text-tertiary); flex-wrap: wrap; }
+
+  .empty { padding: 40px 20px; text-align: center; color: var(--text-secondary); }
+
+  @media (max-width: 600px) {
+    .composer, .post-list { margin-left: 12px; margin-right: 12px; padding-left: 0; padding-right: 0; }
+    .post-list { padding: 0 12px 40px; }
+  }
+</style>
