@@ -1,4 +1,4 @@
-import { h, OG_ACCENT, OG_BG, scoreColor, scoreBadgeBg, scoreBadgeText, truncate } from "./og";
+import { h, OG_ACCENT, OG_BG, scoreColor, scoreBadgeBg, scoreBadgeText, hexToRgba, truncate } from "./og";
 
 export interface ListGridEntry {
   /** Pre-cropped to exactly CELL_W × COVER_H by the endpoint. */
@@ -20,29 +20,39 @@ export interface ListGridData {
 }
 
 export const CANVAS_W = 1080;
-export const COLS = 5;
-const PAD = 22;
-const GAP = 10;
 const HEADER_H = 148;
 const FOOTER_H = 36;
-// Info area below each cover: rank + title (+ optional hours)
-const INFO_H = 68;
 
-export const CELL_W = Math.floor((CANVAS_W - PAD * 2 - (COLS - 1) * GAP) / COLS); // 200px
-export const COVER_H = Math.round(CELL_W * (4 / 3)); // 267px — standard game cover
+/** Returns layout constants that depend on how many games are in the list. */
+export function getGridDimensions(count: number) {
+  const is10Col = count > 20;
+  const COLS   = is10Col ? 10 : 5;
+  const PAD    = is10Col ? 14 : 22;
+  const GAP    = is10Col ? 5  : 10;
+  const CELL_W = Math.floor((CANVAS_W - PAD * 2 - (COLS - 1) * GAP) / COLS);
+  const COVER_H = Math.round(CELL_W * (4 / 3));
+  // 10-col: just rank number below; 5-col: rank + 2-line title
+  const INFO_H     = is10Col ? 20 : 68;
+  const BADGE_SIZE = is10Col ? 22 : 32;
+  const BADGE_FONT = is10Col ? 11 : 15;
+  const HOURS_FONT = is10Col ? 9  : 12;
+  return { is10Col, COLS, PAD, GAP, CELL_W, COVER_H, INFO_H, BADGE_SIZE, BADGE_FONT, HOURS_FONT };
+}
 
 export function buildListGridTree(data: ListGridData): { tree: any; height: number } {
-  const entries = data.entries.slice(0, 20);
-  const rows = Math.max(1, Math.ceil(entries.length / COLS));
-  const cellH = COVER_H + GAP / 2 + INFO_H;
-  const gridH = rows * cellH + (rows - 1) * GAP;
+  const entries = data.entries.slice(0, 100);
+  const dims = getGridDimensions(entries.length);
+  const { is10Col, COLS, PAD, GAP, CELL_W, COVER_H, INFO_H, BADGE_SIZE, BADGE_FONT, HOURS_FONT } = dims;
+
+  const rows  = Math.max(1, Math.ceil(entries.length / COLS));
+  const gridH = rows * (COVER_H + INFO_H) + (rows - 1) * GAP;
   const canvasH = HEADER_H + gridH + FOOTER_H;
 
   // ── Individual game cells ─────────────────────────────────────────────────
   const cells = entries.map((entry) => {
     const coverLayers: any[] = [];
 
-    // Cover background (pre-cropped to exact dimensions)
+    // Cover background (pre-cropped server-side to exact cell size)
     coverLayers.push(
       entry.coverDataUri
         ? h("div", {
@@ -61,82 +71,110 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
           })
     );
 
-    // Top-left: hours played badge (dark pill, matching the site's library cards)
+    // Top-left: hours badge
     if (entry.hoursPlayed && entry.hoursPlayed > 0) {
+      const pad = is10Col ? "3px 5px" : "4px 8px";
       coverLayers.push(
         h("div", {
           style: {
-            position: "absolute", top: 7, left: 7,
+            position: "absolute", top: 6, left: 6,
             background: "rgba(9,9,10,0.72)",
-            borderRadius: 6, padding: "4px 8px",
+            borderRadius: 5, padding: pad,
             display: "flex", alignItems: "center",
           },
         }, [
           h("div", {
-            style: { fontSize: 12, fontWeight: 700, color: "rgba(240,237,232,0.9)", display: "flex" },
+            style: { fontSize: HOURS_FONT, fontWeight: 700, color: "rgba(240,237,232,0.88)", display: "flex" },
           }, `${entry.hoursPlayed}h`),
         ])
       );
     }
 
-    // Bottom-right: score badge — solid fill using the site's exact score color system
+    // Bottom-right: score badge — solid fill + colored glow (matching the site's badges)
     if (entry.score !== null) {
-      const bgColor = scoreBadgeBg(entry.score);
-      const textColor = scoreBadgeText(entry.score);
+      const bg   = scoreBadgeBg(entry.score);
+      const text = scoreBadgeText(entry.score);
+      const glow = scoreColor(entry.score);
       coverLayers.push(
         h("div", {
           style: {
-            position: "absolute", bottom: 7, right: 7,
-            background: bgColor,
-            borderRadius: 7,
-            width: 32, height: 32,
+            position: "absolute", bottom: 6, right: 6,
+            background: bg,
+            borderRadius: 6,
+            width: BADGE_SIZE, height: BADGE_SIZE,
             display: "flex", alignItems: "center", justifyContent: "center",
             flexShrink: 0,
+            boxShadow: `0 0 10px ${hexToRgba(glow, 0.65)}, 0 0 4px ${hexToRgba(glow, 0.35)}`,
           },
         }, [
           h("div", {
-            style: { fontSize: 15, fontWeight: 700, color: textColor, display: "flex" },
+            style: { fontSize: BADGE_FONT, fontWeight: 700, color: text, display: "flex" },
           }, String(entry.score)),
         ])
       );
     }
 
-    // Cover container (relative so overlays position correctly)
     const coverEl = h("div", {
       style: {
         width: CELL_W, height: COVER_H,
-        borderRadius: 8, overflow: "hidden",
+        borderRadius: is10Col ? 6 : 8,
+        overflow: "hidden",
         position: "relative", display: "flex", flexShrink: 0,
       },
     }, coverLayers);
 
-    // Info below cover: rank + title
+    // Info below cover
     const infoChildren: any[] = [];
 
-    if (data.isRanked) {
+    if (is10Col) {
+      // 10-col: rank only, centered, very small
+      if (data.isRanked) {
+        infoChildren.push(
+          h("div", {
+            style: {
+              fontSize: 10, fontWeight: 700,
+              color: "rgba(240,237,232,0.35)",
+              display: "flex", justifyContent: "center",
+              width: CELL_W, paddingTop: 4,
+            },
+          }, `#${entry.rank}`)
+        );
+      }
+    } else {
+      // 5-col: rank + 2-line title
+      if (data.isRanked) {
+        infoChildren.push(
+          h("div", {
+            style: {
+              fontSize: 12, fontWeight: 700,
+              color: "rgba(240,237,232,0.38)",
+              display: "flex", marginBottom: 3,
+            },
+          }, `#${entry.rank}`)
+        );
+      }
       infoChildren.push(
         h("div", {
-          style: { fontSize: 12, fontWeight: 700, color: "rgba(240,237,232,0.38)", display: "flex", marginBottom: 3 },
-        }, `#${entry.rank}`)
+          style: {
+            fontSize: 12, fontWeight: 600, color: "#e8e5e0",
+            display: "-webkit-box",
+            WebkitBoxOrient: "vertical",
+            WebkitLineClamp: 2,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            lineHeight: 1.35,
+          },
+        }, truncate(entry.gameTitle, 45))
       );
     }
 
-    infoChildren.push(
-      h("div", {
-        style: {
-          fontSize: 12, fontWeight: 600, color: "#e8e5e0",
-          display: "-webkit-box",
-          WebkitBoxOrient: "vertical",
-          WebkitLineClamp: 2,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          lineHeight: 1.35,
-        },
-      }, truncate(entry.gameTitle, 45))
-    );
-
     const infoArea = h("div", {
-      style: { width: CELL_W, display: "flex", flexDirection: "column", paddingTop: 7, flexShrink: 0 },
+      style: {
+        width: CELL_W, height: INFO_H,
+        display: "flex", flexDirection: "column",
+        paddingTop: is10Col ? 0 : 7,
+        flexShrink: 0,
+      },
     }, infoChildren);
 
     return h("div", {
@@ -158,8 +196,7 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
           width: AVATAR_SIZE, height: AVATAR_SIZE,
           borderRadius: AVATAR_SIZE / 2,
           backgroundImage: `url(${data.ownerAvatarDataUri})`,
-          backgroundSize: "cover",
-          backgroundPosition: "center",
+          backgroundSize: "cover", backgroundPosition: "center",
           display: "flex", flexShrink: 0,
         },
       })
@@ -198,15 +235,11 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
       justifyContent: "center", paddingLeft: PAD, paddingRight: PAD, gap: 10,
     },
   }, [
-    // Branding + owner row
     h("div", { style: { display: "flex", alignItems: "center", gap: 10 } }, [
       h("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, [
         h("div", { style: { width: 7, height: 7, borderRadius: 4, background: OG_ACCENT, display: "flex" } }),
         h("div", {
-          style: {
-            fontSize: 11, fontWeight: 700, letterSpacing: 2.2,
-            color: "rgba(240,237,232,0.25)", display: "flex",
-          },
+          style: { fontSize: 11, fontWeight: 700, letterSpacing: 2.2, color: "rgba(240,237,232,0.25)", display: "flex" },
         }, "CHEKPOINT"),
       ]),
       h("div", { style: { width: 1, height: 13, background: "rgba(255,255,255,0.08)", display: "flex" } }),
@@ -215,7 +248,6 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
         style: { fontSize: 14, fontWeight: 600, color: "rgba(240,237,232,0.55)", display: "flex" },
       }, `@${truncate(data.ownerUsername, 30)}`),
     ]),
-    // List title
     h("div", {
       style: {
         fontSize: titleSize, fontWeight: 700, color: "#f0ede8",
@@ -224,7 +256,6 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
         maxWidth: CANVAS_W - PAD * 2,
       },
     }, truncate(data.title, 55)),
-    // Stats
     h("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, statParts),
   ]);
 
@@ -238,27 +269,27 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
   }, [
     h("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, [
       h("div", { style: { width: 5, height: 5, borderRadius: 3, background: OG_ACCENT, display: "flex" } }),
-      h("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: 1.5, color: "rgba(240,237,232,0.2)", display: "flex" } }, "CHEKPOINT.GG"),
+      h("div", {
+        style: { fontSize: 11, fontWeight: 700, letterSpacing: 1.5, color: "rgba(240,237,232,0.2)", display: "flex" },
+      }, "CHEKPOINT.GG"),
     ]),
   ]);
 
-  const tree = h("div", {
-    style: {
-      width: CANVAS_W, height: canvasH,
-      backgroundColor: OG_BG,
-      display: "flex", flexDirection: "column",
-      fontFamily: "DM Sans",
-    },
-  }, [
-    header,
-    h("div", {
+  return {
+    tree: h("div", {
       style: {
-        display: "flex", flexDirection: "column", gap: GAP,
-        paddingLeft: PAD, paddingRight: PAD,
+        width: CANVAS_W, height: canvasH,
+        backgroundColor: OG_BG,
+        display: "flex", flexDirection: "column",
+        fontFamily: "DM Sans",
       },
-    }, gridRows),
-    footer,
-  ]);
-
-  return { tree, height: canvasH };
+    }, [
+      header,
+      h("div", {
+        style: { display: "flex", flexDirection: "column", gap: GAP, paddingLeft: PAD, paddingRight: PAD },
+      }, gridRows),
+      footer,
+    ]),
+    height: canvasH,
+  };
 }

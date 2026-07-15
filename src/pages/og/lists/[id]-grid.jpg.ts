@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
 import { renderOgImage, fetchImageDataUri, fetchAndCropCover } from "../../../utils/og";
-import { buildListGridTree, CANVAS_W, CELL_W, COVER_H } from "../../../utils/ogListGrid";
+import { buildListGridTree, getGridDimensions, CANVAS_W } from "../../../utils/ogListGrid";
 
 export const prerender = false;
 
@@ -14,7 +14,6 @@ export const GET: APIRoute = async ({ params }) => {
 
   const db = getSupabaseAdmin() as any;
 
-  // Fetch list metadata including owner profile
   const { data: list } = await db
     .from("lists")
     .select("id, title, is_ranked, visibility, profiles ( id, username, avatar_url )")
@@ -25,19 +24,21 @@ export const GET: APIRoute = async ({ params }) => {
     return new Response(null, { status: 404 });
   }
 
-  // Fetch up to 20 entries with game id, title, and cover
   const { data: entries } = await db
     .from("list_entries")
     .select("position, games ( id, title, cover_img_url )")
     .eq("list_id", id)
     .order("position", { ascending: true, nullsFirst: false })
     .order("added_at", { ascending: true })
-    .limit(20);
+    .limit(100);
 
   const entryList = (entries ?? []) as any[];
   const gameIds = entryList.map((e) => e.games?.id).filter(Boolean);
 
-  // Fetch owner's reviews for these games to get score + hours
+  // Compute layout dimensions based on actual entry count — needed for cropping
+  const { CELL_W, COVER_H } = getGridDimensions(entryList.length);
+
+  // Fetch owner reviews for score + hours
   let reviewMap: Record<string, { score: number; hoursPlayed: number | null }> = {};
   if (gameIds.length > 0 && list.profiles?.id) {
     const { data: reviews } = await db
@@ -52,14 +53,11 @@ export const GET: APIRoute = async ({ params }) => {
     }
   }
 
-  // Avg score for stat line in header
-  let avgScore: number | null = null;
   const reviewScores = Object.values(reviewMap).map((r) => r.score);
-  if (reviewScores.length > 0) {
-    avgScore = reviewScores.reduce((s, v) => s + v, 0) / reviewScores.length;
-  }
+  const avgScore = reviewScores.length > 0
+    ? reviewScores.reduce((s, v) => s + v, 0) / reviewScores.length
+    : null;
 
-  // Fetch + crop all covers in parallel (pre-cropping to exact cell size eliminates alignment issues)
   const [processedEntries, ownerAvatarDataUri] = await Promise.all([
     Promise.all(
       entryList.map(async (e, i) => {
