@@ -1,12 +1,12 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
-import { renderOgImage, fetchImageDataUri } from "../../../utils/og";
-import { buildListGridTree } from "../../../utils/ogListGrid";
+import { renderOgImage, fetchImageDataUri, fetchAndCropCover } from "../../../utils/og";
+import { buildListGridTree, CANVAS_W, CELL_W, COVER_H } from "../../../utils/ogListGrid";
 
 export const prerender = false;
 
-const IMAGE_FETCH_TIMEOUT_MS = 4000;
+const TIMEOUT_MS = 4500;
 
 export const GET: APIRoute = async ({ params }) => {
   const { id } = params;
@@ -14,9 +14,10 @@ export const GET: APIRoute = async ({ params }) => {
 
   const db = getSupabaseAdmin() as any;
 
+  // Fetch list metadata including owner profile
   const { data: list } = await db
     .from("lists")
-    .select("id, title, is_ranked, visibility")
+    .select("id, title, is_ranked, visibility, profiles ( id, username, avatar_url )")
     .eq("id", id)
     .maybeSingle();
 
@@ -24,33 +25,74 @@ export const GET: APIRoute = async ({ params }) => {
     return new Response(null, { status: 404 });
   }
 
+  // Fetch up to 20 entries with game id, title, and cover
   const { data: entries } = await db
     .from("list_entries")
-    .select("position, games ( cover_img_url )")
+    .select("position, games ( id, title, cover_img_url )")
     .eq("list_id", id)
     .order("position", { ascending: true, nullsFirst: false })
     .order("added_at", { ascending: true })
     .limit(20);
 
   const entryList = (entries ?? []) as any[];
+  const gameIds = entryList.map((e) => e.games?.id).filter(Boolean);
 
-  const coverDataUris = await Promise.all(
-    entryList.map(async (e, i) => {
-      const url = igdbImage(e.games?.cover_img_url, "t_cover_big");
-      return {
-        coverDataUri: url ? await fetchImageDataUri(url, IMAGE_FETCH_TIMEOUT_MS) : null,
-        rank: e.position ?? i + 1,
-      };
-    })
-  );
+  // Fetch owner's reviews for these games to get score + hours
+  let reviewMap: Record<string, { score: number; hoursPlayed: number | null }> = {};
+  if (gameIds.length > 0 && list.profiles?.id) {
+    const { data: reviews } = await db
+      .from("reviews")
+      .select("game_id, score, play_time_hours")
+      .eq("profile_id", list.profiles.id)
+      .eq("status", "published")
+      .in("game_id", gameIds);
+
+    for (const r of (reviews ?? []) as any[]) {
+      reviewMap[r.game_id] = { score: r.score, hoursPlayed: r.play_time_hours ?? null };
+    }
+  }
+
+  // Avg score for stat line in header
+  let avgScore: number | null = null;
+  const reviewScores = Object.values(reviewMap).map((r) => r.score);
+  if (reviewScores.length > 0) {
+    avgScore = reviewScores.reduce((s, v) => s + v, 0) / reviewScores.length;
+  }
+
+  // Fetch + crop all covers in parallel (pre-cropping to exact cell size eliminates alignment issues)
+  const [processedEntries, ownerAvatarDataUri] = await Promise.all([
+    Promise.all(
+      entryList.map(async (e, i) => {
+        const url = igdbImage(e.games?.cover_img_url, "t_cover_big");
+        const coverDataUri = url
+          ? await fetchAndCropCover(url, CELL_W, COVER_H, "center", TIMEOUT_MS)
+          : null;
+        const review = reviewMap[e.games?.id] ?? null;
+        return {
+          coverDataUri,
+          rank: e.position ?? i + 1,
+          gameTitle: e.games?.title ?? "",
+          score: review?.score ?? null,
+          hoursPlayed: review?.hoursPlayed ?? null,
+        };
+      })
+    ),
+    list.profiles?.avatar_url
+      ? fetchImageDataUri(list.profiles.avatar_url, TIMEOUT_MS)
+      : Promise.resolve(null),
+  ]);
 
   const { tree, height } = buildListGridTree({
     title: list.title,
+    ownerUsername: list.profiles?.username ?? "unknown",
+    ownerAvatarDataUri,
     isRanked: !!list.is_ranked,
-    entries: coverDataUris,
+    totalGames: entryList.length,
+    avgScore,
+    entries: processedEntries,
   });
 
-  const image = await renderOgImage(tree, 1000, height);
+  const image = await renderOgImage(tree, CANVAS_W, height);
 
   return new Response(new Uint8Array(image), {
     status: 200,
