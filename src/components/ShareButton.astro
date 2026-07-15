@@ -9,9 +9,14 @@ interface Props {
    * 'overlay' — small icon-only button with a dark circular badge, for use atop cover images.
    */
   variant?: 'pill' | 'icon' | 'overlay';
+  /**
+   * When provided, clicking the button shows a dropdown with two options:
+   * "Copy link" and "Copy image" (fetches this URL and copies/downloads it).
+   */
+  imageUrl?: string;
 }
 
-const { url, label = "Share", variant = 'pill' } = Astro.props;
+const { url, label = "Share", variant = 'pill', imageUrl } = Astro.props;
 const shareUrl = url ?? Astro.url.pathname;
 const iconOnly = variant !== 'pill';
 ---
@@ -21,6 +26,7 @@ const iconOnly = variant !== 'pill';
   type="button"
   data-share-url={shareUrl}
   data-share-title={label}
+  data-share-image={imageUrl ?? ''}
   title={iconOnly ? label : undefined}
 >
   {iconOnly ? (
@@ -69,28 +75,206 @@ const iconOnly = variant !== 'pill';
   .share-btn.share-btn-overlay:hover { background: rgba(96, 80, 200, .85); color: #fff; }
 </style>
 
+<style is:global>
+  #share-img-panel {
+    flex-direction: column;
+    gap: 2px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 5px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    min-width: 148px;
+  }
+  #share-img-panel button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    color: var(--text-secondary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.1s, color 0.1s;
+  }
+  #share-img-panel button:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  #share-img-panel button:disabled { opacity: 0.5; cursor: default; }
+</style>
+
 <script>
   if (!(window as any).__shareBtnInit) {
     (window as any).__shareBtnInit = true;
 
+    // ── Singleton dropdown panel for share-with-image buttons ────────────────
+    const panel = document.createElement('div');
+    panel.id = 'share-img-panel';
+    panel.style.cssText = 'display:none;position:fixed;z-index:9999';
+    panel.innerHTML =
+      '<button id="share-opt-link">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>' +
+        'Copy link' +
+      '</button>' +
+      '<button id="share-opt-image">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' +
+        'Copy image' +
+      '</button>';
+    document.body.appendChild(panel);
+
+    let activeBtn: HTMLButtonElement | null = null;
+
+    function closePanel() {
+      panel.style.display = 'none';
+      activeBtn = null;
+    }
+
+    function openPanel(btn: HTMLButtonElement) {
+      activeBtn = btn;
+      panel.style.display = 'flex';
+      requestAnimationFrame(function () {
+        const rect = btn.getBoundingClientRect();
+        const pRect = panel.getBoundingClientRect();
+        let top = rect.top - pRect.height - 8;
+        if (top < 8) top = rect.bottom + 8;
+        let left = rect.left;
+        if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+        panel.style.top = top + 'px';
+        panel.style.left = left + 'px';
+      });
+    }
+
+    function showToast(btn: HTMLButtonElement, msg: string) {
+      const toast = btn.querySelector('.share-btn-toast') as HTMLElement | null;
+      if (toast) toast.textContent = msg;
+      btn.classList.add('copied');
+      setTimeout(function () {
+        btn.classList.remove('copied');
+        if (toast) toast.textContent = 'Link copied';
+      }, 2000);
+    }
+
+    function downloadBlob(blob: Blob, filename: string) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }
+
     document.addEventListener('click', function (e) {
-      const btn = (e.target as HTMLElement)?.closest('.share-btn') as HTMLButtonElement | null;
-      if (!btn) return;
+      const target = e.target as HTMLElement;
 
-      const path = btn.dataset.shareUrl || window.location.pathname;
-      const url = new URL(path, window.location.origin).href;
-      const title = btn.dataset.shareTitle || document.title;
-
-      if ((navigator as any).share) {
-        (navigator as any).share({ url, title }).catch(function () {});
+      // ── Copy link option ────────────────────────────────────────────────────
+      const linkOpt = target.closest('#share-opt-link') as HTMLElement | null;
+      if (linkOpt) {
+        const btn = activeBtn;
+        closePanel();
+        if (!btn) return;
+        const path = btn.dataset.shareUrl || window.location.pathname;
+        const url = new URL(path, window.location.origin).href;
+        navigator.clipboard?.writeText(url).then(function () { showToast(btn, 'Link copied'); });
         return;
       }
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(function () {
+
+      // ── Copy image option ───────────────────────────────────────────────────
+      const imageOpt = target.closest('#share-opt-image') as HTMLButtonElement | null;
+      if (imageOpt) {
+        const btn = activeBtn;
+        const imageUrl = btn?.dataset.shareImage;
+        closePanel();
+        if (!btn || !imageUrl) return;
+
+        const absUrl = new URL(imageUrl, window.location.origin).href;
+        imageOpt.textContent = 'Copying…';
+        imageOpt.setAttribute('disabled', 'true');
+
+        fetch(absUrl)
+          .then(function (r) { return r.blob(); })
+          .then(function (blob) {
+            imageOpt.textContent = 'Copy image';
+            imageOpt.removeAttribute('disabled');
+
+            if ((window as any).ClipboardItem) {
+              // Chrome/Edge: convert JPEG → PNG for clipboard (only PNG is supported)
+              const objUrl = URL.createObjectURL(blob);
+              const img = new Image();
+              img.onload = function () {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                (canvas.getContext('2d') as CanvasRenderingContext2D).drawImage(img, 0, 0);
+                URL.revokeObjectURL(objUrl);
+                canvas.toBlob(function (png) {
+                  if (!png) { downloadBlob(blob, 'chekpoint-list.jpg'); showToast(btn, 'Image saved'); return; }
+                  navigator.clipboard.write([(new (window as any).ClipboardItem({ 'image/png': png }))])
+                    .then(function () { showToast(btn, 'Image copied'); })
+                    .catch(function () { downloadBlob(blob, 'chekpoint-list.jpg'); showToast(btn, 'Image saved'); });
+                }, 'image/png');
+              };
+              img.onerror = function () {
+                URL.revokeObjectURL(objUrl);
+                downloadBlob(blob, 'chekpoint-list.jpg');
+                showToast(btn, 'Image saved');
+              };
+              img.src = objUrl;
+            } else {
+              // Firefox / Safari fallback: download the JPEG directly
+              downloadBlob(blob, 'chekpoint-list.jpg');
+              showToast(btn, 'Image saved');
+            }
+          })
+          .catch(function () {
+            imageOpt.textContent = 'Copy image';
+            imageOpt.removeAttribute('disabled');
+            window.open(absUrl, '_blank');
+          });
+        return;
+      }
+
+      // ── Share button click ──────────────────────────────────────────────────
+      const btn = target.closest('.share-btn') as HTMLButtonElement | null;
+      if (btn) {
+        const imageUrl = btn.dataset.shareImage;
+
+        if (imageUrl) {
+          // Has image option — show dropdown instead of immediately copying
+          if (panel.style.display !== 'none' && activeBtn === btn) {
+            closePanel();
+          } else {
+            closePanel();
+            openPanel(btn);
+          }
+          return;
+        }
+
+        // No image option — existing copy-link / native-share behavior
+        const path = btn.dataset.shareUrl || window.location.pathname;
+        const url = new URL(path, window.location.origin).href;
+        const title = btn.dataset.shareTitle || document.title;
+
+        if ((navigator as any).share) {
+          (navigator as any).share({ url, title }).catch(function () {});
+          return;
+        }
+        navigator.clipboard?.writeText(url).then(function () {
           btn.classList.add('copied');
           setTimeout(function () { btn.classList.remove('copied'); }, 1500);
         });
+        return;
       }
+
+      // ── Outside click closes panel ──────────────────────────────────────────
+      if (!target.closest('#share-img-panel')) closePanel();
     });
   }
 </script>
