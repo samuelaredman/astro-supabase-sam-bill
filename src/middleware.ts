@@ -15,9 +15,11 @@ export const onRequest = defineMiddleware(async (_context, next) => {
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('text/html')) return response;
 
+  // Reading the body consumes it, so we must always return a fresh Response
+  // from the string below — returning the original here would fail static
+  // prerendering with "Body has already been read".
   const html = await response.text();
   const rewritten = rewriteImageUrls(html);
-  if (rewritten === html) return response;
 
   // Rebuild the response, preserving status and headers (incl. Set-Cookie for
   // auth). Body length changed, so drop the now-stale Content-Length.
