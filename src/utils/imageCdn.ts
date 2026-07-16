@@ -12,24 +12,36 @@
 // source's pixel dimensions. That's the bandwidth win with no risk of blur or
 // layout shift.
 //
-// Any host listed here MUST also be present in the `remote_images` allowlist in
-// netlify.toml, or the CDN will refuse to transform it. Hosts not listed here
-// simply pass through unchanged (served as the original URL) — never broken.
+// SECURITY: never hardcode the Supabase project URL here — it is the value of
+// the SUPABASE_DATABASE_URL env var, and Netlify's secret scanner fails the
+// build if an env-var value appears in committed code. The host is read from
+// the environment at runtime instead. Any host that ends up in the list below
+// MUST also be covered by the `remote_images` allowlist in netlify.toml (which
+// uses a project-agnostic *.supabase.co wildcard for the same reason).
 
-export const CDN_HOSTS = [
-  'images.igdb.com',              // game covers, developer logos, platform art
-  'bzlwwtatoiyzwirerify.supabase.co', // Supabase Storage: avatars + banners
-] as const;
+// IGDB is a fixed public host (not an env value), so it may be named directly.
+const IGDB_HOST = 'images.igdb.com';
 
-const HOST_ALT = CDN_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|');
+/** The Supabase Storage host, derived from env — never hardcoded. */
+export function supabaseHostFromEnv(): string | null {
+  const url =
+    import.meta.env.SUPABASE_DATABASE_URL ??
+    (typeof process !== 'undefined' ? process.env.SUPABASE_DATABASE_URL : undefined);
+  if (!url) return null;
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+}
 
-// A URL on one of our hosts, used as an <img src>. Anchoring on `src=` keeps us
-// clear of <meta ... content="…"> (og:image), <link href>, canonical URLs, and
-// JSON-LD, which must keep the original absolute URL for scrapers/RSS.
-const SRC_RE = new RegExp(`(\\ssrc=)(["'])(https://(?:${HOST_ALT})/[^"']+)\\2`, 'g');
-
-// The same URL used as a CSS background, e.g. style="background-image:url(…)".
-const CSS_URL_RE = new RegExp(`url\\((['"]?)(https://(?:${HOST_ALT})/[^)'"]+)\\1\\)`, 'g');
+/** Hosts whose images are routed through the Netlify Image CDN. */
+export function cdnHosts(): string[] {
+  const hosts = [IGDB_HOST];
+  const supabase = supabaseHostFromEnv();
+  if (supabase) hosts.push(supabase);
+  return hosts;
+}
 
 /** Wrap a raw source URL in a Netlify Image CDN request. */
 export function toCdnUrl(raw: string): string {
@@ -44,9 +56,22 @@ export function toCdnUrl(raw: string): string {
  * Image CDN equivalent. Pure and idempotent-safe on our output (source HTML
  * never contains `/.netlify/images`). Only `src=` and CSS `url(…)` values are
  * touched; all other markup is returned byte-for-byte unchanged.
+ *
+ * `hosts` defaults to the runtime allowlist; tests pass an explicit list so no
+ * real project URL is ever embedded in the repo.
  */
-export function rewriteImageUrls(html: string): string {
+export function rewriteImageUrls(html: string, hosts: string[] = cdnHosts()): string {
+  if (hosts.length === 0) return html;
+  const hostAlt = hosts.map((h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+
+  // Anchoring on `src=` keeps us clear of <meta ... content="…"> (og:image),
+  // <link href>, canonical URLs, and JSON-LD, which must keep the original
+  // absolute URL for scrapers/RSS.
+  const srcRe = new RegExp(`(\\ssrc=)(["'])(https://(?:${hostAlt})/[^"']+)\\2`, 'g');
+  // The same URL used as a CSS background, e.g. style="background-image:url(…)".
+  const cssUrlRe = new RegExp(`url\\((['"]?)(https://(?:${hostAlt})/[^)'"]+)\\1\\)`, 'g');
+
   return html
-    .replace(SRC_RE, (_m, pre, quote, url) => `${pre}${quote}${toCdnUrl(url)}${quote}`)
-    .replace(CSS_URL_RE, (_m, quote, url) => `url(${quote}${toCdnUrl(url)}${quote})`);
+    .replace(srcRe, (_m, pre, quote, url) => `${pre}${quote}${toCdnUrl(url)}${quote}`)
+    .replace(cssUrlRe, (_m, quote, url) => `url(${quote}${toCdnUrl(url)}${quote})`);
 }
