@@ -18,6 +18,14 @@ export const POST: APIRoute = async (context) => {
   if (!rec) return json({ error: "Recommendation not found." }, 404);
   if (rec.profile_id !== profile.id) return json({ error: "Forbidden." }, 403);
 
+  // Remove notifications tied to this recommendation first. The FK is ON DELETE SET NULL,
+  // which would otherwise leave orphaned rows that render the "a recommendation" fallback.
+  try {
+    await (db as any).from("notifications").delete().eq("recommendation_id", recommendation_id);
+  } catch (e) {
+    console.error("[recommendations/delete] notification cleanup error (non-fatal):", e);
+  }
+
   const { error } = await (db as any).from("recommendations").delete().eq("id", recommendation_id);
 
   if (error) {

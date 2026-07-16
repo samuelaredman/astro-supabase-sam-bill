@@ -63,10 +63,28 @@ const db = getSupabaseAdmin() as any;
 const { data: gameRecsRaw } = await db
   .from('recommendations')
   .select(REC_SELECT)
+  .eq('status', 'published')
   .or(`source_game_id.eq.${game.id},target_game_id.eq.${game.id}`)
   .order('created_at', { ascending: false })
   .limit(50);
 const gameRecs = (gameRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfileId));
+
+// The current user's saved draft review for this game (if any), so "Write a review"
+// resumes it instead of starting a duplicate. Auto-opens when arriving via ?draft=.
+let draftReview: any = null;
+if (currentProfileId) {
+  const { data: dr } = await db
+    .from('reviews')
+    .select('id, score, title, body, platform_played_on, play_time_hours, contains_spoilers')
+    .eq('profile_id', currentProfileId)
+    .eq('game_id', game.id)
+    .eq('status', 'draft')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  draftReview = dr ?? null;
+}
+const autoOpenDraft = !!Astro.url.searchParams.get('draft') && !!draftReview;
 
 const { count: wantToPlayCount } = await db
   .from('user_game_status').select('*', { count: 'exact', head: true })
@@ -721,6 +739,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .composer-submit{padding:8px 18px;border-radius:20px;border:none;background:var(--accent);color:var(--accent-text);font-size:14px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity .15s}
     .composer-submit:hover{opacity:.85}
     .composer-submit:disabled{opacity:.45;cursor:not-allowed}
+    .composer-draft{padding:8px 16px;border-radius:20px;border:1px solid var(--border);background:transparent;color:var(--text-secondary);font-size:14px;font-weight:500;font-family:inherit;cursor:pointer;transition:background .15s,color .15s,border-color .15s}
+    .composer-draft:hover:not(:disabled){background:var(--bg-hover);color:var(--text-primary);border-color:var(--accent)}
+    .composer-draft:disabled{opacity:.6;cursor:default}
     .composer-error{font-size:13px;color:#c0392b;min-height:18px;margin-top:8px}
 
     @keyframes resultFadeIn {
@@ -1964,6 +1985,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         <span>Contains spoilers</span>
       </label>
       <div style="display:flex;gap:8px;margin-left:auto">
+        <button class="composer-draft" id="gcSaveDraft" type="button">Save draft</button>
         <button class="composer-submit" id="gcSubmit">Post review</button>
       </div>
     </div>
@@ -1971,7 +1993,21 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   </div>
 </div>
 
-<script is:inline define:vars={{ isLoggedIn, gameId: game.id, gameTitle: game.title }}>
+<script is:inline define:vars={{ isLoggedIn, gameId: game.id, gameTitle: game.title, draftReview, autoOpenDraft }}>
+  // Id of the draft review being resumed (set on load if one exists, or after a first save).
+  var currentReviewDraftId = draftReview ? draftReview.id : null
+
+  function prefillReviewDraft() {
+    if (!draftReview) return
+    if (draftReview.score != null) document.getElementById('gcScore').value = draftReview.score
+    document.getElementById('gcTitle').value = draftReview.title || ''
+    document.getElementById('gcBody').value = draftReview.body || ''
+    if (draftReview.platform_played_on) document.getElementById('gcPlatform').value = draftReview.platform_played_on
+    if (draftReview.play_time_hours != null) document.getElementById('gcHours').value = draftReview.play_time_hours
+    document.getElementById('gcSpoilers').checked = !!draftReview.contains_spoilers
+    document.getElementById('gcCharCount').textContent = (draftReview.body || '').length + ' / 5000'
+  }
+
   function openGameComposer() {
     if (!isLoggedIn) {
       document.getElementById('gcSignInPrompt').style.display = 'block'
@@ -1980,6 +2016,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     }
     document.getElementById('gameComposer').style.display = 'block'
     document.getElementById('gameComposerOverlay').style.display = 'block'
+    // Re-hydrate a saved draft each time the composer is opened.
+    if (currentReviewDraftId) prefillReviewDraft()
     document.getElementById('gcScore').focus()
   }
 
@@ -2039,21 +2077,37 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     btn.textContent = 'Posting…'
 
     try {
-      var res = await fetch('/api/reviews/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          game_id: gameId,
-          score,
-          title,
-          body,
-          platform_played_on: platform || null,
-          play_time_hours: hours,
-          contains_spoilers: spoilers,
-        })
-      })
+      // Publishing a saved draft flips it via update; a fresh review is created.
+      var res = currentReviewDraftId
+        ? await fetch('/api/reviews/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              review_id: currentReviewDraftId,
+              score, title, body,
+              platform_played_on: platform || null,
+              play_time_hours: hours,
+              contains_spoilers: spoilers,
+              status: 'published',
+            })
+          })
+        : await fetch('/api/reviews/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              game_id: gameId,
+              score,
+              title,
+              body,
+              platform_played_on: platform || null,
+              play_time_hours: hours,
+              contains_spoilers: spoilers,
+            })
+          })
       var data = await res.json()
       if (!res.ok) { errEl.textContent = data.error || 'Failed to post review.'; return }
+      // Published — this row is no longer a draft.
+      currentReviewDraftId = null
 
       // Show reveal card
       var userScore = parseFloat(score)
@@ -2138,6 +2192,60 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       btn.textContent = 'Post review'
     }
   })
+
+  // ── Save draft: only review text is required; score/title can come later. ──
+  var gcSaveDraftBtn = document.getElementById('gcSaveDraft')
+  if (gcSaveDraftBtn) {
+    gcSaveDraftBtn.addEventListener('click', async function() {
+      var btn = this
+      var scoreRaw = document.getElementById('gcScore').value
+      var score = scoreRaw ? parseFloat(scoreRaw) : null
+      var title = document.getElementById('gcTitle').value.trim()
+      var body = document.getElementById('gcBody').value.trim()
+      var platform = document.getElementById('gcPlatform').value
+      var hours = parseInt(document.getElementById('gcHours').value) || null
+      var spoilers = document.getElementById('gcSpoilers').checked
+      var errEl = document.getElementById('gcError')
+      errEl.textContent = ''
+
+      if (!body) { errEl.textContent = 'Write something before saving a draft.'; return }
+      if (score != null && (score < 0.1 || score > 10)) { errEl.textContent = 'Score must be between 0.1 and 10.'; return }
+
+      btn.disabled = true
+      btn.textContent = 'Saving…'
+      try {
+        var payload = {
+          score: score,
+          title: title,
+          body: body,
+          platform_played_on: platform || null,
+          play_time_hours: hours,
+          contains_spoilers: spoilers,
+          status: 'draft',
+        }
+        var res
+        if (currentReviewDraftId) {
+          payload.review_id = currentReviewDraftId
+          res = await fetch('/api/reviews/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        } else {
+          payload.game_id = gameId
+          res = await fetch('/api/reviews/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+        }
+        var data = await res.json()
+        if (!res.ok) { errEl.textContent = data.error || 'Could not save draft.'; return }
+        if (data.draft_id) currentReviewDraftId = data.draft_id
+        btn.textContent = 'Draft saved ✓'
+        setTimeout(function() { closeGameComposer(); }, 900)
+      } catch(e) {
+        errEl.textContent = 'Something went wrong. Please try again.'
+      } finally {
+        setTimeout(function() { btn.disabled = false; btn.textContent = 'Save draft' }, 950)
+      }
+    })
+  }
+
+  // Arrived from /drafts (?draft=…) — open the composer straight into the saved draft.
+  if (autoOpenDraft) openGameComposer()
 </script>
 
 </Layout>

@@ -70,7 +70,10 @@ const fixedSourceCover = sourceGame ? igdbImage(sourceGame.cover_img_url, 't_cov
       <input type="checkbox" id="recSpoiler" />
       <span>Contains spoilers</span>
     </label>
-    <button class="rcx-submit" id="recSubmit">Post recommendation</button>
+    <div class="rcx-btn-group">
+      <button class="rcx-draft" id="recSaveDraft" type="button">Save draft</button>
+      <button class="rcx-submit" id="recSubmit">Post recommendation</button>
+    </div>
   </div>
   <div class="rcx-error" id="recError"></div>
 </div>
@@ -82,16 +85,65 @@ if (!window.__recComposerInit) {
   var overlay = document.getElementById('recComposerOverlay');
   var modal = document.getElementById('recComposer');
 
-  function openRecComposer() {
+  // Id of the draft currently being resumed (null when composing a brand-new rec).
+  var currentDraftId = null;
+
+  // Accepts an optional resume payload when continuing a saved draft:
+  //   { id, sourceId, sourceTitle, targetId, targetTitle, body, contains_spoilers }
+  function openRecComposer(resume) {
     if (!modal) return;
+    resetRecComposer();
+    if (resume && resume.id) {
+      currentDraftId = resume.id;
+      var srcHidden = document.getElementById('recSourceId');
+      var tgtHidden = document.getElementById('recTargetId');
+      if (srcHidden) srcHidden.value = resume.sourceId || '';
+      if (tgtHidden) tgtHidden.value = resume.targetId || '';
+      // Lock the game inputs — update only edits the body/spoilers of an existing draft.
+      lockGameInput('recSourceSearch', resume.sourceTitle);
+      lockGameInput('recTargetSearch', resume.targetTitle);
+      var bodyEl = document.getElementById('recBody');
+      if (bodyEl) {
+        bodyEl.value = resume.body || '';
+        bodyEl.dispatchEvent(new Event('input'));
+      }
+      var spoiler = document.getElementById('recSpoiler');
+      if (spoiler) spoiler.checked = !!resume.contains_spoilers;
+    }
     overlay.style.display = 'block';
     modal.style.display = 'block';
+  }
+  function lockGameInput(inputId, title) {
+    var input = document.getElementById(inputId);
+    if (!input) return;
+    input.value = title || '';
+    input.readOnly = true;
+    input.style.opacity = '0.7';
+  }
+  function resetRecComposer() {
+    currentDraftId = null;
+    ['recSourceSearch', 'recTargetSearch'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) { el.value = ''; el.readOnly = false; el.style.opacity = ''; }
+    });
+    var srcHidden = document.getElementById('recSourceId');
+    var tgtHidden = document.getElementById('recTargetId');
+    // When the source is a fixed game (game page), there's no search input and the
+    // hidden id is server-set — leave it. Only clear it in the searchable case.
+    var hasSourceSearch = !!document.getElementById('recSourceSearch');
+    if (srcHidden && hasSourceSearch) srcHidden.value = '';
+    if (tgtHidden) tgtHidden.value = '';
+    var bodyEl = document.getElementById('recBody');
+    if (bodyEl) { bodyEl.value = ''; bodyEl.dispatchEvent(new Event('input')); }
+    var spoiler = document.getElementById('recSpoiler');
+    if (spoiler) spoiler.checked = false;
+    var err = document.getElementById('recError');
+    if (err) err.textContent = '';
   }
   function closeRecComposer() {
     overlay.style.display = 'none';
     modal.style.display = 'none';
-    var err = document.getElementById('recError');
-    if (err) err.textContent = '';
+    resetRecComposer();
   }
   window.openRecComposer = openRecComposer;
 
@@ -187,28 +239,74 @@ if (!window.__recComposerInit) {
       submitBtn.disabled = true;
       submitBtn.textContent = 'Posting...';
       try {
-        var res = await fetch('/api/recommendations/create', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            source_game_id: sourceId,
-            target_game_id: targetId,
-            body: body,
-            contains_spoilers: spoilers,
-          }),
-        });
-        var data = await res.json();
-        if (!res.ok) {
-          errEl.textContent = data.error || 'Something went wrong.';
-          submitBtn.disabled = false;
-          submitBtn.textContent = 'Post recommendation';
-          return;
+        var res, data;
+        if (currentDraftId) {
+          // Publishing a saved draft — update.ts flips status to 'published'.
+          res = await fetch('/api/recommendations/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recommendation_id: currentDraftId, body: body, contains_spoilers: spoilers, status: 'published' }),
+          });
+          data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+          window.location.href = '/recommendations/' + currentDraftId;
+        } else {
+          res = await fetch('/api/recommendations/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_game_id: sourceId, target_game_id: targetId, body: body, contains_spoilers: spoilers }),
+          });
+          data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+          window.location.href = '/recommendations/' + data.recommendation_id;
         }
-        window.location.href = '/recommendations/' + data.recommendation_id;
       } catch (err) {
-        errEl.textContent = 'Something went wrong.';
+        errEl.textContent = (err && err.message) || 'Something went wrong.';
         submitBtn.disabled = false;
         submitBtn.textContent = 'Post recommendation';
+      }
+    });
+  }
+
+  // ── Save draft: requires both games; body optional. Creates or updates a draft. ──
+  var saveDraftBtn = document.getElementById('recSaveDraft');
+  if (saveDraftBtn) {
+    saveDraftBtn.addEventListener('click', async function () {
+      var errEl = document.getElementById('recError');
+      errEl.textContent = '';
+      var sourceId = document.getElementById('recSourceId').value;
+      var targetId = document.getElementById('recTargetId').value;
+      var body = document.getElementById('recBody').value.trim();
+      var spoilers = document.getElementById('recSpoiler').checked;
+      if (!sourceId) { errEl.textContent = 'Pick the game you liked.'; return; }
+      if (!targetId) { errEl.textContent = 'Pick the game you’re recommending.'; return; }
+      if (sourceId === targetId) { errEl.textContent = 'Pick two different games.'; return; }
+      saveDraftBtn.disabled = true;
+      saveDraftBtn.textContent = 'Saving...';
+      try {
+        var res, data;
+        if (currentDraftId) {
+          res = await fetch('/api/recommendations/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recommendation_id: currentDraftId, body: body, contains_spoilers: spoilers, status: 'draft' }),
+          });
+        } else {
+          res = await fetch('/api/recommendations/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_game_id: sourceId, target_game_id: targetId, body: body, contains_spoilers: spoilers, status: 'draft' }),
+          });
+        }
+        data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Could not save draft.');
+        if (data.recommendation_id) currentDraftId = data.recommendation_id;
+        saveDraftBtn.textContent = 'Draft saved ✓';
+        setTimeout(function () { closeRecComposer(); saveDraftBtn.disabled = false; saveDraftBtn.textContent = 'Save draft'; }, 900);
+      } catch (err) {
+        errEl.textContent = (err && err.message) || 'Could not save draft.';
+        saveDraftBtn.disabled = false;
+        saveDraftBtn.textContent = 'Save draft';
       }
     });
   }
@@ -263,7 +361,11 @@ if (!window.__recComposerInit) {
 
   .rcx-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
   .rcx-spoiler { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
-  .rcx-submit { margin-left: auto; padding: 9px 18px; border: none; border-radius: 10px; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
+  .rcx-btn-group { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .rcx-draft { padding: 9px 16px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--text-secondary); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+  .rcx-draft:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
+  .rcx-draft:disabled { opacity: 0.6; cursor: default; }
+  .rcx-submit { padding: 9px 18px; border: none; border-radius: 10px; background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer; transition: opacity 0.15s; }
   .rcx-submit:hover { opacity: 0.9; }
   .rcx-submit:disabled { opacity: 0.5; cursor: default; }
   .rcx-error { font-size: 13px; color: #f87171; margin-top: 10px; min-height: 16px; }

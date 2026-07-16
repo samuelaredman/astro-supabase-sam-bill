@@ -1,0 +1,290 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../utils/database";
+import Layout from "../components/Layout.astro";
+import RecommendationComposer from "../components/RecommendationComposer.astro";
+import { igdbImage, timeAgo } from "../utils/format";
+
+// User client — only for the session check
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+if (!user) return Astro.redirect("/signin");
+
+// Admin client — bypasses RLS for all DB operations
+const db = getSupabaseAdmin() as any;
+
+const { data: profile } = await db
+  .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
+if (!profile) return Astro.redirect("/signin");
+
+// Never serve a stale draft list
+Astro.response.headers.set("Cache-Control", "no-store");
+
+const [{ data: reviewDrafts }, { data: recDrafts }] = await Promise.all([
+  db.from("reviews")
+    .select("id, score, title, body, created_at, games ( title, slug, cover_img_url )")
+    .eq("profile_id", profile.id)
+    .eq("status", "draft")
+    .order("created_at", { ascending: false }),
+  db.from("recommendations")
+    .select(`
+      id, body, contains_spoilers, created_at,
+      source_game:games!source_game_id ( id, title, cover_img_url ),
+      target_game:games!target_game_id ( id, title, cover_img_url )
+    `)
+    .eq("profile_id", profile.id)
+    .eq("status", "draft")
+    .order("created_at", { ascending: false }),
+]);
+
+const reviews = reviewDrafts ?? [];
+const recs = recDrafts ?? [];
+const totalDrafts = reviews.length + recs.length;
+
+function snippet(text: string | null, n = 140): string {
+  if (!text) return "";
+  const t = text.trim();
+  return t.length > n ? t.slice(0, n).trimEnd() + "…" : t;
+}
+---
+
+<Layout
+  title="Drafts — Chekpoint"
+  isLoggedIn={true}
+  currentProfile={profile}
+  activeNav="drafts"
+  variant="two-col"
+>
+  <main class="feed drafts-main">
+    <div class="drafts-header">
+      <h1 class="drafts-title">Drafts</h1>
+      {totalDrafts > 0 && <span class="drafts-count">{totalDrafts}</span>}
+    </div>
+
+    {totalDrafts === 0 ? (
+      <div class="drafts-empty">
+        <div class="drafts-empty-icon">📝</div>
+        <div class="drafts-empty-title">No drafts yet</div>
+        <p class="drafts-empty-body">
+          Start a review or a recommendation and hit <strong>Save draft</strong> — it'll wait for you here
+          until you're ready to post.
+        </p>
+      </div>
+    ) : (
+      <>
+        {reviews.length > 0 && (
+          <section class="drafts-section">
+            <h2 class="drafts-subhead">Review drafts</h2>
+            <div class="drafts-list">
+              {reviews.map((r: any) => {
+                const thumb = igdbImage(r.games?.cover_img_url, "t_cover_big");
+                const href = r.games?.slug ? `/games/${r.games.slug}?draft=${r.id}` : "#";
+                return (
+                  <div class="draft-card">
+                    <a href={href} class="draft-cover" aria-label="Continue draft">
+                      {thumb ? <img src={thumb} alt={r.games?.title ?? ""} /> : <span>🎮</span>}
+                    </a>
+                    <div class="draft-body">
+                      <div class="draft-game">{r.games?.title ?? "Unknown game"}</div>
+                      {r.title && <div class="draft-heading">{r.title}</div>}
+                      <div class="draft-snippet">{snippet(r.body)}</div>
+                      <div class="draft-meta">
+                        {r.score != null && <span class="draft-chip">Score {Number(r.score).toFixed(1)}</span>}
+                        <span class="draft-time">Saved {timeAgo(r.created_at)} ago</span>
+                      </div>
+                    </div>
+                    <div class="draft-actions">
+                      <a href={href} class="draft-continue">Continue</a>
+                      <button class="draft-delete" data-type="review" data-id={r.id} type="button">Delete</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {recs.length > 0 && (
+          <section class="drafts-section">
+            <h2 class="drafts-subhead">Recommendation drafts</h2>
+            <div class="drafts-list">
+              {recs.map((r: any) => {
+                const srcThumb = igdbImage(r.source_game?.cover_img_url, "t_cover_big");
+                return (
+                  <div class="draft-card">
+                    <div class="draft-cover">
+                      {srcThumb ? <img src={srcThumb} alt={r.source_game?.title ?? ""} /> : <span>🎮</span>}
+                    </div>
+                    <div class="draft-body">
+                      <div class="draft-game">
+                        {r.source_game?.title ?? "?"} <span class="draft-arrow">→</span> {r.target_game?.title ?? "?"}
+                      </div>
+                      <div class="draft-snippet">{r.body?.trim() ? snippet(r.body) : "No write-up yet."}</div>
+                      <div class="draft-meta">
+                        <span class="draft-time">Saved {timeAgo(r.created_at)} ago</span>
+                      </div>
+                    </div>
+                    <div class="draft-actions">
+                      <button
+                        class="draft-continue rec-continue"
+                        type="button"
+                        data-id={r.id}
+                        data-source-id={r.source_game?.id ?? ""}
+                        data-source-title={r.source_game?.title ?? ""}
+                        data-target-id={r.target_game?.id ?? ""}
+                        data-target-title={r.target_game?.title ?? ""}
+                        data-body={r.body ?? ""}
+                        data-spoilers={r.contains_spoilers ? "1" : ""}
+                      >Continue</button>
+                      <button class="draft-delete" data-type="recommendation" data-id={r.id} type="button">Delete</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+      </>
+    )}
+  </main>
+
+  <RecommendationComposer />
+</Layout>
+
+<script>
+  // Resume a recommendation draft in the shared composer
+  document.querySelectorAll(".rec-continue").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      const open = (window as any).openRecComposer;
+      if (typeof open !== "function") return;
+      open({
+        id: el.dataset.id,
+        sourceId: el.dataset.sourceId,
+        sourceTitle: el.dataset.sourceTitle,
+        targetId: el.dataset.targetId,
+        targetTitle: el.dataset.targetTitle,
+        body: el.dataset.body,
+        contains_spoilers: el.dataset.spoilers === "1",
+      });
+    });
+  });
+
+  // Delete a draft (soft-delete for reviews, hard-delete for recommendations)
+  document.querySelectorAll(".draft-delete").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const el = btn as HTMLButtonElement;
+      if (!confirm("Delete this draft? This can't be undone.")) return;
+      const type = el.dataset.type;
+      const id = el.dataset.id;
+      if (!id) return;
+      el.disabled = true;
+      el.textContent = "Deleting…";
+      const endpoint = type === "review" ? "/api/reviews/delete" : "/api/recommendations/delete";
+      const payload = type === "review" ? { review_id: id } : { recommendation_id: id };
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error();
+        const card = el.closest(".draft-card") as HTMLElement | null;
+        if (card) {
+          card.style.transition = "opacity 0.2s";
+          card.style.opacity = "0";
+          setTimeout(() => card.remove(), 220);
+        }
+      } catch {
+        el.disabled = false;
+        el.textContent = "Delete";
+        alert("Could not delete the draft. Try again.");
+      }
+    });
+  });
+</script>
+
+<style>
+  .drafts-main { min-width: 0; padding: 24px 24px 48px; }
+  .drafts-header {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 20px; padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .drafts-title {
+    font-family: 'DM Serif Display', serif; font-size: 26px; font-weight: 400;
+    color: var(--text-primary); margin: 0;
+  }
+  .drafts-count {
+    background: var(--accent); color: white; font-size: 11px; font-weight: 700;
+    padding: 2px 8px; border-radius: 20px; line-height: 1.5;
+  }
+
+  .drafts-empty { text-align: center; padding: 64px 24px; }
+  .drafts-empty-icon { font-size: 36px; margin-bottom: 14px; }
+  .drafts-empty-title {
+    font-family: 'DM Serif Display', serif; font-size: 20px;
+    color: var(--text-primary); margin-bottom: 10px;
+  }
+  .drafts-empty-body {
+    font-size: 14px; color: var(--text-secondary); line-height: 1.7;
+    max-width: 380px; margin: 0 auto;
+  }
+
+  .drafts-section { margin-bottom: 28px; }
+  .drafts-subhead {
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-tertiary); margin: 0 0 12px;
+  }
+  .drafts-list { display: flex; flex-direction: column; gap: 12px; }
+
+  .draft-card {
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 14px; border: 1px solid var(--border-subtle);
+    border-radius: 12px; background: var(--bg-card);
+  }
+  .draft-cover {
+    width: 46px; height: 62px; border-radius: 6px; overflow: hidden;
+    background: var(--tag-bg); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; flex-shrink: 0; text-decoration: none;
+  }
+  .draft-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .draft-body { flex: 1; min-width: 0; }
+  .draft-game { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
+  .draft-arrow { color: var(--accent); font-weight: 700; }
+  .draft-heading { font-size: 13px; color: var(--text-secondary); font-weight: 500; margin-bottom: 4px; }
+  .draft-snippet {
+    font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 8px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .draft-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .draft-chip {
+    font-size: 11px; font-weight: 600; color: var(--accent);
+    background: rgba(96, 80, 200, 0.1); border: 1px solid rgba(96, 80, 200, 0.2);
+    padding: 1px 8px; border-radius: 20px;
+  }
+  .draft-time { font-size: 11px; color: var(--text-tertiary); }
+
+  .draft-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+  .draft-continue {
+    padding: 6px 14px; border-radius: 8px; border: none; background: var(--accent);
+    color: var(--accent-text); font-size: 12px; font-weight: 600; font-family: inherit;
+    cursor: pointer; text-decoration: none; text-align: center; transition: opacity 0.15s;
+  }
+  .draft-continue:hover { opacity: 0.9; }
+  .draft-delete {
+    padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-tertiary); font-size: 12px; font-weight: 600;
+    font-family: inherit; cursor: pointer; transition: color 0.15s, border-color 0.15s;
+  }
+  .draft-delete:hover:not(:disabled) { color: #f87171; border-color: #f87171; }
+  .draft-delete:disabled { opacity: 0.6; cursor: default; }
+
+  @media (max-width: 560px) {
+    .draft-card { flex-wrap: wrap; }
+    .draft-actions { flex-direction: row; width: 100%; }
+    .draft-continue, .draft-delete { flex: 1; }
+  }
+</style>
