@@ -490,6 +490,7 @@ export type Database = {
           igdb_category: number | null
           igdb_id: number | null
           igdb_status: number | null
+          parent_game_id: string | null
           search_vector: unknown
           slug: string | null
           storyline: string | null
@@ -504,6 +505,7 @@ export type Database = {
           igdb_category?: number | null
           igdb_id?: number | null
           igdb_status?: number | null
+          parent_game_id?: string | null
           search_vector?: unknown
           slug?: string | null
           storyline?: string | null
@@ -518,13 +520,22 @@ export type Database = {
           igdb_category?: number | null
           igdb_id?: number | null
           igdb_status?: number | null
+          parent_game_id?: string | null
           search_vector?: unknown
           slug?: string | null
           storyline?: string | null
           title?: string
           title_search?: unknown
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "games_parent_game_id_fkey"
+            columns: ["parent_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       genres: {
         Row: {

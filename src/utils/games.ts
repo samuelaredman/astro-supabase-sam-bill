@@ -121,6 +121,18 @@ async function upsertJunction(
   }
 }
 
+// Resolves an IGDB game's parent (its base game) to our internal games.id, if we
+// already have that base game. IGDB exposes two parent pointers: `parent_game`
+// (DLC / expansions / episodes point at the base game) and `version_parent`
+// (alternate editions/versions point at the canonical release). We only link to a
+// parent that already exists in our DB — importing missing parents is a separate pass.
+async function resolveParentGameId(db: any, igdbGame: any): Promise<string | null> {
+  const parentIgdbId = igdbGame.parent_game ?? igdbGame.version_parent ?? null;
+  if (!parentIgdbId) return null;
+  const { data } = await db.from('games').select('id').eq('igdb_id', parentIgdbId).maybeSingle();
+  return data?.id ?? null;
+}
+
 export type ImportGameResult =
   | { ok: true; game: { id: string; title: string; slug: string; cover_img_url: string | null; date_released: string | null } }
   | { ok: false; error: string; status: number };
@@ -187,7 +199,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
 
   const games = await igdbFetch("games", `
     fields name, slug, summary, storyline, game_type, status,
-           first_release_date, cover.url,
+           first_release_date, cover.url, parent_game, version_parent,
            genres.id, genres.name, genres.slug,
            platforms.id, platforms.name, platforms.slug,
            themes.id, themes.name, themes.slug,
@@ -209,6 +221,8 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
   const { data: slugConflict } = await db.from('games').select('id').eq('slug', slug).maybeSingle();
   const finalSlug = slugConflict ? `${slug}-${igdbId}` : slug;
 
+  const parentGameId = await resolveParentGameId(db, game);
+
   const { data: inserted, error: insertError } = await db
     .from('games')
     .insert({
@@ -218,6 +232,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
       storyline:        game.storyline ?? null,
       igdb_category:    game.game_type ?? null,
       igdb_status:      game.status    ?? null,
+      parent_game_id:   parentGameId,
       cover_img_url:    coverUrl,
       date_released:    game.first_release_date
         ? new Date(game.first_release_date * 1000).toISOString().split('T')[0]
