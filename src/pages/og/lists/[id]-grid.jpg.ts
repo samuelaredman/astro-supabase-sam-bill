@@ -53,10 +53,12 @@ export const GET: APIRoute = async ({ params }) => {
     }
   }
 
-  const reviewScores = Object.values(reviewMap).map((r) => r.score);
+  const reviewValues = Object.values(reviewMap);
+  const reviewScores = reviewValues.map((r) => r.score);
   const avgScore = reviewScores.length > 0
     ? reviewScores.reduce((s, v) => s + v, 0) / reviewScores.length
     : null;
+  const totalHours = reviewValues.reduce((s, r) => s + (r.hoursPlayed ?? 0), 0);
 
   const [processedEntries, ownerAvatarDataUri] = await Promise.all([
     Promise.all(
@@ -88,6 +90,7 @@ export const GET: APIRoute = async ({ params }) => {
     isRanked: !!list.is_ranked,
     totalGames: entryList.length,
     avgScore,
+    totalHours,
     entries: processedEntries,
   });
 

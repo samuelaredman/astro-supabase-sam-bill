@@ -17,6 +17,7 @@ export interface ListGridData {
   isRanked: boolean;
   totalGames: number;
   avgScore: number | null;
+  totalHours: number;
   entries: ListGridEntry[];
 }
 
@@ -243,6 +244,13 @@ export function buildListGridTree(data: ListGridData): { tree: any; height: numb
       h("div", { style: { fontSize: 14, color: "rgba(255,255,255,0.12)", display: "flex" } }, "·"),
       h("div", { style: { fontSize: 14, fontWeight: 700, color: sc, display: "flex" } },
         `avg ${data.avgScore.toFixed(1)}`),
+    );
+  }
+  if (data.totalHours > 0) {
+    statParts.push(
+      h("div", { style: { fontSize: 14, color: "rgba(255,255,255,0.12)", display: "flex" } }, "·"),
+      h("div", { style: { fontSize: 14, fontWeight: 700, color: "rgba(240,237,232,0.7)", display: "flex" } },
+        `${data.totalHours}h played`),
     );
   }
 
