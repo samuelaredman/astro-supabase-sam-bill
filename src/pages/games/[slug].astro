@@ -5,7 +5,7 @@ import { getSupabase, createSupabaseServerClientFromContext, getSupabaseAdmin } 
 const supabase = getSupabase();
 import { igdbFetch } from '../../utils/igdb'
 import { igdbImage, scoreClass, timeAgo } from '../../utils/format'
-import { isAllowedGameCategory, GAME_CATEGORIES } from '../../utils/games'
+import { isAllowedGameCategory, GAME_CATEGORIES, seriesTitleTokens, seriesRelevanceScore } from '../../utils/games'
 import Layout from '../../components/Layout.astro'
 import ReviewCard from '../../components/ReviewCard.astro'
 import ReportModal from '../../components/ReportModal.astro'
@@ -358,7 +358,12 @@ const { data: childRows } = await (supabase as any)
   .order('date_released', { ascending: true, nullsFirst: false })
 const childGames = (childRows ?? []) as any[]
 
-// Series siblings: other games sharing a collection or franchise with this one.
+// Series siblings — "More in this series".
+// Prefer the tight `collection` grouping (IGDB's canonical series). Crossover games
+// (Super Smash Bros., Mario Kart) get tagged with many broad franchises, so unioning
+// franchises drags in unrelated titles (Donkey Kong, Zelda…). We only fall back to
+// franchise siblings when the collection yields none — e.g. Cyberpunk 2077, whose
+// collection is just itself, falls back to its clean 3-game franchise.
 const [{ data: collRows }, { data: franRows }] = await Promise.all([
   (supabase as any).from('game_collections').select('collection_id').eq('game_id', game.id),
   (supabase as any).from('game_franchises').select('franchise_id').eq('game_id', game.id),
@@ -366,31 +371,60 @@ const [{ data: collRows }, { data: franRows }] = await Promise.all([
 const collectionIds = (collRows ?? []).map((r: any) => r.collection_id)
 const franchiseIds = (franRows ?? []).map((r: any) => r.franchise_id)
 
-const siblingIds = new Set<string>()
-if (collectionIds.length > 0) {
-  const { data } = await (supabase as any)
-    .from('game_collections').select('game_id').in('collection_id', collectionIds)
-  for (const r of data ?? []) siblingIds.add(r.game_id)
+async function siblingIdsFrom(junction: string, col: string, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>()
+  if (ids.length === 0) return out
+  const { data } = await (supabase as any).from(junction).select('game_id').in(col, ids)
+  for (const r of data ?? []) out.add(r.game_id)
+  // Drop self, the parent, and any direct children — those get their own sections.
+  out.delete(game.id)
+  if (game.parent_game_id) out.delete(game.parent_game_id)
+  for (const c of childGames) out.delete(c.id)
+  return out
 }
-if (franchiseIds.length > 0) {
-  const { data } = await (supabase as any)
-    .from('game_franchises').select('game_id').in('franchise_id', franchiseIds)
-  for (const r of data ?? []) siblingIds.add(r.game_id)
-}
-// Drop self, the parent, and any direct children — those get their own sections.
-siblingIds.delete(game.id)
-if (game.parent_game_id) siblingIds.delete(game.parent_game_id)
-for (const c of childGames) siblingIds.delete(c.id)
 
+let siblingIds = await siblingIdsFrom('game_collections', 'collection_id', collectionIds)
+if (siblingIds.size === 0) {
+  siblingIds = await siblingIdsFrom('game_franchises', 'franchise_id', franchiseIds)
+}
+
+const SERIES_LIMIT = 12
 let seriesGames: any[] = []
 if (siblingIds.size > 0) {
   const { data } = await (supabase as any)
     .from('games')
-    .select('id, title, slug, cover_img_url, date_released, igdb_category')
+    .select('id, title, slug, cover_img_url, date_released, igdb_category, parent_game_id')
     .in('id', Array.from(siblingIds))
-    .order('date_released', { ascending: true, nullsFirst: false })
-  // Only surface main, reviewable entries here — DLC/ports would clutter the series rail.
-  seriesGames = (data ?? []).filter((g: any) => isAllowedGameCategory(g.igdb_category, g.title)).slice(0, 12)
+  // Only surface main, reviewable entries here. Exclude:
+  //  - non-main categories (DLC/ports) that would clutter the series rail, and
+  //  - anything linked to a parent — those belong under that base game's
+  //    "Editions & DLC" section, not the flat series list.
+  const candidates = (data ?? [])
+    .filter((g: any) => !g.parent_game_id && isAllowedGameCategory(g.igdb_category, g.title))
+
+  if (candidates.length > SERIES_LIMIT) {
+    // Large collection (e.g. "Super Mario" ~68). Rank by relevance to keep the
+    // closest entries rather than just the oldest — but ONLY to select which
+    // survive the cap. Display order stays chronological below, so tight series
+    // (Witcher, Cyberpunk) — always under the cap — are never reordered here.
+    const selfTokens = seriesTitleTokens(game.title)
+    const selfTime = game.date_released ? new Date(game.date_released).getTime() : null
+    seriesGames = [...candidates]
+      .sort((a: any, b: any) =>
+        seriesRelevanceScore(selfTokens, selfTime, b.title, b.date_released) -
+        seriesRelevanceScore(selfTokens, selfTime, a.title, a.date_released))
+      .slice(0, SERIES_LIMIT)
+  } else {
+    seriesGames = candidates
+  }
+
+  // A series reads best chronologically — sort the selected entries by release date
+  // (undated last) for display, independent of how they were ranked for selection.
+  seriesGames.sort((a: any, b: any) => {
+    const ta = a.date_released ? new Date(a.date_released).getTime() : Infinity
+    const tb = b.date_released ? new Date(b.date_released).getTime() : Infinity
+    return ta - tb
+  })
 }
 
 // Human-readable label for a child's IGDB category (e.g. "DLC", "Expansion").

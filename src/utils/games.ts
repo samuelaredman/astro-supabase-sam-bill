@@ -93,6 +93,54 @@ export function foldDiacritics(str: string): string {
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
+// \u2500\u2500 Series relevance ranking \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Used by the "More in this series" rail to rank sibling games when a collection
+// is larger than the display cap (e.g. the "Super Mario" collection has ~68 games).
+// Game titles in a series almost always share a leading name ("The Witcher \u2026",
+// "Super Smash Bros. \u2026"), so a shared-prefix count is a strong relevance signal
+// that cleanly separates true series entries from loosely-linked ones.
+
+// Normalizes a title into lowercase alphanumeric tokens (diacritics folded).
+// "Super Smash Bros. Melee" -> ["super","smash","bros","melee"].
+export function seriesTitleTokens(title: string): string[] {
+  return foldDiacritics(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// Number of leading tokens two titles share \u2014 the length of their common prefix.
+// ("The Witcher 3","The Witcher 2") -> 2 ; ("Smash Bros Melee","Donkey Kong") -> 0.
+export function sharedLeadingTokens(a: string[], b: string[]): number {
+  const n = Math.min(a.length, b.length);
+  let count = 0;
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) break;
+    count++;
+  }
+  return count;
+}
+
+// Relevance of a candidate sibling to the game being viewed. Shared title prefix
+// dominates; release-date proximity (0..1, 1 = same year) only breaks ties between
+// equally title-similar entries. Higher = more relevant.
+export function seriesRelevanceScore(
+  selfTokens: string[],
+  selfTime: number | null,
+  candidateTitle: string,
+  candidateReleased: string | null | undefined
+): number {
+  const shared = sharedLeadingTokens(selfTokens, seriesTitleTokens(candidateTitle));
+  let proximity = 0;
+  if (selfTime != null && candidateReleased) {
+    const years = Math.abs(selfTime - new Date(candidateReleased).getTime()) / (365.25 * 24 * 3600 * 1000);
+    proximity = 1 / (1 + years);
+  }
+  return shared * 10 + proximity;
+}
+
 function makeGameSlug(title: string, igdbSlug?: string): string {
   if (igdbSlug) return igdbSlug;
   return foldDiacritics(title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
