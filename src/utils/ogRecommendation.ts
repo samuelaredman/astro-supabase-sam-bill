@@ -123,12 +123,10 @@ export function buildRecOgTree(data: RecOgData): any {
       position: "absolute",
       left: HALF_W, top: CONTENT_TOP,
       width: GAP_W, height: CONTENT_H,
-      display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", gap: 6,
+      display: "flex", alignItems: "center", justifyContent: "center",
     },
   }, [
-    h("div", { style: { fontSize: 22, fontWeight: 700, color: OG_ACCENT, display: "flex", lineHeight: 1 } }, "→"),
-    h("div", { style: { fontSize: 22, fontWeight: 700, color: OG_ACCENT, display: "flex", lineHeight: 1 } }, "←"),
+    h("div", { style: { fontSize: 26, fontWeight: 700, color: OG_ACCENT, display: "flex", lineHeight: 1 } }, "↔"),
   ]));
 
   // ── Separator ──
