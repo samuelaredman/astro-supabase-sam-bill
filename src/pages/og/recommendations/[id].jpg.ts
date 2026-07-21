@@ -2,12 +2,10 @@ import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
 import { renderOgImage, fetchAndCropCover, fetchImageDataUri } from "../../../utils/og";
-import { buildRecOgTree } from "../../../utils/ogRecommendation";
+import { buildRecOgTree, COVER_W, COVER_H } from "../../../utils/ogRecommendation";
 
 export const prerender = false;
 
-const COVER_W = 200;
-const COVER_H = 267;
 const TIMEOUT_MS = 4500;
 
 export const GET: APIRoute = async ({ params }) => {
