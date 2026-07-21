@@ -69,6 +69,17 @@ const { data: gameRecsRaw } = await db
   .limit(50);
 const gameRecs = (gameRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfileId));
 
+// Aggregate the "other" game in each rec to build a ranked play-next grid
+const _relatedMap = new Map<string, { game: { id: string; title: string; slug: string; cover_img_url: string | null }; count: number }>();
+for (const rec of gameRecs) {
+  const other = rec.sourceGame?.id === game.id ? rec.targetGame : rec.sourceGame;
+  if (!other?.id) continue;
+  const entry = _relatedMap.get(other.id);
+  if (entry) entry.count++;
+  else _relatedMap.set(other.id, { game: other, count: 1 });
+}
+const relatedGames = [..._relatedMap.values()].sort((a, b) => b.count - a.count);
+
 // The current user's saved draft review for this game (if any), so "Write a review"
 // resumes it instead of starting a duplicate. Auto-opens when arriving via ?draft=.
 let draftReview: any = null;
@@ -800,6 +811,88 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       .avg-score-num{font-size:56px}
       .write-review-btn{width:100%;text-align:center}
       .tab-nav{flex-wrap:wrap}
+      .rec-game-grid{grid-template-columns:repeat(3,1fr)}
+    }
+
+    /* ── Recommendation play-next grid ── */
+    .rec-game-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    .rec-game-tile {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-decoration: none;
+      gap: 8px;
+    }
+    .rec-game-tile:hover .rec-tile-cover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,.35); }
+    .rec-game-tile:hover .rec-tile-title { color: var(--accent); }
+    .rec-tile-cover {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 3/4;
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--tag-bg);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .rec-tile-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .rec-tile-ph { font-size: 28px; }
+    .rec-tile-badge {
+      position: absolute;
+      bottom: 6px;
+      right: 6px;
+      background: rgba(0,0,0,.7);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 5px;
+      letter-spacing: 0.03em;
+    }
+    .rec-tile-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+      text-align: center;
+      line-height: 1.3;
+      transition: color 0.12s;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      width: 100%;
+    }
+
+    /* ── Posts section divider ── */
+    .rec-posts-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 4px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .rec-posts-count {
+      background: var(--tag-bg);
+      border: 1px solid var(--border);
+      color: var(--text-tertiary);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 1px 7px;
+      border-radius: 20px;
     }
   </style>
 
@@ -1134,34 +1227,61 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
           : <a href={`/signin?next=${encodeURIComponent(`/games/${game.slug}?tab=recommendations`)}`} class="write-review-btn">+ Add a recommendation</a>
         }
       </div>
+
       {gameRecs.length === 0 ? (
         <div class="empty-state">
           <div class="empty-title">No recommendations yet</div>
           <p style="font-size:14px;color:var(--text-tertiary)">Be the first to suggest what fans of {game.title} should play next.</p>
         </div>
       ) : (
-        <div>
-          {gameRecs.map((rec: any) => (
-            <RecommendationFeedCard
-              id={rec.id}
-              sourceGame={rec.sourceGame}
-              targetGame={rec.targetGame}
-              body={rec.body}
-              containsSpoilers={rec.containsSpoilers}
-              ownerUsername={rec.ownerUsername}
-              ownerAvatar={rec.ownerAvatar}
-              createdAt={rec.createdAt}
-              upVotes={rec.upVotes}
-              downVotes={rec.downVotes}
-              myVote={rec.myVote}
-              commentCount={rec.commentCount}
-              reactions={rec.reactions}
-              isLoggedIn={isLoggedIn}
-              currentProfileId={currentProfileId}
-              profileId={rec.profileId}
-            />
-          ))}
-        </div>
+        <>
+          {/* ── Play-next game grid ── */}
+          <div class="rec-game-grid">
+            {relatedGames.map(({ game: g, count }) => {
+              const cover = igdbImage(g.cover_img_url, 't_cover_big');
+              return (
+                <a href={`/games/${g.slug}`} class="rec-game-tile">
+                  <div class="rec-tile-cover">
+                    {cover
+                      ? <img src={cover} alt={g.title} loading="lazy" />
+                      : <span class="rec-tile-ph">🎮</span>
+                    }
+                    <div class="rec-tile-badge">{count} {count === 1 ? 'rec' : 'recs'}</div>
+                  </div>
+                  <div class="rec-tile-title">{g.title}</div>
+                </a>
+              );
+            })}
+          </div>
+
+          {/* ── Posts section ── */}
+          <div class="rec-posts-header">
+            <span>Posts</span>
+            <span class="rec-posts-count">{gameRecs.length}</span>
+          </div>
+          <div>
+            {gameRecs.map((rec: any) => (
+              <RecommendationFeedCard
+                id={rec.id}
+                sourceGame={rec.sourceGame}
+                targetGame={rec.targetGame}
+                body={rec.body}
+                containsSpoilers={rec.containsSpoilers}
+                ownerUsername={rec.ownerUsername}
+                ownerAvatar={rec.ownerAvatar}
+                createdAt={rec.createdAt}
+                upVotes={rec.upVotes}
+                downVotes={rec.downVotes}
+                myVote={rec.myVote}
+                commentCount={rec.commentCount}
+                reactions={rec.reactions}
+                isLoggedIn={isLoggedIn}
+                currentProfileId={currentProfileId}
+                profileId={rec.profileId}
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
 
