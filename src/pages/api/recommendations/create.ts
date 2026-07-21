@@ -47,17 +47,19 @@ export const POST: APIRoute = async (context) => {
   if (!body?.trim())
     return json({ error: "source_game_id, target_game_id and body are required." }, 400);
 
-  // One published recommendation per author per directional game pair
+  // One published recommendation per author per unordered game pair (X→Y and Y→X are the same)
   const { data: existing } = await (db as any)
     .from("recommendations")
     .select("id")
     .eq("profile_id", profile.id)
-    .eq("source_game_id", source_game_id)
-    .eq("target_game_id", target_game_id)
     .eq("status", "published")
+    .or(
+      `and(source_game_id.eq.${source_game_id},target_game_id.eq.${target_game_id}),` +
+      `and(source_game_id.eq.${target_game_id},target_game_id.eq.${source_game_id})`
+    )
     .maybeSingle();
 
-  if (existing) return json({ error: "You've already made this recommendation." }, 409);
+  if (existing) return json({ error: "You've already made a recommendation between these two games." }, 409);
 
   const { data: inserted, error: insertError } = await (db as any)
     .from("recommendations")
