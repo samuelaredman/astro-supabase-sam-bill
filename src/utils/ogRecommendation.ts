@@ -126,7 +126,7 @@ export function buildRecOgTree(data: RecOgData): any {
       display: "flex", alignItems: "center", justifyContent: "center",
     },
   }, [
-    h("div", { style: { fontSize: 26, fontWeight: 700, color: OG_ACCENT, display: "flex", lineHeight: 1 } }, "↔"),
+    h("div", { style: { fontSize: 32, fontWeight: 700, color: OG_ACCENT, display: "flex", lineHeight: 1 } }, "↔"),
   ]));
 
   // ── Separator ──
