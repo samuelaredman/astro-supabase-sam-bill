@@ -164,36 +164,42 @@ export function buildRecOgTree(data: RecOgData): any {
     ]),
   ]));
 
-  // ── "Rec" chip — top-left ──
+  // ── "Recommendation" chip — top-middle ──
   children.push(h("div", {
     style: {
-      position: "absolute", top: 24, left: 32,
-      display: "flex", alignItems: "center", gap: 9,
-      background: "rgba(9,9,10,0.5)", borderRadius: 20,
-      padding: "8px 16px 8px 14px",
+      position: "absolute", top: 24, left: 0, right: 0,
+      display: "flex", justifyContent: "center",
     },
   }, [
-    h("div", { style: { width: 9, height: 9, borderRadius: 5, background: OG_ACCENT, display: "flex" } }),
     h("div", {
-      style: { fontSize: 17, fontWeight: 700, letterSpacing: 2,
-               textTransform: "uppercase", color: "rgba(240,237,232,0.95)", display: "flex" },
-    }, "Rec"),
+      style: {
+        display: "flex", alignItems: "center", gap: 9,
+        background: "rgba(9,9,10,0.5)", borderRadius: 20,
+        padding: "8px 16px 8px 14px",
+      },
+    }, [
+      h("div", { style: { width: 9, height: 9, borderRadius: 5, background: OG_ACCENT, display: "flex" } }),
+      h("div", {
+        style: { fontSize: 17, fontWeight: 700, letterSpacing: 2,
+                 textTransform: "uppercase", color: "rgba(240,237,232,0.95)", display: "flex" },
+      }, "Recommendation"),
+    ]),
   ]));
 
-  // ── "CHEKPOINT" chip — top-right ──
+  // ── "CHEKPOINT.GG" branding pill — top-right, highlighted ──
   children.push(h("div", {
     style: {
       position: "absolute", top: 24, right: 32,
-      display: "flex", alignItems: "center", gap: 9,
-      background: "rgba(9,9,10,0.5)", borderRadius: 20,
-      padding: "8px 16px 8px 14px",
+      display: "flex", alignItems: "center", gap: 7,
+      background: "linear-gradient(135deg, rgba(96,80,200,0.55) 0%, rgba(139,123,240,0.35) 100%)",
+      border: "1px solid rgba(139,123,240,0.45)",
+      borderRadius: 20, padding: "8px 15px 8px 12px",
     },
   }, [
-    h("div", { style: { width: 9, height: 9, borderRadius: 5, background: OG_ACCENT, display: "flex" } }),
+    h("div", { style: { width: 8, height: 8, borderRadius: 4, background: OG_ACCENT, display: "flex", flexShrink: 0 } }),
     h("div", {
-      style: { fontSize: 22, fontWeight: 700, letterSpacing: 3,
-               color: "rgba(240,237,232,0.95)", display: "flex" },
-    }, "CHEKPOINT"),
+      style: { fontSize: 15, fontWeight: 700, letterSpacing: 2, color: "#f0ede8", display: "flex" },
+    }, "CHEKPOINT.GG"),
   ]));
 
   return h("div", {

@@ -10,13 +10,20 @@ interface Props {
    */
   variant?: 'pill' | 'icon' | 'overlay';
   /**
-   * When provided, clicking the button shows a dropdown with two options:
-   * "Copy link" and "Copy image" (fetches this URL and copies/downloads it).
+   * When provided, the share panel also offers "Copy Image" / "Download Image"
+   * for this image (fetched from this URL), and native OS share (see below)
+   * shares the image file itself instead of just the link.
    */
   imageUrl?: string;
+  /**
+   * Short human-readable blurb about the content (e.g. "Elden Ring — 9/10 by
+   * @username"), used as the prefilled text for Discord/Steam sharing since a
+   * bare link reads as spammy in a chat. Falls back to `label` when omitted.
+   */
+  shareText?: string;
 }
 
-const { url, label = "Share", variant = 'pill', imageUrl } = Astro.props;
+const { url, label = "Share", variant = 'pill', imageUrl, shareText } = Astro.props;
 const shareUrl = url ?? Astro.url.pathname;
 const iconOnly = variant !== 'pill';
 ---
@@ -26,6 +33,7 @@ const iconOnly = variant !== 'pill';
   type="button"
   data-share-url={shareUrl}
   data-share-title={label}
+  data-share-text={shareText ?? ''}
   data-share-image={imageUrl ?? ''}
   title={iconOnly ? label : undefined}
 >
@@ -76,7 +84,7 @@ const iconOnly = variant !== 'pill';
 </style>
 
 <style is:global>
-  #share-img-panel {
+  #share-panel {
     flex-direction: column;
     gap: 2px;
     background: var(--bg-card);
@@ -84,9 +92,9 @@ const iconOnly = variant !== 'pill';
     border-radius: 10px;
     padding: 5px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-    min-width: 180px;
+    min-width: 190px;
   }
-  #share-img-panel button {
+  #share-panel button {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -103,22 +111,32 @@ const iconOnly = variant !== 'pill';
     text-align: left;
     transition: background 0.1s, color 0.1s;
   }
-  #share-img-panel button:hover:not(:disabled) {
+  #share-panel button svg { flex-shrink: 0; }
+  #share-panel button:hover:not(:disabled) {
     background: var(--bg-hover);
     color: var(--text-primary);
   }
-  #share-img-panel button:disabled { opacity: 0.5; cursor: default; }
+  #share-panel button:disabled { opacity: 0.5; cursor: default; }
+  #share-panel .share-panel-divider {
+    height: 1px;
+    background: var(--border-subtle, var(--border));
+    margin: 4px 2px;
+  }
 </style>
 
 <script>
   if (!(window as any).__shareBtnInit) {
     (window as any).__shareBtnInit = true;
 
-    // ── Singleton dropdown panel for share-with-image buttons ────────────────
+    // ── Singleton dropdown panel — shared across every ShareButton on the page ──
     const panel = document.createElement('div');
-    panel.id = 'share-img-panel';
+    panel.id = 'share-panel';
     panel.style.cssText = 'display:none;position:fixed;z-index:9999';
     panel.innerHTML =
+      '<button id="share-opt-native">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>' +
+        'Share…' +
+      '</button>' +
       '<button id="share-opt-link">' +
         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>' +
         'Copy link' +
@@ -130,10 +148,38 @@ const iconOnly = variant !== 'pill';
       '<button id="share-opt-download">' +
         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
         'Download Image' +
+      '</button>' +
+      '<div class="share-panel-divider"></div>' +
+      '<button id="share-opt-reddit">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="13.2" r="7.6"/><circle cx="19.2" cy="7.4" r="1.6" fill="var(--bg-card)"/><circle cx="8.6" cy="13" r="1.4" fill="var(--bg-card)"/><circle cx="15.4" cy="13" r="1.4" fill="var(--bg-card)"/><path d="M8.6 16.2c1 .9 2.2 1.3 3.4 1.3s2.4-.4 3.4-1.3" stroke="var(--bg-card)" stroke-width="1" stroke-linecap="round" fill="none"/><path d="M19.2 7.4 20.8 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="12" cy="4" r="1" /></svg>' +
+        'Share to Reddit' +
+      '</button>' +
+      '<button id="share-opt-discord">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 8.5C8 6.8 10 6 12 6s4 .8 6 2.5c1.3 3 1.6 6.3.9 9-1.4.9-2.8 1.4-4.2 1.6l-.6-1.4c.7-.2 1.4-.5 2-.9-1.4.6-3 .9-4.6.9s-3.2-.3-4.6-.9c.6.4 1.3.7 2 .9L8.3 19c-1.4-.2-2.8-.7-4.2-1.6-.6-2.5-.4-5.9.9-8.9Z"/><circle cx="9.3" cy="13" r="1.3" fill="var(--bg-card)"/><circle cx="14.7" cy="13" r="1.3" fill="var(--bg-card)"/></svg>' +
+        'Share to Discord' +
+      '</button>' +
+      '<button id="share-opt-steam">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="12" cy="12" r="9.2"/><circle cx="15" cy="9" r="2.6"/><circle cx="15" cy="9" r="0.8" fill="currentColor"/><path d="M8.6 14.4a2.4 2.4 0 1 0 2 4.3" /><path d="M9.6 14.9 12.8 11" /></svg>' +
+        'Share to Steam' +
       '</button>';
     document.body.appendChild(panel);
 
+    const nativeOpt = panel.querySelector('#share-opt-native') as HTMLButtonElement;
+    const imageOptEl = panel.querySelector('#share-opt-image') as HTMLButtonElement;
+    const downloadOptEl = panel.querySelector('#share-opt-download') as HTMLButtonElement;
+
+    // Native OS share sheet (Messages/AirDrop/Mail on Mac & iOS, the Android
+    // share tray, etc.) is only offered when the browser actually supports it —
+    // desktop Chrome/Firefox generally don't, so we hide the entry there rather
+    // than show a dead button.
+    const hasNativeShare = !!(navigator as any).share;
+    if (nativeOpt) nativeOpt.style.display = hasNativeShare ? '' : 'none';
+
     let activeBtn: HTMLButtonElement | null = null;
+
+    function absUrl(path: string): string {
+      return new URL(path, window.location.origin).href;
+    }
 
     function closePanel() {
       panel.style.display = 'none';
@@ -142,6 +188,9 @@ const iconOnly = variant !== 'pill';
 
     function openPanel(btn: HTMLButtonElement) {
       activeBtn = btn;
+      const hasImage = !!btn.dataset.shareImage;
+      if (imageOptEl) imageOptEl.style.display = hasImage ? '' : 'none';
+      if (downloadOptEl) downloadOptEl.style.display = hasImage ? '' : 'none';
       panel.style.display = 'flex';
       requestAnimationFrame(function () {
         const rect = btn.getBoundingClientRect();
@@ -165,6 +214,20 @@ const iconOnly = variant !== 'pill';
       }, 2000);
     }
 
+    function copyLink(btn: HTMLButtonElement, msg: string) {
+      const url = absUrl(btn.dataset.shareUrl || window.location.pathname);
+      navigator.clipboard?.writeText(url).then(function () { showToast(btn, msg); });
+    }
+
+    // Short blurb + link, for chat apps (Discord, Steam) where a bare URL
+    // reads as spammy — falls back to the button's tooltip label, then the
+    // page title, when the caller hasn't supplied a content-specific blurb.
+    function copyBlurb(btn: HTMLButtonElement, msg: string) {
+      const url = absUrl(btn.dataset.shareUrl || window.location.pathname);
+      const blurb = btn.dataset.shareText || btn.dataset.shareTitle || document.title;
+      navigator.clipboard?.writeText(blurb + '\n' + url).then(function () { showToast(btn, msg); });
+    }
+
     function downloadBlob(blob: Blob, filename: string) {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -175,8 +238,82 @@ const iconOnly = variant !== 'pill';
       setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
     }
 
+    // Fetches an image and puts it on the clipboard as PNG (Chrome/Edge only
+    // support PNG for image clipboard writes), falling back to a direct
+    // download when the Clipboard API or PNG conversion isn't available.
+    function copyImageToClipboard(btn: HTMLButtonElement, imageUrl: string, successMsg: string) {
+      const absImgUrl = absUrl(imageUrl);
+      return fetch(absImgUrl)
+        .then(function (r) { return r.blob(); })
+        .then(function (blob) {
+          if (!(window as any).ClipboardItem) {
+            // Firefox / Safari fallback: download the JPEG directly
+            downloadBlob(blob, 'chekpoint.jpg');
+            showToast(btn, 'Image saved');
+            return;
+          }
+          // Chrome/Edge: convert JPEG → PNG for clipboard (only PNG is supported)
+          const objUrl = URL.createObjectURL(blob);
+          const img = new Image();
+          img.onload = function () {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            (canvas.getContext('2d') as CanvasRenderingContext2D).drawImage(img, 0, 0);
+            URL.revokeObjectURL(objUrl);
+            canvas.toBlob(function (png) {
+              if (!png) { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); return; }
+              navigator.clipboard.write([(new (window as any).ClipboardItem({ 'image/png': png }))])
+                .then(function () { showToast(btn, successMsg); })
+                .catch(function () { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); });
+            }, 'image/png');
+          };
+          img.onerror = function () {
+            URL.revokeObjectURL(objUrl);
+            downloadBlob(blob, 'chekpoint.jpg');
+            showToast(btn, 'Image saved');
+          };
+          img.src = objUrl;
+        })
+        .catch(function () {
+          window.open(absImgUrl, '_blank');
+        });
+    }
+
     document.addEventListener('click', function (e) {
       const target = e.target as HTMLElement;
+
+      // ── Native OS share sheet ───────────────────────────────────────────────
+      const nativeOptClicked = target.closest('#share-opt-native') as HTMLElement | null;
+      if (nativeOptClicked) {
+        const btn = activeBtn;
+        closePanel();
+        if (!btn) return;
+        const url = absUrl(btn.dataset.shareUrl || window.location.pathname);
+        const title = btn.dataset.shareTitle || document.title;
+        const imageUrl = btn.dataset.shareImage;
+
+        const shareUrlOnly = function () {
+          (navigator as any).share({ url: url, title: title }).catch(function () {});
+        };
+
+        if (imageUrl && (navigator as any).canShare) {
+          fetch(absUrl(imageUrl))
+            .then(function (r) { return r.blob(); })
+            .then(function (blob) {
+              const file = new File([blob], 'chekpoint.jpg', { type: blob.type || 'image/jpeg' });
+              if ((navigator as any).canShare({ files: [file] })) {
+                (navigator as any).share({ files: [file], title: title, url: url }).catch(shareUrlOnly);
+              } else {
+                shareUrlOnly();
+              }
+            })
+            .catch(shareUrlOnly);
+        } else {
+          shareUrlOnly();
+        }
+        return;
+      }
 
       // ── Copy link option ────────────────────────────────────────────────────
       const linkOpt = target.closest('#share-opt-link') as HTMLElement | null;
@@ -184,9 +321,7 @@ const iconOnly = variant !== 'pill';
         const btn = activeBtn;
         closePanel();
         if (!btn) return;
-        const path = btn.dataset.shareUrl || window.location.pathname;
-        const url = new URL(path, window.location.origin).href;
-        navigator.clipboard?.writeText(url).then(function () { showToast(btn, 'Link copied'); });
+        copyLink(btn, 'Link copied');
         return;
       }
 
@@ -197,51 +332,7 @@ const iconOnly = variant !== 'pill';
         const imageUrl = btn?.dataset.shareImage;
         closePanel();
         if (!btn || !imageUrl) return;
-
-        const absUrl = new URL(imageUrl, window.location.origin).href;
-        imageOpt.textContent = 'Copying…';
-        imageOpt.setAttribute('disabled', 'true');
-
-        fetch(absUrl)
-          .then(function (r) { return r.blob(); })
-          .then(function (blob) {
-            imageOpt.textContent = 'Copy Image';
-            imageOpt.removeAttribute('disabled');
-
-            if ((window as any).ClipboardItem) {
-              // Chrome/Edge: convert JPEG → PNG for clipboard (only PNG is supported)
-              const objUrl = URL.createObjectURL(blob);
-              const img = new Image();
-              img.onload = function () {
-                const canvas = document.createElement('canvas');
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                (canvas.getContext('2d') as CanvasRenderingContext2D).drawImage(img, 0, 0);
-                URL.revokeObjectURL(objUrl);
-                canvas.toBlob(function (png) {
-                  if (!png) { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); return; }
-                  navigator.clipboard.write([(new (window as any).ClipboardItem({ 'image/png': png }))])
-                    .then(function () { showToast(btn, 'Image copied'); })
-                    .catch(function () { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); });
-                }, 'image/png');
-              };
-              img.onerror = function () {
-                URL.revokeObjectURL(objUrl);
-                downloadBlob(blob, 'chekpoint.jpg');
-                showToast(btn, 'Image saved');
-              };
-              img.src = objUrl;
-            } else {
-              // Firefox / Safari fallback: download the JPEG directly
-              downloadBlob(blob, 'chekpoint.jpg');
-              showToast(btn, 'Image saved');
-            }
-          })
-          .catch(function () {
-            imageOpt.textContent = 'Copy Image';
-            imageOpt.removeAttribute('disabled');
-            window.open(absUrl, '_blank');
-          });
+        copyImageToClipboard(btn, imageUrl, 'Image copied');
         return;
       }
 
@@ -253,11 +344,11 @@ const iconOnly = variant !== 'pill';
         closePanel();
         if (!btn || !imageUrl) return;
 
-        const absUrl = new URL(imageUrl, window.location.origin).href;
+        const absImgUrl = absUrl(imageUrl);
         downloadOpt.textContent = 'Downloading…';
         downloadOpt.setAttribute('disabled', 'true');
 
-        fetch(absUrl)
+        fetch(absImgUrl)
           .then(function (r) { return r.blob(); })
           .then(function (blob) {
             downloadOpt.textContent = 'Download Image';
@@ -268,45 +359,70 @@ const iconOnly = variant !== 'pill';
           .catch(function () {
             downloadOpt.textContent = 'Download Image';
             downloadOpt.removeAttribute('disabled');
-            window.open(absUrl, '_blank');
+            window.open(absImgUrl, '_blank');
           });
         return;
       }
 
-      // ── Share button click ──────────────────────────────────────────────────
+      // ── Share to Reddit — opens Reddit's own submit page, prefilled ────────
+      const redditOpt = target.closest('#share-opt-reddit') as HTMLElement | null;
+      if (redditOpt) {
+        const btn = activeBtn;
+        closePanel();
+        if (!btn) return;
+        const url = absUrl(btn.dataset.shareUrl || window.location.pathname);
+        const title = btn.dataset.shareTitle || document.title;
+        const redditUrl = 'https://www.reddit.com/submit?url=' + encodeURIComponent(url) + '&title=' + encodeURIComponent(title);
+        window.open(redditUrl, '_blank', 'noopener,noreferrer,width=880,height=740');
+        return;
+      }
+
+      // ── Share to Discord — copies a short blurb + link, not a bare URL.
+      // Discord auto-embeds the link as a rich card from our OG tags, so the
+      // blurb is what actually reads well as a message; a naked link alone
+      // looks like spam in a chat. ──
+      const discordOpt = target.closest('#share-opt-discord') as HTMLElement | null;
+      if (discordOpt) {
+        const btn = activeBtn;
+        closePanel();
+        if (!btn) return;
+        copyBlurb(btn, 'Copied — paste in Discord');
+        return;
+      }
+
+      // ── Share to Steam — Steam chat does NOT unfurl link previews the way
+      // Discord/Reddit do, but it does support pasting images directly. So
+      // instead of handing over a link that'll just sit there as plain text,
+      // copy the actual share image when one exists — falls back to a blurb +
+      // link for content that has no image. ──
+      const steamOpt = target.closest('#share-opt-steam') as HTMLElement | null;
+      if (steamOpt) {
+        const btn = activeBtn;
+        const imageUrl = btn?.dataset.shareImage;
+        closePanel();
+        if (!btn) return;
+        if (imageUrl) {
+          copyImageToClipboard(btn, imageUrl, 'Image copied — paste in Steam chat');
+        } else {
+          copyBlurb(btn, 'Copied — paste in Steam chat');
+        }
+        return;
+      }
+
+      // ── Share button click — always opens the panel ─────────────────────────
       const btn = target.closest('.share-btn') as HTMLButtonElement | null;
       if (btn) {
-        const imageUrl = btn.dataset.shareImage;
-
-        if (imageUrl) {
-          // Has image option — show dropdown instead of immediately copying
-          if (panel.style.display !== 'none' && activeBtn === btn) {
-            closePanel();
-          } else {
-            closePanel();
-            openPanel(btn);
-          }
-          return;
+        if (panel.style.display !== 'none' && activeBtn === btn) {
+          closePanel();
+        } else {
+          closePanel();
+          openPanel(btn);
         }
-
-        // No image option — existing copy-link / native-share behavior
-        const path = btn.dataset.shareUrl || window.location.pathname;
-        const url = new URL(path, window.location.origin).href;
-        const title = btn.dataset.shareTitle || document.title;
-
-        if ((navigator as any).share) {
-          (navigator as any).share({ url, title }).catch(function () {});
-          return;
-        }
-        navigator.clipboard?.writeText(url).then(function () {
-          btn.classList.add('copied');
-          setTimeout(function () { btn.classList.remove('copied'); }, 1500);
-        });
         return;
       }
 
       // ── Outside click closes panel ──────────────────────────────────────────
-      if (!target.closest('#share-img-panel')) closePanel();
+      if (!target.closest('#share-panel')) closePanel();
     });
   }
 </script>
