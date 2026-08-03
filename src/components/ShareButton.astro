@@ -15,9 +15,15 @@ interface Props {
    * shares the image file itself instead of just the link.
    */
   imageUrl?: string;
+  /**
+   * Short human-readable blurb about the content (e.g. "Elden Ring — 9/10 by
+   * @username"), used as the prefilled text for Discord/Steam sharing since a
+   * bare link reads as spammy in a chat. Falls back to `label` when omitted.
+   */
+  shareText?: string;
 }
 
-const { url, label = "Share", variant = 'pill', imageUrl } = Astro.props;
+const { url, label = "Share", variant = 'pill', imageUrl, shareText } = Astro.props;
 const shareUrl = url ?? Astro.url.pathname;
 const iconOnly = variant !== 'pill';
 ---
@@ -27,6 +33,7 @@ const iconOnly = variant !== 'pill';
   type="button"
   data-share-url={shareUrl}
   data-share-title={label}
+  data-share-text={shareText ?? ''}
   data-share-image={imageUrl ?? ''}
   title={iconOnly ? label : undefined}
 >
@@ -212,6 +219,15 @@ const iconOnly = variant !== 'pill';
       navigator.clipboard?.writeText(url).then(function () { showToast(btn, msg); });
     }
 
+    // Short blurb + link, for chat apps (Discord, Steam) where a bare URL
+    // reads as spammy — falls back to the button's tooltip label, then the
+    // page title, when the caller hasn't supplied a content-specific blurb.
+    function copyBlurb(btn: HTMLButtonElement, msg: string) {
+      const url = absUrl(btn.dataset.shareUrl || window.location.pathname);
+      const blurb = btn.dataset.shareText || btn.dataset.shareTitle || document.title;
+      navigator.clipboard?.writeText(blurb + '\n' + url).then(function () { showToast(btn, msg); });
+    }
+
     function downloadBlob(blob: Blob, filename: string) {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -220,6 +236,48 @@ const iconOnly = variant !== 'pill';
       a.click();
       document.body.removeChild(a);
       setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }
+
+    // Fetches an image and puts it on the clipboard as PNG (Chrome/Edge only
+    // support PNG for image clipboard writes), falling back to a direct
+    // download when the Clipboard API or PNG conversion isn't available.
+    function copyImageToClipboard(btn: HTMLButtonElement, imageUrl: string, successMsg: string) {
+      const absImgUrl = absUrl(imageUrl);
+      return fetch(absImgUrl)
+        .then(function (r) { return r.blob(); })
+        .then(function (blob) {
+          if (!(window as any).ClipboardItem) {
+            // Firefox / Safari fallback: download the JPEG directly
+            downloadBlob(blob, 'chekpoint.jpg');
+            showToast(btn, 'Image saved');
+            return;
+          }
+          // Chrome/Edge: convert JPEG → PNG for clipboard (only PNG is supported)
+          const objUrl = URL.createObjectURL(blob);
+          const img = new Image();
+          img.onload = function () {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            (canvas.getContext('2d') as CanvasRenderingContext2D).drawImage(img, 0, 0);
+            URL.revokeObjectURL(objUrl);
+            canvas.toBlob(function (png) {
+              if (!png) { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); return; }
+              navigator.clipboard.write([(new (window as any).ClipboardItem({ 'image/png': png }))])
+                .then(function () { showToast(btn, successMsg); })
+                .catch(function () { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); });
+            }, 'image/png');
+          };
+          img.onerror = function () {
+            URL.revokeObjectURL(objUrl);
+            downloadBlob(blob, 'chekpoint.jpg');
+            showToast(btn, 'Image saved');
+          };
+          img.src = objUrl;
+        })
+        .catch(function () {
+          window.open(absImgUrl, '_blank');
+        });
     }
 
     document.addEventListener('click', function (e) {
@@ -274,51 +332,7 @@ const iconOnly = variant !== 'pill';
         const imageUrl = btn?.dataset.shareImage;
         closePanel();
         if (!btn || !imageUrl) return;
-
-        const absImgUrl = absUrl(imageUrl);
-        imageOpt.textContent = 'Copying…';
-        imageOpt.setAttribute('disabled', 'true');
-
-        fetch(absImgUrl)
-          .then(function (r) { return r.blob(); })
-          .then(function (blob) {
-            imageOpt.textContent = 'Copy Image';
-            imageOpt.removeAttribute('disabled');
-
-            if ((window as any).ClipboardItem) {
-              // Chrome/Edge: convert JPEG → PNG for clipboard (only PNG is supported)
-              const objUrl = URL.createObjectURL(blob);
-              const img = new Image();
-              img.onload = function () {
-                const canvas = document.createElement('canvas');
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                (canvas.getContext('2d') as CanvasRenderingContext2D).drawImage(img, 0, 0);
-                URL.revokeObjectURL(objUrl);
-                canvas.toBlob(function (png) {
-                  if (!png) { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); return; }
-                  navigator.clipboard.write([(new (window as any).ClipboardItem({ 'image/png': png }))])
-                    .then(function () { showToast(btn, 'Image copied'); })
-                    .catch(function () { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); });
-                }, 'image/png');
-              };
-              img.onerror = function () {
-                URL.revokeObjectURL(objUrl);
-                downloadBlob(blob, 'chekpoint.jpg');
-                showToast(btn, 'Image saved');
-              };
-              img.src = objUrl;
-            } else {
-              // Firefox / Safari fallback: download the JPEG directly
-              downloadBlob(blob, 'chekpoint.jpg');
-              showToast(btn, 'Image saved');
-            }
-          })
-          .catch(function () {
-            imageOpt.textContent = 'Copy Image';
-            imageOpt.removeAttribute('disabled');
-            window.open(absImgUrl, '_blank');
-          });
+        copyImageToClipboard(btn, imageUrl, 'Image copied');
         return;
       }
 
@@ -363,24 +377,35 @@ const iconOnly = variant !== 'pill';
         return;
       }
 
-      // ── Share to Discord / Steam — neither platform exposes a web intent for
-      // posting into an arbitrary channel/chat, so the practical equivalent is
-      // copying the link (pasting it into either app unfurls our OG preview). ──
+      // ── Share to Discord — copies a short blurb + link, not a bare URL.
+      // Discord auto-embeds the link as a rich card from our OG tags, so the
+      // blurb is what actually reads well as a message; a naked link alone
+      // looks like spam in a chat. ──
       const discordOpt = target.closest('#share-opt-discord') as HTMLElement | null;
       if (discordOpt) {
         const btn = activeBtn;
         closePanel();
         if (!btn) return;
-        copyLink(btn, 'Link copied — paste in Discord');
+        copyBlurb(btn, 'Copied — paste in Discord');
         return;
       }
 
+      // ── Share to Steam — Steam chat does NOT unfurl link previews the way
+      // Discord/Reddit do, but it does support pasting images directly. So
+      // instead of handing over a link that'll just sit there as plain text,
+      // copy the actual share image when one exists — falls back to a blurb +
+      // link for content that has no image. ──
       const steamOpt = target.closest('#share-opt-steam') as HTMLElement | null;
       if (steamOpt) {
         const btn = activeBtn;
+        const imageUrl = btn?.dataset.shareImage;
         closePanel();
         if (!btn) return;
-        copyLink(btn, 'Link copied — paste in Steam chat');
+        if (imageUrl) {
+          copyImageToClipboard(btn, imageUrl, 'Image copied — paste in Steam chat');
+        } else {
+          copyBlurb(btn, 'Copied — paste in Steam chat');
+        }
         return;
       }
 
