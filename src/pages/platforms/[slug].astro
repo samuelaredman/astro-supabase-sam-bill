@@ -2,13 +2,15 @@
 export const prerender = false;
 import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database'
 import { igdbFetch } from '../../utils/igdb'
-import { igdbImage, timeAgo } from '../../utils/format'
+import { igdbImage, timeAgo, scoreClass } from '../../utils/format'
 import { isAllowedGameCategory } from '../../utils/games'
+import Layout from '../../components/Layout.astro'
 
 const supabase = getSupabase();
 const { data: { user: _platformUser } } = await createSupabaseServerClientFromContext(Astro).auth.getUser();
 const isLoggedIn = !!_platformUser;
 const { slug = '' } = Astro.params;
+const activeTab = Astro.url.searchParams.get('tab') || 'overview'
 
 const { data: platform } = await supabase
   .from('platforms')
@@ -32,7 +34,7 @@ const hasReviewedGame = (reviewedOnPlatform?.length ?? 0) > 0
 
 const { data: gamePlatforms } = await supabase
   .from('game_platforms')
-  .select(`games(id, title, slug, cover_img_url, date_released, igdb_category)`)
+  .select(`games(id, title, slug, cover_img_url, date_released, igdb_category, igdb_id)`)
   .eq('platform_id', platform.id)
   .limit(3000)
 
@@ -87,6 +89,11 @@ const gameAvg = allGameScores.length > 0
   ? (allGameScores.reduce((a, b) => a + b, 0) / allGameScores.length).toFixed(1)
   : null
 const totalGameReviews = allGameScores.length
+
+const scoreDistribution = Array.from({ length: 10 }, (_, i) =>
+  allGameScores.filter((s: number) => Math.round(s) === i + 1).length
+)
+const distJson = JSON.stringify(scoreDistribution)
 
 const topRated = allGames
   .sort((a: any, b: any) =>
@@ -389,7 +396,7 @@ const consoleBanners: Record<string, string> = {
   'saturn':                  '/banners/sega-saturn.jpg',
   'win':                     '/banners/pc.jpg',
 }
-const bannerImage = (platform as any).banner_url || consoleBanners[platform.slug] || null
+const curatedBanner = (platform as any).banner_url || consoleBanners[platform.slug] || null
 
 const summary = igdbData?.summary || platformDescriptions[platform.slug] || null
 const releaseDate = platformReleaseDates[platform.slug] ?? null
@@ -398,6 +405,34 @@ const generation = igdbData?.generation ? `${igdbData.generation}th` : platformG
 const family = igdbData?.platform_family?.name ?? platformFamilies[platform.slug] ?? null
 const officialSite = igdbData?.websites?.find((w: any) => w.category === 1)?.url ?? null
 
+// Hero image — prefer the curated console banner (sharp), else a sharp IGDB
+// artwork/screenshot from the platform's flagship game (top-rated, else most
+// recent with an igdb_id), else the blurred cover mosaic. Mirrors the fallback
+// chain used on games/[slug].astro, studios/[slug].astro and genres/[slug].astro.
+const flagshipGame = topRated.find((g: any) => g.igdb_id)
+  ?? allGames.find((g: any) => g.igdb_id)
+  ?? null
+
+let heroArtwork: string | null = null
+let heroScreenshot: string | null = null
+if (!curatedBanner && flagshipGame?.igdb_id) {
+  const heroResult = await igdbFetch('games',
+    `fields artworks.url, screenshots.url; where id = ${flagshipGame.igdb_id};`)
+  const heroGameData = heroResult?.[0] ?? null
+  heroArtwork = heroGameData?.artworks?.[0]?.url ?? null
+  heroScreenshot = heroGameData?.screenshots?.[0]?.url ?? null
+}
+const showCoverBlur = !curatedBanner && !heroArtwork && !heroScreenshot
+const heroImageUrl = curatedBanner
+  ? curatedBanner
+  : heroArtwork
+    ? igdbImage(heroArtwork, 't_1080p_2x') ?? ''
+    : heroScreenshot ? igdbImage(heroScreenshot, 't_1080p_2x') ?? '' : ''
+const heroImageUrl1x = curatedBanner
+  ? curatedBanner
+  : heroArtwork
+    ? igdbImage(heroArtwork, 't_1080p') ?? ''
+    : heroScreenshot ? igdbImage(heroScreenshot, 't_1080p') ?? '' : ''
 
 const mosaicCovers = topRated
   .map((g: any) => igdbImage(g.cover_img_url, 't_cover_big'))
@@ -405,17 +440,6 @@ const mosaicCovers = topRated
 const mosaicTiles: string[] = mosaicCovers.length > 0
   ? [...mosaicCovers, ...mosaicCovers, ...mosaicCovers].slice(0, 24)
   : []
-const hasMosaic = mosaicTiles.length >= 6
-
-function scoreClass(score: number): string {
-  if (score === 10) return 'perfect'
-  if (score >= 9)   return 'great'
-  if (score >= 8)   return 'teal'
-  if (score >= 7)   return 'good'
-  if (score >= 5)   return 'mid'
-  if (score >= 3)   return 'orange'
-  return 'low'
-}
 
 function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase()
@@ -424,7 +448,6 @@ function getInitials(username: string): string {
 const consoleScoreClass = consoleAvg ? scoreClass(parseFloat(consoleAvg)) : null
 const gameAvgScoreClass = gameAvg ? scoreClass(parseFloat(gameAvg)) : null
 const displayGameCount = allGames.length
-const activeTab = Astro.url.searchParams.get('tab') || 'overview'
 
 // per-year game counts (all games, not just top 25) + avg scores for histogram
 const yearGameCountsMap: Record<number, number> = {}
@@ -543,6 +566,9 @@ const byYearJson = JSON.stringify(
 )
 const yearsJson = JSON.stringify(years)
 
+const ogImageUrl = heroImageUrl || (mosaicCovers[0] ?? '')
+const platformMetaDescription = summary?.slice(0, 160) ?? `Browse all ${platform.name} games and reviews on Chekpoint.`
+
 // CDN cache — anonymous visitors share a cached response; auth users get a fresh render
 if (!isLoggedIn) {
   Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
@@ -553,55 +579,28 @@ if (!isLoggedIn) {
 Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 ---
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <!-- Runs synchronously before CSS is applied — prevents dark mode flash -->
-  <script is:inline>
-    (function() {
-      var t = localStorage.getItem('theme') ||
-        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-      document.documentElement.setAttribute('data-theme', t);
-      var m = document.getElementById('meta-theme-color');
-      if (m) m.content = t === 'dark' ? '#0f0f0e' : '#f9f8f6';
-    })();
-  </script>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" id="meta-theme-color" content="#f9f8f6" />
-  <title>{platform.name} — Chekpoint</title>
-  <meta name="description" content={summary?.slice(0, 160) ?? `Browse all ${platform.name} games and reviews on Chekpoint.`} />
-  {!hasReviewedGame && <meta name="robots" content="noindex, nofollow" />}
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Serif+Display&family=Press+Start+2P&display=swap" rel="stylesheet" />
-  <script is:inline define:vars={{ accentLight, accentDark, accentRgb }}>
-    (function() {
-      var t = document.documentElement.getAttribute('data-theme') || 'dark';
-      document.documentElement.style.setProperty('--game-accent', t === 'light' ? accentLight : accentDark);
-      document.documentElement.style.setProperty('--accent-rgb', accentRgb);
-    })();
-  </script>
+<Layout title={`${platform.name} — Chekpoint`} description={platformMetaDescription} ogImage={ogImageUrl} variant="fullwidth" noindex={!hasReviewedGame}>
+  <Fragment slot="head">
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet" />
+    <script is:inline define:vars={{ accentLight, accentDark, accentRgb }}>
+      (function() {
+        var t = document.documentElement.getAttribute('data-theme') || 'dark';
+        document.documentElement.style.setProperty('--game-accent', t === 'light' ? accentLight : accentDark);
+        document.documentElement.style.setProperty('--accent-rgb', accentRgb);
+      })();
+    </script>
+  </Fragment>
   <style is:global>
     :root[data-theme="light"] {
       --bg:#f5f4f2;--bg-card:#ffffff;--bg-hover:#f4f3f0;
-      --border:#e8e6e1;--border-subtle:#f0ede8;
-      --text-primary:#141412;--text-secondary:#6b6860;--text-tertiary:#a09d98;
-      --tag-bg:#f0ede8;--tag-text:#6b6860;
-      --shadow:0 1px 3px rgba(0,0,0,.06);--shadow-md:0 4px 16px rgba(0,0,0,.1);
-      --score-great:#1a6b3c;--score-great-bg:#eaf5ee;
-      --score-good:#1a4a6b;--score-good-bg:#eaf0f5;
       --score-mid:#6b5a1a;--score-mid-bg:#f5f0ea;
-      --score-low:#6b1a1a;--score-low-bg:#f5eaea;
-      --game-accent:#c8332a;
-      --hero-overlay:linear-gradient(to bottom,rgba(245,244,242,0)0%,rgba(245,244,242,.6)65%,rgba(245,244,242,1)100%);
-      --hero-side:linear-gradient(to right,rgba(245,244,242,.3)0%,transparent 50%);
+      --game-accent:#c8332a;--game-accent-subtle:rgba(200,51,42,.06);
+      --hero-overlay:linear-gradient(to bottom,rgba(245,244,242,.05)0%,rgba(245,244,242,.2)40%,rgba(245,244,242,.85)75%,rgba(245,244,242,1)100%);
     }
     :root[data-theme="dark"] {
       --bg:#09090a;--bg-card:#131314;--bg-hover:#1c1c1e;
       --border:#222224;--border-subtle:#191919;
-      --text-primary:#f0ede8;--text-secondary:#908d87;--text-tertiary:#484644;
-      --tag-bg:#1c1c1e;--tag-text:#6a6866;
+      --text-tertiary:#484644;--tag-bg:#1c1c1e;--tag-text:#6a6866;
       --shadow:0 1px 3px rgba(0,0,0,.5);--shadow-md:0 4px 16px rgba(0,0,0,.7);
       --score-great:#4ade80;--score-great-bg:#112e1c;
       --score-teal:#2dd4bf;--score-teal-bg:#082d2a;
@@ -610,101 +609,109 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       --score-orange:#fb923c;--score-orange-bg:#2c160a;
       --score-low:#f87171;--score-low-bg:#300e0e;
       --score-perfect:#ffffff;--score-perfect-bg:#22223a;
-      --game-accent:#e84444;
-      --hero-overlay:linear-gradient(to bottom,rgba(9,9,10,0)0%,rgba(9,9,10,.65)65%,rgba(9,9,10,1)100%);
-      --hero-side:linear-gradient(to right,rgba(9,9,10,.35)0%,transparent 50%);
+      --game-accent:#e84444;--game-accent-subtle:rgba(232,68,68,.09);
+      --hero-overlay:linear-gradient(to bottom,rgba(9,9,10,.05)0%,rgba(9,9,10,.2)40%,rgba(9,9,10,.8)75%,rgba(9,9,10,1)100%);
     }
-
-    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     html{scroll-behavior:smooth}
-    body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text-primary);min-height:100vh;-webkit-font-smoothing:antialiased}
-    a{color:inherit;text-decoration:none}
 
-    .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.88);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;backdrop-filter:blur(20px)}
-    [data-theme="light"] .topnav{background:rgba(245,244,242,.88)}
+    .topnav{position:sticky;top:0;z-index:30;background:rgba(9,9,10,.82);border-bottom:1px solid var(--border);padding:13px 28px;display:flex;align-items:center;backdrop-filter:blur(20px)}
+    [data-theme="light"] .topnav{background:rgba(245,244,242,.82)}
     .back-btn{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-tertiary);transition:color .15s;background:none;border:none;cursor:pointer;font-family:inherit;padding:0}
     .back-btn:hover{color:var(--text-primary)}
-    .logo{font-family:'Press Start 2P',monospace;font-size:13px;line-height:1;display:flex;align-items:center;gap:7px;margin-left:auto}
+    .logo{font-family:'Press Start 2P',monospace;font-size:13px;letter-spacing:-.3px;line-height:1;display:flex;align-items:center;gap:7px;margin-left:auto}
     .logo-dot{width:6px;height:6px;background:var(--game-accent);border-radius:50%;box-shadow:0 0 10px var(--game-accent)}
     .theme-btn{background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:6px;display:flex;align-items:center;transition:color .15s;margin-left:8px}
     .theme-btn:hover{color:var(--text-primary)}
 
-    .jump-nav{position:sticky;top:53px;z-index:20;background:rgba(9,9,10,.72);border-bottom:1px solid var(--border);backdrop-filter:blur(16px);display:flex;overflow-x:auto;scrollbar-width:none}
-    .jump-nav::-webkit-scrollbar{display:none}
-    [data-theme="light"] .jump-nav{background:rgba(245,244,242,.82)}
-    .jump-link{font-size:11px;font-weight:500;color:var(--text-tertiary);padding:10px 20px;letter-spacing:.08em;text-transform:uppercase;transition:color .15s,border-color .15s;border-bottom:2px solid transparent;white-space:nowrap;flex-shrink:0}
-    .jump-link:hover{color:var(--text-primary)}
-    .jump-link.active{color:var(--text-primary);border-color:var(--game-accent)}
+    /* TAB NAV */
+    .tab-nav{display:flex;gap:4px;margin-bottom:28px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:4px;overflow-x:auto;scrollbar-width:none}
+    .tab-nav::-webkit-scrollbar{display:none}
+    .tab-link{padding:8px 18px;border-radius:7px;font-size:13px;font-weight:600;color:var(--text-secondary);text-decoration:none;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:6px}
+    .tab-link:hover{color:var(--text-primary);background:var(--bg-hover)}
+    .tab-link.active{background:var(--game-accent);color:#fff}
+    .tab-count{font-size:11px;font-weight:700;background:rgba(255,255,255,.15);border-radius:10px;padding:1px 6px;line-height:1.5}
+    .tab-link:not(.active) .tab-count{background:var(--bg-hover);color:var(--text-tertiary)}
 
-    .hero{position:relative;width:100%;height:200px;overflow:hidden;background:#0c0c10}
-    .hero-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 40%;opacity:.78}
-    .hero-mosaic{position:absolute;inset:-20px;display:none;flex-wrap:wrap;filter:blur(18px) saturate(1.5) brightness(.35);transform:scale(1.08)}
-    .hero-mosaic.visible{display:flex}
-    .hero-mosaic-tile{flex:1 1 90px;min-width:90px;min-height:180px;background-size:cover;background-position:center}
-    .hero-side-fade{position:absolute;inset:0;background:var(--hero-side)}
+    .hero{position:relative;width:100%;height:400px;overflow:hidden;background:#04040a}
+    .hero-artwork{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 30%}
+    .hero-mosaic{position:absolute;inset:-20px;display:flex;flex-wrap:wrap;filter:blur(18px) saturate(1.5) brightness(.38);transform:scale(1.08)}
+    .hero-mosaic-tile{flex:1 1 90px;min-width:90px;min-height:160px;background-size:cover;background-position:center}
     .hero-overlay{position:absolute;inset:0;background:var(--hero-overlay)}
 
-    .page{max-width:900px;margin:0 auto;padding:0 28px 100px}
+    .page{max-width:980px;margin:0 auto;padding:0 28px 100px}
 
-    .platform-header{display:flex;gap:28px;align-items:flex-end;margin-bottom:32px;position:relative;z-index:2}
-    .platform-header.has-banner{margin-top:-52px}
-    .platform-header.no-banner{margin-top:32px}
-
-    .platform-logo-wrap{flex-shrink:0;width:140px;height:140px;border-radius:22px;background:var(--bg-card);border:1px solid rgba(var(--accent-rgb),.3);box-shadow:0 14px 48px rgba(0,0,0,.8),0 0 36px rgba(var(--accent-rgb),.18);display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:60px}
-    .platform-logo{width:100%;height:100%;object-fit:contain;padding:18px;filter:brightness(0) invert(1)}
+    .platform-header{display:flex;gap:24px;align-items:flex-end;margin-top:-100px;margin-bottom:28px;position:relative;z-index:2}
+    .platform-logo-wrap{flex-shrink:0;width:130px;height:130px;border-radius:14px;background:var(--bg-card);border:1px solid rgba(var(--accent-rgb),.4);box-shadow:0 12px 40px rgba(0,0,0,.8),0 0 32px rgba(var(--accent-rgb),.2);display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:48px}
+    .platform-logo{width:100%;height:100%;object-fit:contain;padding:16px;filter:brightness(0) invert(1)}
     [data-theme="light"] .platform-logo{filter:brightness(0);opacity:.85}
     .platform-logo.custom{filter:none;opacity:1;padding:0;object-fit:cover}
-    .platform-logo-wrap.custom{border:none;background:none;box-shadow:0 14px 48px rgba(0,0,0,.8)}
-    .platform-info{flex:1;min-width:0;padding-bottom:6px}
+    .platform-logo-wrap.custom{border:none;background:none;box-shadow:0 12px 40px rgba(0,0,0,.8)}
+    .platform-info{flex:1;min-width:0;padding-bottom:4px}
     .platform-name-row{display:flex;align-items:baseline;gap:14px;margin-bottom:8px;flex-wrap:wrap}
-    .platform-name{font-family:'Cinzel',serif;font-size:34px;line-height:1.1;letter-spacing:.04em;font-weight:600;text-shadow:0 2px 24px rgba(0,0,0,.8)}
+    .platform-name{font-family:'Cinzel',serif;font-size:32px;line-height:1.1;letter-spacing:.04em;font-weight:600;text-shadow:0 2px 20px rgba(0,0,0,.6)}
     .console-score-wrap{display:flex;align-items:baseline;gap:5px;flex-shrink:0}
-    .console-score-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:28px;font-weight:400;line-height:1;letter-spacing:-1px}
-    .console-score-num.great{color:var(--score-great)}
-    .console-score-num.good{color:var(--score-good)}
-    .console-score-num.mid{color:var(--score-mid)}
-    .console-score-num.low{color:var(--score-low)}
+    .console-score-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:26px;font-weight:400;line-height:1;letter-spacing:-1px}
+    .console-score-num.score-great{color:var(--score-great)}
+    .console-score-num.score-good{color:var(--score-good)}
+    .console-score-num.score-mid{color:var(--score-mid)}
+    .console-score-num.score-low{color:var(--score-low)}
     .console-score-label{font-size:11px;color:var(--text-tertiary);font-weight:500;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}
-    .platform-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-    .platform-meta-item{font-size:13px;color:var(--text-secondary)}
-    .platform-meta-sep{color:var(--text-tertiary);font-size:10px}
-    .platform-website{font-size:13px;color:var(--game-accent);transition:opacity .15s;display:flex;align-items:center;gap:4px}
-    .platform-website:hover{opacity:.7}
+    .meta-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .meta-tag{font-size:13px;color:var(--text-secondary)}
+    .meta-sep{color:var(--text-tertiary);font-size:10px}
+    .meta-link{font-size:13px;color:var(--game-accent);transition:opacity .15s;display:inline-flex;align-items:center;gap:4px}
+    .meta-link:hover{opacity:.7}
     .rate-console-btn{margin-top:12px;display:inline-flex;align-items:center;gap:6px;background:var(--game-accent);color:white;border:none;border-radius:20px;padding:7px 16px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:opacity .15s}
     .rate-console-btn:hover{opacity:.85}
 
-    .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:28px}
-    .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:20px 18px 16px}
-    .stat-card.score-card-great{border-bottom:2px solid var(--score-great)}
-    .stat-card.score-card-good{border-bottom:2px solid var(--score-good)}
-    .stat-card.score-card-mid{border-bottom:2px solid var(--score-mid)}
-    .stat-card.score-card-low{border-bottom:2px solid var(--score-low)}
-    .stat-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:32px;font-weight:400;line-height:1;letter-spacing:-1px;margin-bottom:5px;color:var(--text-primary);background:none}
-    .stat-num.great{color:var(--score-great)}
-    .stat-num.good{color:var(--score-good)}
-    .stat-num.mid{color:var(--score-mid)}
-    .stat-num.low{color:var(--score-low)}
-    .stat-label{font-size:10px;font-weight:500;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.08em}
-    .stat-sub{font-size:10px;color:var(--text-tertiary);margin-top:2px}
+    .score-hero{display:flex;align-items:flex-start;gap:24px;padding:20px 24px;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;margin-bottom:28px;position:relative;overflow:hidden}
+    .score-hero::before{content:'';position:absolute;inset:0;background:var(--game-accent-subtle);pointer-events:none}
+    .score-hero::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(to right,transparent,var(--game-accent),transparent);opacity:.6}
+    .avg-score-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:72px;line-height:1;font-weight:700;position:relative;z-index:1;letter-spacing:-3px;padding-top:8px}
+    .score-perfect-color{color:#ffffff;text-shadow:0 0 20px rgba(255,255,255,.7),0 0 40px rgba(255,255,255,.3)}
+    .score-great-color{color:var(--score-great)}
+    .score-teal-color{color:var(--score-teal)}
+    .score-good-color{color:var(--score-good)}
+    .score-mid-color{color:var(--score-mid)}
+    .score-orange-color{color:var(--score-orange)}
+    .score-low-color{color:var(--score-low)}
+    .score-divider{width:1px;height:56px;background:var(--border);flex-shrink:0;margin-top:8px}
+    .score-meta{flex:1;position:relative;z-index:1}
+    .score-label{font-size:11px;font-weight:500;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.1em;margin-bottom:3px}
+    .review-count-label{font-size:13px;color:var(--text-secondary);margin-bottom:12px}
+    .score-dist{display:flex;gap:4px;align-items:flex-end;height:44px;margin-top:8px}
+    .dist-bar-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;flex:1;cursor:pointer}
+    .dist-bar{width:100%;border-radius:4px 4px 0 0;min-height:4px;transition:opacity .15s,transform .15s}
+    .dist-bar-wrap:hover .dist-bar{opacity:1!important;transform:scaleY(1.06);transform-origin:bottom}
+    .dist-label{font-size:9px;color:var(--text-tertiary);font-weight:500;margin-top:2px}
 
-    .about-grid{display:grid;grid-template-columns:1fr 260px;gap:24px;margin-bottom:40px}
-    @media(max-width:720px){.about-grid{grid-template-columns:1fr}}
-    .description{font-size:14px;line-height:1.8;color:var(--text-secondary)}
-    .description.collapsed{display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden}
-    .read-more-btn{background:none;border:none;font-family:inherit;font-size:12px;color:var(--game-accent);cursor:pointer;padding:8px 0 0;display:block}
-    .details-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:4px 18px;height:fit-content}
-    .detail-row{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--border-subtle);font-size:12px}
-    .detail-row:last-child{border-bottom:none}
-    .detail-label{flex-shrink:0;width:80px;color:var(--text-tertiary);padding-top:2px;text-transform:uppercase;letter-spacing:.06em;font-size:10px;font-weight:500}
-    .detail-value{color:var(--text-secondary);line-height:1.5}
-    .detail-link{color:var(--game-accent);transition:opacity .15s}
-    .detail-link:hover{opacity:.7}
+    .tab-panel{display:none}
+    .tab-panel.active{display:block}
 
-    .section{margin-bottom:48px}
-    .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+    /* TWO COLUMN — OVERVIEW */
+    .two-col{display:grid;grid-template-columns:1fr 300px;gap:24px;align-items:start}
+    @media(max-width:720px){.two-col{grid-template-columns:1fr}}
+    .main-col{min-width:0}
+    .sidebar-col{position:sticky;top:20px;display:flex;flex-direction:column;gap:14px}
+    .section{margin-bottom:32px}
+    .section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
     .section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--text-tertiary)}
     .section-count{font-size:12px;color:var(--text-tertiary)}
 
+    /* SIDEBAR */
+    .desc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px}
+    .desc-text{font-size:13px;line-height:1.75;color:var(--text-secondary);display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+    .desc-text.expanded{display:block}
+    .read-more-btn{background:none;border:none;font-family:inherit;font-size:12px;color:var(--game-accent);cursor:pointer;padding:8px 0 0;display:block;font-weight:500}
+    .details-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:4px 16px}
+    .detail-row{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-subtle);font-size:12px}
+    .detail-row:last-child{border-bottom:none}
+    .detail-label{flex-shrink:0;width:76px;color:var(--text-tertiary);padding-top:1px;text-transform:uppercase;letter-spacing:.06em;font-size:10px;font-weight:500}
+    .detail-value{color:var(--text-secondary);line-height:1.5;flex:1}
+    .detail-link{color:var(--game-accent);transition:opacity .15s}
+    .detail-link:hover{opacity:.7}
+
+    /* PAGINATED GAME ROW */
     .game-row{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
     @media(max-width:700px){.game-row{grid-template-columns:repeat(3,1fr)}}
     .row-nav{display:flex;align-items:center;gap:8px;margin-top:14px}
@@ -713,49 +720,66 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .row-arrow:hover{border-color:var(--game-accent);color:var(--game-accent)}
     .row-arrow:disabled{opacity:.25;cursor:default;pointer-events:none}
 
+    /* YEAR PILL STRIP */
     .pill-strip-wrap{position:relative;display:flex;align-items:center;gap:6px;margin-bottom:14px}
     .strip-arrow{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s;color:var(--text-secondary);flex-shrink:0}
     .strip-arrow:hover{border-color:var(--game-accent);color:var(--game-accent)}
     .strip-arrow:disabled{opacity:.2;cursor:default;pointer-events:none}
     .year-pill-strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none;flex:1;min-width:0}
     .year-pill-strip::-webkit-scrollbar{display:none}
-    .year-pill{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;white-space:nowrap;scroll-snap-align:start;transition:border-color .15s,background .15s;font-family:inherit}
+    .year-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);cursor:pointer;white-space:nowrap;scroll-snap-align:start;transition:border-color .15s,background .15s;font-family:inherit;flex-shrink:0}
     .year-pill:hover{border-color:rgba(var(--accent-rgb),.4)}
     .year-pill.active{border-color:var(--game-accent);background:rgba(var(--accent-rgb),.08)}
-    .year-pill-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-    .year-pill-label{font-size:12px;font-weight:600;color:var(--text-primary)}
-    .year-pill-count{font-size:11px;color:var(--text-tertiary)}
-    .rank-badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;line-height:1.4;letter-spacing:.01em;backdrop-filter:blur(4px)}
+    .year-pill-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block}
+    .year-pill-label{font-size:12px;font-weight:600;color:var(--text-primary);display:inline-block}
+    .year-pill-count{font-size:11px;color:var(--text-tertiary);display:inline-block}
 
     .year-panel-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)}
     .year-panel-label{font-family:'DM Serif Display',serif;font-size:22px;letter-spacing:-.3px;color:var(--text-primary)}
     .year-panel-count{font-size:12px;color:var(--text-tertiary)}
 
-    .game-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s;display:block;text-decoration:none;position:relative}
+    /* GAME CARDS */
+    .game-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s;display:block;position:relative}
     .game-card:hover{transform:translateY(-3px);box-shadow:var(--shadow-md);border-color:rgba(var(--accent-rgb),.3)}
-    .game-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;position:relative;width:100%}
-    .game-cover img{width:100%;height:100%;object-fit:cover;display:block}
-    .game-cover-placeholder{width:100%;height:100%;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:32px}
-    .game-score-badge{position:absolute;top:7px;right:7px;width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
-    .badge-perfect{color:#09090a;background:#ffffff;border:1px solid rgba(255,255,255,.8);box-shadow:0 0 10px rgba(255,255,255,.9),0 0 24px rgba(255,255,255,.6),0 0 48px rgba(255,255,255,.3)}
-    [data-theme="light"] .badge-perfect{color:#ffffff;background:#1a1a2e;border:1px solid rgba(30,26,60,.3);box-shadow:0 0 8px rgba(30,26,60,.4)}
-    .badge-great  {color:var(--score-great);  background:var(--score-great-bg);  border:1px solid rgba(74,222,128,.3)}
-    .badge-teal   {color:var(--score-teal);   background:var(--score-teal-bg);   border:1px solid rgba(45,212,191,.3)}
-    .badge-good   {color:var(--score-good);   background:var(--score-good-bg);   border:1px solid rgba(96,165,250,.3)}
-    .badge-mid    {color:var(--score-mid);    background:var(--score-mid-bg);    border:1px solid rgba(251,191,36,.3)}
-    .badge-orange {color:var(--score-orange); background:var(--score-orange-bg); border:1px solid rgba(251,146,60,.3)}
-    .badge-low    {color:var(--score-low);    background:var(--score-low-bg);    border:1px solid rgba(248,113,113,.3)}
-    .exclusive-badge{position:absolute;top:7px;left:7px;background:var(--game-accent);color:white;font-size:8px;font-weight:700;padding:2px 5px;border-radius:4px;text-transform:uppercase;letter-spacing:.06em}
+    .game-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;position:relative}
+    .game-cover img{width:100%;height:100%;object-fit:cover}
+    .game-cover-placeholder{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:32px}
+    .game-score-badge{position:absolute;top:7px;right:7px;width:30px;height:30px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
+    .badge-score-perfect{color:#09090a;background:#ffffff;border:1px solid rgba(255,255,255,.8);box-shadow:0 0 10px rgba(255,255,255,.9),0 0 24px rgba(255,255,255,.6),0 0 48px rgba(255,255,255,.3)}
+    [data-theme="light"] .badge-score-perfect{color:#ffffff;background:#1a1a2e;border:1px solid rgba(30,26,60,.3);box-shadow:0 0 8px rgba(30,26,60,.4)}
+    .badge-score-great{color:var(--score-great);background:var(--score-great-bg);border:1px solid rgba(74,222,128,.3)}
+    .badge-score-teal{color:var(--score-teal);background:var(--score-teal-bg);border:1px solid rgba(45,212,191,.3)}
+    .badge-score-good{color:var(--score-good);background:var(--score-good-bg);border:1px solid rgba(96,165,250,.3)}
+    .badge-score-mid{color:var(--score-mid);background:var(--score-mid-bg);border:1px solid rgba(251,191,36,.3)}
+    .badge-score-orange{color:var(--score-orange);background:var(--score-orange-bg);border:1px solid rgba(251,146,60,.3)}
+    .badge-score-low{color:var(--score-low);background:var(--score-low-bg);border:1px solid rgba(248,113,113,.3)}
+    .rank-badge{position:absolute;top:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;line-height:1.4;letter-spacing:.01em;backdrop-filter:blur(4px)}
     .game-info{padding:9px 10px 11px}
     .game-title-text{font-size:11px;font-weight:500;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:2px}
     .game-review-count{font-size:10px;color:var(--text-tertiary);margin-top:1px}
 
+    /* STATS TAB */
+    .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:28px}
+    .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:22px 20px 18px}
+    .stat-card.score-card-score-great{border-bottom:2px solid var(--score-great)}
+    .stat-card.score-card-score-good{border-bottom:2px solid var(--score-good)}
+    .stat-card.score-card-score-mid{border-bottom:2px solid var(--score-mid)}
+    .stat-card.score-card-score-low{border-bottom:2px solid var(--score-low)}
+    .stat-num{font-family:'Century Schoolbook','New Century Schoolbook',Georgia,serif;font-size:32px;font-weight:400;line-height:1;letter-spacing:-1px;margin-bottom:6px;color:var(--text-primary)}
+    .stat-num.score-great{color:var(--score-great)}
+    .stat-num.score-good{color:var(--score-good)}
+    .stat-num.score-mid{color:var(--score-mid)}
+    .stat-num.score-low{color:var(--score-low)}
+    .stat-label{font-size:11px;font-weight:500;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.08em}
+    .stat-sub{font-size:11px;color:var(--text-tertiary);margin-top:3px}
+
+    /* REVIEWS */
     .reviews-toolbar{display:flex;align-items:center;gap:6px;margin-bottom:20px}
     .sort-tab{background:var(--tag-bg);color:var(--text-tertiary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;letter-spacing:.04em;text-transform:uppercase}
     .sort-tab.active{background:var(--game-accent);color:white;border-color:transparent}
     .review-card{padding:22px 0;border-bottom:1px solid var(--border-subtle)}
     .review-card:last-child{border-bottom:none}
-    .review-top{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+    .review-top{display:flex;align-items:center;gap:10px;margin-bottom:10px}
     .avatar{width:34px;height:34px;border-radius:50%;background:var(--bg-hover);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--text-tertiary);overflow:hidden}
     .avatar img{width:100%;height:100%;object-fit:cover}
     .reviewer-info{flex:1;min-width:0}
@@ -763,65 +787,38 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .reviewer-name:hover{color:var(--text-secondary)}
     .reviewer-meta{font-size:11px;color:var(--text-tertiary);display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px}
     .score-badge{flex-shrink:0;width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;font-family:'Century Schoolbook',Georgia,serif}
-    .score-perfect{color:#09090a!important;background:#ffffff!important;border:1px solid rgba(255,255,255,.8)!important;box-shadow:0 0 10px rgba(255,255,255,.7),0 0 20px rgba(255,255,255,.3)}
-    [data-theme="light"] .score-perfect{color:#ffffff!important;background:#1a1a2e!important;border:1px solid rgba(30,26,60,.3)!important;box-shadow:0 0 8px rgba(30,26,60,.4)}
-    .score-great  {color:var(--score-great);  background:var(--score-great-bg);  border:1px solid rgba(74,222,128,.25)}
-    .score-teal   {color:var(--score-teal);   background:var(--score-teal-bg);   border:1px solid rgba(45,212,191,.25)}
-    .score-good   {color:var(--score-good);   background:var(--score-good-bg);   border:1px solid rgba(96,165,250,.25)}
-    .score-mid    {color:var(--score-mid);    background:var(--score-mid-bg);    border:1px solid rgba(251,191,36,.25)}
-    .score-orange {color:var(--score-orange); background:var(--score-orange-bg); border:1px solid rgba(251,146,60,.25)}
-    .score-low    {color:var(--score-low);    background:var(--score-low-bg);    border:1px solid rgba(248,113,113,.25)}
+    .score-badge.score-perfect{color:#09090a!important;background:#ffffff!important;border:1px solid rgba(255,255,255,.8)!important;box-shadow:0 0 10px rgba(255,255,255,.7),0 0 20px rgba(255,255,255,.3)}
+    [data-theme="light"] .score-badge.score-perfect{color:#ffffff!important;background:#1a1a2e!important;border:1px solid rgba(30,26,60,.3)!important;box-shadow:0 0 8px rgba(30,26,60,.4)}
+    .score-badge.score-great{color:var(--score-great);background:var(--score-great-bg);border:1px solid rgba(74,222,128,.25)}
+    .score-badge.score-teal{color:var(--score-teal);background:var(--score-teal-bg);border:1px solid rgba(45,212,191,.25)}
+    .score-badge.score-good{color:var(--score-good);background:var(--score-good-bg);border:1px solid rgba(96,165,250,.25)}
+    .score-badge.score-mid{color:var(--score-mid);background:var(--score-mid-bg);border:1px solid rgba(251,191,36,.25)}
+    .score-badge.score-orange{color:var(--score-orange);background:var(--score-orange-bg);border:1px solid rgba(251,146,60,.25)}
+    .score-badge.score-low{color:var(--score-low);background:var(--score-low-bg);border:1px solid rgba(248,113,113,.25)}
     .review-title{font-family:'DM Serif Display',serif;font-size:18px;line-height:1.3;margin-bottom:8px;letter-spacing:-.2px}
     .review-body{font-size:14px;line-height:1.75;color:var(--text-secondary)}
     .review-body.collapsed{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
     .review-footer{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap}
     .expand-btn{font-size:11px;color:var(--game-accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;transition:opacity .15s;padding:0;font-weight:500}
     .expand-btn:hover{opacity:.7}
-    .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
-    .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
     .write-review-btn{display:inline-block;margin-top:16px;background:var(--game-accent);color:white;border-radius:20px;padding:9px 20px;font-size:14px;font-weight:500;border:none;cursor:pointer;font-family:inherit;transition:opacity .15s}
     .write-review-btn:hover{opacity:.85}
 
-    .tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:28px}
-    .tab-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:16px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;transition:all .2s;position:relative;overflow:hidden;text-decoration:none}
-    .tab-link:hover{border-color:rgba(var(--accent-rgb),.35);transform:translateY(-2px);box-shadow:var(--shadow-md)}
-    .tab-link.active{border-color:var(--game-accent);box-shadow:0 0 0 1px var(--game-accent),0 4px 20px rgba(var(--accent-rgb),.15)}
-    .tab-link.active::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--game-accent)}
-    .tab-icon{width:30px;height:30px;border-radius:8px;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;transition:background .2s;flex-shrink:0}
-    .tab-link.active .tab-icon svg,.tab-link:hover .tab-icon svg{stroke:var(--game-accent)}
-    .tab-label{font-size:13px;font-weight:600;color:var(--text-secondary);transition:color .2s}
-    .tab-link.active .tab-label,.tab-link:hover .tab-label{color:var(--text-primary)}
-    .tab-meta{font-size:11px;color:var(--text-tertiary)}
-    .tab-link.active .tab-meta{color:var(--game-accent)}
-    .tab-count-badge{background:var(--game-accent);color:white;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;position:absolute;top:8px;right:8px;z-index:2}
-    .tab-panel{display:none}
-    .tab-panel.active{display:block}
+    .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
+    .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
 
     @media(max-width:600px){
-      .platform-header{flex-direction:column;align-items:flex-start}
-      .platform-header.has-banner{margin-top:-40px}
-      .platform-header.no-banner{margin-top:20px}
+      .platform-header{flex-direction:column;align-items:flex-start;margin-top:-60px}
       .platform-name{font-size:26px}
-      .hero{height:200px}
+      .hero{height:260px}
+      .score-hero{flex-wrap:wrap;gap:16px}
+      .avg-score-num{font-size:56px}
+      .tab-nav{flex-wrap:nowrap}
       .stats-row{grid-template-columns:repeat(2,1fr);gap:8px}
       .stat-num{font-size:28px}
-      .jump-nav{display:none}
-    }
-    /* ── Mobile bottom nav ── */
-    .mobile-nav{display:none}
-    @media(max-width:768px){
-      body{padding-bottom:calc(56px + env(safe-area-inset-bottom,0px))}
-      .mobile-nav{display:flex;position:fixed;bottom:0;left:0;right:0;height:calc(56px + env(safe-area-inset-bottom,0px));padding-bottom:env(safe-area-inset-bottom,0px);background:var(--bg-sidebar);border-top:1px solid var(--border);z-index:100;align-items:stretch}
-      .mn-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;text-decoration:none;color:var(--text-tertiary);transition:color 0.15s;padding:6px 2px;min-width:0;-webkit-tap-highlight-color:transparent}
-      .mn-item.active{color:var(--text-primary)}
-      .mn-item:active{opacity:.65}
-      .mn-icon{width:22px;height:22px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-      .mn-label{font-size:9px;font-weight:500;letter-spacing:.02em;white-space:nowrap}
     }
   </style>
-</head>
 
-<body>
   <nav class="topnav">
     <button class="back-btn" onclick="(function(){var r=document.referrer;try{var u=new URL(r);if(u.hostname===location.hostname&&u.pathname!==location.pathname){window.location.assign(r);return}}catch(e){}window.location.href='/'})()">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
@@ -829,31 +826,31 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     </button>
     <a href="/" class="logo"><span class="logo-dot"></span>Chekpoint</a>
     <button class="theme-btn" onclick="toggleTheme()">
-      <svg id="themeIcon" width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <svg id="platformThemeIcon" width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="9" cy="9" r="3.5"/>
         <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
       </svg>
     </button>
   </nav>
 
-  {(hasMosaic || bannerImage) && (
-    <div class="hero">
-      {hasMosaic
-        ? (<div class="hero-mosaic visible" id="heroMosaic">
-            {mosaicTiles.map((url: string) => (
-              <div class="hero-mosaic-tile" style={`background-image:url('${url}')`}></div>
-            ))}
-          </div>)
-        : (<img class="hero-img" src={bannerImage!} alt={platform.name} />)
-      }
-      <div class="hero-side-fade"></div>
-      <div class="hero-overlay"></div>
+  <div class="hero">
+    {!showCoverBlur && heroImageUrl ? (
+      <img class="hero-artwork" src={heroImageUrl1x}
+        srcset={curatedBanner ? undefined : `${heroImageUrl1x} 1920w, ${heroImageUrl} 3840w`} sizes="100vw"
+        alt="" loading="eager"
+        onerror="this.style.display='none';var m=document.getElementById('heroMosaic');if(m)m.style.display='flex'" />
+    ) : null}
+    <div class="hero-mosaic" id="heroMosaic" style={showCoverBlur ? '' : 'display:none'}>
+      {mosaicTiles.map((url: string) => (
+        <div class="hero-mosaic-tile" style={`background-image:url('${url}')`}></div>
+      ))}
     </div>
-  )}
+    <div class="hero-overlay"></div>
+  </div>
 
   <div class="page">
 
-    <div class={`platform-header ${(hasMosaic || bannerImage) ? 'has-banner' : 'no-banner'}`}>
+    <div class="platform-header">
       <div class={`platform-logo-wrap${platform.logo_url ? ' custom' : ''}`}>
         {platform.logo_url
           ? <img class="platform-logo custom" src={platform.logo_url} alt={platform.name} />
@@ -872,24 +869,24 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
             </div>
           )}
         </div>
-        <div class="platform-meta">
-          {releaseYearDisplay && <span class="platform-meta-item">Released {releaseYearDisplay}</span>}
+        <div class="meta-row">
+          {releaseYearDisplay && <span class="meta-tag">Released {releaseYearDisplay}</span>}
           {generation && (
             <>
-              {releaseYearDisplay && <span class="platform-meta-sep">•</span>}
-              <span class="platform-meta-item">{generation} Generation</span>
+              {releaseYearDisplay && <span class="meta-sep">•</span>}
+              <span class="meta-tag">{generation} Generation</span>
             </>
           )}
           {family && (
             <>
-              <span class="platform-meta-sep">•</span>
-              <span class="platform-meta-item">{family}</span>
+              <span class="meta-sep">•</span>
+              <span class="meta-tag">{family}</span>
             </>
           )}
           {officialSite && (
             <>
-              <span class="platform-meta-sep">•</span>
-              <a href={officialSite} target="_blank" rel="noopener" class="platform-website">
+              <span class="meta-sep">•</span>
+              <a href={officialSite} target="_blank" rel="noopener" class="meta-link">
                 <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 2c0 0-3 2-3 6s3 6 3 6M8 2c0 0 3 2 3 6s-3 6-3 6M2 8h12"/></svg>
                 Website
               </a>
@@ -903,103 +900,77 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       </div>
     </div>
 
-    <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-num">{displayGameCount.toLocaleString()}</div>
-        <div class="stat-label">Games</div>
+    {gameAvg ? (
+      <div class="score-hero">
+        <div class={`avg-score-num ${gameAvgScoreClass}-color`}>{gameAvg}</div>
+        <div class="score-divider"></div>
+        <div class="score-meta">
+          <div class="score-label">Chekpoint Score</div>
+          <div class="review-count-label">from {totalGameReviews.toLocaleString()} {totalGameReviews === 1 ? 'review' : 'reviews'} across {displayGameCount.toLocaleString()} games</div>
+          <div class="score-dist" id="scoreDist"></div>
+        </div>
       </div>
-      <div class="stat-card">
-        <div class="stat-num">{totalGameReviews.toLocaleString()}</div>
-        <div class="stat-label">Game reviews</div>
-        <div class="stat-sub">across all games</div>
+    ) : (
+      <div class="score-hero">
+        <div class="score-meta">
+          <div class="score-label">No reviews yet</div>
+          <div class="review-count-label">{displayGameCount.toLocaleString()} games on Chekpoint — none reviewed yet</div>
+        </div>
       </div>
-      <div class={`stat-card ${gameAvgScoreClass ? `score-card-${gameAvgScoreClass}` : ''}`}>
-        {gameAvg
-          ? <div class={`stat-num ${gameAvgScoreClass}`}>{gameAvg}</div>
-          : <div class="stat-num" style="color:var(--text-tertiary)">—</div>
-        }
-        <div class="stat-label">Avg game score</div>
-      </div>
-      <div class={`stat-card ${consoleScoreClass ? `score-card-${consoleScoreClass}` : ''}`}>
-        {consoleAvg
-          ? <div class={`stat-num ${consoleScoreClass}`}>{consoleAvg}</div>
-          : <div class="stat-num" style="color:var(--text-tertiary)">—</div>
-        }
-        <div class="stat-label">Console score</div>
-        {consoleTotalRatings > 0 && <div class="stat-sub">{consoleTotalRatings.toLocaleString()} ratings</div>}
-      </div>
-    </div>
+    )}
 
-    <!-- TAB NAV -->
+    <!-- TAB BUTTONS -->
     <nav class="tab-nav">
-      <a href={`/platforms/${platform.slug}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`}>
-        <div class="tab-icon">
-          <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="2" width="6" height="6" rx="1.5"/><rect x="10" y="2" width="6" height="6" rx="1.5"/>
-            <rect x="2" y="10" width="6" height="6" rx="1.5"/><rect x="10" y="10" width="6" height="6" rx="1.5"/>
-          </svg>
-        </div>
-        <div class="tab-label">Overview</div>
-        <div class="tab-meta">Info &amp; games by year</div>
-      </a>
-      <a href={`/platforms/${platform.slug}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>
-        {platformReviewList.length > 0 && <span class="tab-count-badge">{platformReviewList.length}</span>}
-        <div class="tab-icon">
-          <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 4h12M3 8h8M3 12h5"/>
-          </svg>
-        </div>
-        <div class="tab-label">Reviews</div>
-        <div class="tab-meta">{platformReviewList.length > 0 ? `${platformReviewList.length} ${platformReviewList.length === 1 ? 'review' : 'reviews'}` : 'No reviews yet'}</div>
-      </a>
-      <a href={`/platforms/${platform.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`}>
-        <div class="tab-icon">
-          <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M2 14l4-5 3 3 3-4 4 6"/>
-          </svg>
-        </div>
-        <div class="tab-label">Stats</div>
-        <div class="tab-meta">Library insights</div>
-      </a>
+      <a href={`/platforms/${platform.slug}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`} data-tab="overview">Overview</a>
+      <a href={`/platforms/${platform.slug}?tab=byyear`} class={`tab-link ${activeTab === 'byyear' ? 'active' : ''}`} data-tab="byyear">By Year {years.length > 0 && <span class="tab-count">{years.length}</span>}</a>
+      <a href={`/platforms/${platform.slug}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`} data-tab="reviews">Reviews {platformReviewList.length > 0 && <span class="tab-count">{platformReviewList.length}</span>}</a>
+      <a href={`/platforms/${platform.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">Stats</a>
     </nav>
 
-    <!-- OVERVIEW TAB -->
-    <div class={`tab-panel ${activeTab === 'overview' ? 'active' : ''}`}>
-      {summary && (
-        <div class="about-grid">
-          <div>
-            <p class="description collapsed" id="desc">{summary}</p>
-            <button class="read-more-btn" id="readMoreBtn" onclick="toggleDesc()">Read more →</button>
-          </div>
-          <div class="details-card">
-            {releaseDate && releaseDate !== 'N/A' && (
-              <div class="detail-row">
-                <span class="detail-label">Released</span>
-                <span class="detail-value">{releaseDate}</span>
+    <!-- ── OVERVIEW TAB ── -->
+    <div class={`tab-panel ${activeTab === 'overview' ? 'active' : ''}`} data-tab="overview">
+      <div class="two-col">
+        <div class="main-col">
+          {allGames.length > 0 && (
+            <div class="section">
+              <div class="section-header">
+                <span class="section-title">Top Rated</span>
+                <span class="section-count">{topRated.length} games</span>
               </div>
-            )}
-            {generation && (
-              <div class="detail-row">
-                <span class="detail-label">Generation</span>
-                <span class="detail-value">{generation}</span>
+              <div class="game-row" id="topRatedRow"></div>
+              <div class="row-nav">
+                <button class="row-arrow" id="topPrev" onclick="pageRow('top',-1)">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
+                </button>
+                <button class="row-arrow" id="topNext" onclick="pageRow('top',1)">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
+                </button>
+                <span class="row-nav-info" id="topInfo"></span>
               </div>
-            )}
-            {family && (
-              <div class="detail-row">
-                <span class="detail-label">Family</span>
-                <span class="detail-value">{family}</span>
-              </div>
-            )}
-            <div class="detail-row">
-              <span class="detail-label">Games</span>
-              <span class="detail-value">{displayGameCount.toLocaleString()} on Chekpoint</span>
             </div>
-            {totalGameReviews > 0 && (
-              <div class="detail-row">
-                <span class="detail-label">Reviews</span>
-                <span class="detail-value">{totalGameReviews.toLocaleString()} total</span>
-              </div>
-            )}
+          )}
+
+          {allGames.length === 0 && (
+            <div class="empty-state">
+              <div class="empty-title">No games yet</div>
+              <p>We don't have any {platform.name} games in our database yet.</p>
+            </div>
+          )}
+        </div>
+
+        <div class="sidebar-col">
+          {summary && (
+            <div class="desc-card">
+              <p class="desc-text" id="desc">{summary}</p>
+              <button class="read-more-btn" id="readMoreBtn" onclick="toggleDesc()">Read more →</button>
+            </div>
+          )}
+          <div class="details-card">
+            {releaseDate && releaseDate !== 'N/A' && (<div class="detail-row"><span class="detail-label">Released</span><span class="detail-value">{releaseDate}</span></div>)}
+            {generation && (<div class="detail-row"><span class="detail-label">Generation</span><span class="detail-value">{generation}</span></div>)}
+            {family && (<div class="detail-row"><span class="detail-label">Family</span><span class="detail-value">{family}</span></div>)}
+            <div class="detail-row"><span class="detail-label">Games</span><span class="detail-value">{displayGameCount.toLocaleString()} on Chekpoint</span></div>
+            {totalGameReviews > 0 && (<div class="detail-row"><span class="detail-label">Reviews</span><span class="detail-value">{totalGameReviews.toLocaleString()} total</span></div>)}
             {officialSite && (
               <div class="detail-row">
                 <span class="detail-label">Website</span>
@@ -1010,28 +981,17 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
             )}
           </div>
         </div>
-      )}
+      </div>
+    </div>
 
-      {allGames.length > 0 && (
-        <div class="section">
-          <div class="section-header">
-            <span class="section-title">Top Rated</span>
-            <span class="section-count">{topRated.length} games</span>
-          </div>
-          <div class="game-row" id="topRatedRow"></div>
-          <div class="row-nav">
-            <button class="row-arrow" id="topPrev" onclick="pageRow('top',-1)">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
-            </button>
-            <button class="row-arrow" id="topNext" onclick="pageRow('top',1)">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
-            </button>
-            <span class="row-nav-info" id="topInfo"></span>
-          </div>
+    <!-- ── BY YEAR TAB ── -->
+    <div class={`tab-panel ${activeTab === 'byyear' ? 'active' : ''}`} data-tab="byyear">
+      {years.length === 0 ? (
+        <div class="empty-state">
+          <div class="empty-title">No games yet</div>
+          <p>We don't have any {platform.name} games in our database yet.</p>
         </div>
-      )}
-
-      {years.length > 0 && (
+      ) : (
         <div class="section">
           <div class="section-header">
             <span class="section-title">Games by Year</span>
@@ -1046,33 +1006,29 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
               <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
             </button>
           </div>
-          <div>
-            <div class="year-panel-header">
-              <span class="year-panel-label" id="yearPanelLabel"></span>
-              <span class="year-panel-count" id="yearPanelTotal"></span>
-            </div>
-            <div class="game-row" id="yearGamesRow"></div>
-            <div class="row-nav">
-              <button class="row-arrow" id="yearPrev" onclick="pageRow('year',-1)">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
-              </button>
-              <button class="row-arrow" id="yearNext" onclick="pageRow('year',1)">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
-              </button>
-              <span class="row-nav-info" id="yearInfo"></span>
-            </div>
+          <div class="year-panel-header">
+            <span class="year-panel-label" id="yearPanelLabel"></span>
+            <span class="year-panel-count" id="yearPanelTotal"></span>
+          </div>
+          <div class="game-row" id="yearGamesRow"></div>
+          <div class="row-nav">
+            <button class="row-arrow" id="yearPrev" onclick="pageRow('year',-1)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg>
+            </button>
+            <button class="row-arrow" id="yearNext" onclick="pageRow('year',1)">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg>
+            </button>
+            <span class="row-nav-info" id="yearInfo"></span>
           </div>
         </div>
       )}
     </div>
 
-    <!-- REVIEWS TAB -->
-    <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`}>
+    <!-- ── REVIEWS TAB ── -->
+    <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`} data-tab="reviews">
       <div class="section-header" style="margin-bottom:20px">
         <span class="section-title">Console Reviews</span>
-        <span class="section-count">
-          {platformReviewList.length} {platformReviewList.length === 1 ? 'review' : 'reviews'}
-        </span>
+        <span class="section-count">{platformReviewList.length} {platformReviewList.length === 1 ? 'review' : 'reviews'}</span>
       </div>
 
       {platformReviewList.length === 0 ? (
@@ -1102,11 +1058,9 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
                     <a href={`/reviewers/${review.profiles?.username}`} class="reviewer-name">
                       @{review.profiles?.username ?? 'unknown'}
                     </a>
-                    <div class="reviewer-meta">
-                      <span>{timeAgo(review.created_at)}</span>
-                    </div>
+                    <div class="reviewer-meta"><span>{timeAgo(review.created_at)}</span></div>
                   </div>
-                  <div class={`score-badge score-${scoreClass(review.score)}`}>{review.score}</div>
+                  <div class={`score-badge ${scoreClass(review.score)}`}>{review.score}</div>
                 </div>
                 {review.title && <div class="review-title">{review.title}</div>}
                 {review.body && (
@@ -1124,8 +1078,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       )}
     </div>
 
-    <!-- STATS TAB -->
-    <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`}>
+    <!-- ── STATS TAB ── -->
+    <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">
       {totalGameReviews === 0 ? (
         <div class="empty-state">
           <div class="empty-title">No stats yet</div>
@@ -1138,22 +1092,21 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
   </div>
 
-  <script define:vars={{ topRatedJson, byYearJson, yearsJson, platformStatsJson, activeTab, yearGameCountsJson, yearAvgScoresJson, accentLight, accentDark, accentRgb }}>
+  <script define:vars={{ topRatedJson, byYearJson, yearsJson, platformStatsJson, distJson, activeTab, yearGameCountsJson, yearAvgScoresJson, accentLight, accentDark, accentRgb }}>
 
     var topRated = JSON.parse(topRatedJson);
     var byYear = JSON.parse(byYearJson);
     var years = JSON.parse(yearsJson);
 
-    var scoreBorderColors = {'badge-perfect':'#ffffff','badge-great':'#4ade80','badge-teal':'#2dd4bf','badge-good':'#60a5fa','badge-mid':'#fbbf24','badge-orange':'#fb923c','badge-low':'#f87171'}
+    var scoreBorderColors = {'badge-score-perfect':'#ffffff','badge-score-great':'#4ade80','badge-score-teal':'#2dd4bf','badge-score-good':'#60a5fa','badge-score-mid':'#fbbf24','badge-score-orange':'#fb923c','badge-score-low':'#f87171'}
 
-    function makeCard(g, isExc, rank) {
+    function makeCard(g, rank) {
       var cv = g.cover ? '<img src="'+g.cover+'" alt="" loading="lazy"/>' : '<div class="game-cover-placeholder">🎮</div>';
       var bd = g.score ? '<div class="game-score-badge '+g.badge+'">'+g.score+'</div>' : '';
-      var ex = isExc ? '<div class="exclusive-badge">Exclusive</div>' : '';
       var rk = rank ? '<div class="rank-badge">#'+rank+'</div>' : '';
       var borderBottom = g.badge && scoreBorderColors[g.badge] ? 'border-bottom:2px solid '+scoreBorderColors[g.badge]+';' : '';
       return '<a href="/games/'+g.slug+'" class="game-card" style="'+borderBottom+'">'
-        +'<div class="game-cover">'+cv+ex+rk+'</div>'
+        +'<div class="game-cover">'+cv+rk+'</div>'
         +bd
         +'<div class="game-info">'
         +'<div class="game-title-text">'+g.title+'</div>'
@@ -1163,8 +1116,8 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
     var rows = {};
 
-    function initRow(key, data, rowId, prevId, nextId, infoId, isExc, showRank) {
-      rows[key] = {data:data,page:0,pageSize:5,rowId:rowId,prevId:prevId,nextId:nextId,infoId:infoId,isExc:isExc||false,showRank:showRank||false};
+    function initRow(key, data, rowId, prevId, nextId, infoId, showRank) {
+      rows[key] = {data:data,page:0,pageSize:5,rowId:rowId,prevId:prevId,nextId:nextId,infoId:infoId,showRank:showRank||false};
       renderRow(key);
     }
 
@@ -1173,7 +1126,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       var start = r.page * r.pageSize;
       var slice = r.data.slice(start, start+r.pageSize);
       var el = document.getElementById(r.rowId);
-      if (el) el.innerHTML = slice.map(function(g,i){return makeCard(g,r.isExc,r.showRank?(start+i+1):null);}).join('');
+      if (el) el.innerHTML = slice.map(function(g,i){return makeCard(g,r.showRank?(start+i+1):null);}).join('');
       var tot = Math.ceil(r.data.length / r.pageSize);
       var prev = document.getElementById(r.prevId);
       var next = document.getElementById(r.nextId);
@@ -1209,7 +1162,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     }
 
     if (topRated.length > 0) {
-      initRow('top', topRated, 'topRatedRow', 'topPrev', 'topNext', 'topInfo', false, true);
+      initRow('top', topRated, 'topRatedRow', 'topPrev', 'topNext', 'topInfo', true);
     }
 
     if (years.length > 0) {
@@ -1241,24 +1194,35 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         Object.keys(yearPills).forEach(function(yr) {
           yearPills[yr].classList.toggle('active', parseInt(yr) === y);
         });
-        if (strip && yearPills[y]) {
-          var pill = yearPills[y];
-          var target = pill.offsetLeft - (strip.clientWidth / 2) + (pill.offsetWidth / 2);
-          strip.scrollTo({left: Math.max(0, target), behavior: 'smooth'});
-        }
+        requestAnimationFrame(function() {
+          if (strip && yearPills[y]) {
+            var pill = yearPills[y];
+            var target = pill.offsetLeft - (strip.clientWidth / 2) + (pill.offsetWidth / 2);
+            strip.scrollTo({left: Math.max(0, target), behavior: 'smooth'});
+          }
+        });
         var games = byYear[y] || [];
         var totalCount = yearGameCounts[y] || games.length;
         var lbl = document.getElementById('yearPanelLabel');
         var tot = document.getElementById('yearPanelTotal');
         var cnt = document.getElementById('yearPanelCount');
-        if (lbl) lbl.textContent = y;
+        if (lbl) lbl.textContent = String(y);
         if (tot) tot.textContent = totalCount + ' games';
         if (cnt) cnt.textContent = totalCount + ' games';
-        rows['year'] = {data:games,page:0,pageSize:5,rowId:'yearGamesRow',prevId:'yearPrev',nextId:'yearNext',infoId:'yearInfo',isExc:false};
+        rows['year'] = {data:games,page:0,pageSize:5,rowId:'yearGamesRow',prevId:'yearPrev',nextId:'yearNext',infoId:'yearInfo',showRank:false};
         renderRow('year');
       }
-      selectYear(activeYear);
+
+      setTimeout(function() { selectYear(activeYear); }, 50);
     }
+
+    function toggleDesc() {
+      var d=document.getElementById('desc'), b=document.getElementById('readMoreBtn');
+      if (!d||!b) return;
+      d.classList.toggle('expanded');
+      b.textContent = d.classList.contains('expanded') ? 'Read less ↑' : 'Read more →';
+    }
+    window.toggleDesc = toggleDesc;
 
     function sortReviews(type, btn) {
       document.querySelectorAll('.sort-tab').forEach(function(b){b.classList.remove('active');});
@@ -1283,18 +1247,30 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     }
     window.toggleReview = toggleReview;
 
-    function toggleDesc() {
-      var d=document.getElementById('desc'), b=document.getElementById('readMoreBtn');
-      if (!d||!b) return;
-      d.classList.toggle('collapsed');
-      b.textContent = d.classList.contains('collapsed') ? 'Read more →' : 'Read less ↑';
-    }
-    window.toggleDesc = toggleDesc;
-
     function openRateModal() {
       alert('Sign in to rate this console');
     }
     window.openRateModal = openRateModal;
+
+    // score distribution bars — mini chart in the score-hero card
+    var dist = JSON.parse(distJson)
+    var maxVal = Math.max.apply(null, dist.concat([1]))
+    var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#ffffff']
+    function buildDist(containerId, maxHeight) {
+      var container = document.getElementById(containerId)
+      if (!container) return
+      dist.forEach(function(count, i) {
+        var wrap = document.createElement('div'); wrap.className = 'dist-bar-wrap'
+        wrap.title = 'Score ' + (i+1) + ': ' + count + ' reviews'
+        var bar = document.createElement('div'); bar.className = 'dist-bar'
+        bar.style.height = Math.max(4,(count/maxVal)*maxHeight)+'px'
+        bar.style.background = barColors[i]; bar.style.opacity = '0.65'
+        var label = document.createElement('div'); label.className = 'dist-label'
+        label.textContent = String(i+1)
+        wrap.appendChild(bar); wrap.appendChild(label); container.appendChild(wrap)
+      })
+    }
+    buildDist('scoreDist', 40)
 
     // ── PLATFORM STATS ──
     var ps = JSON.parse(platformStatsJson)
@@ -1304,7 +1280,6 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       if (!el) return
       var html = ''
 
-      // hero card: avg game score
       if (ps.gameAvg) {
         var sColor = ps.gameAvg >= 9 ? '#4ade80' : ps.gameAvg >= 7 ? '#60a5fa' : ps.gameAvg >= 5 ? '#fbbf24' : '#f87171'
         html += '<div style="background:var(--bg-card);border:1px solid ' + sColor + '44;border-radius:12px;padding:16px 20px;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">'
@@ -1317,7 +1292,6 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         html += '</div>'
       }
 
-      // 3-col mini stats
       var cColor = ps.consoleAvg ? (ps.consoleAvg >= 9 ? '#4ade80' : ps.consoleAvg >= 7 ? '#60a5fa' : ps.consoleAvg >= 5 ? '#fbbf24' : '#f87171') : '#484644'
       html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">'
       var mini = [
@@ -1335,7 +1309,6 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       })
       html += '</div>'
 
-      // score distribution + reviews by year side by side
       var hasDist = ps.gameScoreDist && ps.gameScoreDist.some(function(v) { return v > 0 })
       var hasYear = ps.reviewsByYearData && ps.reviewsByYearData.length > 0
       if (hasDist || hasYear) {
@@ -1343,14 +1316,14 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         html += '<div style="display:grid;grid-template-columns:' + cols + ';gap:8px;margin-bottom:10px">'
         if (hasDist) {
           var maxDist = Math.max.apply(null, ps.gameScoreDist.concat([1]))
-          var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#4ade80']
+          var barColors2 = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#4ade80']
           html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px">'
           html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Score distribution — per-game avg</div>'
           html += '<div style="display:flex;gap:4px;align-items:flex-end;height:60px">'
           ps.gameScoreDist.forEach(function(count, i) {
             var h = Math.max(4, (count / maxDist) * 52)
             html += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px" title="~' + (i+1) + '/10: ' + count + ' games">'
-            html += '<div style="width:100%;border-radius:4px 4px 0 0;height:' + h + 'px;background:' + barColors[i] + ';opacity:.7;min-height:4px"></div>'
+            html += '<div style="width:100%;border-radius:4px 4px 0 0;height:' + h + 'px;background:' + barColors2[i] + ';opacity:.7;min-height:4px"></div>'
             html += '<div style="font-size:9px;color:var(--text-tertiary);font-weight:500">' + (i+1) + '</div>'
             html += '</div>'
           })
@@ -1373,7 +1346,6 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         html += '</div>'
       }
 
-      // most reviewed games
       if (ps.topReviewedGames && ps.topReviewedGames.length > 0) {
         html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px">'
         html += '<div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.12em;margin-bottom:10px">Most reviewed games</div>'
@@ -1402,60 +1374,57 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
     if (activeTab === 'stats') buildPlatformStats()
 
+    // ── CLIENT-SIDE TAB SWITCHING ──
+    document.querySelectorAll('.tab-link').forEach(function(link) {
+      link.addEventListener('click', function(e) {
+        e.preventDefault()
+        var tab = new URL(link.href, location.origin).searchParams.get('tab') || 'overview'
+        document.querySelectorAll('.tab-link').forEach(function(l) { l.classList.remove('active') })
+        link.classList.add('active')
+        document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active') })
+        var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
+        if (panel) panel.classList.add('active')
+        history.replaceState({}, '', '?tab=' + tab)
+        if (tab === 'stats') {
+          var el = document.getElementById('platformStatsContent')
+          if (el && el.innerHTML === '') buildPlatformStats()
+        }
+      })
+    })
+
+    window.addEventListener('popstate', function() {
+      var tab = new URLSearchParams(location.search).get('tab') || 'overview'
+      document.querySelectorAll('.tab-link').forEach(function(l) { l.classList.remove('active') })
+      var link = document.querySelector('.tab-link[href*="tab=' + tab + '"]')
+      if (link) link.classList.add('active')
+      document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active') })
+      var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
+      if (panel) panel.classList.add('active')
+    })
+
     function toggleTheme() {
       var h=document.documentElement,n=h.getAttribute('data-theme')==='light'?'dark':'light';
       h.setAttribute('data-theme',n);localStorage.setItem('theme',n);updateIcon(n);
       h.style.setProperty('--game-accent', n === 'light' ? accentLight : accentDark);
       h.style.setProperty('--accent-rgb', accentRgb);
+      var m = document.getElementById('meta-theme-color');
+      if (m) m.content = n === 'dark' ? '#0f0f0e' : '#f9f8f6';
       if (activeTab === 'stats') {
         var el = document.getElementById('platformStatsContent')
         if (el) { el.innerHTML = ''; buildPlatformStats() }
       }
     }
+    window.toggleTheme = toggleTheme;
     function updateIcon(t) {
-      var i=document.getElementById('themeIcon');
+      var i=document.getElementById('platformThemeIcon');
       if (!i) return;
       i.innerHTML=t==='dark'
         ?'<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
         :'<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>';
     }
-    window.toggleTheme = function(t) {
-      toggleTheme(t);
-      var m = document.getElementById('meta-theme-color');
-      if (m) m.content = t === 'dark' ? '#0f0f0e' : '#f9f8f6';
-    };
 
-    var saved=document.documentElement.getAttribute('data-theme')||'light';
+    var saved=document.documentElement.getAttribute('data-theme')||'dark';
     updateIcon(saved);
 
   </script>
-
-<nav class="mobile-nav" aria-label="Mobile navigation">
-  <a href="/" class="mn-item">
-    <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7L9 2L16 7V16H11V11H7V16H2V7Z"/></svg></span>
-    <span class="mn-label">Home</span>
-  </a>
-  <a href="/search" class="mn-item">
-    <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M13 13l3 3"/></svg></span>
-    <span class="mn-label">Search</span>
-  </a>
-  {isLoggedIn ? (
-    <>
-      <a href="/notifications" class="mn-item">
-        <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6a4.5 4.5 0 0 0-9 0c0 5-2 6.5-2 6.5h13s-2-1.5-2-6.5"/><path d="M10.3 15a1.5 1.5 0 0 1-2.6 0"/></svg></span>
-        <span class="mn-label">Notifs</span>
-      </a>
-      <a href="/profile" class="mn-item">
-        <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3.5"/><path d="M3 16c0-3.31 2.69-6 6-6s6 2.69 6 6"/></svg></span>
-        <span class="mn-label">Profile</span>
-      </a>
-    </>
-  ) : (
-    <a href="/signin" class="mn-item">
-      <span class="mn-icon"><svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="3.5"/><path d="M3 16c0-3.31 2.69-6 6-6s6 2.69 6 6"/></svg></span>
-      <span class="mn-label">Sign In</span>
-    </a>
-  )}
-</nav>
-</body>
-</html>
+</Layout>
