@@ -1,8 +1,8 @@
+
 import type { APIRoute } from "astro";
-import { getSupabase } from "../../utils/database";
-import { igdbImage } from "../../utils/format";
 import { renderOgImage, fetchImageDataUri } from "../../utils/og";
 import { buildReviewOgTree } from "../../utils/ogReview";
+import { resolveGameCover } from "./_mockupShared";
 
 export const prerender = false;
 
@@ -48,31 +48,7 @@ export const GET: APIRoute = async ({ url }) => {
   const avatarUrl = params.get("avatar");
   const coverOverrideUrl = params.get("cover");
 
-  let gameTitle = game;
-  let coverImgUrl: string | null = null;
-
-  if (coverOverrideUrl) {
-    coverImgUrl = coverOverrideUrl;
-  } else {
-    const db = getSupabase();
-    const { data: exact } = await db
-      .from("games").select("title, cover_img_url").eq("slug", game).maybeSingle();
-    if (exact) {
-      gameTitle = exact.title;
-      coverImgUrl = exact.cover_img_url;
-    } else {
-      const { data: fuzzy } = await db
-        .from("games").select("title, cover_img_url").ilike("title", `%${game}%`).limit(1).maybeSingle();
-      if (fuzzy) {
-        gameTitle = fuzzy.title;
-        coverImgUrl = fuzzy.cover_img_url;
-      }
-    }
-  }
-
-  const coverUrl = coverImgUrl
-    ? (coverOverrideUrl ? coverImgUrl : igdbImage(coverImgUrl, "t_cover_big"))
-    : null;
+  const { title: gameTitle, coverUrl } = await resolveGameCover(game, coverOverrideUrl);
 
   const [coverDataUri, reviewerAvatarDataUri] = await Promise.all([
     coverUrl ? fetchImageDataUri(coverUrl, IMAGE_FETCH_TIMEOUT_MS) : Promise.resolve(null),
