@@ -93,6 +93,54 @@ export function foldDiacritics(str: string): string {
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
+// \u2500\u2500 Series relevance ranking \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Used by the "More in this series" rail to rank sibling games when a collection
+// is larger than the display cap (e.g. the "Super Mario" collection has ~68 games).
+// Game titles in a series almost always share a leading name ("The Witcher \u2026",
+// "Super Smash Bros. \u2026"), so a shared-prefix count is a strong relevance signal
+// that cleanly separates true series entries from loosely-linked ones.
+
+// Normalizes a title into lowercase alphanumeric tokens (diacritics folded).
+// "Super Smash Bros. Melee" -> ["super","smash","bros","melee"].
+export function seriesTitleTokens(title: string): string[] {
+  return foldDiacritics(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// Number of leading tokens two titles share \u2014 the length of their common prefix.
+// ("The Witcher 3","The Witcher 2") -> 2 ; ("Smash Bros Melee","Donkey Kong") -> 0.
+export function sharedLeadingTokens(a: string[], b: string[]): number {
+  const n = Math.min(a.length, b.length);
+  let count = 0;
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== b[i]) break;
+    count++;
+  }
+  return count;
+}
+
+// Relevance of a candidate sibling to the game being viewed. Shared title prefix
+// dominates; release-date proximity (0..1, 1 = same year) only breaks ties between
+// equally title-similar entries. Higher = more relevant.
+export function seriesRelevanceScore(
+  selfTokens: string[],
+  selfTime: number | null,
+  candidateTitle: string,
+  candidateReleased: string | null | undefined
+): number {
+  const shared = sharedLeadingTokens(selfTokens, seriesTitleTokens(candidateTitle));
+  let proximity = 0;
+  if (selfTime != null && candidateReleased) {
+    const years = Math.abs(selfTime - new Date(candidateReleased).getTime()) / (365.25 * 24 * 3600 * 1000);
+    proximity = 1 / (1 + years);
+  }
+  return shared * 10 + proximity;
+}
+
 function makeGameSlug(title: string, igdbSlug?: string): string {
   if (igdbSlug) return igdbSlug;
   return foldDiacritics(title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -119,6 +167,18 @@ async function upsertJunction(
       );
     }
   }
+}
+
+// Resolves an IGDB game's parent (its base game) to our internal games.id, if we
+// already have that base game. IGDB exposes two parent pointers: `parent_game`
+// (DLC / expansions / episodes point at the base game) and `version_parent`
+// (alternate editions/versions point at the canonical release). We only link to a
+// parent that already exists in our DB — importing missing parents is a separate pass.
+async function resolveParentGameId(db: any, igdbGame: any): Promise<string | null> {
+  const parentIgdbId = igdbGame.parent_game ?? igdbGame.version_parent ?? null;
+  if (!parentIgdbId) return null;
+  const { data } = await db.from('games').select('id').eq('igdb_id', parentIgdbId).maybeSingle();
+  return data?.id ?? null;
 }
 
 export type ImportGameResult =
@@ -187,7 +247,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
 
   const games = await igdbFetch("games", `
     fields name, slug, summary, storyline, game_type, status,
-           first_release_date, cover.url,
+           first_release_date, cover.url, parent_game, version_parent,
            genres.id, genres.name, genres.slug,
            platforms.id, platforms.name, platforms.slug,
            themes.id, themes.name, themes.slug,
@@ -209,6 +269,8 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
   const { data: slugConflict } = await db.from('games').select('id').eq('slug', slug).maybeSingle();
   const finalSlug = slugConflict ? `${slug}-${igdbId}` : slug;
 
+  const parentGameId = await resolveParentGameId(db, game);
+
   const { data: inserted, error: insertError } = await db
     .from('games')
     .insert({
@@ -218,6 +280,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
       storyline:        game.storyline ?? null,
       igdb_category:    game.game_type ?? null,
       igdb_status:      game.status    ?? null,
+      parent_game_id:   parentGameId,
       cover_img_url:    coverUrl,
       date_released:    game.first_release_date
         ? new Date(game.first_release_date * 1000).toISOString().split('T')[0]

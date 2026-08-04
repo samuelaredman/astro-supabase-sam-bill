@@ -5,6 +5,7 @@ import { getSupabase, createSupabaseServerClientFromContext, getSupabaseAdmin } 
 const supabase = getSupabase();
 import { igdbFetch } from '../../utils/igdb'
 import { igdbImage, scoreClass, timeAgo } from '../../utils/format'
+import { isAllowedGameCategory, GAME_CATEGORIES, seriesTitleTokens, seriesRelevanceScore } from '../../utils/games'
 import Layout from '../../components/Layout.astro'
 import ReviewCard from '../../components/ReviewCard.astro'
 import ReportModal from '../../components/ReportModal.astro'
@@ -24,7 +25,7 @@ const { data: game } = await (supabase as any)
   .from('games')
   .select(`
     id, title, slug, game_description, cover_img_url,
-    date_released, igdb_id,
+    date_released, igdb_id, igdb_category, parent_game_id,
     game_genres(genres(id, name, slug)),
     game_platforms(platforms(id, name, slug)),
     game_companies(role, developers(id, name, slug))
@@ -349,6 +350,104 @@ if (similarSlugs.length > 0) {
 
 const thisAvg = avgScore ? parseFloat(avgScore) : 0
 const allAvgs = Object.values(gameAvgs).sort((a, b) => b - a)
+
+// ── GAME LINKING: parent (base game), children (DLC/editions), series siblings ──
+// franchises/collections + parent_game_id already live in our DB (public tables),
+// so these are plain lookups against the anon client — no live IGDB calls needed.
+
+// Parent: this game is a DLC/expansion/edition of another game in our library.
+let parentGame: { id: string; title: string; slug: string; cover_img_url: string | null } | null = null
+if (game.parent_game_id) {
+  const { data } = await (supabase as any)
+    .from('games').select('id, title, slug, cover_img_url').eq('id', game.parent_game_id).maybeSingle()
+  parentGame = data ?? null
+}
+
+// Children: DLC / expansions / editions that point AT this game. Deliberately
+// includes non-main categories (that's the whole point of this section).
+const { data: childRows } = await (supabase as any)
+  .from('games')
+  .select('id, title, slug, cover_img_url, date_released, igdb_category')
+  .eq('parent_game_id', game.id)
+  .order('date_released', { ascending: true, nullsFirst: false })
+const childGames = (childRows ?? []) as any[]
+
+// Series siblings — "More in this series".
+// Prefer the tight `collection` grouping (IGDB's canonical series). Crossover games
+// (Super Smash Bros., Mario Kart) get tagged with many broad franchises, so unioning
+// franchises drags in unrelated titles (Donkey Kong, Zelda…). We only fall back to
+// franchise siblings when the collection yields none — e.g. Cyberpunk 2077, whose
+// collection is just itself, falls back to its clean 3-game franchise.
+const [{ data: collRows }, { data: franRows }] = await Promise.all([
+  (supabase as any).from('game_collections').select('collection_id').eq('game_id', game.id),
+  (supabase as any).from('game_franchises').select('franchise_id').eq('game_id', game.id),
+])
+const collectionIds = (collRows ?? []).map((r: any) => r.collection_id)
+const franchiseIds = (franRows ?? []).map((r: any) => r.franchise_id)
+
+async function siblingIdsFrom(junction: string, col: string, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>()
+  if (ids.length === 0) return out
+  const { data } = await (supabase as any).from(junction).select('game_id').in(col, ids)
+  for (const r of data ?? []) out.add(r.game_id)
+  // Drop self, the parent, and any direct children — those get their own sections.
+  out.delete(game.id)
+  if (game.parent_game_id) out.delete(game.parent_game_id)
+  for (const c of childGames) out.delete(c.id)
+  return out
+}
+
+let siblingIds = await siblingIdsFrom('game_collections', 'collection_id', collectionIds)
+if (siblingIds.size === 0) {
+  siblingIds = await siblingIdsFrom('game_franchises', 'franchise_id', franchiseIds)
+}
+
+const SERIES_LIMIT = 12
+let seriesGames: any[] = []
+if (siblingIds.size > 0) {
+  const { data } = await (supabase as any)
+    .from('games')
+    .select('id, title, slug, cover_img_url, date_released, igdb_category, parent_game_id')
+    .in('id', Array.from(siblingIds))
+  // Only surface main, reviewable entries here. Exclude:
+  //  - non-main categories (DLC/ports) that would clutter the series rail, and
+  //  - anything linked to a parent — those belong under that base game's
+  //    "Editions & DLC" section, not the flat series list.
+  const candidates = (data ?? [])
+    .filter((g: any) => !g.parent_game_id && isAllowedGameCategory(g.igdb_category, g.title))
+
+  if (candidates.length > SERIES_LIMIT) {
+    // Large collection (e.g. "Super Mario" ~68). Rank by relevance to keep the
+    // closest entries rather than just the oldest — but ONLY to select which
+    // survive the cap. Display order stays chronological below, so tight series
+    // (Witcher, Cyberpunk) — always under the cap — are never reordered here.
+    const selfTokens = seriesTitleTokens(game.title)
+    const selfTime = game.date_released ? new Date(game.date_released).getTime() : null
+    seriesGames = [...candidates]
+      .sort((a: any, b: any) =>
+        seriesRelevanceScore(selfTokens, selfTime, b.title, b.date_released) -
+        seriesRelevanceScore(selfTokens, selfTime, a.title, a.date_released))
+      .slice(0, SERIES_LIMIT)
+  } else {
+    seriesGames = candidates
+  }
+
+  // A series reads best chronologically — sort the selected entries by release date
+  // (undated last) for display, independent of how they were ranked for selection.
+  seriesGames.sort((a: any, b: any) => {
+    const ta = a.date_released ? new Date(a.date_released).getTime() : Infinity
+    const tb = b.date_released ? new Date(b.date_released).getTime() : Infinity
+    return ta - tb
+  })
+}
+
+// Human-readable label for a child's IGDB category (e.g. "DLC", "Expansion").
+function categoryLabel(cat: number | null | undefined): string | null {
+  if (cat == null) return null
+  const raw = GAME_CATEGORIES[cat]
+  if (!raw || raw === 'main_game') return null
+  return raw.replace(/_/g, ' ').replace(/\bdlc\b/i, 'DLC').replace(/\b\w/g, c => c.toUpperCase())
+}
 const allTimeRank = allAvgs.findIndex(v => v <= thisAvg) + 1
 const allTimeTotal = allAvgs.length
 const allTimePct = allTimeTotal > 0 ? Math.round(((allTimeTotal - allTimeRank) / allTimeTotal) * 100) : 0
@@ -715,6 +814,11 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     .similar-score-badge.score-low{background:rgba(48,14,14,.88);color:#f87171;border:1px solid rgba(248,113,113,.4)}
     .similar-info{padding:6px 8px 8px}
     .similar-title{font-size:10px;font-weight:500;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--text-secondary)}
+    .kind-badge{position:absolute;top:5px;left:5px;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;background:rgba(96,80,200,.92);color:#fff;backdrop-filter:blur(6px)}
+    .parent-breadcrumb{display:inline-flex;align-items:center;gap:6px;margin-bottom:8px;padding:4px 10px;border-radius:999px;background:var(--tag-bg);border:1px solid var(--border);font-size:12px;color:var(--text-secondary);transition:border-color .15s,color .15s;width:fit-content}
+    .parent-breadcrumb:hover{color:var(--text-primary);border-color:var(--game-accent)}
+    .parent-breadcrumb strong{font-weight:600;color:var(--text-primary)}
+    .parent-breadcrumb-arrow{color:var(--game-accent);font-weight:700}
 
     /* SIDEBAR */
     .desc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px}
@@ -944,6 +1048,12 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         : <div class="cover-placeholder">🎮</div>
       }
       <div class="game-info">
+        {parentGame && (
+          <a href={`/games/${parentGame.slug}`} class="parent-breadcrumb">
+            <span class="parent-breadcrumb-arrow">↑</span>
+            <span>{categoryLabel(game.igdb_category) ?? 'Part of'} · <strong>{parentGame.title}</strong></span>
+          </a>
+        )}
         <h1 class="game-title">{game.title}</h1>
         <div class="meta-row">
           {releaseYear && <span class="meta-tag">{releaseYear}</span>}
@@ -1025,6 +1135,50 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
                       alt={`${game.title} screenshot ${i + 1}`} loading="lazy" />
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+          {childGames.length > 0 && (
+            <div class="section">
+              <div class="section-header"><span class="section-title">Editions & DLC</span></div>
+              <div class="similar-scroll">
+                {childGames.map((c: any) => {
+                  const cAvg = gameAvgs[c.id]
+                  const kind = categoryLabel(c.igdb_category)
+                  return (
+                    <a href={`/games/${c.slug}`} class="similar-card">
+                      <div class="similar-cover">
+                        {c.cover_img_url ? <img src={igdbImage(c.cover_img_url, 't_cover_big') ?? ''} alt={c.title} loading="lazy" /> : '🎮'}
+                        {cAvg != null && (
+                          <div class={`similar-score-badge ${scoreClass(cAvg)}`}>{cAvg.toFixed(1)}</div>
+                        )}
+                        {kind && <div class="kind-badge">{kind}</div>}
+                      </div>
+                      <div class="similar-info"><div class="similar-title">{c.title}</div></div>
+                    </a>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+          {seriesGames.length > 0 && (
+            <div class="section">
+              <div class="section-header"><span class="section-title">More in this series</span></div>
+              <div class="similar-scroll">
+                {seriesGames.map((s: any) => {
+                  const sAvg = gameAvgs[s.id]
+                  return (
+                    <a href={`/games/${s.slug}`} class="similar-card">
+                      <div class="similar-cover">
+                        {s.cover_img_url ? <img src={igdbImage(s.cover_img_url, 't_cover_big') ?? ''} alt={s.title} loading="lazy" /> : '🎮'}
+                        {sAvg != null && (
+                          <div class={`similar-score-badge ${scoreClass(sAvg)}`}>{sAvg.toFixed(1)}</div>
+                        )}
+                      </div>
+                      <div class="similar-info"><div class="similar-title">{s.title}</div></div>
+                    </a>
+                  )
+                })}
               </div>
             </div>
           )}
