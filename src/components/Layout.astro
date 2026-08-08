@@ -39,6 +39,18 @@ const hasSidebarRight = variant === 'three-col' && Astro.slots.has('sidebar-righ
 const layoutClass = variant === 'centered' ? 'layout no-sidebar' : variant === 'two-col' ? 'layout two-col' : hasSidebarRight ? 'layout' : 'layout two-col';
 const isFullwidth = variant === 'fullwidth';
 
+// --- GA4 analytics tagging ---
+// Team accounts whose traffic we exclude from GA4 via the built-in Internal Traffic
+// filter (matched case-insensitively). Add/remove usernames here as the team changes.
+const GA_INTERNAL_USERNAMES = ['sam', 'bill', 'chekpoint', 'chekpoint moderation'];
+const isInternalTraffic = Boolean(
+  isLoggedIn &&
+  currentProfile?.username &&
+  GA_INTERNAL_USERNAMES.includes(currentProfile.username.trim().toLowerCase())
+);
+// Non-identifying user property so any GA4 report can be segmented by auth state.
+const gaLoginState = isLoggedIn ? 'authenticated' : 'anonymous';
+
 function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase();
 }
@@ -87,17 +99,25 @@ function getInitials(username: string): string {
   <meta name="google-site-verification" content="l1TgpE7YMhgtwQDau-96h_eqePqIgzVJPx6cB95HDn4" />
   <!-- Google Analytics 4 with Consent Mode v2 (analytics off by default) -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-TFBYE9G1QW" is:inline></script>
-  <script is:inline>
+  <script is:inline define:vars={{ isInternalTraffic, gaLoginState, isLoggedIn }}>
     window.dataLayer = window.dataLayer || [];
     function gtag(){dataLayer.push(arguments);}
     // Deny analytics by default — updated to 'granted' only if user accepts
     gtag('consent', 'default', { analytics_storage: 'denied', wait_for_update: 500 });
     gtag('js', new Date());
-    gtag('config', 'G-TFBYE9G1QW');
+    // Non-identifying user property so reports can be segmented by auth state.
+    gtag('set', 'user_properties', { login_state: gaLoginState });
+    // Tag team traffic so GA4's built-in Internal Traffic filter can exclude it.
+    var gaConfig = {};
+    if (isInternalTraffic) { gaConfig.traffic_type = 'internal'; }
+    gtag('config', 'G-TFBYE9G1QW', gaConfig);
     // If user has already accepted in a previous visit, grant immediately
     if (typeof localStorage !== 'undefined' && localStorage.getItem('cookie-consent') === 'accepted') {
       gtag('consent', 'update', { analytics_storage: 'granted' });
     }
+    // Returning-member signal: fires on every authenticated page load, capturing
+    // members whose live session means they never re-submit the sign-in form.
+    if (isLoggedIn) { gtag('event', 'logged_in_visit'); }
   </script>
   <link rel="manifest" href="/manifest.json" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
