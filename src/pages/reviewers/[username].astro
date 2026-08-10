@@ -25,6 +25,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
     favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
     steam_id, steam_username, steam_synced_at,
+    twitch_url, youtube_url, twitter_url, discord_url, website_url, accent_color,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
     ),
@@ -606,6 +607,38 @@ const bannerStyle = reviewer.banner_url
   ? `background-image:url('${reviewer.banner_url}');background-size:cover;background-position:${reviewer.banner_position ?? 'center'}`
   : ''
 
+// Scoped to a wrapper below the topnav so a visitor's own site chrome (logo dot)
+// never changes color when viewing someone else's profile.
+const accentStyle = reviewer.accent_color && /^#[0-9a-f]{6}$/i.test(reviewer.accent_color)
+  ? `--accent:${reviewer.accent_color}`
+  : undefined
+
+const SOCIAL_PLATFORMS = [
+  { key: 'twitch_url', label: 'Twitch' },
+  { key: 'youtube_url', label: 'YouTube' },
+  { key: 'twitter_url', label: 'Twitter/X' },
+  { key: 'discord_url', label: 'Discord' },
+  { key: 'website_url', label: 'Website' },
+] as const
+const socialLinks = SOCIAL_PLATFORMS
+  .map(p => ({ ...p, url: reviewer[p.key] as string | null }))
+  .filter(p => !!p.url)
+
+// Small generic, self-drawn glyphs (not exact trademarked logos) matching the
+// site's existing inline-SVG stroke-icon convention. Always paired with a text
+// label in the pill, so icon fidelity doesn't need to carry meaning alone.
+const SOCIAL_ICON_SVG: Record<string, string> = {
+  twitch_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h11v8l-3 3h-3l-2 2v-2H3V2z"/><path d="M8 5v3M11 5v3"/></svg>',
+  youtube_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="3.5" width="13" height="9" rx="2.5"/><path d="M6.5 6l4 2-4 2V6z" fill="currentColor" stroke="none"/></svg>',
+  twitter_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 2.5l11 11M13.5 2.5l-11 11"/></svg>',
+  discord_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="12" height="7" rx="3.5"/><path d="M5.5 8.5v.01M10.5 8.5v.01" stroke-width="2"/></svg>',
+  website_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 2c0 0-3 2-3 6s3 6 3 6M8 2c0 0 3 2 3 6s-3 6-3 6M2 8h12"/></svg>',
+}
+const hasAccentColor = !!accentStyle
+const initialAccentColorValue = hasAccentColor ? (reviewer.accent_color as string) : '#6050c8'
+const socialIconsJson = JSON.stringify(SOCIAL_ICON_SVG)
+const socialLabelsJson = JSON.stringify(Object.fromEntries(SOCIAL_PLATFORMS.map(p => [p.key, p.label])))
+
 // Per-game scatter + hot takes
 const perGameData = publishedReviews
   .map((r: any) => {
@@ -628,10 +661,36 @@ const hotTakes = [...perGameData]
   .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
   .slice(0, 5)
 
+// ── VOLUME PERCENTILE — how this reviewer's review count ranks against every other reviewer ──
+// Reviews is unbounded, so page through in batches (same pattern used for the all-time score
+// rank on games/[slug].astro) rather than a single capped query.
+let volumePercentile: number | null = null
+{
+  const profileReviewCounts: Record<string, number> = {}
+  const PAGE_SIZE = 1000
+  let from = 0
+  while (true) {
+    const { data: page } = await (supabase as any)
+      .from('reviews').select('profile_id').eq('status', 'published')
+      .range(from, from + PAGE_SIZE - 1)
+    if (!page || page.length === 0) break
+    for (const row of page) {
+      profileReviewCounts[row.profile_id] = (profileReviewCounts[row.profile_id] ?? 0) + 1
+    }
+    if (page.length < PAGE_SIZE) break
+    from += PAGE_SIZE
+  }
+  const allCounts = Object.values(profileReviewCounts)
+  const myCount = publishedReviews.length
+  const fewerThanMe = allCounts.filter((c) => c < myCount).length
+  const totalOtherReviewers = allCounts.length - 1 // exclude self
+  volumePercentile = totalOtherReviewers > 0 ? Math.round((fewerThanMe / totalOtherReviewers) * 100) : null
+}
+
 const distJson = JSON.stringify(scoreDistribution)
 const statsJson = JSON.stringify({
   reviewCount: publishedReviews.length,
-  avgScore, avgHours, totalHours, recommendedRate, scoreDelta,
+  avgScore, avgHours, totalHours, recommendedRate, scoreDelta, volumePercentile,
   platformBreakdown, genreBreakdown,
   genreActivityData, genreRatingData, yearRatingData,
   monthLabels, monthCounts, scoreDistribution,
@@ -767,6 +826,21 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     .bio-actions.editing{display:flex}
     .bio-empty{font-size:14px;color:var(--text-tertiary);font-style:italic;cursor:text;padding:4px 6px;border-radius:6px;transition:background .15s;display:inline-block}
     .bio-empty:hover{background:var(--tag-bg);color:var(--text-secondary)}
+
+    /* SOCIAL LINKS */
+    .social-links-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+    .social-link-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:16px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-tertiary);font-size:12px;font-weight:500;text-decoration:none;transition:all .15s}
+    .social-link-pill:hover{border-color:var(--accent);color:var(--accent)}
+    .social-link-pill svg{flex-shrink:0}
+    .social-links-edit{flex-direction:column;gap:6px;max-width:480px;margin-bottom:10px}
+    .social-edit-row{display:flex;align-items:center;gap:8px}
+    .social-edit-label{font-size:11px;font-weight:600;color:var(--text-tertiary);width:70px;flex-shrink:0}
+    .social-edit-input{flex:1;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text-primary);background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:6px 10px;outline:none;transition:border-color .15s}
+    .social-edit-input:focus{border-color:var(--accent)}
+    .accent-color-input{width:34px;height:34px;border-radius:8px;border:1px solid var(--border);background:none;cursor:pointer;padding:2px;flex:none}
+    .accent-reset-btn{font-size:12px;color:var(--text-tertiary);background:none;border:none;cursor:pointer;font-family:inherit;text-decoration:underline;text-underline-offset:2px}
+    .accent-reset-btn:hover{color:var(--text-secondary)}
+
     .btn-sm{padding:5px 12px;border-radius:8px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;border:none;transition:opacity .15s}
     .btn-sm-primary{background:var(--accent);color:white}
     .btn-sm-ghost{background:var(--tag-bg);color:var(--text-secondary)}
@@ -898,6 +972,45 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     .sort-tabs{display:flex;gap:6px;margin-bottom:16px}
     .sort-tab{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:5px 14px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:.04em}
     .sort-tab.active{background:var(--accent);color:white;border-color:transparent}
+
+    /* OVERVIEW GRID — condensed "All" view for reviews + recommendations. 2-3 per row instead of
+       one full-width row, so there's no dead space next to a short title. */
+    .reviews-overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;padding:16px 0}
+    .review-overview-card{display:flex;align-items:center;gap:10px;padding:7px 10px 7px 9px;border-radius:9px;text-decoration:none;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--border);transition:transform .15s,box-shadow .15s}
+    .review-overview-card:hover{transform:translateY(-2px);box-shadow:0 4px 14px rgba(0,0,0,.12)}
+    .rov-cover{width:32px;height:43px;border-radius:5px;object-fit:cover;background:var(--tag-bg);flex-shrink:0;display:block}
+    .rov-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+    .rov-title{font-size:12.5px;font-weight:500;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .rov-date{font-size:10.5px;color:var(--text-tertiary)}
+    .rov-score{font-family:'DM Serif Display',serif;font-size:16px;font-weight:700;color:var(--text-primary);flex-shrink:0}
+    /* Score-tinted highlight — fixed hex per tier (not the --score-* vars, which resolve to
+       white-on-colored-bg for badges) as a low-alpha wash so text stays readable in both themes.
+       Namespaced as .rov-* rather than reusing bare .score-* — shared.css defines a GLOBAL,
+       !important-laden .score-perfect rule (for the small .score-badge chip) that would otherwise
+       silently force this card's background to solid white/navy regardless of what's set here. */
+    /* Perfect (10) follows the site's own inverted "perfect" convention — bright ring in dark
+       mode, dark-navy ring in light mode — instead of a hue, but kept low-alpha so it reads as
+       a subtle glow rather than the site's usual solid white/navy badge fill. Full ring, not
+       just a left stripe, since a 10 is the one tier worth calling out on all four sides. */
+    .review-overview-card.rov-perfect{border:3px solid rgba(255,255,255,.8);background:rgba(255,255,255,.17);box-shadow:0 0 18px rgba(255,255,255,.45)}
+    .review-overview-card.rov-perfect:hover{box-shadow:0 4px 14px rgba(0,0,0,.12),0 0 18px rgba(255,255,255,.45)}
+    [data-theme="light"] .review-overview-card.rov-perfect{border-color:rgba(26,26,46,.7);background:rgba(26,26,46,.14);box-shadow:0 0 18px rgba(26,26,46,.32)}
+    [data-theme="light"] .review-overview-card.rov-perfect:hover{box-shadow:0 4px 14px rgba(0,0,0,.12),0 0 18px rgba(26,26,46,.32)}
+    .review-overview-card.rov-great{border-left-color:#4ade80;background:rgba(74,222,128,.08)}
+    .review-overview-card.rov-teal{border-left-color:#2dd4bf;background:rgba(45,212,191,.08)}
+    .review-overview-card.rov-good{border-left-color:#60a5fa;background:rgba(96,165,250,.08)}
+    .review-overview-card.rov-mid{border-left-color:#fbbf24;background:rgba(251,191,36,.08)}
+    .review-overview-card.rov-orange{border-left-color:#fb923c;background:rgba(251,146,60,.08)}
+    .review-overview-card.rov-low{border-left-color:#f87171;background:rgba(248,113,113,.08)}
+
+    .recs-overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px 14px;padding:20px 0}
+    .rec-overview-tile{display:block;text-decoration:none}
+    .rot-covers{display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:8px}
+    .rot-cover{width:56px;height:75px;border-radius:6px;overflow:hidden;background:var(--tag-bg);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 2px 8px rgba(0,0,0,.15);transition:transform .15s}
+    .rot-cover img{width:100%;height:100%;object-fit:cover;display:block}
+    .rec-overview-tile:hover .rot-cover{transform:translateY(-3px)}
+    .rot-arrow{color:var(--text-tertiary);font-size:14px;flex-shrink:0}
+    .rot-titles{font-size:11px;font-weight:500;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
     .spoiler-pill{display:inline-flex;align-items:center;gap:4px;background:rgba(251,191,36,.08);color:#fbbf24;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em;border:1px solid rgba(251,191,36,.2)}
     .expand-btn{font-size:11px;color:var(--accent);margin-left:auto;cursor:pointer;background:none;border:none;font-family:inherit;padding:0;font-weight:500}
     .empty-state{padding:60px 0;text-align:center;color:var(--text-tertiary)}
@@ -1110,6 +1223,8 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   </button>
 </nav>
 
+<div id="accentScope" style={accentStyle}>
+
 <div class="profile-banner" id="profileBanner" style={bannerStyle}>
   {!reviewer.banner_url && <div class="banner-glow"></div>}
   {!reviewer.banner_url && <div class="banner-glow2"></div>}
@@ -1177,6 +1292,43 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
           reviewer.bio && <p class="profile-bio">{reviewer.bio}</p>
         )}
       </div>
+
+      <div class="social-links-row" id="socialLinksRow" style={socialLinks.length === 0 ? 'display:none' : ''}>
+        {socialLinks.map(link => (
+          <a href={link.url ?? '#'} target="_blank" rel="noopener" class="social-link-pill" data-social-key={link.key}>
+            <Fragment set:html={SOCIAL_ICON_SVG[link.key]} />
+            <span>{link.label}</span>
+          </a>
+        ))}
+      </div>
+
+      {isOwnProfile && (
+        <div class="social-links-edit" id="socialLinksEdit" style="display:none">
+          {SOCIAL_PLATFORMS.map(p => (
+            <div class="social-edit-row">
+              <label class="social-edit-label" for={`social-${p.key}`}>{p.label}</label>
+              <input
+                type="text"
+                class="social-edit-input"
+                id={`social-${p.key}`}
+                data-social-key={p.key}
+                placeholder="https://…"
+                value={(reviewer[p.key] as string | null) ?? ''}
+              />
+            </div>
+          ))}
+          <div class="social-edit-row">
+            <label class="social-edit-label" for="accentColorInput">Accent color</label>
+            <input
+              type="color"
+              class="accent-color-input"
+              id="accentColorInput"
+              value={initialAccentColorValue}
+            />
+            <button type="button" class="accent-reset-btn" id="accentResetBtn" onclick="resetAccentColor()">Reset to default</button>
+          </div>
+        </div>
+      )}
 
     </div>
 
@@ -1466,13 +1618,14 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   ) : (
     <>
       <div class="sort-tabs">
-        <button class="sort-tab active" onclick="sortReviews('recent',this)">Recent</button>
+        <button class="sort-tab active" onclick="sortReviews('all',this)">All</button>
+        <button class="sort-tab" onclick="sortReviews('recent',this)">Recent</button>
         <button class="sort-tab" onclick="sortReviews('highest',this)">Highest</button>
         <button class="sort-tab" onclick="sortReviews('lowest',this)">Lowest</button>
         <button class="sort-tab" onclick="sortReviews('most_upvoted',this)">Most upvoted</button>
         <button class="sort-tab" onclick="sortReviews('most_downvoted',this)">Most downvoted</button>
       </div>
-      <div id="reviewsList">
+      <div id="reviewsList" style="display:none">
         {publishedReviews.map((review: any) => (
           <ReviewCard
             review={review}
@@ -1484,6 +1637,23 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
           />
         ))}
       </div>
+      <div class="reviews-overview-grid" id="reviewsOverviewList">
+        {[...publishedReviews].sort((a: any, b: any) =>
+          (a.games?.title ?? '').localeCompare(b.games?.title ?? '')
+        ).map((review: any) => {
+          const cover = igdbCover(review.games?.cover_img_url, 't_thumb')
+          return (
+            <a href={`/reviews/${review.id}`} class={`review-overview-card rov-${scoreClass(review.score).replace('score-', '')}`}>
+              {cover ? <img class="rov-cover" src={cover} alt="" loading="lazy" /> : <div class="rov-cover" />}
+              <div class="rov-body">
+                <span class="rov-title">{review.games?.title ?? 'Unknown game'}</span>
+                <span class="rov-date">{timeAgo(review.published_at ?? review.created_at)}</span>
+              </div>
+              <span class="rov-score">{review.score}</span>
+            </a>
+          )
+        })}
+      </div>
     </>
   )}
 </div>
@@ -1493,7 +1663,8 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     <div class="prof-recs-head">
       {reviewerRecs.length > 0 && (
         <div class="prof-recs-sorts">
-          <button class="prof-rec-sort active" data-sort="recent">Recent</button>
+          <button class="prof-rec-sort active" data-sort="all">All</button>
+          <button class="prof-rec-sort" data-sort="recent">Recent</button>
           <button class="prof-rec-sort" data-sort="most_up">Most upvoted</button>
           <button class="prof-rec-sort" data-sort="least_up">Least upvoted</button>
           <button class="prof-rec-sort" data-sort="oldest">Oldest</button>
@@ -1508,7 +1679,7 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
         {isOwnProfile && <button class="prof-rec-add" onclick="openRecComposer()" style="margin-top:14px">+ Add a recommendation</button>}
       </div>
     ) : (
-      <div id="profRecsList">
+      <div id="profRecsList" style="display:none">
         {reviewerRecs.map((rec: any) => (
           <div class="prof-rec-item" data-created={rec.createdAt} data-net={rec.upVotes - rec.downVotes}>
             <RecommendationFeedCard
@@ -1531,6 +1702,24 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
             />
           </div>
         ))}
+      </div>
+      <div class="recs-overview-grid" id="profRecsOverviewList">
+        {[...reviewerRecs].sort((a: any, b: any) =>
+          (a.sourceGame?.title ?? '').localeCompare(b.sourceGame?.title ?? '')
+        ).map((rec: any) => {
+          const srcCover = igdbCover(rec.sourceGame?.cover_img_url, 't_cover_big')
+          const tgtCover = igdbCover(rec.targetGame?.cover_img_url, 't_cover_big')
+          return (
+            <a href={`/recommendations/${rec.id}`} class="rec-overview-tile">
+              <div class="rot-covers">
+                <div class="rot-cover">{srcCover ? <img src={srcCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+                <span class="rot-arrow">→</span>
+                <div class="rot-cover">{tgtCover ? <img src={tgtCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+              </div>
+              <div class="rot-titles">{rec.sourceGame?.title ?? 'Unknown'} → {rec.targetGame?.title ?? 'Unknown'}</div>
+            </a>
+          )
+        })}
       </div>
     )}
   </div>
@@ -2005,9 +2194,10 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn, librarySettingsJson }}>
+</div><!-- /#accentScope -->
 
-  var barColors = ['#f87171','#f87171','#fb923c','#fb923c','#fbbf24','#fbbf24','#60a5fa','#2dd4bf','#4ade80','#ffffff']
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
+
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
 
@@ -2025,6 +2215,25 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   var _pendingBannerFile = null
   var _pendingBannerPosition = null
   var _origBioValue = ''
+  var _origSocialValues = {}
+  var _origAccentValue = ''
+  var _origAccentCleared = false
+  var _hasCustomAccent = hasAccentColor
+  var SOCIAL_KEYS = ['twitch_url', 'youtube_url', 'twitter_url', 'discord_url', 'website_url']
+  var SOCIAL_ICONS = JSON.parse(socialIconsJson)
+  var SOCIAL_LABELS = JSON.parse(socialLabelsJson)
+
+  function defaultAccentColor() {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? '#4a3a8a' : '#6050c8'
+  }
+  function escAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  }
+  function resetAccentColor() {
+    var accentInput = document.getElementById('accentColorInput')
+    if (accentInput) { accentInput.value = defaultAccentColor(); accentInput.dataset.cleared = 'true' }
+  }
+  window.resetAccentColor = resetAccentColor
 
   function enterEditMode() {
     document.body.classList.add('editing-profile')
@@ -2039,6 +2248,21 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
       bioTextarea.style.display = 'block'
       bioTextarea.focus()
     }
+    // show social links + accent color edit form
+    var socialRow = document.getElementById('socialLinksRow')
+    var socialEdit = document.getElementById('socialLinksEdit')
+    if (socialRow) socialRow.style.display = 'none'
+    if (socialEdit) socialEdit.style.display = 'flex'
+    SOCIAL_KEYS.forEach(function(key) {
+      var input = document.getElementById('social-' + key)
+      if (input) _origSocialValues[key] = input.value
+    })
+    var accentInput = document.getElementById('accentColorInput')
+    if (accentInput) {
+      _origAccentValue = accentInput.value
+      _origAccentCleared = accentInput.dataset.cleared === 'true'
+      if (!_hasCustomAccent) { accentInput.value = defaultAccentColor(); accentInput.dataset.cleared = 'true' }
+    }
   }
 
   function cancelEditMode() {
@@ -2050,6 +2274,20 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     var bioTextarea = document.getElementById('bioTextarea')
     if (bioTextarea) { bioTextarea.value = _origBioValue; bioTextarea.style.display = 'none' }
     if (bioDisplay) bioDisplay.style.display = ''
+    // restore social links + accent color
+    var socialRow = document.getElementById('socialLinksRow')
+    var socialEdit = document.getElementById('socialLinksEdit')
+    if (socialEdit) socialEdit.style.display = 'none'
+    if (socialRow && socialRow.children.length > 0) socialRow.style.display = ''
+    SOCIAL_KEYS.forEach(function(key) {
+      var input = document.getElementById('social-' + key)
+      if (input && key in _origSocialValues) input.value = _origSocialValues[key]
+    })
+    var accentInput = document.getElementById('accentColorInput')
+    if (accentInput) {
+      accentInput.value = _origAccentValue
+      if (_origAccentCleared) accentInput.dataset.cleared = 'true'; else delete accentInput.dataset.cleared
+    }
     // clear pending files
     _pendingAvatarFile = null
     _pendingBannerFile = null
@@ -2060,6 +2298,12 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   }
   window.enterEditMode = enterEditMode
   window.cancelEditMode = cancelEditMode
+
+  // color input: any manual pick clears the "reset to default" intent
+  var _accentColorInputEl = document.getElementById('accentColorInput')
+  if (_accentColorInputEl) {
+    _accentColorInputEl.addEventListener('input', function() { delete _accentColorInputEl.dataset.cleared })
+  }
 
   async function saveProfile() {
     var saveBtn = document.getElementById('saveProfileBtn')
@@ -2120,24 +2364,62 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
       } catch(e) { errors.push('Banner: ' + (e?.message || 'upload failed')) }
     }
 
-    // 3. Save bio
+    // 3. Save bio + social links + accent color (one combined request)
     var bioTextarea = document.getElementById('bioTextarea')
-    if (bioTextarea) {
-      var newBio = bioTextarea.value.trim()
+    var accentInput = document.getElementById('accentColorInput')
+    var accentCleared = accentInput ? accentInput.dataset.cleared === 'true' : false
+    var payload = {}
+    if (bioTextarea) payload.bio = bioTextarea.value.trim()
+    SOCIAL_KEYS.forEach(function(key) {
+      var input = document.getElementById('social-' + key)
+      if (input) payload[key] = input.value.trim()
+    })
+    if (accentInput) payload.accent_color = accentCleared ? '' : accentInput.value
+
+    if (Object.keys(payload).length > 0) {
       try {
         var bres2 = await fetch('/api/profile/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ bio: newBio })
+          body: JSON.stringify(payload)
         })
-        if (!bres2.ok) throw new Error()
-        // update display
-        var bioDisplay = document.getElementById('bioDisplay')
-        if (bioDisplay) {
-          bioDisplay.textContent = newBio
-          if (!newBio) bioDisplay.innerHTML = '<span style="font-size:14px;color:var(--text-tertiary);font-style:italic">Add a bio…</span>'
+        var respData = await bres2.json().catch(function() { return {} })
+        if (!bres2.ok) throw new Error(respData.error || 'Profile save failed')
+
+        // update bio display
+        if (bioTextarea) {
+          var bioDisplay = document.getElementById('bioDisplay')
+          if (bioDisplay) {
+            bioDisplay.textContent = payload.bio
+            if (!payload.bio) bioDisplay.innerHTML = '<span style="font-size:14px;color:var(--text-tertiary);font-style:italic">Add a bio…</span>'
+          }
         }
-      } catch(e) { errors.push('Bio save failed') }
+
+        // update social links row
+        var socialRow = document.getElementById('socialLinksRow')
+        if (socialRow) {
+          var pills = ''
+          SOCIAL_KEYS.forEach(function(key) {
+            var val = payload[key]
+            if (!val) return
+            pills += '<a href="' + escAttr(val) + '" target="_blank" rel="noopener" class="social-link-pill" data-social-key="' + key + '">' + SOCIAL_ICONS[key] + '<span>' + SOCIAL_LABELS[key] + '</span></a>'
+          })
+          socialRow.innerHTML = pills
+          socialRow.style.display = pills ? '' : 'none'
+        }
+
+        // update accent color live, scoped to #accentScope (never the topnav)
+        var scope = document.getElementById('accentScope')
+        if (accentCleared) {
+          if (scope) scope.style.removeProperty('--accent')
+          _hasCustomAccent = false
+          if (accentInput) accentInput.dataset.cleared = 'true'
+        } else {
+          if (scope) scope.style.setProperty('--accent', payload.accent_color)
+          _hasCustomAccent = true
+          if (accentInput) delete accentInput.dataset.cleared
+        }
+      } catch(e) { errors.push(e && e.message ? e.message : 'Profile save failed') }
     }
 
     saveBtn.disabled = false
@@ -2155,6 +2437,10 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
       var bioDisplay2 = document.getElementById('bioDisplay')
       if (bioTextarea2) bioTextarea2.style.display = 'none'
       if (bioDisplay2) bioDisplay2.style.display = ''
+      var socialEdit2 = document.getElementById('socialLinksEdit')
+      var socialRow2 = document.getElementById('socialLinksRow')
+      if (socialEdit2) socialEdit2.style.display = 'none'
+      if (socialRow2 && socialRow2.children.length > 0) socialRow2.style.display = ''
       _pendingAvatarFile = null
       _pendingBannerFile = null
       _pendingBannerPosition = null
@@ -2493,7 +2779,7 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     dist.forEach(function(count, i) {
       var bar = document.createElement('div'); bar.className = 'dist-bar'
       bar.style.height = Math.max(3, (count/maxD)*40)+'px'
-      bar.style.background = barColors[i]
+      bar.style.background = scoreCol(i+1)
       bar.title = 'Score '+(i+1)+': '+count+' review'+(count!==1?'s':'')
       barsRow.appendChild(bar)
       var num = document.createElement('div'); num.className = 'dist-num'
@@ -2547,6 +2833,14 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active') })
   btn.classList.add('active')
   var list = document.getElementById('reviewsList')
+  var overview = document.getElementById('reviewsOverviewList')
+  if (type === 'all') {
+    if (list) list.style.display = 'none'
+    if (overview) overview.style.display = ''
+    return
+  }
+  if (list) list.style.display = ''
+  if (overview) overview.style.display = 'none'
   if (!list) return
   var cards = Array.from(list.querySelectorAll('.rc'))
   cards.sort(function(a, b) {
@@ -3160,12 +3454,15 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     var deltaVal = s.scoreDelta !== null && s.scoreDelta !== undefined ? s.scoreDelta : null
     var deltaColor = deltaVal === null ? '#908d87' : deltaVal > 0 ? '#4ade80' : deltaVal < 0 ? '#f87171' : '#908d87'
     var deltaStr = deltaVal === null ? '—' : (deltaVal > 0 ? '+' : '') + deltaVal.toFixed(1)
-    html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">'
+    var volPct = s.volumePercentile !== null && s.volumePercentile !== undefined ? s.volumePercentile : null
+    var volTopPct = volPct !== null ? Math.max(1, 100 - volPct) : null
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:10px">'
     var heroStats = [
       { lbl: 'Reviews written', val: s.reviewCount, color: '#6050c8' },
       { lbl: 'Avg score given', val: s.avgScore || '—', color: scoreCol(parseFloat(s.avgScore||'0')) },
       { lbl: 'Avg hours played', val: s.avgHours ? s.avgHours+'h' : '—', color: '#fbbf24' },
       { lbl: 'vs. community', val: deltaStr, color: deltaColor, sub: deltaVal === null ? 'no data' : deltaVal > 0 ? 'rates higher than avg' : deltaVal < 0 ? 'rates lower than avg' : 'rates same as avg' },
+      { lbl: 'Review volume', val: volTopPct !== null ? 'Top '+volTopPct+'%' : '—', color: '#a78bfa', sub: volPct !== null ? 'more reviews than '+volPct+'% of reviewers' : 'not enough data' },
     ]
     heroStats.forEach(function(hs) {
       html += '<div style="background:var(--bg-card);border:1px solid '+hs.color+'33;border-radius:12px;padding:12px 14px;position:relative;overflow:hidden">'
@@ -3643,7 +3940,7 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
       sLabelsRow.style.cssText = 'display:flex;gap:4px;margin-top:4px'
       s.scoreDistribution.forEach(function(count, i) {
         var bar = document.createElement('div')
-        bar.style.cssText = 'flex:1;border-radius:3px 3px 0 0;min-height:3px;opacity:.75;background:'+barColors[i]+';height:'+Math.max(3,(count/maxVal)*52)+'px;transition:opacity .15s;cursor:default'
+        bar.style.cssText = 'flex:1;border-radius:3px 3px 0 0;min-height:3px;opacity:.75;background:'+scoreCol(i+1)+';height:'+Math.max(3,(count/maxVal)*52)+'px;transition:opacity .15s;cursor:default'
         bar.title = 'Score '+(i+1)+': '+count+' review'+(count!==1?'s':'')
         bar.onmouseenter = function(){this.style.opacity='1'}
         bar.onmouseleave = function(){this.style.opacity='.75'}
@@ -3972,9 +4269,17 @@ async function createNewList(btn) {
 <script is:inline>
   (function () {
     var list = document.getElementById('profRecsList');
+    var overview = document.getElementById('profRecsOverviewList');
     if (!list) return;
     var btns = document.querySelectorAll('.prof-rec-sort');
     function sortBy(mode) {
+      if (mode === 'all') {
+        list.style.display = 'none';
+        if (overview) overview.style.display = '';
+        return;
+      }
+      list.style.display = '';
+      if (overview) overview.style.display = 'none';
       var items = Array.prototype.slice.call(list.querySelectorAll('.prof-rec-item'));
       items.sort(function (a, b) {
         var ca = new Date(a.dataset.created).getTime();

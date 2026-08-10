@@ -97,6 +97,12 @@ supabase/
 | | `avatar_url` | text | YES | — |
 | | `banner_url` | text | YES | — |
 | | `favorite_game_id` | uuid FK→games | YES | — |
+| | `twitch_url` | text | YES | — |
+| | `youtube_url` | text | YES | — |
+| | `twitter_url` | text | YES | — |
+| | `discord_url` | text | YES | — |
+| | `website_url` | text | YES | — |
+| | `accent_color` | text | YES | — |
 | `games` | `id` | uuid PK | NO | gen_random_uuid() |
 | | `title` | text | NO | — |
 | | `slug` | text UNIQUE | YES | — |
