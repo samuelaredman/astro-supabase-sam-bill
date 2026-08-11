@@ -1456,6 +1456,7 @@ export type Database = {
           created_at: string
           dropped_privacy: string
           favorite_game_id: string | null
+          featured_group_id: string | null
           id: string
           is_active: boolean
           is_group_admin: boolean
@@ -1481,6 +1482,7 @@ export type Database = {
           created_at?: string
           dropped_privacy?: string
           favorite_game_id?: string | null
+          featured_group_id?: string | null
           id?: string
           is_active?: boolean
           is_group_admin?: boolean
@@ -1506,6 +1508,7 @@ export type Database = {
           created_at?: string
           dropped_privacy?: string
           favorite_game_id?: string | null
+          featured_group_id?: string | null
           id?: string
           is_active?: boolean
           is_group_admin?: boolean
@@ -1528,6 +1531,13 @@ export type Database = {
             columns: ["favorite_game_id"]
             isOneToOne: false
             referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "profiles_featured_group_id_fkey"
+            columns: ["featured_group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
             referencedColumns: ["id"]
           },
         ]
