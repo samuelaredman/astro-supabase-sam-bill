@@ -25,7 +25,7 @@ const db = getSupabaseAdmin() as any;
 
 let { data: group, error: groupError } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, created_by, created_at, stats_config, join_prompt")
   .eq("id", id)
   .single();
 
@@ -33,13 +33,17 @@ let { data: group, error: groupError } = await db
 if (!group && groupError) {
   const { data: fallback } = await db
     .from("groups")
-    .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
+    .select("id, name, description, avatar_url, visibility, requires_approval, invite_code, created_by, created_at, stats_config, join_prompt")
     .eq("id", id)
     .single();
   if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center' };
 }
 
 if (!group) return Astro.redirect("/groups");
+
+// Whether joining this group needs owner/admin approval — always true for
+// private groups, optional for public ones via the requires_approval setting
+const needsApproval = group.visibility === "private" || !!group.requires_approval;
 
 let membership: any = null;
 if (currentProfile) {
@@ -73,7 +77,7 @@ if (currentProfile && !isMember) {
 
 // Has this user already submitted a join request?
 let existingJoinRequest: any = null;
-if (currentProfile && !isMember && group.visibility === "private") {
+if (currentProfile && !isMember && needsApproval) {
   const { data: jr } = await db
     .from("group_join_requests")
     .select("id, status")
@@ -362,21 +366,12 @@ const groupOgDescription = group.description
 
   /* ── Tab nav (card style) ── */
   .page{max-width:980px;margin:0 auto;padding:20px 28px 80px}
-  .tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px}
-  .tab-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:14px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;text-decoration:none}
-  .tab-link::before{content:'';position:absolute;inset:0;background:var(--accent-subtle);opacity:0;transition:opacity .2s}
-  .tab-link:hover::before,.tab-link.active::before{opacity:1}
-  .tab-link:hover{border-color:rgba(96,80,200,.35);transform:translateY(-2px);box-shadow:var(--shadow-md)}
-  .tab-link.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 4px 20px rgba(96,80,200,.15)}
-  .tab-link.active::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent)}
-  .tab-icon{width:28px;height:28px;border-radius:8px;background:var(--tag-bg);display:flex;align-items:center;justify-content:center}
-  .tab-link.active .tab-icon,.tab-link:hover .tab-icon{background:var(--accent-subtle)}
-  .tab-link.active .tab-icon svg,.tab-link:hover .tab-icon svg{stroke:var(--accent)}
-  .tab-label{font-size:13px;font-weight:600;color:var(--text-secondary);position:relative;z-index:1;transition:color .2s}
-  .tab-link.active .tab-label,.tab-link:hover .tab-label{color:var(--text-primary)}
-  .tab-meta{font-size:12px;color:var(--text-secondary);position:relative;z-index:1}
-  .tab-link.active .tab-meta{color:var(--accent)}
-  .tab-badge{background:var(--accent);color:white;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;position:absolute;top:8px;right:8px;z-index:2}
+  .tab-nav{display:flex;gap:4px;margin-bottom:24px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:4px}
+  .tab-link{padding:8px 18px;border-radius:7px;font-size:13px;font-weight:600;color:var(--text-secondary);text-decoration:none;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:6px}
+  .tab-link:hover{color:var(--text-primary);background:var(--bg-hover)}
+  .tab-link.active{background:var(--accent);color:#fff}
+  .tab-count{font-size:11px;font-weight:700;background:rgba(255,255,255,.15);border-radius:10px;padding:1px 6px;line-height:1.5}
+  .tab-link:not(.active) .tab-count{background:var(--bg-hover);color:var(--text-tertiary)}
   .tab-panel{display:none}
   .tab-panel.active{display:block}
 
@@ -529,7 +524,7 @@ const groupOgDescription = group.description
     .page{padding:16px 16px 60px}
     .group-header{padding:0 16px}
     .group-avatar-wrap{left:16px}
-    .tab-nav{grid-template-columns:1fr}
+    .tab-nav{flex-wrap:wrap}
     .stats-row{grid-template-columns:repeat(2,1fr)}
   }
 </style>
@@ -589,6 +584,7 @@ const groupOgDescription = group.description
       {group.description && <p class="group-desc">{group.description}</p>}
       <div class="group-meta-badges">
         <span class="badge">{group.visibility}</span>
+        {group.visibility === "public" && group.requires_approval && <span class="badge">Application required</span>}
         {membership && <span class="badge badge-accent">{membership.role}</span>}
         {focusLabel && <span class="badge" style="background:rgba(96,80,200,.12);color:var(--accent)">🎯 {focusLabel}</span>}
       </div>
@@ -628,10 +624,10 @@ const groupOgDescription = group.description
     <div class="group-actions">
       <ShareButton url={`/groups/${group.id}`} />
       {/* Not logged in */}
-      {!user && (group.visibility === "public" || group.visibility === "community") && (
+      {!user && !needsApproval && (
         <a href="/signin" class="btn-primary">Sign in to join</a>
       )}
-      {!user && group.visibility === "private" && (
+      {!user && needsApproval && (
         <a href="/signin" class="btn-primary">Sign in to request access</a>
       )}
 
@@ -639,19 +635,19 @@ const groupOgDescription = group.description
       {user && !isMember && pendingInvite && (
         <button class="btn-primary" id="accept-invite-btn" onclick="acceptInvite()">Accept Invite</button>
       )}
-      {user && !isMember && !pendingInvite && (group.visibility === "public" || group.visibility === "community") && (
+      {user && !isMember && !pendingInvite && !needsApproval && (
         <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
       )}
       {user && !isMember && !pendingInvite && group.visibility === "private" && joinCode && (
         <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
       )}
-      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "pending" && (
+      {user && !isMember && needsApproval && !joinCode && existingJoinRequest?.status === "pending" && (
         <span class="badge-pending-action">Request pending</span>
       )}
-      {user && !isMember && group.visibility === "private" && !joinCode && !existingJoinRequest && (
+      {user && !isMember && needsApproval && !joinCode && !existingJoinRequest && (
         <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request to Join</button>
       )}
-      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "rejected" && (
+      {user && !isMember && needsApproval && !joinCode && existingJoinRequest?.status === "rejected" && (
         <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request Again</button>
       )}
 
@@ -666,7 +662,7 @@ const groupOgDescription = group.description
 
     {/* Join request form — shown inline below actions when opened */}
     {/* Renders for: no prior request, OR a rejected request (allowing re-application) */}
-    {user && !isMember && group.visibility === "private" && !joinCode && (!existingJoinRequest || existingJoinRequest?.status === "rejected") && (
+    {user && !isMember && needsApproval && !joinCode && (!existingJoinRequest || existingJoinRequest?.status === "rejected") && (
       <div id="join-request-form" style="display:none;margin-top:14px;padding:16px 20px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;max-width:420px">
         <div style="font-size:13px;font-weight:600;margin-bottom:8px">Request to join {group.name}</div>
         {group.join_prompt && (
@@ -703,39 +699,16 @@ const groupOgDescription = group.description
 
   {/* Full tab nav — only shown to members or non-private groups */}
   {(isMember || group.visibility !== "private") && (
-  <nav class="tab-nav" style={`grid-template-columns: repeat(${1 + (statsConf.show_sessions ? 1 : 0) + (statsConf.show_score_compare ? 1 : 0)}, 1fr)`}>
-    <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>
-      <div class="tab-icon">
-        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="2" width="6" height="6" rx="1.5"/><rect x="10" y="2" width="6" height="6" rx="1.5"/>
-          <rect x="2" y="10" width="6" height="6" rx="1.5"/><rect x="10" y="10" width="6" height="6" rx="1.5"/>
-        </svg>
-      </div>
-      <div class="tab-label">Overview</div>
-      <div class="tab-meta">Stats &amp; activity</div>
-    </a>
+  <nav class="tab-nav">
+    <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>Overview</a>
     {statsConf.show_sessions && (
     <a href={`/groups/${group.id}?tab=sessions`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
-      {(sessionsData ?? []).length > 0 && <span class="tab-badge">{(sessionsData ?? []).length}</span>}
-      <div class="tab-icon">
-        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="14" height="13" rx="2"/><path d="M6 1v4M12 1v4M2 8h14"/>
-        </svg>
-      </div>
-      <div class="tab-label">Sessions</div>
-      <div class="tab-meta">{(sessionsData ?? []).length} game nights</div>
+      Sessions {(sessionsData ?? []).length > 0 && <span class="tab-count">{(sessionsData ?? []).length}</span>}
     </a>
     )}
     {statsConf.show_score_compare && (
     <a href={`/groups/${group.id}?tab=compare`} class={`tab-link${activeTab === "compare" ? " active" : ""}`}>
-      {sharedGames.length > 0 && <span class="tab-badge">{sharedGames.length}</span>}
-      <div class="tab-icon">
-        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M2 14l4-5 3 3 3-4 4 6"/>
-        </svg>
-      </div>
-      <div class="tab-label">Stats</div>
-      <div class="tab-meta">{sharedGames.length} shared games</div>
+      Stats {sharedGames.length > 0 && <span class="tab-count">{sharedGames.length}</span>}
     </a>
     )}
   </nav>

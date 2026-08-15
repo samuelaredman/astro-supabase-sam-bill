@@ -10,7 +10,7 @@ export const POST: APIRoute = async (context) => {
   const { group_id, invite_code } = body;
 
   // Resolve the group — by id or invite_code
-  let groupQuery = db.from("groups").select("id, visibility, invite_code");
+  let groupQuery = db.from("groups").select("id, visibility, invite_code, requires_approval");
   if (invite_code) {
     groupQuery = groupQuery.eq("invite_code", invite_code.toUpperCase());
   } else if (group_id) {
@@ -27,6 +27,8 @@ export const POST: APIRoute = async (context) => {
     if (!invite_code || group.invite_code !== invite_code.toUpperCase()) {
       return json({ error: "This group is private. Request to join or use an invite link.", code: "PRIVATE_GROUP" }, 403);
     }
+  } else if (group.requires_approval) {
+    return json({ error: "This group requires approval to join. Submit a join request instead.", code: "REQUIRES_APPROVAL" }, 403);
   }
 
   const { data: existing } = await db.from("group_members")

@@ -902,6 +902,7 @@ export type Database = {
           invite_code: string | null
           join_prompt: string | null
           name: string
+          requires_approval: boolean
           stats_config: Json | null
           visibility: string
         }
@@ -916,6 +917,7 @@ export type Database = {
           invite_code?: string | null
           join_prompt?: string | null
           name: string
+          requires_approval?: boolean
           stats_config?: Json | null
           visibility?: string
         }
@@ -930,6 +932,7 @@ export type Database = {
           invite_code?: string | null
           join_prompt?: string | null
           name?: string
+          requires_approval?: boolean
           stats_config?: Json | null
           visibility?: string
         }
