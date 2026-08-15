@@ -113,7 +113,7 @@ const defaultStats = {
   show_top_games: true, show_top_rated: true, show_hot_take: true,
   show_critic_spectrum: true, show_recent_reviews: true,
   show_score_compare: true, show_sessions: true, show_watchlist: true,
-  show_announcements: true, show_polls: true,
+  show_announcements: true, show_polls: true, show_split_decision: true,
   focus_genre_id: null as string | null, focus_platform_id: null as string | null,
 };
 const statsConf = { ...defaultStats, ...(group.stats_config ?? {}) };
@@ -254,6 +254,26 @@ if (memberProfileIds.length >= 2) {
     .slice(0, 30);
 }
 
+// Split Decision — the shared game where two members disagree the most
+let splitDecision: any = null;
+if (sharedGames.length > 0) {
+  let maxSpread = 0;
+  for (const g of sharedGames) {
+    let hi = g.reviews[0], lo = g.reviews[0];
+    for (const r of g.reviews) {
+      if (r.score > hi.score) hi = r;
+      if (r.score < lo.score) lo = r;
+    }
+    const spread = hi.score - lo.score;
+    if (spread > maxSpread) {
+      maxSpread = spread;
+      const hiMember = memberList.find((m: any) => m.id === hi.profile_id);
+      const loMember = memberList.find((m: any) => m.id === lo.profile_id);
+      splitDecision = { game: g.game, spread, high: { ...hiMember, score: hi.score }, low: { ...loMember, score: lo.score } };
+    }
+  }
+}
+
 let activityQuery = (supabase as any)
   .from("reviews")
   .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
@@ -291,6 +311,17 @@ const memberAvgScores = memberList
     return { ...m, avgScore: avg, reviewCount: revs.length };
   })
   .filter(Boolean);
+
+// The Range — the toughest and easiest graders in the group
+let scoreRange: any = null;
+if (memberAvgScores.length >= 2) {
+  const sorted = [...memberAvgScores].sort((a: any, b: any) => a.avgScore - b.avgScore);
+  const toughest = sorted[0];
+  const easiest = sorted[sorted.length - 1];
+  if (toughest.id !== easiest.id && toughest.avgScore !== easiest.avgScore) {
+    scoreRange = { toughest, easiest };
+  }
+}
 
 // Hot take — group's biggest divergence from community average
 const gameListIds = gameList.map((g: any) => g.game?.id).filter(Boolean);
@@ -434,9 +465,17 @@ const groupOgDescription = group.description
   .hot-take-delta{font-size:12px;font-weight:700}
   .delta-up{color:var(--score-great)}
   .delta-down{color:var(--score-low)}
+  .split-decision-delta{color:var(--accent)}
 
   /* ── Critic Spectrum ── */
   .spectrum-wrap{padding-top:4px}
+  .range-row{display:flex;gap:10px;margin-bottom:16px}
+  .range-badge{flex:1;display:flex;align-items:center;gap:8px;background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:8px 10px}
+  .range-avatar{width:28px;height:28px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
+  .range-avatar img{width:100%;height:100%;object-fit:cover}
+  .range-info{min-width:0}
+  .range-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-tertiary)}
+  .range-name{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .spectrum-edge-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--text-tertiary);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:28px}
   .spectrum-track{position:relative;height:32px;margin-bottom:20px}
   .spectrum-bar{position:absolute;top:50%;left:0;right:0;height:3px;background:linear-gradient(to right,var(--score-low-bg),var(--score-mid-bg),var(--score-great-bg));border-radius:2px;transform:translateY(-50%)}
@@ -942,9 +981,64 @@ const groupOgDescription = group.description
           </div>
         )}
 
+        {statsConf.show_split_decision && splitDecision && (
+          <div class="card" style="margin-top:14px">
+            <div class="card-title">Split Decision</div>
+            <a class="hot-take-inner" href={`/games/${splitDecision.game.slug}`}>
+              {igdbCover(splitDecision.game.cover_img_url, "t_cover_small")
+                ? <img class="hot-take-cover" src={igdbCover(splitDecision.game.cover_img_url, "t_cover_small")!} alt={splitDecision.game.title} loading="lazy" />
+                : <div class="hot-take-cover" />
+              }
+              <div class="hot-take-body">
+                <div class="hot-take-title">{splitDecision.game.title}</div>
+                <div class="hot-take-scores">
+                  <div>
+                    <div class={`score-badge ${scoreClass(Math.round(splitDecision.high.score))}`}>{splitDecision.high.score}</div>
+                    <div class="hot-take-lbl">@{splitDecision.high.username}</div>
+                  </div>
+                  <div class="hot-take-vs">vs</div>
+                  <div>
+                    <div class={`score-badge ${scoreClass(Math.round(splitDecision.low.score))}`}>{splitDecision.low.score}</div>
+                    <div class="hot-take-lbl">@{splitDecision.low.username}</div>
+                  </div>
+                </div>
+                <div class="hot-take-delta split-decision-delta">
+                  {splitDecision.spread} point{splitDecision.spread !== 1 ? "s" : ""} apart
+                </div>
+              </div>
+            </a>
+          </div>
+        )}
+
         {statsConf.show_critic_spectrum && memberAvgScores.length >= 2 && (
           <div class="card" style="margin-top:14px">
             <div class="card-title">Critic Spectrum</div>
+            {scoreRange && (
+              <div class="range-row">
+                <a class="range-badge" href={`/reviewers/${scoreRange.toughest.username}`}>
+                  <div class="range-avatar">
+                    {scoreRange.toughest.avatar_url
+                      ? <img src={scoreRange.toughest.avatar_url} alt={scoreRange.toughest.username} />
+                      : getInitials(scoreRange.toughest.username)}
+                  </div>
+                  <div class="range-info">
+                    <div class="range-lbl">Toughest Grader</div>
+                    <div class="range-name">@{scoreRange.toughest.username} · {scoreRange.toughest.avgScore}</div>
+                  </div>
+                </a>
+                <a class="range-badge" href={`/reviewers/${scoreRange.easiest.username}`}>
+                  <div class="range-avatar">
+                    {scoreRange.easiest.avatar_url
+                      ? <img src={scoreRange.easiest.avatar_url} alt={scoreRange.easiest.username} />
+                      : getInitials(scoreRange.easiest.username)}
+                  </div>
+                  <div class="range-info">
+                    <div class="range-lbl">Easiest Grader</div>
+                    <div class="range-name">@{scoreRange.easiest.username} · {scoreRange.easiest.avgScore}</div>
+                  </div>
+                </a>
+              </div>
+            )}
             <div class="spectrum-wrap">
               <div class="spectrum-edge-labels"><span>Harsh</span><span>Generous</span></div>
               <div class="spectrum-track">
