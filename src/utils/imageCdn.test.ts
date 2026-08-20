@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { toCdnUrl, rewriteImageUrls } from "./imageCdn";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { toCdnUrl, cdnImage, rewriteImageUrls } from "./imageCdn";
+
+// Global cap appended to every proxied image by toCdnUrl. Kept as a constant
+// so these tests read as "the encoded source URL, plus the cap".
+const CAP = "&w=1600&q=72";
 
 // Fake hosts/URLs only — never the real project URL (that's an env-var value
 // and would trip Netlify's secret scanner if committed).
@@ -10,15 +14,50 @@ const SUPA = "https://demo-project.supabase.co/storage/v1/object/public/avatars/
 const rewrite = (html: string) => rewriteImageUrls(html, HOSTS);
 
 describe("toCdnUrl", () => {
-  it("wraps a source URL in a Netlify Image CDN request", () => {
-    expect(toCdnUrl(IGDB)).toBe(`/.netlify/images?url=${encodeURIComponent(IGDB)}`);
+  it("wraps a source URL in a Netlify Image CDN request with a size/quality cap", () => {
+    expect(toCdnUrl(IGDB)).toBe(`/.netlify/images?url=${encodeURIComponent(IGDB)}${CAP}`);
   });
 
   it("un-escapes HTML entities before encoding", () => {
     const escaped = "https://images.igdb.com/x?a=1&amp;b=2";
     expect(toCdnUrl(escaped)).toBe(
-      `/.netlify/images?url=${encodeURIComponent("https://images.igdb.com/x?a=1&b=2")}`,
+      `/.netlify/images?url=${encodeURIComponent("https://images.igdb.com/x?a=1&b=2")}${CAP}`,
     );
+  });
+});
+
+describe("cdnImage", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("returns null for a null/undefined source", () => {
+    expect(cdnImage(null, 96)).toBeNull();
+    expect(cdnImage(undefined, 96)).toBeNull();
+  });
+
+  it("requests the given width and default quality in production", () => {
+    vi.stubEnv("DEV", false);
+    expect(cdnImage(SUPA, 96, 72, HOSTS)).toBe(
+      `/.netlify/images?url=${encodeURIComponent(SUPA)}&w=96&q=72`,
+    );
+  });
+
+  it("accepts a custom quality and un-escapes HTML entities before encoding", () => {
+    vi.stubEnv("DEV", false);
+    const escaped = "https://images.igdb.com/x?a=1&amp;b=2";
+    expect(cdnImage(escaped, 240, 80, HOSTS)).toBe(
+      `/.netlify/images?url=${encodeURIComponent("https://images.igdb.com/x?a=1&b=2")}&w=240&q=80`,
+    );
+  });
+
+  it("passes non-allowlisted hosts (e.g. Steam avatars) through untouched", () => {
+    vi.stubEnv("DEV", false);
+    const steam = "https://avatars.steamstatic.com/abc_full.jpg";
+    expect(cdnImage(steam, 96, 72, HOSTS)).toBe(steam);
+  });
+
+  it("returns the raw URL unchanged in DEV (the /.netlify/images endpoint is prod-only)", () => {
+    vi.stubEnv("DEV", true);
+    expect(cdnImage(SUPA, 96, 72, HOSTS)).toBe(SUPA);
   });
 });
 

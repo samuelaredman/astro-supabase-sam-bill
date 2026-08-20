@@ -43,12 +43,61 @@ export function cdnHosts(): string[] {
   return hosts;
 }
 
+// Global safety cap applied to every proxied image. `w` only downscales
+// sources WIDER than this (Netlify never upscales), so covers/thumbnails are
+// untouched while oversized user uploads — a 4000px banner, a 2000px avatar —
+// stop being served at full resolution. `q` re-compresses to a visually
+// indistinguishable quality on AVIF/WebP. Together these are the single
+// biggest bandwidth win and carry no layout-shift or blur risk. Call sites
+// that know their display size is much smaller should use `cdnImage()` below
+// to request a tighter width still.
+const MAX_WIDTH = 1600;
+const DEFAULT_QUALITY = 72;
+
 /** Wrap a raw source URL in a Netlify Image CDN request. */
 export function toCdnUrl(raw: string): string {
   // Attribute values may arrive HTML-escaped (& → &amp;); undo that before
   // encoding so the CDN receives the true source URL.
   const clean = raw.replace(/&amp;/g, '&');
-  return `/.netlify/images?url=${encodeURIComponent(clean)}`;
+  return `/.netlify/images?url=${encodeURIComponent(clean)}&w=${MAX_WIDTH}&q=${DEFAULT_QUALITY}`;
+}
+
+/**
+ * Build a sized Netlify Image CDN `<img src>` for a KNOWN display width.
+ *
+ * Use at call sites where the rendered size is much smaller than the source —
+ * avatars, small thumbnails — because the middleware rewrite (toCdnUrl) can't
+ * downscale to a specific slot: it never sees the element's display dimensions.
+ * A 2000px avatar in a 40px card slot is the canonical case this fixes.
+ *
+ * Pass `width` at ~2× the CSS display width so it stays crisp on retina.
+ * In DEV the `/.netlify/images` endpoint doesn't exist, so the raw URL is
+ * returned unchanged (matching the middleware's DEV behaviour). The emitted
+ * `/.netlify/images` URL is not re-matched by the middleware's http(s)-anchored
+ * regex, so there's no double-wrapping.
+ *
+ * Only allowlisted hosts (IGDB, Supabase) are wrapped — Netlify's Image CDN
+ * refuses hosts outside `remote_images`, so a Steam/other-hosted avatar is
+ * returned raw, exactly as the middleware leaves it. This makes cdnImage a safe
+ * drop-in for any image URL, whatever its origin.
+ */
+export function cdnImage(
+  raw: string | null | undefined,
+  width: number,
+  quality: number = DEFAULT_QUALITY,
+  hosts: string[] = cdnHosts(),
+): string | null {
+  if (!raw) return null;
+  const clean = raw.replace(/&amp;/g, '&');
+  if (import.meta.env.DEV) return clean;
+  let host: string;
+  try {
+    host = new URL(clean).host;
+  } catch {
+    return clean; // not an absolute URL — leave it alone
+  }
+  if (!hosts.includes(host)) return clean; // non-allowlisted (e.g. Steam) — pass through
+  return `/.netlify/images?url=${encodeURIComponent(clean)}&w=${width}&q=${quality}`;
 }
 
 /**
