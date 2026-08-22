@@ -86,6 +86,72 @@ export const GAME_CATEGORY_OR_FILTER =
   `igdb_category.in.(${ALLOWED_GAME_CATEGORIES.join(',')}),` +
   `and(igdb_category.eq.${BUNDLE_CATEGORY},or(${notableEditionOrClauses}))`;
 
+// ─── Canonical-node model (Phase 1) ──────────────────────────────────────────
+// Additive to the legacy ALLOWED_GAME_CATEGORIES filter above, which stays the
+// live browse/search filter until read-paths are flipped in Phase 5. These sets
+// partition every IGDB game_type into how it behaves in the canonical graph.
+
+// Collapse into a canonical node (ports/remasters/editions/packs). `version_parent`
+// rows also collapse regardless of category — that's decided by resolution logic,
+// not category alone. A collapse-type row with no resolvable parent stays a node.
+export const COLLAPSE_CATEGORIES = [
+  3,  // bundle (GOTY/Definitive/Complete editions)
+  9,  // remaster (aggressive collapse — e.g. Skyrim Special Edition → Skyrim)
+  11, // port
+  13, // pack
+];
+
+// Separate, reviewable nodes, connected to a parent/series via game_relationships.
+export const CONNECTED_CATEGORIES = [
+  0,  // main_game (sequels are their own nodes, linked as series_sibling)
+  1,  // dlc_addon (a node, but excluded from the main browse grid — see isBrowseGridNode)
+  2,  // expansion
+  4,  // standalone_expansion
+  8,  // remake
+  10, // expanded_game
+];
+
+// Never a node: imported for completeness but excluded from browse and reviews.
+export const HIDDEN_CATEGORIES = [
+  5,  // mod
+  6,  // episode
+  7,  // season
+  12, // fork
+  14, // update
+];
+
+export type GameNodeClass = 'collapse' | 'connected' | 'hidden';
+
+// Classifies an IGDB game_type into its canonical-graph behavior. A null category
+// (unbackfilled or delisted from IGDB) is treated as a reviewable node, matching
+// the legacy allow-null behavior of isAllowedGameCategory.
+export function classifyGameType(category: number | null | undefined): GameNodeClass {
+  if (category == null) return 'connected';
+  if (COLLAPSE_CATEGORIES.includes(category)) return 'collapse';
+  if (HIDDEN_CATEGORIES.includes(category)) return 'hidden';
+  return 'connected';
+}
+
+// True when this row is a reviewable node: it is canonical (nothing collapsed it
+// into another row) and its category is not hidden. This is the Phase-5
+// replacement for isAllowedGameCategory once canonical_game_id is populated.
+export function isReviewableNode(
+  category: number | null | undefined,
+  canonicalGameId: string | null | undefined
+): boolean {
+  return canonicalGameId == null && classifyGameType(category) !== 'hidden';
+}
+
+// True when a reviewable node should appear in the main browse/search/rankings
+// grid. DLC is a reviewable node but is surfaced only in the game's "DLC &
+// expansions" panel, never the top-level grid.
+export function isBrowseGridNode(
+  category: number | null | undefined,
+  canonicalGameId: string | null | undefined
+): boolean {
+  return isReviewableNode(category, canonicalGameId) && category !== 1;
+}
+
 // Decomposes accented characters (e.g. "Ö" -> "O" + combining diaeresis) and
 // drops the combining marks, so callers can compare/transliterate titles
 // without accented letters silently failing to match their plain ASCII form.
