@@ -288,6 +288,54 @@ export async function persistSteamAppsFromIgdb(
   );
 }
 
+// ─── Canonical resolution (Phase 3) ──────────────────────────────────────────
+// Pure decision helpers used by scripts/backfill-canonical.ts. The script owns
+// DB access, id → uuid resolution, one-level flattening, and the report/apply
+// gating; these functions own the *rules*, and are unit-tested.
+
+export interface CanonicalGameRow {
+  id: string;
+  igdb_category: number | null;
+  date_released: string | null;
+}
+
+// The IGDB ids a collapse-type row might fold into, in precedence order:
+// version_parent (an explicit "edition of X") beats parent_game.
+export function collapseParentCandidates(game: {
+  igdb_version_parent?: number | null;
+  igdb_parent_game?: number | null;
+}): number[] {
+  const out: number[] = [];
+  const vp = asIgdbId(game.igdb_version_parent);
+  const pg = asIgdbId(game.igdb_parent_game);
+  if (vp != null) out.push(vp);
+  if (pg != null && pg !== vp) out.push(pg);
+  return out;
+}
+
+// Normalized title key for exact-duplicate clustering — identical to the audit
+// script (scripts/audit-game-categories.ts) so clusters line up between them.
+// Also folds diacritics so "Pokémon" and "Pokemon" cluster together.
+export function normalizeClusterTitle(title: string): string {
+  return foldDiacritics(title).trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// Choose the canonical node within a cluster: the earliest-released main_game
+// (category 0 / null), or if the cluster has no main game, the earliest release
+// overall. Deterministic — ties break on id. Returns null for an empty cluster.
+export function chooseClusterCanonical(members: CanonicalGameRow[]): string | null {
+  if (members.length === 0) return null;
+  const mains = members.filter((m) => m.igdb_category === 0 || m.igdb_category == null);
+  const pool = mains.length > 0 ? mains : members;
+  const sorted = [...pool].sort((a, b) => {
+    const da = a.date_released ?? '9999-99-99';
+    const db_ = b.date_released ?? '9999-99-99';
+    if (da !== db_) return da < db_ ? -1 : 1;
+    return a.id < b.id ? -1 : 1;
+  });
+  return sorted[0].id;
+}
+
 // Decomposes accented characters (e.g. "Ö" -> "O" + combining diaeresis) and
 // drops the combining marks, so callers can compare/transliterate titles
 // without accented letters silently failing to match their plain ASCII form.

@@ -12,6 +12,9 @@ import {
   deriveIgdbRelationEdges,
   collectSteamAppids,
   asIgdbId,
+  collapseParentCandidates,
+  normalizeClusterTitle,
+  chooseClusterCanonical,
 } from "./games";
 
 describe("canonical-node classification sets", () => {
@@ -163,6 +166,54 @@ describe("collectSteamAppids", () => {
     expect(collectSteamAppids(null)).toEqual([]);
     expect(collectSteamAppids([{ category: 1, uid: null }])).toEqual([]);
     expect(collectSteamAppids([{ category: 1, uid: "not-a-number" }])).toEqual([]);
+  });
+});
+
+describe("collapseParentCandidates", () => {
+  it("prefers version_parent over parent_game", () => {
+    expect(collapseParentCandidates({ igdb_version_parent: 10, igdb_parent_game: 20 }))
+      .toEqual([10, 20]);
+  });
+
+  it("dedupes when both point at the same game, and handles missing values", () => {
+    expect(collapseParentCandidates({ igdb_version_parent: 10, igdb_parent_game: 10 })).toEqual([10]);
+    expect(collapseParentCandidates({ igdb_parent_game: 20 })).toEqual([20]);
+    expect(collapseParentCandidates({})).toEqual([]);
+  });
+});
+
+describe("normalizeClusterTitle", () => {
+  it("folds case, whitespace, and diacritics for exact-duplicate clustering", () => {
+    expect(normalizeClusterTitle("  DOOM  ")).toBe("doom");
+    expect(normalizeClusterTitle("Pokémon   Red")).toBe("pokemon red");
+    expect(normalizeClusterTitle("BioShock")).toBe(normalizeClusterTitle("bioshock"));
+  });
+});
+
+describe("chooseClusterCanonical", () => {
+  it("picks the earliest-released main_game", () => {
+    const id = chooseClusterCanonical([
+      { id: "b", igdb_category: 0, date_released: "2011-11-11" }, // Skyrim (main)
+      { id: "a", igdb_category: 9, date_released: "2016-10-28" }, // Special Edition (remaster)
+      { id: "c", igdb_category: 3, date_released: "2021-11-11" }, // Anniversary (bundle)
+    ]);
+    expect(id).toBe("b");
+  });
+
+  it("falls back to earliest release when the cluster has no main game", () => {
+    const id = chooseClusterCanonical([
+      { id: "a", igdb_category: 11, date_released: "2013-01-01" }, // port
+      { id: "b", igdb_category: 9, date_released: "2012-01-01" },  // remaster (earlier)
+    ]);
+    expect(id).toBe("b");
+  });
+
+  it("is deterministic on ties and empty clusters", () => {
+    expect(chooseClusterCanonical([
+      { id: "y", igdb_category: 0, date_released: null },
+      { id: "x", igdb_category: 0, date_released: null },
+    ])).toBe("x");
+    expect(chooseClusterCanonical([])).toBeNull();
   });
 });
 
