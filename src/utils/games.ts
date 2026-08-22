@@ -152,6 +152,142 @@ export function isBrowseGridNode(
   return isReviewableNode(category, canonicalGameId) && category !== 1;
 }
 
+// ─── IGDB relationship + Steam-appid ingestion (Phase 2) ─────────────────────
+// These populate the typed game_relationships graph and game_steam_apps mapping.
+// The pure derivation helpers below are unit-tested; the persist* wrappers do the
+// DB resolution (IGDB id → internal uuid) and upserts, shared by the on-import
+// path and the backfill script so the two never drift.
+
+export type GameRelationType =
+  | 'dlc' | 'expansion' | 'standalone_expansion' | 'remake'
+  | 'expanded_game' | 'sequel' | 'series_sibling' | 'similar';
+
+// The relationship an IGDB child (via its `parent_game`) has to that parent,
+// keyed on the child's own game_type. Ports/remasters/bundles/packs collapse via
+// canonical_game_id instead, so they produce no relationship edge here.
+export function relationTypeForChildCategory(
+  category: number | null | undefined
+): GameRelationType | null {
+  switch (category) {
+    case 1:  return 'dlc';
+    case 2:  return 'expansion';
+    case 4:  return 'standalone_expansion';
+    case 8:  return 'remake';
+    case 10: return 'expanded_game';
+    default: return null;
+  }
+}
+
+// IGDB scalar relationship fields come back as a bare id, and array fields as
+// bare ids too (when no sub-fields are requested) — but tolerate {id} objects.
+export function asIgdbId(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (raw && typeof raw === 'object' && typeof (raw as any).id === 'number') return (raw as any).id;
+  return null;
+}
+
+export interface IgdbRelationEdge {
+  igdbId: number;              // the OTHER game, in IGDB id space
+  relationType: GameRelationType;
+  direction: 'out' | 'in';    // out: this game → other; in: other → this game
+}
+
+// IGDB reverse-array fields that belong to *this* game (this game is the primary
+// node), each mapped to the edge type it represents.
+const REVERSE_RELATION_FIELDS: Array<[string, GameRelationType]> = [
+  ['dlcs', 'dlc'],
+  ['expansions', 'expansion'],
+  ['standalone_expansions', 'standalone_expansion'],
+  ['expanded_games', 'expanded_game'],
+  ['remakes', 'remake'],
+];
+
+// Pure: derive the intended relationship edges (still in IGDB-id space) from an
+// IGDB game payload. `sequel`/`series_sibling` are NOT derived here — those come
+// from collection membership in the Phase 3 canonical/relationship backfill.
+export function deriveIgdbRelationEdges(igdbGame: any): IgdbRelationEdge[] {
+  const edges: IgdbRelationEdge[] = [];
+
+  for (const [field, relationType] of REVERSE_RELATION_FIELDS) {
+    for (const raw of igdbGame?.[field] ?? []) {
+      const igdbId = asIgdbId(raw);
+      if (igdbId != null) edges.push({ igdbId, relationType, direction: 'out' });
+    }
+  }
+
+  const parentId = asIgdbId(igdbGame?.parent_game);
+  const parentType = relationTypeForChildCategory(igdbGame?.game_type);
+  if (parentId != null && parentType) {
+    edges.push({ igdbId: parentId, relationType: parentType, direction: 'in' });
+  }
+
+  // De-duplicate on (igdbId, relationType, direction).
+  const seen = new Set<string>();
+  return edges.filter((e) => {
+    const key = `${e.igdbId}:${e.relationType}:${e.direction}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// IGDB external_games.category === 1 is Steam. Pure: pull distinct positive
+// integer Steam appids out of an external_games array.
+const IGDB_EXTERNAL_STEAM = 1;
+export function collectSteamAppids(externalGames: any): number[] {
+  const out = new Set<number>();
+  for (const eg of externalGames ?? []) {
+    if (eg?.category === IGDB_EXTERNAL_STEAM && eg?.uid != null) {
+      const n = parseInt(String(eg.uid), 10);
+      if (Number.isFinite(n) && n > 0) out.add(n);
+    }
+  }
+  return [...out];
+}
+
+// Resolve derived edges against games already in the DB and upsert them. Edges to
+// games not yet imported are skipped — the backfill's full pass (and later imports
+// of those games) will complete them.
+export async function persistGameRelationshipsFromIgdb(
+  db: any, internalGameId: string, igdbGame: any
+): Promise<void> {
+  const edges = deriveIgdbRelationEdges(igdbGame);
+  if (edges.length === 0) return;
+
+  const igdbIds = [...new Set(edges.map((e) => e.igdbId))];
+  const { data: rows } = await db.from('games').select('id, igdb_id').in('igdb_id', igdbIds);
+  const byIgdb = new Map<number, string>((rows ?? []).map((r: any) => [r.igdb_id, r.id]));
+
+  const junctionRows: any[] = [];
+  for (const e of edges) {
+    const other = byIgdb.get(e.igdbId);
+    if (!other) continue;
+    const from = e.direction === 'out' ? internalGameId : other;
+    const to   = e.direction === 'out' ? other : internalGameId;
+    if (from === to) continue;
+    junctionRows.push({ from_game_id: from, to_game_id: to, relation_type: e.relationType, source: 'igdb' });
+  }
+  if (junctionRows.length > 0) {
+    await db.from('game_relationships').upsert(junctionRows, {
+      onConflict: 'from_game_id,to_game_id,relation_type',
+      ignoreDuplicates: true,
+    });
+  }
+}
+
+// Persist the game's Steam appid(s) from IGDB external_games. onConflict on the
+// appid PK keeps a given appid pointing at its most recently imported game.
+export async function persistSteamAppsFromIgdb(
+  db: any, internalGameId: string, igdbGame: any
+): Promise<void> {
+  const appids = collectSteamAppids(igdbGame?.external_games);
+  if (appids.length === 0) return;
+  await db.from('game_steam_apps').upsert(
+    appids.map((steam_appid) => ({ steam_appid, game_id: internalGameId })),
+    { onConflict: 'steam_appid' }
+  );
+}
+
 // Decomposes accented characters (e.g. "Ö" -> "O" + combining diaeresis) and
 // drops the combining marks, so callers can compare/transliterate titles
 // without accented letters silently failing to match their plain ASCII form.
@@ -226,7 +362,11 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
 
     if (needsRefresh) {
       const refresh = await igdbFetch("games", `
-        fields genres.id, genres.name, genres.slug,
+        fields game_type,
+               parent_game, version_parent, version_title,
+               dlcs, expansions, standalone_expansions, expanded_games, remakes,
+               external_games.category, external_games.uid,
+               genres.id, genres.name, genres.slug,
                platforms.id, platforms.name, platforms.slug,
                themes.id, themes.name, themes.slug,
                game_modes.id, game_modes.name, game_modes.slug,
@@ -237,6 +377,11 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
       `);
       const g = refresh?.[0];
       if (g) {
+        await db.from('games').update({
+          igdb_parent_game:    asIgdbId(g.parent_game),
+          igdb_version_parent: asIgdbId(g.version_parent),
+          version_title:       g.version_title ?? null,
+        }).eq('id', existing.id);
         await Promise.all([
           upsertJunction(db, existing.id, g.genres,     'genres',     'game_genres',     'genre_id'),
           upsertJunction(db, existing.id, g.platforms,  'platforms',  'game_platforms',  'platform_id'),
@@ -244,6 +389,8 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
           upsertJunction(db, existing.id, g.game_modes, 'game_modes', 'game_game_modes', 'game_mode_id'),
           upsertJunction(db, existing.id, g.franchises, 'franchises', 'game_franchises', 'franchise_id'),
           upsertJunction(db, existing.id, g.collections,'collections','game_collections','collection_id'),
+          persistGameRelationshipsFromIgdb(db, existing.id, g),
+          persistSteamAppsFromIgdb(db, existing.id, g),
         ]);
       }
     }
@@ -254,6 +401,9 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
   const games = await igdbFetch("games", `
     fields name, slug, summary, storyline, game_type, status,
            first_release_date, cover.url,
+           parent_game, version_parent, version_title,
+           dlcs, expansions, standalone_expansions, expanded_games, remakes,
+           external_games.category, external_games.uid,
            genres.id, genres.name, genres.slug,
            platforms.id, platforms.name, platforms.slug,
            themes.id, themes.name, themes.slug,
@@ -284,6 +434,9 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
       storyline:        game.storyline ?? null,
       igdb_category:    game.game_type ?? null,
       igdb_status:      game.status    ?? null,
+      igdb_parent_game:    asIgdbId(game.parent_game),
+      igdb_version_parent: asIgdbId(game.version_parent),
+      version_title:       game.version_title ?? null,
       cover_img_url:    coverUrl,
       date_released:    game.first_release_date
         ? new Date(game.first_release_date * 1000).toISOString().split('T')[0]
@@ -305,6 +458,8 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
     upsertJunction(db, inserted.id, game.game_modes, 'game_modes', 'game_game_modes', 'game_mode_id'),
     upsertJunction(db, inserted.id, game.franchises, 'franchises', 'game_franchises', 'franchise_id'),
     upsertJunction(db, inserted.id, game.collections,'collections','game_collections','collection_id'),
+    persistGameRelationshipsFromIgdb(db, inserted.id, game),
+    persistSteamAppsFromIgdb(db, inserted.id, game),
   ]);
 
   return { ok: true, game: inserted };

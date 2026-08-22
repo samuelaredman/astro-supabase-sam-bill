@@ -8,6 +8,10 @@ import {
   isReviewableNode,
   isBrowseGridNode,
   isAllowedGameCategory,
+  relationTypeForChildCategory,
+  deriveIgdbRelationEdges,
+  collectSteamAppids,
+  asIgdbId,
 } from "./games";
 
 describe("canonical-node classification sets", () => {
@@ -78,6 +82,87 @@ describe("isBrowseGridNode", () => {
     expect(isBrowseGridNode(0, null)).toBe(true);  // main_game shows in grid
     expect(isBrowseGridNode(1, null)).toBe(false); // dlc hidden from grid
     expect(isBrowseGridNode(1, "canonical")).toBe(false);
+  });
+});
+
+describe("asIgdbId", () => {
+  it("accepts bare ids and {id} objects, rejects everything else", () => {
+    expect(asIgdbId(42)).toBe(42);
+    expect(asIgdbId({ id: 42 })).toBe(42);
+    expect(asIgdbId(null)).toBeNull();
+    expect(asIgdbId(undefined)).toBeNull();
+    expect(asIgdbId("42")).toBeNull();
+    expect(asIgdbId(NaN)).toBeNull();
+  });
+});
+
+describe("relationTypeForChildCategory", () => {
+  it("maps connected child categories to their edge type", () => {
+    expect(relationTypeForChildCategory(1)).toBe("dlc");
+    expect(relationTypeForChildCategory(2)).toBe("expansion");
+    expect(relationTypeForChildCategory(4)).toBe("standalone_expansion");
+    expect(relationTypeForChildCategory(8)).toBe("remake");
+    expect(relationTypeForChildCategory(10)).toBe("expanded_game");
+  });
+
+  it("returns null for collapse categories and unknowns (no edge)", () => {
+    expect(relationTypeForChildCategory(11)).toBeNull(); // port collapses
+    expect(relationTypeForChildCategory(9)).toBeNull();  // remaster collapses
+    expect(relationTypeForChildCategory(0)).toBeNull();  // main_game has no parent edge
+    expect(relationTypeForChildCategory(null)).toBeNull();
+  });
+});
+
+describe("deriveIgdbRelationEdges", () => {
+  it("emits outbound edges for each reverse-array member", () => {
+    const edges = deriveIgdbRelationEdges({
+      game_type: 0,
+      dlcs: [101, 102],
+      expansions: [{ id: 201 }],
+      remakes: [301],
+    });
+    expect(edges).toContainEqual({ igdbId: 101, relationType: "dlc", direction: "out" });
+    expect(edges).toContainEqual({ igdbId: 102, relationType: "dlc", direction: "out" });
+    expect(edges).toContainEqual({ igdbId: 201, relationType: "expansion", direction: "out" });
+    expect(edges).toContainEqual({ igdbId: 301, relationType: "remake", direction: "out" });
+  });
+
+  it("emits an inbound edge from parent typed by this game's own category", () => {
+    // This game is an expansion (2) whose parent_game is 500.
+    const edges = deriveIgdbRelationEdges({ game_type: 2, parent_game: 500 });
+    expect(edges).toEqual([{ igdbId: 500, relationType: "expansion", direction: "in" }]);
+  });
+
+  it("emits no parent edge when the child category collapses (e.g. a port)", () => {
+    expect(deriveIgdbRelationEdges({ game_type: 11, parent_game: 500 })).toEqual([]);
+  });
+
+  it("de-duplicates identical edges", () => {
+    const edges = deriveIgdbRelationEdges({ game_type: 0, dlcs: [101, 101] });
+    expect(edges).toEqual([{ igdbId: 101, relationType: "dlc", direction: "out" }]);
+  });
+
+  it("returns nothing for a payload with no relationships", () => {
+    expect(deriveIgdbRelationEdges({ game_type: 0 })).toEqual([]);
+    expect(deriveIgdbRelationEdges({})).toEqual([]);
+  });
+});
+
+describe("collectSteamAppids", () => {
+  it("pulls distinct positive Steam appids (category 1) and ignores other stores", () => {
+    const appids = collectSteamAppids([
+      { category: 1, uid: "570" },   // Steam
+      { category: 1, uid: "570" },   // dup
+      { category: 5, uid: "999" },   // GOG — ignored
+      { category: 1, uid: "440" },   // Steam
+    ]);
+    expect(appids.sort((a, b) => a - b)).toEqual([440, 570]);
+  });
+
+  it("handles missing/garbage uids and empty input", () => {
+    expect(collectSteamAppids(null)).toEqual([]);
+    expect(collectSteamAppids([{ category: 1, uid: null }])).toEqual([]);
+    expect(collectSteamAppids([{ category: 1, uid: "not-a-number" }])).toEqual([]);
   });
 });
 
