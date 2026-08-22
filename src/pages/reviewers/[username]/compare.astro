@@ -1,0 +1,268 @@
+---
+export const prerender = false;
+import Layout from '../../../components/Layout.astro';
+import { getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../../utils/database';
+import { getTasteMatch } from '../../../utils/tasteMatch';
+import { igdbImage, scoreClass } from '../../../utils/format';
+
+const { username } = Astro.params;
+if (!username) return Astro.redirect('/404');
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const { data: { user } } = await serverClient.auth.getUser();
+if (!user) return Astro.redirect('/signin');
+
+const db = getSupabaseAdmin();
+
+const { data: viewer } = await db
+  .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+if (!viewer) return Astro.redirect('/signin');
+
+const { data: target } = await db
+  .from('profiles')
+  .select('id, username, avatar_url, taste_match_enabled')
+  .eq('username', username)
+  .maybeSingle();
+if (!target) return Astro.redirect('/404');
+if (target.id === viewer.id) return Astro.redirect(`/reviewers/${target.username}?tab=stats`);
+
+const match = await getTasteMatch(db, viewer.id, target.id);
+const currentProfile = viewer;
+
+// 1–10 axis positions for the taste spectrum
+const pos = (avg: number | null) => (avg == null ? 50 : ((avg - 1) / 9) * 100);
+const viewerPos = pos(match.viewerAvg);
+const targetPos = pos(match.targetAvg);
+
+const confidenceLabel: Record<string, string> = {
+  none: '',
+  low: 'Low confidence — few shared games',
+  medium: 'Medium confidence',
+  high: 'High confidence',
+};
+
+const meterColor = (pct: number) =>
+  pct >= 65 ? 'linear-gradient(to right, var(--score-good), var(--score-great))'
+  : pct >= 45 ? 'linear-gradient(to right, var(--score-orange), var(--score-mid))'
+  : 'linear-gradient(to right, var(--score-low), var(--score-orange))';
+
+const initial = (name: string) => (name?.[0] ?? '?').toUpperCase();
+---
+
+<Layout
+  title={`You vs ${target.username} — Taste Match`}
+  description={`How your game-scoring taste compares with ${target.username} on Chekpoint.`}
+  isLoggedIn={true}
+  currentProfile={currentProfile}
+>
+  <main class="cmp">
+    <div class="cmp-header">
+      <a href={`/reviewers/${target.username}`} class="cmp-back">← Back to {target.username}</a>
+      <h1 class="cmp-h1">Taste Match</h1>
+      <div class="cmp-who">
+        <div class="cmp-person">
+          {viewer.avatar_url
+            ? <img class="cmp-avatar" src={viewer.avatar_url} alt="You" />
+            : <div class="cmp-avatar cmp-avatar-ph">{initial(viewer.username)}</div>}
+          <span>You</span>
+        </div>
+        <span class="cmp-vs">vs</span>
+        <div class="cmp-person">
+          <a href={`/reviewers/${target.username}`} class="cmp-person">
+            {target.avatar_url
+              ? <img class="cmp-avatar" src={target.avatar_url} alt={target.username} />
+              : <div class="cmp-avatar cmp-avatar-ph">{initial(target.username)}</div>}
+            <span>{target.username}</span>
+          </a>
+        </div>
+      </div>
+    </div>
+
+    {match.disabled ? (
+      <div class="empty-state">
+        <div class="empty-state-title">Taste matching is turned off</div>
+        <p>{target.username} has chosen not to appear in taste comparisons.</p>
+      </div>
+    ) : match.sharedCount === 0 ? (
+      <div class="empty-state">
+        <div class="empty-state-title">No shared games yet</div>
+        <p>You and {target.username} haven't reviewed any of the same games. Review some overlapping games to unlock your taste match.</p>
+        <a href="/search" class="empty-cta">Find games</a>
+      </div>
+    ) : (
+      <>
+        <!-- HEADLINE -->
+        <div class="card cmp-headline-card">
+          <div class="cmp-pct-row">
+            <span class="cmp-pct">{match.matchPct}%</span>
+            <div>
+              <div class="cmp-label">{match.label}</div>
+              <div class="cmp-conf">{confidenceLabel[match.confidence]}</div>
+            </div>
+          </div>
+          <div class="cmp-meter"><div class="cmp-meter-fill" style={`width:${match.matchPct}%;background:${meterColor(match.matchPct)}`}></div></div>
+          <div class="cmp-sub">Based on {match.sharedCount} game{match.sharedCount === 1 ? '' : 's'} you both reviewed.</div>
+        </div>
+
+        <!-- SPECTRUM -->
+        <div class="card">
+          <div class="card-title">Where you both land</div>
+          <div class="cmp-spectrum">
+            <div class="cmp-axis"></div>
+            <div class="cmp-marker" style={`left:${targetPos}%`} title={`${target.username} avg`}>
+              {target.avatar_url
+                ? <img class="cmp-marker-av" src={target.avatar_url} alt={target.username} />
+                : <div class="cmp-marker-av cmp-avatar-ph">{initial(target.username)}</div>}
+            </div>
+            <div class="cmp-marker cmp-marker-you" style={`left:${viewerPos}%`} title="Your avg">
+              {viewer.avatar_url
+                ? <img class="cmp-marker-av" src={viewer.avatar_url} alt="You" />
+                : <div class="cmp-marker-av cmp-avatar-ph">{initial(viewer.username)}</div>}
+            </div>
+          </div>
+          <div class="cmp-axis-labels"><span>1</span><span>Average score on shared games</span><span>10</span></div>
+          <div class="cmp-avgs">
+            <span>You: <strong>{match.viewerAvg?.toFixed(1)}</strong></span>
+            <span>{target.username}: <strong>{match.targetAvg?.toFixed(1)}</strong></span>
+          </div>
+        </div>
+
+        <!-- GENRE BREAKDOWN -->
+        {match.genreBreakdown.length > 0 && (
+          <div class="card">
+            <div class="card-title">Agreement by genre</div>
+            {match.genreBreakdown.map((g) => (
+              <div class="cmp-genre-row">
+                <span class="cmp-genre-name">{g.genre}</span>
+                <div class="cmp-genre-track"><div class="cmp-genre-fill" style={`width:${g.pct}%`}></div></div>
+                <span class="cmp-genre-pct">{g.pct}%</span>
+                <span class="cmp-genre-n">{g.shared} game{g.shared === 1 ? '' : 's'}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div class="cmp-two">
+          <!-- AGREEMENTS -->
+          {match.topAgreements.length > 0 && (
+            <div class="card">
+              <div class="card-title">🤝 Biggest agreements</div>
+              {match.topAgreements.map((g) => (
+                <div class="cmp-game-row">
+                  <a href={g.slug ? `/games/${g.slug}` : '#'} class="cmp-game-title">{g.title}</a>
+                  <div class="cmp-scores">
+                    <span class={`cmp-chip ${scoreClass(g.scoreA)}`}>{g.scoreA}</span>
+                    <span class={`cmp-chip ${scoreClass(g.scoreB)}`}>{g.scoreB}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <!-- DISAGREEMENTS -->
+          {match.topDisagreements.length > 0 && (
+            <div class="card">
+              <div class="card-title">⚔️ Biggest disagreements</div>
+              {match.topDisagreements.map((g) => (
+                <div class="cmp-game-row">
+                  <a href={g.slug ? `/games/${g.slug}` : '#'} class="cmp-game-title">{g.title}</a>
+                  <div class="cmp-scores">
+                    <span class={`cmp-chip ${scoreClass(g.scoreA)}`}>{g.scoreA}</span>
+                    <span class={`cmp-chip ${scoreClass(g.scoreB)}`}>{g.scoreB}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <!-- ALL SHARED GAMES -->
+        <div class="card">
+          <div class="card-title">All {match.sharedCount} shared game{match.sharedCount === 1 ? '' : 's'}</div>
+          {match.sharedGames.map((g) => (
+            <div class="cmp-game-row cmp-shared-row">
+              {igdbImage(g.cover_img_url, 't_cover_small')
+                ? <img class="cmp-cover" src={igdbImage(g.cover_img_url, 't_cover_small') ?? ''} alt="" loading="lazy" />
+                : <div class="cmp-cover cmp-cover-ph">🎮</div>}
+              <a href={g.slug ? `/games/${g.slug}` : '#'} class="cmp-game-title">{g.title}</a>
+              <div class="cmp-scores">
+                <span class={`cmp-chip ${scoreClass(g.scoreA)}`}>{g.scoreA}</span>
+                <span class={`cmp-chip ${scoreClass(g.scoreB)}`}>{g.scoreB}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </>
+    )}
+  </main>
+
+  <div slot="sidebar-right">
+    <div class="widget">
+      <div class="widget-title">How taste match works</div>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.65;margin:0">
+        We look at every game you and {target.username} have both reviewed and compare your scores. The closer your scores across those games, the higher the match. Matches on just a few games are pulled toward the middle until you share more, so the number stays honest.
+      </p>
+    </div>
+    {!match.disabled && match.sharedCount > 0 && (
+      <div class="widget" style="margin-top:4px">
+        <div class="widget-title">The numbers</div>
+        <div class="stat-row"><span class="stat-label">Games in common</span><span class="stat-value">{match.sharedCount}</span></div>
+        <div class="stat-row"><span class="stat-label">Your reviews</span><span class="stat-value">{match.viewerReviewCount}</span></div>
+        <div class="stat-row"><span class="stat-label">{target.username}'s reviews</span><span class="stat-value">{match.targetReviewCount}</span></div>
+        {match.correlation != null && (
+          <div class="stat-row"><span class="stat-label">Score correlation</span><span class="stat-value">{match.correlation.toFixed(2)}</span></div>
+        )}
+      </div>
+    )}
+  </div>
+</Layout>
+
+<style>
+  .cmp { padding: 20px; max-width: 760px; }
+  .cmp-back { font-size: 13px; color: var(--text-secondary); text-decoration: none; }
+  .cmp-back:hover { color: var(--accent); }
+  .cmp-h1 { font-family: 'DM Serif Display', serif; font-size: 28px; margin: 8px 0 14px; }
+  .cmp-who { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+  .cmp-person { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-primary); text-decoration: none; }
+  .cmp-vs { color: var(--text-tertiary); font-size: 13px; }
+  .cmp-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; }
+  .cmp-avatar-ph { display: flex; align-items: center; justify-content: center; background: var(--accent-subtle); color: var(--accent); font-weight: 700; }
+
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .card-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--text-secondary); margin-bottom: 12px; }
+
+  .cmp-pct-row { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+  .cmp-pct { font-family: 'DM Serif Display', serif; font-size: 52px; line-height: 1; color: var(--accent); }
+  .cmp-label { font-size: 18px; font-weight: 700; color: var(--text-primary); }
+  .cmp-conf { font-size: 12px; color: var(--text-tertiary); }
+  .cmp-meter { height: 10px; background: var(--tag-bg); border-radius: 5px; overflow: hidden; }
+  .cmp-meter-fill { height: 100%; border-radius: 5px; }
+  .cmp-sub { font-size: 13px; color: var(--text-secondary); margin-top: 10px; }
+
+  .cmp-spectrum { position: relative; height: 44px; margin: 8px 0 4px; }
+  .cmp-axis { position: absolute; top: 50%; left: 0; right: 0; height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--score-low), var(--score-mid), var(--score-great)); transform: translateY(-50%); }
+  .cmp-marker { position: absolute; top: 50%; transform: translate(-50%, -50%); }
+  .cmp-marker-av { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; border: 2px solid var(--bg-card); box-shadow: var(--shadow); }
+  .cmp-marker-you .cmp-marker-av { border-color: var(--accent); }
+  .cmp-axis-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-tertiary); }
+  .cmp-avgs { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); margin-top: 8px; }
+
+  .cmp-genre-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 13px; }
+  .cmp-genre-name { flex: 0 0 110px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cmp-genre-track { flex: 1; height: 6px; background: var(--tag-bg); border-radius: 3px; overflow: hidden; }
+  .cmp-genre-fill { height: 100%; border-radius: 3px; background: linear-gradient(to right, var(--accent), var(--score-great)); }
+  .cmp-genre-pct { flex: 0 0 38px; text-align: right; font-weight: 600; color: var(--text-primary); }
+  .cmp-genre-n { flex: 0 0 62px; text-align: right; color: var(--text-tertiary); font-size: 12px; }
+
+  .cmp-two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .cmp-two .card { margin-bottom: 0; }
+  @media (max-width: 640px) { .cmp-two { grid-template-columns: 1fr; } }
+
+  .cmp-game-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border-subtle); }
+  .cmp-game-row:last-child { border-bottom: none; }
+  .cmp-game-title { flex: 1; font-size: 14px; font-weight: 600; color: var(--text-primary); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cmp-game-title:hover { color: var(--accent); }
+  .cmp-scores { display: flex; gap: 6px; }
+  .cmp-chip { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 26px; padding: 0 6px; border-radius: 7px; font-family: 'DM Serif Display', serif; font-size: 14px; }
+  .cmp-cover { width: 32px; height: 43px; border-radius: 4px; object-fit: cover; flex: 0 0 auto; }
+  .cmp-cover-ph { display: flex; align-items: center; justify-content: center; background: var(--tag-bg); font-size: 16px; }
+</style>

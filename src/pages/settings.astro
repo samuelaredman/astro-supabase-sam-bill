@@ -11,7 +11,7 @@ if (!user) return Astro.redirect('/signin');
 const db = getSupabaseAdmin() as any;
 const { data: profile } = await db
   .from('profiles')
-  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at')
+  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, taste_match_enabled, steam_id, steam_username, steam_synced_at')
   .eq('auth_user_id', user.id)
   .single();
 
@@ -133,6 +133,23 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           </div>
         </div>
         <div id="searchIndexableMsg" style="font-size:12px;min-height:16px;margin-top:8px"></div>
+      </div>
+
+      <!-- Taste matching — on by default; opt out to hide from comparisons -->
+      <div class="settings-row" id="taste-matching" style="flex-direction:column;align-items:stretch;gap:0;margin-top:14px">
+        <div class="priv-row">
+          <div class="settings-row-text">
+            <div class="settings-row-label">🎯 Taste matching</div>
+            <div class="settings-row-sub">
+              Let other reviewers see how their game-scoring taste compares with yours, based on games you've both reviewed. On by default. Turn this off to hide your taste match from everyone.
+            </div>
+          </div>
+          <div class="priv-toggle" data-field="taste_match_enabled">
+            <button class={`priv-opt${profile.taste_match_enabled === false ? ' active' : ''}`} data-value="off" onclick="setTasteMatch(false, this)">Off</button>
+            <button class={`priv-opt${profile.taste_match_enabled === false ? '' : ' active'}`} data-value="on" onclick="setTasteMatch(true, this)">On</button>
+          </div>
+        </div>
+        <div id="tasteMatchMsg" style="font-size:12px;min-height:16px;margin-top:8px"></div>
       </div>
     </section>
 
@@ -515,6 +532,7 @@ declare global {
     changePassword: () => Promise<void>;
     setPrivacy: (field: string, value: string, btn: HTMLElement) => Promise<void>;
     setSearchIndexable: (value: boolean, btn: HTMLElement) => Promise<void>;
+    setTasteMatch: (value: boolean, btn: HTMLElement) => Promise<void>;
     steamSync: () => Promise<void>;
     steamDisconnect: () => Promise<void>;
   }
@@ -590,6 +608,42 @@ async function setSearchIndexable(value: boolean, btn: HTMLElement) {
   }
 }
 window.setSearchIndexable = setSearchIndexable;
+
+async function setTasteMatch(value: boolean, btn: HTMLElement) {
+  const toggle = btn.closest('.priv-toggle') as HTMLElement | null;
+  if (!toggle) return;
+  const prevActive = toggle.querySelector('.priv-opt.active') as HTMLElement | null;
+  // Optimistic UI update
+  toggle.querySelectorAll('.priv-opt').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const msg = document.getElementById('tasteMatchMsg');
+  if (msg) { msg.textContent = ''; }
+  try {
+    const res = await fetch('/api/profile/privacy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taste_match_enabled: value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Failed to save');
+    if (msg) {
+      msg.textContent = value
+        ? 'Others can now compare their taste with yours.'
+        : 'Your taste match is now hidden from others.';
+      (msg as HTMLElement).style.color = 'var(--score-great, #4ade80)';
+      setTimeout(() => { if (msg) msg.textContent = ''; }, 4000);
+    }
+  } catch (e: any) {
+    // Revert optimistic update on failure
+    toggle.querySelectorAll('.priv-opt').forEach(b => b.classList.remove('active'));
+    prevActive?.classList.add('active');
+    if (msg) {
+      msg.textContent = e.message ?? 'Something went wrong.';
+      (msg as HTMLElement).style.color = '#f87171';
+    }
+  }
+}
+window.setTasteMatch = setTasteMatch;
 
 function togglePwForm() {
   const form = document.getElementById('pwForm');

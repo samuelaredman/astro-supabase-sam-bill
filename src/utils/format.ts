@@ -8,6 +8,13 @@ export function scoreClass(score: number): string {
   return 'score-low';
 }
 
+export function tasteMatchLabel(pct: number): string {
+  if (pct >= 80) return 'Very similar';
+  if (pct >= 65) return 'Similar';
+  if (pct >= 45) return 'Mixed';
+  return 'Different';
+}
+
 export function timeAgo(dateStr: string): string {
   const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (diff < 60) return `${diff}s`;

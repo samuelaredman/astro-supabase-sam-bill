@@ -1346,6 +1346,10 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
               </svg>
             </button>
           )}
+          <a href={`/reviewers/${reviewer.username}/compare`} class="taste-badge" id="tasteBadge" style="display:none" title="See how your tastes compare">
+            <span class="taste-badge-pct" id="tasteBadgePct">—</span>
+            <span class="taste-badge-lbl">match</span>
+          </a>
         </div>
       )}
       {!isOwnProfile && !user && (
@@ -1422,6 +1426,105 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   </script>
 )}
 
+<!-- TASTE MATCH styles + hydration -->
+<style>
+  .taste-badge {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    padding: 4px 10px; border-radius: 20px;
+    background: var(--accent-subtle); border: 1px solid var(--border);
+    color: var(--text-primary); text-decoration: none; line-height: 1;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .taste-badge:hover { background: var(--bg-hover); border-color: var(--accent); }
+  .taste-badge-pct { font-family: 'DM Serif Display', serif; font-size: 15px; font-weight: 600; color: var(--accent); }
+  .taste-badge-lbl { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em; }
+  .taste-card .taste-muted { font-size: 13px; color: var(--text-secondary); padding: 4px 0; }
+  .taste-headline { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+  .taste-pct { font-family: 'DM Serif Display', serif; font-size: 34px; font-weight: 600; line-height: 1; color: var(--accent); }
+  .taste-label { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+  .taste-conf { font-size: 12px; color: var(--text-tertiary); }
+  .taste-meter { height: 8px; background: var(--tag-bg); border-radius: 4px; overflow: hidden; margin-bottom: 12px; }
+  .taste-meter-fill { height: 100%; border-radius: 4px; }
+  .taste-line { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); margin: 6px 0; }
+  .taste-line .t-title { color: var(--text-primary); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .taste-chip { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 6px; font-family: 'DM Serif Display', serif; font-size: 13px; }
+  .taste-link { display: inline-block; margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--accent); text-decoration: none; }
+  .taste-link:hover { text-decoration: underline; }
+</style>
+{!isOwnProfile && user && (
+  <script is:inline define:vars={{ tasteTargetId: reviewer.id, tasteCompareHref: `/reviewers/${reviewer.username}/compare` }}>
+    (function () {
+      if (window.__tasteInit) return;
+      window.__tasteInit = true;
+
+      function sc(n) {
+        if (n === 10) return 'score-perfect';
+        if (n >= 9) return 'score-great';
+        if (n >= 8) return 'score-teal';
+        if (n >= 7) return 'score-good';
+        if (n >= 5) return 'score-mid';
+        if (n >= 3) return 'score-orange';
+        return 'score-low';
+      }
+      function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+      function chip(n) {
+        return '<span class="taste-chip ' + sc(n) + '">' + n + '</span>';
+      }
+      function meterColor(pct) {
+        if (pct >= 65) return 'linear-gradient(to right, var(--score-good), var(--score-great))';
+        if (pct >= 45) return 'linear-gradient(to right, var(--score-orange), var(--score-mid))';
+        return 'linear-gradient(to right, var(--score-low), var(--score-orange))';
+      }
+
+      var body = document.getElementById('tasteCardBody');
+      var badge = document.getElementById('tasteBadge');
+      var badgePct = document.getElementById('tasteBadgePct');
+      if (!body) return;
+
+      fetch('/api/taste-match?with=' + encodeURIComponent(tasteTargetId))
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r); })
+        .then(function (d) {
+          if (d.disabled) {
+            body.innerHTML = '<div class="taste-muted">This reviewer has taste matching turned off.</div>';
+            return;
+          }
+          if (!d.sharedCount) {
+            body.innerHTML = '<div class="taste-muted">No shared games yet — review some of the same games to compare tastes.</div>';
+            return;
+          }
+          var html = '';
+          html += '<div class="taste-headline"><span class="taste-pct">' + d.matchPct + '%</span>'
+                + '<span class="taste-label">' + esc(d.label) + '</span></div>';
+          html += '<div class="taste-meter"><div class="taste-meter-fill" style="width:' + d.matchPct + '%;background:' + meterColor(d.matchPct) + '"></div></div>';
+          html += '<div class="taste-conf">' + d.sharedCount + ' game' + (d.sharedCount === 1 ? '' : 's') + ' in common'
+                + (d.confidence === 'low' ? ' · low confidence' : '') + '</div>';
+          var ag = d.topAgreements && d.topAgreements[0];
+          if (ag) {
+            html += '<div class="taste-line">🤝 <span class="t-title">' + esc(ag.title) + '</span> ' + chip(ag.scoreA) + chip(ag.scoreB) + '</div>';
+          }
+          var dis = d.topDisagreements && d.topDisagreements[0];
+          if (dis) {
+            html += '<div class="taste-line">⚔️ <span class="t-title">' + esc(dis.title) + '</span> ' + chip(dis.scoreA) + chip(dis.scoreB) + '</div>';
+          }
+          html += '<a class="taste-link" href="' + tasteCompareHref + '">View full comparison →</a>';
+          body.innerHTML = html;
+
+          if (badge && badgePct) {
+            badgePct.textContent = d.matchPct + '%';
+            badge.style.display = 'inline-flex';
+          }
+        })
+        .catch(function () {
+          body.innerHTML = '<div class="taste-muted">Couldn’t load taste match right now.</div>';
+        });
+    })();
+  </script>
+)}
+
 <!-- EDIT MODE BAR -->
 <div class="edit-mode-bar" id="editModeBar">
   <div class="edit-mode-label">
@@ -1451,6 +1554,16 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   <div class={`tab-panel ${activeTab === 'profile' ? 'active' : ''}`} data-tab="profile">
     <div class="two-col">
       <div>
+
+        <!-- TASTE MATCH (logged-in, viewing someone else) -->
+        {!isOwnProfile && user && (
+          <div class="card taste-card" id="tasteCard">
+            <div class="card-title">Taste Match</div>
+            <div id="tasteCardBody">
+              <div class="taste-muted">Comparing your taste…</div>
+            </div>
+          </div>
+        )}
 
         <!-- FAVORITE GAME -->
         {favGame ? (

@@ -1468,6 +1468,7 @@ export type Database = {
           steam_id: string | null
           steam_synced_at: string | null
           steam_username: string | null
+          taste_match_enabled: boolean
           updated_at: string
           username: string
           want_to_play_privacy: string
@@ -1493,6 +1494,7 @@ export type Database = {
           steam_id?: string | null
           steam_synced_at?: string | null
           steam_username?: string | null
+          taste_match_enabled?: boolean
           updated_at?: string
           username: string
           want_to_play_privacy?: string
@@ -1518,6 +1520,7 @@ export type Database = {
           steam_id?: string | null
           steam_synced_at?: string | null
           steam_username?: string | null
+          taste_match_enabled?: boolean
           updated_at?: string
           username?: string
           want_to_play_privacy?: string
@@ -1894,6 +1897,42 @@ export type Database = {
           title_key?: string
         }
         Relationships: []
+      }
+      taste_matches: {
+        Row: {
+          computed_at: string
+          data: Json
+          profile_a: string
+          profile_b: string
+        }
+        Insert: {
+          computed_at?: string
+          data: Json
+          profile_a: string
+          profile_b: string
+        }
+        Update: {
+          computed_at?: string
+          data?: Json
+          profile_a?: string
+          profile_b?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "taste_matches_profile_a_fkey"
+            columns: ["profile_a"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "taste_matches_profile_b_fkey"
+            columns: ["profile_b"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       themes: {
         Row: {

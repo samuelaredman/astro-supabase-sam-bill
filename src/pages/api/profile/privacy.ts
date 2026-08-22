@@ -35,6 +35,14 @@ export const POST: APIRoute = async (context) => {
     updates.search_indexable_at = body.search_indexable ? new Date().toISOString() : null;
   }
 
+  // Taste matching — on by default; users can opt out of appearing in comparisons.
+  if (body.taste_match_enabled !== undefined) {
+    if (typeof body.taste_match_enabled !== "boolean") {
+      return json({ error: "Invalid taste_match_enabled value" }, 400);
+    }
+    updates.taste_match_enabled = body.taste_match_enabled;
+  }
+
   if (Object.keys(updates).length === 0) {
     return json({ error: "Nothing to update" }, 400);
   }
