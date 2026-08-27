@@ -113,29 +113,34 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
       return;
     }
 
-    var baseline = await crawl(base, "all games");
+    // The default /games/ view is played+playing only — backlog & wishlist games
+    // aren't in it — so this is a lower bound on the library, used for titles and
+    // as a sanity ceiling, not as "the total".
+    var baseline = await crawl(base, "your library");
     var baseCount = baseline.length;
-    if (!baseCount) { box.textContent = "Chekpoint: no games found in your library."; return; }
 
     // Most-current status first so it wins on de-dupe (playing > played > backlog > wishlist).
     var SHELVES = ["playing", "played", "backlog", "wishlist"];
     var titleBySlug = {};
-    for (var b = 0; b < baseline.length; b++) titleBySlug[baseline[b].slug] = baseline[b].title;
+    var librarySlugs = {};
+    for (var b = 0; b < baseline.length; b++) { titleBySlug[baseline[b].slug] = baseline[b].title; librarySlugs[baseline[b].slug] = 1; }
 
     var assigned = {};          // slug -> status
-    var seenSets = [];          // JSON of each kept shelf's slug list, for alias detection
+    var seenSets = [];          // sorted slug list of each kept shelf, for alias detection
     for (var s = 0; s < SHELVES.length; s++) {
       var shelf = SHELVES[s];
       box.textContent = "Chekpoint: reading " + shelf + "…";
       var cards = await crawl(base + "added:desc/type:" + shelf + "/", shelf);
       var slugs = cards.map(function(c){ return c.slug; }).sort();
-      // Skip a shelf that returned nothing, more than the whole library (bogus),
-      // or the exact same set as an already-kept shelf (Backloggd ignored it).
-      if (!slugs.length || slugs.length > baseCount) continue;
+      // Skip an empty shelf, a wildly-oversized result (filter ignored — a shelf
+      // can legitimately exceed baseCount since backlog/wishlist aren't in it,
+      // so only bail past 3x), or an exact duplicate of an already-kept shelf.
+      if (!slugs.length || (baseCount > 0 && slugs.length > baseCount * 3)) continue;
       var key = slugs.join(",");
       if (seenSets.indexOf(key) !== -1) continue;
       seenSets.push(key);
       for (var c2 = 0; c2 < cards.length; c2++) {
+        librarySlugs[cards[c2].slug] = 1;
         if (!assigned[cards[c2].slug]) {
           assigned[cards[c2].slug] = shelf;
           if (cards[c2].title && !titleBySlug[cards[c2].slug]) titleBySlug[cards[c2].slug] = cards[c2].title;
@@ -144,6 +149,8 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
       await sleep(300);
     }
 
+    var libraryTotal = Object.keys(librarySlugs).length || baseCount;
+
     var rows = [];
     for (var slug in assigned) {
       rows.push({ game_slug: slug, game_title: titleBySlug[slug] || slug.replace(/-/g, " "),
@@ -151,18 +158,23 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     }
 
     if (!rows.length) {
-      box.textContent = "Chekpoint: your " + baseCount + " games have no shelf status (played/playing/backlog/wishlist) to import.";
+      box.textContent = "Chekpoint: none of your " + libraryTotal + " games have a played/playing/backlog/wishlist status to import.";
       return;
     }
 
+    var counts = { playing: 0, played: 0, backlog: 0, wishlist: 0 };
+    for (var rr = 0; rr < rows.length; rr++) counts[rows[rr].backloggd_status]++;
+
     var payload = { version: 1, source: "backloggd", kind: "library", username: username,
-      scrapedAt: new Date().toISOString(), totalGames: baseCount, rows: rows };
+      scrapedAt: new Date().toISOString(), totalGames: libraryTotal, counts: counts, rows: rows };
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     var a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "backloggd-chekpoint-library.json";
     document.body.appendChild(a); a.click(); a.remove();
-    box.textContent = "Chekpoint: done — " + rows.length + " of " + baseCount + " games have a status. Upload the file on Chekpoint.";
+    box.textContent = "Chekpoint: done — " + rows.length + " games with a status (" +
+      counts.played + " played, " + counts.playing + " playing, " + counts.backlog + " backlog, " +
+      counts.wishlist + " wishlist). Upload the file on Chekpoint.";
   } catch (e) {
     box.textContent = "Chekpoint library importer: failed — " + (e && e.message ? e.message : e);
     throw e;
