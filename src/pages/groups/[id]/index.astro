@@ -26,7 +26,7 @@ const db = getSupabaseAdmin() as any;
 
 let { data: group, error: groupError } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, created_by, created_at, stats_config, join_prompt")
   .eq("id", id)
   .single();
 
@@ -34,13 +34,17 @@ let { data: group, error: groupError } = await db
 if (!group && groupError) {
   const { data: fallback } = await db
     .from("groups")
-    .select("id, name, description, avatar_url, visibility, invite_code, created_by, created_at, stats_config, join_prompt")
+    .select("id, name, description, avatar_url, visibility, requires_approval, invite_code, created_by, created_at, stats_config, join_prompt")
     .eq("id", id)
     .single();
   if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center' };
 }
 
 if (!group) return Astro.redirect("/groups");
+
+// Whether joining this group needs owner/admin approval — always true for
+// private groups, optional for public ones via the requires_approval setting
+const needsApproval = group.visibility === "private" || !!group.requires_approval;
 
 let membership: any = null;
 if (currentProfile) {
@@ -74,7 +78,7 @@ if (currentProfile && !isMember) {
 
 // Has this user already submitted a join request?
 let existingJoinRequest: any = null;
-if (currentProfile && !isMember && group.visibility === "private") {
+if (currentProfile && !isMember && needsApproval) {
   const { data: jr } = await db
     .from("group_join_requests")
     .select("id, status")
@@ -110,9 +114,57 @@ const defaultStats = {
   show_top_games: true, show_top_rated: true, show_hot_take: true,
   show_critic_spectrum: true, show_recent_reviews: true,
   show_score_compare: true, show_sessions: true, show_watchlist: true,
+  show_announcements: true, show_polls: true, show_split_decision: true,
   focus_genre_id: null as string | null, focus_platform_id: null as string | null,
 };
 const statsConf = { ...defaultStats, ...(group.stats_config ?? {}) };
+
+// ── Announcements ──
+let announcements: any[] = [];
+if (isMember) {
+  const { data: ann } = await (supabase as any)
+    .from("group_announcements")
+    .select("id, body, pinned, created_at, profiles ( id, username, avatar_url )")
+    .eq("group_id", id)
+    .order("pinned", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(10);
+  announcements = ann ?? [];
+}
+
+// ── Polls ──
+let polls: any[] = [];
+if (isMember) {
+  const { data: pollRows } = await (supabase as any)
+    .from("group_polls")
+    .select("id, question, closed, created_at, profile_id")
+    .eq("group_id", id)
+    .order("created_at", { ascending: false })
+    .limit(5);
+
+  if (pollRows?.length) {
+    const pollIds = pollRows.map((p: any) => p.id);
+    const [{ data: optionRows }, { data: voteRows }] = await Promise.all([
+      (supabase as any).from("group_poll_options").select("id, poll_id, label, position").in("poll_id", pollIds).order("position", { ascending: true }),
+      (supabase as any).from("group_poll_votes").select("poll_id, option_id, profile_id").in("poll_id", pollIds),
+    ]);
+    polls = pollRows.map((p: any) => {
+      const options = (optionRows ?? []).filter((o: any) => o.poll_id === p.id);
+      const votes = (voteRows ?? []).filter((v: any) => v.poll_id === p.id);
+      const myVote = currentProfile ? votes.find((v: any) => v.profile_id === currentProfile.id) : null;
+      const totalVotes = votes.length;
+      return {
+        ...p,
+        options: options.map((o: any) => ({
+          ...o,
+          count: votes.filter((v: any) => v.option_id === o.id).length,
+        })),
+        totalVotes,
+        myOptionId: myVote?.option_id ?? null,
+      };
+    });
+  }
+}
 
 // ── Custom roles — graceful fallback if migration not yet applied ──
 let groupRoles: any[] = [];
@@ -203,6 +255,26 @@ if (memberProfileIds.length >= 2) {
     .slice(0, 30);
 }
 
+// Split Decision — the shared game where two members disagree the most
+let splitDecision: any = null;
+if (sharedGames.length > 0) {
+  let maxSpread = 0;
+  for (const g of sharedGames) {
+    let hi = g.reviews[0], lo = g.reviews[0];
+    for (const r of g.reviews) {
+      if (r.score > hi.score) hi = r;
+      if (r.score < lo.score) lo = r;
+    }
+    const spread = hi.score - lo.score;
+    if (spread > maxSpread) {
+      maxSpread = spread;
+      const hiMember = memberList.find((m: any) => m.id === hi.profile_id);
+      const loMember = memberList.find((m: any) => m.id === lo.profile_id);
+      splitDecision = { game: g.game, spread, high: { ...hiMember, score: hi.score }, low: { ...loMember, score: lo.score } };
+    }
+  }
+}
+
 let activityQuery = (supabase as any)
   .from("reviews")
   .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
@@ -240,6 +312,17 @@ const memberAvgScores = memberList
     return { ...m, avgScore: avg, reviewCount: revs.length };
   })
   .filter(Boolean);
+
+// The Range — the toughest and easiest graders in the group
+let scoreRange: any = null;
+if (memberAvgScores.length >= 2) {
+  const sorted = [...memberAvgScores].sort((a: any, b: any) => a.avgScore - b.avgScore);
+  const toughest = sorted[0];
+  const easiest = sorted[sorted.length - 1];
+  if (toughest.id !== easiest.id && toughest.avgScore !== easiest.avgScore) {
+    scoreRange = { toughest, easiest };
+  }
+}
 
 // Hot take — group's biggest divergence from community average
 const gameListIds = gameList.map((g: any) => g.game?.id).filter(Boolean);
@@ -355,21 +438,12 @@ const groupOgDescription = group.description
 
   /* ── Tab nav (card style) ── */
   .page{max-width:980px;margin:0 auto;padding:20px 28px 80px}
-  .tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px}
-  .tab-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:14px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;text-decoration:none}
-  .tab-link::before{content:'';position:absolute;inset:0;background:var(--accent-subtle);opacity:0;transition:opacity .2s}
-  .tab-link:hover::before,.tab-link.active::before{opacity:1}
-  .tab-link:hover{border-color:rgba(96,80,200,.35);transform:translateY(-2px);box-shadow:var(--shadow-md)}
-  .tab-link.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 4px 20px rgba(96,80,200,.15)}
-  .tab-link.active::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent)}
-  .tab-icon{width:28px;height:28px;border-radius:8px;background:var(--tag-bg);display:flex;align-items:center;justify-content:center}
-  .tab-link.active .tab-icon,.tab-link:hover .tab-icon{background:var(--accent-subtle)}
-  .tab-link.active .tab-icon svg,.tab-link:hover .tab-icon svg{stroke:var(--accent)}
-  .tab-label{font-size:13px;font-weight:600;color:var(--text-secondary);position:relative;z-index:1;transition:color .2s}
-  .tab-link.active .tab-label,.tab-link:hover .tab-label{color:var(--text-primary)}
-  .tab-meta{font-size:12px;color:var(--text-secondary);position:relative;z-index:1}
-  .tab-link.active .tab-meta{color:var(--accent)}
-  .tab-badge{background:var(--accent);color:white;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;position:absolute;top:8px;right:8px;z-index:2}
+  .tab-nav{display:flex;gap:4px;margin-bottom:24px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:4px}
+  .tab-link{padding:8px 18px;border-radius:7px;font-size:13px;font-weight:600;color:var(--text-secondary);text-decoration:none;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:6px}
+  .tab-link:hover{color:var(--text-primary);background:var(--bg-hover)}
+  .tab-link.active{background:var(--accent);color:#fff}
+  .tab-count{font-size:11px;font-weight:700;background:rgba(255,255,255,.15);border-radius:10px;padding:1px 6px;line-height:1.5}
+  .tab-link:not(.active) .tab-count{background:var(--bg-hover);color:var(--text-tertiary)}
   .tab-panel{display:none}
   .tab-panel.active{display:block}
 
@@ -384,9 +458,17 @@ const groupOgDescription = group.description
   .hot-take-delta{font-size:12px;font-weight:700}
   .delta-up{color:var(--score-great)}
   .delta-down{color:var(--score-low)}
+  .split-decision-delta{color:var(--accent)}
 
   /* ── Critic Spectrum ── */
   .spectrum-wrap{padding-top:4px}
+  .range-row{display:flex;gap:10px;margin-bottom:16px}
+  .range-badge{flex:1;display:flex;align-items:center;gap:8px;background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:8px 10px}
+  .range-avatar{width:28px;height:28px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
+  .range-avatar img{width:100%;height:100%;object-fit:cover}
+  .range-info{min-width:0}
+  .range-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-tertiary)}
+  .range-name{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .spectrum-edge-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--text-tertiary);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:28px}
   .spectrum-track{position:relative;height:32px;margin-bottom:20px}
   .spectrum-bar{position:absolute;top:50%;left:0;right:0;height:3px;background:linear-gradient(to right,var(--score-low-bg),var(--score-mid-bg),var(--score-great-bg));border-radius:2px;transform:translateY(-50%)}
@@ -474,6 +556,38 @@ const groupOgDescription = group.description
   .wl-remove{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:16px;padding:2px;transition:color .15s}
   .wl-remove:hover{color:#f87171}
 
+  /* ── Announcements ── */
+  .announcement-item{padding:12px 0;border-bottom:1px solid var(--border-subtle)}
+  .announcement-item:last-child{border-bottom:none}
+  .announcement-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .announcement-avatar{width:24px;height:24px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
+  .announcement-avatar img{width:100%;height:100%;object-fit:cover}
+  .announcement-author{font-size:12px;font-weight:600}
+  .announcement-time{font-size:11px;color:var(--text-tertiary)}
+  .announcement-pin-tag{font-size:10px;font-weight:700;color:var(--accent);background:var(--accent-subtle);padding:1px 7px;border-radius:8px;margin-left:auto}
+  .announcement-body{font-size:13px;color:var(--text-secondary);line-height:1.5;white-space:pre-wrap}
+  .announcement-actions{display:flex;gap:10px;margin-top:6px}
+  .announcement-action{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:11px;font-family:inherit;padding:0;transition:color .15s}
+  .announcement-action:hover{color:var(--text-primary)}
+  .compose-form{background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px}
+  .compose-input{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:inherit;resize:vertical;min-height:60px;outline:none;box-sizing:border-box}
+  .compose-input:focus{border-color:var(--accent)}
+  .compose-row{display:flex;align-items:center;gap:10px;margin-top:8px}
+  .compose-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer}
+
+  /* ── Polls ── */
+  .poll-item{padding:12px 0;border-bottom:1px solid var(--border-subtle)}
+  .poll-item:last-child{border-bottom:none}
+  .poll-question{font-size:13px;font-weight:600;margin-bottom:8px}
+  .poll-option{display:block;width:100%;text-align:left;background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12px;font-family:inherit;color:var(--text-primary);cursor:pointer;margin-bottom:6px;transition:border-color .15s}
+  .poll-option:hover{border-color:var(--accent)}
+  .poll-result{position:relative;border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12px;margin-bottom:6px;overflow:hidden}
+  .poll-result-bar{position:absolute;inset:0;background:var(--accent-subtle);z-index:0}
+  .poll-result-label{position:relative;z-index:1;display:flex;justify-content:space-between;gap:8px}
+  .poll-result.voted{border-color:var(--accent)}
+  .poll-meta{font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center}
+  .poll-meta-actions{display:flex;gap:10px}
+
   .member-item{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border-subtle);flex-wrap:wrap}
   .member-item:last-child{border-bottom:none}
   .member-avatar{width:34px;height:34px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--accent);flex-shrink:0;overflow:hidden}
@@ -522,7 +636,7 @@ const groupOgDescription = group.description
     .page{padding:16px 16px 60px}
     .group-header{padding:0 16px}
     .group-avatar-wrap{left:16px}
-    .tab-nav{grid-template-columns:1fr}
+    .tab-nav{flex-wrap:wrap}
     .stats-row{grid-template-columns:repeat(2,1fr)}
   }
 </style>
@@ -573,6 +687,7 @@ const groupOgDescription = group.description
       {group.description && <p class="group-desc">{group.description}</p>}
       <div class="group-meta-badges">
         <span class="badge">{group.visibility}</span>
+        {group.visibility === "public" && group.requires_approval && <span class="badge">Application required</span>}
         {membership && <span class="badge badge-accent">{membership.role}</span>}
         {focusLabel && <span class="badge" style="background:rgba(96,80,200,.12);color:var(--accent)">🎯 {focusLabel}</span>}
       </div>
@@ -612,10 +727,10 @@ const groupOgDescription = group.description
     <div class="group-actions">
       <ShareButton url={`/groups/${group.id}`} />
       {/* Not logged in */}
-      {!user && (group.visibility === "public" || group.visibility === "community") && (
+      {!user && !needsApproval && (
         <a href="/signin" class="btn-primary">Sign in to join</a>
       )}
-      {!user && group.visibility === "private" && (
+      {!user && needsApproval && (
         <a href="/signin" class="btn-primary">Sign in to request access</a>
       )}
 
@@ -623,19 +738,19 @@ const groupOgDescription = group.description
       {user && !isMember && pendingInvite && (
         <button class="btn-primary" id="accept-invite-btn" onclick="acceptInvite()">Accept Invite</button>
       )}
-      {user && !isMember && !pendingInvite && (group.visibility === "public" || group.visibility === "community") && (
+      {user && !isMember && !pendingInvite && !needsApproval && (
         <button class="btn-primary" id="join-btn" onclick="joinGroup()">Join Group</button>
       )}
       {user && !isMember && !pendingInvite && group.visibility === "private" && joinCode && (
         <button class="btn-primary" id="join-btn" onclick="joinGroupByCode()">Join via Invite</button>
       )}
-      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "pending" && (
+      {user && !isMember && needsApproval && !joinCode && existingJoinRequest?.status === "pending" && (
         <span class="badge-pending-action">Request pending</span>
       )}
-      {user && !isMember && group.visibility === "private" && !joinCode && !existingJoinRequest && (
+      {user && !isMember && needsApproval && !joinCode && !existingJoinRequest && (
         <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request to Join</button>
       )}
-      {user && !isMember && group.visibility === "private" && !joinCode && existingJoinRequest?.status === "rejected" && (
+      {user && !isMember && needsApproval && !joinCode && existingJoinRequest?.status === "rejected" && (
         <button class="btn-primary" id="join-request-btn" onclick="openJoinRequestForm()">Request Again</button>
       )}
 
@@ -650,7 +765,7 @@ const groupOgDescription = group.description
 
     {/* Join request form — shown inline below actions when opened */}
     {/* Renders for: no prior request, OR a rejected request (allowing re-application) */}
-    {user && !isMember && group.visibility === "private" && !joinCode && (!existingJoinRequest || existingJoinRequest?.status === "rejected") && (
+    {user && !isMember && needsApproval && !joinCode && (!existingJoinRequest || existingJoinRequest?.status === "rejected") && (
       <div id="join-request-form" style="display:none;margin-top:14px;padding:16px 20px;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;max-width:420px">
         <div style="font-size:13px;font-weight:600;margin-bottom:8px">Request to join {group.name}</div>
         {group.join_prompt && (
@@ -687,39 +802,16 @@ const groupOgDescription = group.description
 
   {/* Full tab nav — only shown to members or non-private groups */}
   {(isMember || group.visibility !== "private") && (
-  <nav class="tab-nav" style={`grid-template-columns: repeat(${1 + (statsConf.show_sessions ? 1 : 0) + (statsConf.show_score_compare ? 1 : 0)}, 1fr)`}>
-    <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>
-      <div class="tab-icon">
-        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="2" width="6" height="6" rx="1.5"/><rect x="10" y="2" width="6" height="6" rx="1.5"/>
-          <rect x="2" y="10" width="6" height="6" rx="1.5"/><rect x="10" y="10" width="6" height="6" rx="1.5"/>
-        </svg>
-      </div>
-      <div class="tab-label">Overview</div>
-      <div class="tab-meta">Stats &amp; activity</div>
-    </a>
+  <nav class="tab-nav">
+    <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>Overview</a>
     {statsConf.show_sessions && (
     <a href={`/groups/${group.id}?tab=sessions`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
-      {(sessionsData ?? []).length > 0 && <span class="tab-badge">{(sessionsData ?? []).length}</span>}
-      <div class="tab-icon">
-        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="14" height="13" rx="2"/><path d="M6 1v4M12 1v4M2 8h14"/>
-        </svg>
-      </div>
-      <div class="tab-label">Sessions</div>
-      <div class="tab-meta">{(sessionsData ?? []).length} game nights</div>
+      Sessions {(sessionsData ?? []).length > 0 && <span class="tab-count">{(sessionsData ?? []).length}</span>}
     </a>
     )}
     {statsConf.show_score_compare && (
     <a href={`/groups/${group.id}?tab=compare`} class={`tab-link${activeTab === "compare" ? " active" : ""}`}>
-      {sharedGames.length > 0 && <span class="tab-badge">{sharedGames.length}</span>}
-      <div class="tab-icon">
-        <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M2 14l4-5 3 3 3-4 4 6"/>
-        </svg>
-      </div>
-      <div class="tab-label">Stats</div>
-      <div class="tab-meta">{sharedGames.length} shared games</div>
+      Stats {sharedGames.length > 0 && <span class="tab-count">{sharedGames.length}</span>}
     </a>
     )}
   </nav>
@@ -729,6 +821,56 @@ const groupOgDescription = group.description
     <div class="two-col">
       <!-- Left: top games + podium -->
       <div>
+        {statsConf.show_announcements && isMember && (
+          <div class="card">
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Announcements</span>
+              {isAdminOrOwner && (
+                <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+              )}
+            </div>
+
+            {isAdminOrOwner && (
+              <div id="announcement-form" class="compose-form" style="display:none">
+                <textarea id="announcement-body" class="compose-input" placeholder="Share an update with the group…" maxlength="2000"></textarea>
+                <div class="compose-row">
+                  <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="postAnnouncement()">Post</button>
+                  <label class="compose-check">
+                    <input type="checkbox" id="announcement-pinned" style="accent-color:var(--accent)" />
+                    Pin to top
+                  </label>
+                </div>
+                <div id="announcement-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+              </div>
+            )}
+
+            {announcements.length === 0
+              ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
+              : announcements.map((a: any) => (
+                <div class="announcement-item" data-announcement-id={a.id}>
+                  <div class="announcement-head">
+                    <div class="announcement-avatar">
+                      {a.profiles?.avatar_url
+                        ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
+                        : getInitials(a.profiles?.username ?? "?")}
+                    </div>
+                    <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
+                    <span class="announcement-time">· {timeAgo(a.created_at)}</span>
+                    {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
+                  </div>
+                  <div class="announcement-body">{a.body}</div>
+                  {isAdminOrOwner && (
+                    <div class="announcement-actions">
+                      <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
+                      <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
+                    </div>
+                  )}
+                </div>
+              ))
+            }
+          </div>
+        )}
+
         {statsConf.show_top_games && topGames.length > 0 && (
           <div>
             <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
@@ -823,9 +965,64 @@ const groupOgDescription = group.description
           </div>
         )}
 
+        {statsConf.show_split_decision && splitDecision && (
+          <div class="card" style="margin-top:14px">
+            <div class="card-title">Split Decision</div>
+            <a class="hot-take-inner" href={`/games/${splitDecision.game.slug}`}>
+              {igdbCover(splitDecision.game.cover_img_url, "t_cover_small")
+                ? <img class="hot-take-cover" src={igdbCover(splitDecision.game.cover_img_url, "t_cover_small")!} alt={splitDecision.game.title} loading="lazy" />
+                : <div class="hot-take-cover" />
+              }
+              <div class="hot-take-body">
+                <div class="hot-take-title">{splitDecision.game.title}</div>
+                <div class="hot-take-scores">
+                  <div>
+                    <div class={`score-badge ${scoreClass(Math.round(splitDecision.high.score))}`}>{splitDecision.high.score}</div>
+                    <div class="hot-take-lbl">@{splitDecision.high.username}</div>
+                  </div>
+                  <div class="hot-take-vs">vs</div>
+                  <div>
+                    <div class={`score-badge ${scoreClass(Math.round(splitDecision.low.score))}`}>{splitDecision.low.score}</div>
+                    <div class="hot-take-lbl">@{splitDecision.low.username}</div>
+                  </div>
+                </div>
+                <div class="hot-take-delta split-decision-delta">
+                  {splitDecision.spread} point{splitDecision.spread !== 1 ? "s" : ""} apart
+                </div>
+              </div>
+            </a>
+          </div>
+        )}
+
         {statsConf.show_critic_spectrum && memberAvgScores.length >= 2 && (
           <div class="card" style="margin-top:14px">
             <div class="card-title">Critic Spectrum</div>
+            {scoreRange && (
+              <div class="range-row">
+                <a class="range-badge" href={`/reviewers/${scoreRange.toughest.username}`}>
+                  <div class="range-avatar">
+                    {scoreRange.toughest.avatar_url
+                      ? <img src={scoreRange.toughest.avatar_url} alt={scoreRange.toughest.username} />
+                      : getInitials(scoreRange.toughest.username)}
+                  </div>
+                  <div class="range-info">
+                    <div class="range-lbl">Toughest Grader</div>
+                    <div class="range-name">@{scoreRange.toughest.username} · {scoreRange.toughest.avgScore}</div>
+                  </div>
+                </a>
+                <a class="range-badge" href={`/reviewers/${scoreRange.easiest.username}`}>
+                  <div class="range-avatar">
+                    {scoreRange.easiest.avatar_url
+                      ? <img src={scoreRange.easiest.avatar_url} alt={scoreRange.easiest.username} />
+                      : getInitials(scoreRange.easiest.username)}
+                  </div>
+                  <div class="range-info">
+                    <div class="range-lbl">Easiest Grader</div>
+                    <div class="range-name">@{scoreRange.easiest.username} · {scoreRange.easiest.avgScore}</div>
+                  </div>
+                </a>
+              </div>
+            )}
             <div class="spectrum-wrap">
               <div class="spectrum-edge-labels"><span>Harsh</span><span>Generous</span></div>
               <div class="spectrum-track">
@@ -944,6 +1141,74 @@ const groupOgDescription = group.description
             <div style="font-size:12px;color:var(--text-tertiary);padding-top:8px;text-align:center">+{(watchlistData ?? []).length - 8} more</div>
           )}
         </div>}
+
+        <!-- Polls -->
+        {statsConf.show_polls && isMember && (
+          <div class="card">
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Polls</span>
+              {isAdminOrOwner && (
+                <button onclick="togglePollForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+              )}
+            </div>
+
+            {isAdminOrOwner && (
+              <div id="poll-form" class="compose-form" style="display:none">
+                <input id="poll-question" class="compose-input" style="min-height:auto" type="text" placeholder="Ask the group something…" maxlength="300" />
+                <div id="poll-options" style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+                  <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
+                  <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
+                </div>
+                <div class="compose-row">
+                  <button class="btn-copy" style="font-size:11px;padding:5px 10px" onclick="addPollOption()">+ Option</button>
+                  <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="createPoll()">Create Poll</button>
+                </div>
+                <div id="poll-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+              </div>
+            )}
+
+            {polls.length === 0
+              ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No polls yet.</div>
+              : polls.map((p: any) => {
+                const hasVoted = !!p.myOptionId;
+                const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+                const showResults = hasVoted || p.closed;
+                return (
+                  <div class="poll-item" data-poll-id={p.id}>
+                    <div class="poll-question">{p.question}</div>
+                    {showResults
+                      ? p.options.map((o: any) => {
+                          const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
+                          const isMine = o.id === p.myOptionId;
+                          return (
+                            <div class={`poll-result${isMine ? " voted" : ""}`}>
+                              <div class="poll-result-bar" style={`width:${pct}%`}></div>
+                              <div class="poll-result-label">
+                                <span>{o.label}{isMine ? " ✓" : ""}</span>
+                                <span>{pct}% ({o.count})</span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      : p.options.map((o: any) => (
+                          <button class="poll-option" onclick={`votePoll('${p.id}', '${o.id}')`}>{o.label}</button>
+                        ))
+                    }
+                    <div class="poll-meta">
+                      <span>{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}{p.closed ? " · Closed" : ""}</span>
+                      {canManagePoll && (
+                        <span class="poll-meta-actions">
+                          <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
+                          <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            }
+          </div>
+        )}
 
         <!-- Members -->
         <div class="card">
@@ -1539,6 +1804,126 @@ async function deleteSession(sessionId) {
   else { const d = await res.json(); alert(d.error ?? 'Error'); }
 }
 window.deleteSession = deleteSession;
+
+// ── Announcements ──
+function toggleAnnouncementForm() {
+  const form = document.getElementById('announcement-form');
+  if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+window.toggleAnnouncementForm = toggleAnnouncementForm;
+
+async function postAnnouncement() {
+  const bodyEl = document.getElementById('announcement-body');
+  const pinnedEl = document.getElementById('announcement-pinned');
+  const errEl = document.getElementById('announcement-err');
+  const body = bodyEl?.value?.trim();
+  if (errEl) errEl.style.display = 'none';
+  if (!body) { if (errEl) { errEl.textContent = 'Write something first'; errEl.style.display = 'block'; } return; }
+  const res = await fetch('/api/groups/announcements/create', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, body, pinned: !!pinnedEl?.checked }),
+  });
+  if (res.ok) window.location.reload();
+  else {
+    const d = await res.json();
+    if (errEl) { errEl.textContent = d.error ?? 'Error posting announcement'; errEl.style.display = 'block'; }
+  }
+}
+window.postAnnouncement = postAnnouncement;
+
+async function toggleAnnouncementPin(announcementId, pinned) {
+  const res = await fetch('/api/groups/announcements/pin', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ announcement_id: announcementId, pinned }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.toggleAnnouncementPin = toggleAnnouncementPin;
+
+async function deleteAnnouncement(announcementId) {
+  if (!confirm('Delete this announcement?')) return;
+  const res = await fetch('/api/groups/announcements/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ announcement_id: announcementId }),
+  });
+  if (res.ok) document.querySelector(`[data-announcement-id="${announcementId}"]`)?.remove();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.deleteAnnouncement = deleteAnnouncement;
+
+// ── Polls ──
+function togglePollForm() {
+  const form = document.getElementById('poll-form');
+  if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+window.togglePollForm = togglePollForm;
+
+function addPollOption() {
+  const container = document.getElementById('poll-options');
+  if (!container) return;
+  const inputs = container.querySelectorAll('.poll-option-input');
+  if (inputs.length >= 6) return;
+  const input = document.createElement('input');
+  input.className = 'compose-input poll-option-input';
+  input.style.minHeight = 'auto';
+  input.type = 'text';
+  input.maxLength = 80;
+  input.placeholder = `Option ${inputs.length + 1}`;
+  container.appendChild(input);
+}
+window.addPollOption = addPollOption;
+
+async function createPoll() {
+  const questionEl = document.getElementById('poll-question');
+  const errEl = document.getElementById('poll-err');
+  const question = questionEl?.value?.trim();
+  const options = Array.from(document.querySelectorAll('.poll-option-input')).map(i => i.value.trim()).filter(Boolean);
+  if (errEl) errEl.style.display = 'none';
+  if (!question) { if (errEl) { errEl.textContent = 'Add a question'; errEl.style.display = 'block'; } return; }
+  if (options.length < 2) { if (errEl) { errEl.textContent = 'Add at least 2 options'; errEl.style.display = 'block'; } return; }
+  const res = await fetch('/api/groups/polls/create', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupData.id, question, options }),
+  });
+  if (res.ok) window.location.reload();
+  else {
+    const d = await res.json();
+    if (errEl) { errEl.textContent = d.error ?? 'Error creating poll'; errEl.style.display = 'block'; }
+  }
+}
+window.createPoll = createPoll;
+
+async function votePoll(pollId, optionId) {
+  const res = await fetch('/api/groups/polls/vote', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ poll_id: pollId, option_id: optionId }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Error voting'); }
+}
+window.votePoll = votePoll;
+
+async function togglePollClosed(pollId, closed) {
+  const res = await fetch('/api/groups/polls/close', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ poll_id: pollId, closed }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.togglePollClosed = togglePollClosed;
+
+async function deletePoll(pollId) {
+  if (!confirm('Delete this poll?')) return;
+  const res = await fetch('/api/groups/polls/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ poll_id: pollId }),
+  });
+  if (res.ok) document.querySelector(`[data-poll-id="${pollId}"]`)?.remove();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.deletePoll = deletePoll;
 </script>
 <CropModal />
 </Layout>

@@ -547,6 +547,48 @@ export type Database = {
         }
         Relationships: []
       }
+      group_announcements: {
+        Row: {
+          body: string
+          created_at: string
+          group_id: string
+          id: string
+          pinned: boolean
+          profile_id: string
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          group_id: string
+          id?: string
+          pinned?: boolean
+          profile_id: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          group_id?: string
+          id?: string
+          pinned?: boolean
+          profile_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_announcements_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_announcements_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_invites: {
         Row: {
           created_at: string
@@ -696,6 +738,123 @@ export type Database = {
           },
           {
             foreignKeyName: "group_members_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_poll_options: {
+        Row: {
+          id: string
+          label: string
+          poll_id: string
+          position: number
+        }
+        Insert: {
+          id?: string
+          label: string
+          poll_id: string
+          position?: number
+        }
+        Update: {
+          id?: string
+          label?: string
+          poll_id?: string
+          position?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_options_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "group_polls"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_poll_votes: {
+        Row: {
+          created_at: string
+          id: string
+          option_id: string
+          poll_id: string
+          profile_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          option_id: string
+          poll_id: string
+          profile_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          option_id?: string
+          poll_id?: string
+          profile_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_votes_option_id_fkey"
+            columns: ["option_id"]
+            isOneToOne: false
+            referencedRelation: "group_poll_options"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_votes_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "group_polls"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_votes_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_polls: {
+        Row: {
+          closed: boolean
+          created_at: string
+          group_id: string
+          id: string
+          profile_id: string
+          question: string
+        }
+        Insert: {
+          closed?: boolean
+          created_at?: string
+          group_id: string
+          id?: string
+          profile_id: string
+          question: string
+        }
+        Update: {
+          closed?: boolean
+          created_at?: string
+          group_id?: string
+          id?: string
+          profile_id?: string
+          question?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_polls_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_polls_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
@@ -902,6 +1061,7 @@ export type Database = {
           invite_code: string | null
           join_prompt: string | null
           name: string
+          requires_approval: boolean
           stats_config: Json | null
           visibility: string
         }
@@ -916,6 +1076,7 @@ export type Database = {
           invite_code?: string | null
           join_prompt?: string | null
           name: string
+          requires_approval?: boolean
           stats_config?: Json | null
           visibility?: string
         }
@@ -930,6 +1091,7 @@ export type Database = {
           invite_code?: string | null
           join_prompt?: string | null
           name?: string
+          requires_approval?: boolean
           stats_config?: Json | null
           visibility?: string
         }
@@ -1456,6 +1618,7 @@ export type Database = {
           created_at: string
           dropped_privacy: string
           favorite_game_id: string | null
+          featured_group_id: string | null
           id: string
           is_active: boolean
           is_group_admin: boolean
@@ -1481,6 +1644,7 @@ export type Database = {
           created_at?: string
           dropped_privacy?: string
           favorite_game_id?: string | null
+          featured_group_id?: string | null
           id?: string
           is_active?: boolean
           is_group_admin?: boolean
@@ -1506,6 +1670,7 @@ export type Database = {
           created_at?: string
           dropped_privacy?: string
           favorite_game_id?: string | null
+          featured_group_id?: string | null
           id?: string
           is_active?: boolean
           is_group_admin?: boolean
@@ -1528,6 +1693,13 @@ export type Database = {
             columns: ["favorite_game_id"]
             isOneToOne: false
             referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "profiles_featured_group_id_fkey"
+            columns: ["featured_group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
             referencedColumns: ["id"]
           },
         ]

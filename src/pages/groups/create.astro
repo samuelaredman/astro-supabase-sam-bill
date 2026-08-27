@@ -9,9 +9,8 @@ if (!user) return Astro.redirect("/signin");
 
 const db = getSupabaseAdmin() as any;
 const { data: profile } = await db
-  .from("profiles").select("id, is_group_admin").eq("auth_user_id", user.id).single();
+  .from("profiles").select("id").eq("auth_user_id", user.id).single();
 if (!profile) return Astro.redirect("/signin");
-const isAdmin = !!(profile as any).is_group_admin;
 ---
 
 <Layout title="Create Group — Chekpoint" isLoggedIn={true} currentProfile={profile} variant="centered">
@@ -30,6 +29,8 @@ const isAdmin = !!(profile as any).is_group_admin;
   .vis-option input { display:none; }
   .vis-label { font-size:14px; font-weight:600; margin-bottom:4px; }
   .vis-desc { font-size:12px; color:var(--text-tertiary); }
+  .toggle-row { display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:var(--bg-card); }
+  .toggle-row input { accent-color:var(--accent); width:14px; height:14px; cursor:pointer; }
   .form-actions { display:flex; gap:12px; margin-top:28px; }
   .btn-primary { background:var(--accent); color:#fff; border:none; padding:11px 28px; border-radius:22px; font-size:14px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; }
   .btn-primary:hover { opacity:.85; }
@@ -67,14 +68,14 @@ const isAdmin = !!(profile as any).is_group_admin;
             <div class="vis-label">Private</div>
             <div class="vis-desc">Members join by request or invite</div>
           </label>
-          {isAdmin && (
-            <label class="vis-option" id="opt-community">
-              <input type="radio" name="visibility" value="community" />
-              <div class="vis-label">🏠 Community</div>
-              <div class="vis-desc">All new users auto-join</div>
-            </label>
-          )}
         </div>
+      </div>
+
+      <div class="form-group" id="requires-approval-group">
+        <label class="toggle-row">
+          <input type="checkbox" id="requires-approval" name="requires_approval" />
+          Require approval to join <span style="font-weight:400;color:var(--text-tertiary)">— people apply instead of joining instantly</span>
+        </label>
       </div>
 
       <div class="form-group" id="join-prompt-group" style="display:none">
@@ -94,14 +95,22 @@ const isAdmin = !!(profile as any).is_group_admin;
 </Layout>
 
 <script>
+function updateVisibilityDependentFields() {
+  const visibility = (document.querySelector('input[name="visibility"]:checked') as HTMLInputElement).value;
+  const isPrivate = visibility === 'private';
+  const requiresApproval = (document.getElementById('requires-approval') as HTMLInputElement).checked;
+  (document.getElementById('requires-approval-group') as HTMLElement).style.display = isPrivate ? 'none' : 'block';
+  (document.getElementById('join-prompt-group') as HTMLElement).style.display = (isPrivate || requiresApproval) ? 'block' : 'none';
+}
+
 document.querySelectorAll('.vis-option').forEach(opt => {
   opt.addEventListener('click', () => {
     document.querySelectorAll('.vis-option').forEach(o => o.classList.remove('selected'));
     opt.classList.add('selected');
-    const isPrivate = (opt.querySelector('input') as HTMLInputElement).value === 'private';
-    (document.getElementById('join-prompt-group') as HTMLElement).style.display = isPrivate ? 'block' : 'none';
+    updateVisibilityDependentFields();
   });
 });
+document.getElementById('requires-approval')!.addEventListener('change', updateVisibilityDependentFields);
 
 document.getElementById('create-form')!.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -115,12 +124,17 @@ document.getElementById('create-form')!.addEventListener('submit', async (e) => 
   const name = (form.querySelector('#name') as HTMLInputElement).value;
   const description = (form.querySelector('#description') as HTMLTextAreaElement).value;
   const visibility = (form.querySelector('input[name="visibility"]:checked') as HTMLInputElement).value;
+  const requires_approval = (form.querySelector('#requires-approval') as HTMLInputElement).checked;
   const join_prompt = (form.querySelector('#join-prompt') as HTMLTextAreaElement).value;
 
   const res = await fetch('/api/groups/create', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, description, visibility, join_prompt: visibility === 'private' ? join_prompt : undefined }),
+    body: JSON.stringify({
+      name, description, visibility,
+      requires_approval: visibility === 'public' ? requires_approval : undefined,
+      join_prompt: (visibility === 'private' || (visibility === 'public' && requires_approval)) ? join_prompt : undefined,
+    }),
   });
   const data = await res.json();
   if (!res.ok) {

@@ -24,7 +24,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
   .from('profiles')
   .select(`
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
-    favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
+    favorite_game_id, featured_group_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
     steam_id, steam_username, steam_synced_at,
     twitch_url, youtube_url, twitter_url, discord_url, website_url, accent_color,
     favorite_game:games!favorite_game_id (
@@ -440,6 +440,44 @@ const { data: reviewerRecsRaw } = await db
   .limit(100);
 const reviewerRecs = (reviewerRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
 
+// This reviewer's group memberships — public groups only, unless viewing own profile
+const { data: reviewerGroupMemberships } = await db
+  .from('group_members')
+  .select('role, group:groups(id, name, avatar_url, visibility)')
+  .eq('profile_id', reviewer.id);
+const reviewerGroupsList = (reviewerGroupMemberships ?? [])
+  .map((m: any) => ({ ...m.group, role: m.role }))
+  .filter((g: any) => g?.id && (isOwnProfile || g.visibility === 'public'));
+const reviewerGroupIds = reviewerGroupsList.map((g: any) => g.id);
+const reviewerGroupMemberCounts: Record<string, number> = {};
+if (reviewerGroupIds.length > 0) {
+  const { data: gCounts } = await db
+    .from('group_members').select('group_id').in('group_id', reviewerGroupIds);
+  for (const row of gCounts ?? []) {
+    reviewerGroupMemberCounts[row.group_id] = (reviewerGroupMemberCounts[row.group_id] ?? 0) + 1;
+  }
+}
+
+// Featured group ("Join my community") — shown regardless of visibility since the
+// reviewer explicitly chose to feature it (same exposure level as the private-group wall)
+let featuredGroup: any = null;
+if (reviewer.featured_group_id) {
+  const { data: fg } = await db
+    .from('groups')
+    .select('id, name, description, avatar_url, visibility')
+    .eq('id', reviewer.featured_group_id)
+    .maybeSingle();
+  if (fg) {
+    const { count: fgMemberCount } = await db
+      .from('group_members').select('*', { count: 'exact', head: true }).eq('group_id', fg.id);
+    featuredGroup = { ...fg, memberCount: fgMemberCount ?? 0 };
+  }
+}
+const featuredGroupJson = JSON.stringify(featuredGroup);
+const reviewerGroupsForPickerJson = JSON.stringify(
+  reviewerGroupsList.map((g: any) => ({ id: g.id, name: g.name, avatar_url: g.avatar_url }))
+);
+
 // Fetch library settings with fallback in case migration hasn't run yet
 let libSettingsRow: any = null;
 try {
@@ -850,6 +888,13 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     .follow-avatar{width:52px;height:52px;border-radius:50%;object-fit:cover}
     .follow-avatar-placeholder{width:52px;height:52px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:white}
     .follow-username{font-size:13px;font-weight:600;color:var(--text-primary);text-align:center;word-break:break-all}
+    .rgroup-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
+    .rgroup-card{display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;text-decoration:none;transition:border-color .15s,background .15s}
+    .rgroup-card:hover{border-color:var(--accent);background:var(--bg-hover)}
+    .rgroup-avatar{width:52px;height:52px;border-radius:14px;object-fit:cover}
+    .rgroup-avatar-placeholder{width:52px;height:52px;border-radius:14px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:white}
+    .rgroup-name{font-size:13px;font-weight:600;color:var(--text-primary);text-align:center;word-break:break-word}
+    .rgroup-meta{font-size:11px;color:var(--text-tertiary)}
     .follow-btn.not-following{background:var(--accent);color:white;box-shadow:0 4px 16px rgba(96,80,200,.35)}
     .follow-btn.not-following:hover{opacity:.88;transform:translateY(-1px)}
     .follow-btn.following{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border)}
@@ -933,6 +978,18 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     .fav-empty:hover{background:var(--bg-hover)}
     .fav-empty-icon{width:44px;height:44px;border-radius:12px;background:var(--tag-bg);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;transition:border-color .15s}
     .fav-empty:hover .fav-empty-icon{border-color:var(--accent)}
+
+    /* FEATURED COMMUNITY */
+    .fg-change-btn{background:none;border:none;cursor:pointer;font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.1em;font-family:inherit}
+    .fg-card{display:flex;align-items:center;gap:14px;padding:14px;background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;text-decoration:none;color:inherit;transition:border-color .15s}
+    .fg-card:hover{border-color:var(--accent)}
+    .fg-avatar{width:48px;height:48px;border-radius:12px;object-fit:cover;flex-shrink:0}
+    .fg-avatar-placeholder{display:flex;align-items:center;justify-content:center;background:var(--accent);color:#fff;font-size:15px;font-weight:700}
+    .fg-info{flex:1;min-width:0}
+    .fg-name{font-size:14px;font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .fg-desc{font-size:12px;color:var(--text-secondary);margin-top:2px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+    .fg-meta{font-size:11px;color:var(--text-tertiary);margin-top:4px}
+    .fg-cta{font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap;flex-shrink:0}
 
     /* SHOWCASE */
     .showcase-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
@@ -1442,7 +1499,8 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     <a href={`/reviewers/${reviewer.username}?tab=library`} class={`tab-link ${activeTab === 'library' ? 'active' : ''}`}>Library</a>
     <a href={`/reviewers/${reviewer.username}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>Reviews {publishedReviews.length > 0 && <span class="tab-count">{publishedReviews.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {(profileLists.length + savedLists.length) > 0 && <span class="tab-count">{profileLists.length + savedLists.length}</span>}</a>
-    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Recommendations {reviewerRecs.length > 0 && <span class="tab-count">{reviewerRecs.length}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Recs {reviewerRecs.length > 0 && <span class="tab-count">{reviewerRecs.length}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=groups`} class={`tab-link ${activeTab === 'groups' ? 'active' : ''}`}>Groups {reviewerGroupsList.length > 0 && <span class="tab-count">{reviewerGroupsList.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=followers`} class={`tab-link ${activeTab === 'followers' ? 'active' : ''}`}>Followers {followerCount ? `(${followerCount})` : ''}</a>
     <a href={`/reviewers/${reviewer.username}?tab=following`} class={`tab-link ${activeTab === 'following' ? 'active' : ''}`}>Following {followingCount ? `(${followingCount})` : ''}</a>
   </nav>
@@ -1485,6 +1543,37 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
               <div class="fav-empty-icon">⭐</div>
               <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Set a favorite game</div>
               <div style="font-size:12px;color:var(--text-tertiary)">The one game that defines you</div>
+            </div>
+          </div>
+        ) : null}
+
+        <!-- FEATURED COMMUNITY -->
+        {featuredGroup ? (
+          <div class="card" id="featuredGroupCard">
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Join my community</span>
+              {isOwnProfile && <button class="fg-change-btn" onclick="openFeaturedGroupPicker()">Change</button>}
+            </div>
+            <a href={`/groups/${featuredGroup.id}`} class="fg-card">
+              {featuredGroup.avatar_url
+                ? <img src={featuredGroup.avatar_url} alt={featuredGroup.name} class="fg-avatar" />
+                : <div class="fg-avatar fg-avatar-placeholder">{featuredGroup.name.slice(0,2).toUpperCase()}</div>
+              }
+              <div class="fg-info">
+                <div class="fg-name">{featuredGroup.name}</div>
+                {featuredGroup.description && <div class="fg-desc">{featuredGroup.description}</div>}
+                <div class="fg-meta">{featuredGroup.memberCount} member{featuredGroup.memberCount === 1 ? '' : 's'} · <span style="text-transform:capitalize">{featuredGroup.visibility}</span></div>
+              </div>
+              <span class="fg-cta">View Group →</span>
+            </a>
+          </div>
+        ) : isOwnProfile ? (
+          <div class="card">
+            <div class="card-title">Join my community</div>
+            <div class="fav-empty" onclick="openFeaturedGroupPicker()">
+              <div class="fav-empty-icon">👥</div>
+              <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Feature a group on your profile</div>
+              <div style="font-size:12px;color:var(--text-tertiary)">Invite visitors to join one of your communities</div>
             </div>
           </div>
         ) : null}
@@ -1895,6 +1984,29 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
     )}
   </div>
 
+  <!-- ── GROUPS TAB ── -->
+  <div class={`tab-panel ${activeTab === 'groups' ? 'active' : ''}`} data-tab="groups">
+    {reviewerGroupsList.length === 0 ? (
+      <div class="empty-state">
+        <div class="empty-title">Not in any groups</div>
+        <p style="font-size:14px;color:var(--text-tertiary)">When @{reviewer.username} joins a group, it'll appear here.</p>
+      </div>
+    ) : (
+      <div class="rgroup-grid">
+        {reviewerGroupsList.map((g: any) => (
+          <a href={`/groups/${g.id}`} class="rgroup-card">
+            {g.avatar_url
+              ? <img src={g.avatar_url} alt={g.name} class="rgroup-avatar" />
+              : <div class="rgroup-avatar rgroup-avatar-placeholder">{g.name.slice(0,2).toUpperCase()}</div>
+            }
+            <span class="rgroup-name">{g.name}</span>
+            <span class="rgroup-meta">{reviewerGroupMemberCounts[g.id] ?? 1} member{(reviewerGroupMemberCounts[g.id] ?? 1) === 1 ? '' : 's'}</span>
+          </a>
+        ))}
+      </div>
+    )}
+  </div>
+
   <div class={`tab-panel ${activeTab === 'followers' ? 'active' : ''}`} data-tab="followers">
     {followersList.length === 0 ? (
       <div class="empty-state">
@@ -2173,12 +2285,24 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   </div>
 </div>
 
+{isOwnProfile && (
+  <div class="modal-backdrop" id="featuredGroupPickerModal" onclick="closeFeaturedGroupPickerOnBackdrop(event)">
+    <div class="modal" style="max-height:60vh">
+      <div class="modal-header">
+        <div class="modal-title">Feature a group</div>
+        <button class="modal-close" onclick="closeFeaturedGroupPicker()">×</button>
+      </div>
+      <div class="modal-results" id="featuredGroupPickerResults"></div>
+    </div>
+  </div>
+)}
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor, featuredGroupJson, reviewerGroupsForPickerJson }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -2528,6 +2652,53 @@ const reviewerOgImage = new URL(`/og/profiles/${reviewer.username}.jpg`, Astro.u
   window.openGamePicker = openGamePicker
   window.closePicker = closePicker
   window.closePickerOnBackdrop = closePickerOnBackdrop
+
+  // ── FEATURED GROUP PICKER ──
+  var _myGroupsForPicker = JSON.parse(reviewerGroupsForPickerJson || '[]')
+  var _currentFeaturedGroup = JSON.parse(featuredGroupJson || 'null')
+
+  function groupInitials(name) { return String(name).slice(0, 2).toUpperCase() }
+
+  function openFeaturedGroupPicker() {
+    var results = document.getElementById('featuredGroupPickerResults')
+    var html = ''
+    if (_myGroupsForPicker.length === 0) {
+      html = '<div class="modal-empty">You\'re not in any groups yet. <a href="/groups" style="color:var(--accent)">Browse groups</a></div>'
+    } else {
+      if (_currentFeaturedGroup) {
+        html += '<div class="modal-result" onclick="selectFeaturedGroup(null)"><div class="modal-result-cover">✕</div><div><div class="modal-result-title">Remove featured group</div></div></div>'
+      }
+      _myGroupsForPicker.forEach(function(g) {
+        var cover = g.avatar_url
+          ? '<img src="' + escAttr(g.avatar_url) + '" alt="" />'
+          : groupInitials(g.name)
+        html += '<div class="modal-result" onclick="selectFeaturedGroup(&quot;' + g.id + '&quot;)"><div class="modal-result-cover">' + cover + '</div><div><div class="modal-result-title">' + escAttr(g.name) + '</div></div></div>'
+      })
+    }
+    results.innerHTML = html
+    document.getElementById('featuredGroupPickerModal').classList.add('open')
+  }
+  function closeFeaturedGroupPicker() { document.getElementById('featuredGroupPickerModal').classList.remove('open') }
+  function closeFeaturedGroupPickerOnBackdrop(e) { if (e.target === document.getElementById('featuredGroupPickerModal')) closeFeaturedGroupPicker() }
+  async function selectFeaturedGroup(groupId) {
+    try {
+      var res = await fetch('/api/profile/featured-group', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: groupId })
+      })
+      var data = await res.json().catch(function() { return {} })
+      if (!res.ok) throw new Error(data.error || 'Failed to update')
+      closeFeaturedGroupPicker()
+      location.reload()
+    } catch (e) {
+      showToast(e && e.message ? e.message : 'Failed to update', 'error')
+    }
+  }
+  window.openFeaturedGroupPicker = openFeaturedGroupPicker
+  window.closeFeaturedGroupPicker = closeFeaturedGroupPicker
+  window.closeFeaturedGroupPickerOnBackdrop = closeFeaturedGroupPickerOnBackdrop
+  window.selectFeaturedGroup = selectFeaturedGroup
 
   function debouncedSearch(q) {
     clearTimeout(_searchTimer)
