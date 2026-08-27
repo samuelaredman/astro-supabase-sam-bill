@@ -922,6 +922,7 @@ import {
   resumeActive,
   fetchStatus,
   mapItem,
+  importLibraryFile,
   type ImportProgress,
 } from "../utils/backloggd/importClient";
 
@@ -1163,37 +1164,10 @@ async function blLibImport() {
   btn.textContent = "Importing…";
   msg.style.color = "var(--text-secondary)";
 
-  const totals = { applied: 0, already: 0, unmatched: 0, imported: 0 };
-  const unmatchedSample: string[] = [];
-  let cursor: number | null = 0;
   try {
-    while (cursor != null) {
-      const res: Response = await fetch("/api/import/backloggd/library", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows, cursor }),
-      });
-      const data: any = await res.json();
-      if (!res.ok) {
-        if (res.status === 429 && data.retry_after) {
-          msg.textContent = `Rate-limited — retrying in ${data.retry_after}s…`;
-          await new Promise((r) => setTimeout(r, (data.retry_after + 1) * 1000));
-          continue;
-        }
-        msg.textContent = data.error ?? "Import failed.";
-        msg.style.color = "#f87171";
-        return;
-      }
-      totals.applied += data.applied ?? 0;
-      totals.already += data.already ?? 0;
-      totals.unmatched += data.unmatched ?? 0;
-      totals.imported += data.imported_from_igdb ?? 0;
-      for (const t of data.unmatched_sample ?? []) if (unmatchedSample.length < 12) unmatchedSample.push(t);
-      const doneCount = data.done ? data.total : data.next_cursor;
-      msg.textContent = `Matching games… ${doneCount} / ${data.total}`;
-      cursor = data.done ? null : data.next_cursor;
-    }
-
+    const totals = await importLibraryFile(rows, {
+      onProgress: (p) => { msg.textContent = p.message; },
+    });
     msg.textContent = "";
     results.style.display = "block";
     const lines = [
@@ -1204,11 +1178,11 @@ async function blLibImport() {
     ].filter(Boolean);
     results.innerHTML =
       lines.join("<br>") +
-      (unmatchedSample.length
-        ? `<br><span style="color:var(--text-tertiary);font-size:11px">e.g. ${unmatchedSample.slice(0, 8).join(", ")}</span>`
+      (totals.unmatchedSample.length
+        ? `<br><span style="color:var(--text-tertiary);font-size:11px">e.g. ${totals.unmatchedSample.slice(0, 8).join(", ")}</span>`
         : "");
-  } catch {
-    msg.textContent = "Could not reach the server. Try again.";
+  } catch (e: any) {
+    msg.textContent = e?.message ?? "Could not reach the server. Try again.";
     msg.style.color = "#f87171";
   } finally {
     btn.disabled = false;

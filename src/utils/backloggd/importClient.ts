@@ -57,6 +57,62 @@ export async function startAndDrive(start: StartBody, handlers: ImportHandlers) 
   return driveJob(data.job_id, handlers);
 }
 
+export type LibraryTotals = {
+  applied: number;
+  already: number;
+  unmatched: number;
+  imported: number;
+  unmatchedSample: string[];
+};
+
+/**
+ * Drive the (cursor-chunked) library import for an uploaded rows array to
+ * completion. Shared by the settings page and the onboarding wizard.
+ */
+export async function importLibraryFile(
+  rows: unknown[],
+  handlers: ImportHandlers,
+): Promise<LibraryTotals> {
+  const { onProgress, signal } = handlers;
+  const totals: LibraryTotals = { applied: 0, already: 0, unmatched: 0, imported: 0, unmatchedSample: [] };
+  let cursor: number | null = 0;
+
+  while (cursor != null) {
+    if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+    const { res, data } = await postJson("/api/import/backloggd/library", { rows, cursor }, signal);
+    if (!res.ok) {
+      if (res.status === 429 && data?.retry_after) {
+        onProgress({
+          phase: "rate-limited",
+          fraction: null,
+          message: `Rate-limited — retrying in ${data.retry_after}s…`,
+        });
+        await sleep((data.retry_after + 1) * 1000);
+        continue;
+      }
+      throw new Error(data?.error ?? "Library import failed.");
+    }
+
+    totals.applied += data.applied ?? 0;
+    totals.already += data.already ?? 0;
+    totals.unmatched += data.unmatched ?? 0;
+    totals.imported += data.imported_from_igdb ?? 0;
+    for (const t of data.unmatched_sample ?? []) {
+      if (totals.unmatchedSample.length < 12) totals.unmatchedSample.push(t);
+    }
+
+    const doneCount = data.done ? data.total : data.next_cursor;
+    onProgress({
+      phase: data.done ? "done" : "importing",
+      fraction: data.total ? doneCount / data.total : null,
+      message: data.done ? "Library import complete" : `Matching games… ${doneCount} / ${data.total}`,
+    });
+    cursor = data.done ? null : data.next_cursor;
+  }
+
+  return totals;
+}
+
 /** GET /status with no id — if the user has an unfinished job, resume it. */
 export async function resumeActive(handlers: ImportHandlers) {
   const res = await fetch("/api/import/backloggd/status", { signal: handlers.signal });
