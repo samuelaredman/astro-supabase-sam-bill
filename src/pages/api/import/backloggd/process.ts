@@ -3,8 +3,10 @@ import { requireAuth, json } from "../../../../utils/api";
 import { importBacklogItem, type ImportItemInput } from "../../../../utils/backloggd/importItem";
 import { loadOwnedJob, recountJob } from "../../../../utils/backloggd/job";
 
-const BATCH = 5;
-const TIME_BUDGET_MS = 8000; // stop starting new items past this, stay under the function limit
+const BATCH = 4;
+// Stop starting new items past this — one item can do a couple of IGDB imports
+// (missing game + fallbacks), so keep headroom under the function limit.
+const TIME_BUDGET_MS = 6500;
 
 // POST { job_id } -> process the next batch of pending items, return progress.
 // The client calls this in a loop until { done: true }.

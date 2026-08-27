@@ -1127,31 +1127,51 @@ async function blLibImport() {
 
   btn.disabled = true;
   btn.textContent = "Importing…";
-  msg.textContent = `Matching ${rows.length} games…`;
   msg.style.color = "var(--text-secondary)";
+
+  const totals = { applied: 0, already: 0, unmatched: 0, imported: 0 };
+  const unmatchedSample: string[] = [];
+  let cursor: number | null = 0;
   try {
-    const res = await fetch("/api/import/backloggd/library", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      msg.textContent = data.error ?? "Import failed.";
-      msg.style.color = "#f87171";
-      return;
+    while (cursor != null) {
+      const res: Response = await fetch("/api/import/backloggd/library", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows, cursor }),
+      });
+      const data: any = await res.json();
+      if (!res.ok) {
+        if (res.status === 429 && data.retry_after) {
+          msg.textContent = `Rate-limited — retrying in ${data.retry_after}s…`;
+          await new Promise((r) => setTimeout(r, (data.retry_after + 1) * 1000));
+          continue;
+        }
+        msg.textContent = data.error ?? "Import failed.";
+        msg.style.color = "#f87171";
+        return;
+      }
+      totals.applied += data.applied ?? 0;
+      totals.already += data.already ?? 0;
+      totals.unmatched += data.unmatched ?? 0;
+      totals.imported += data.imported_from_igdb ?? 0;
+      for (const t of data.unmatched_sample ?? []) if (unmatchedSample.length < 12) unmatchedSample.push(t);
+      const doneCount = data.done ? data.total : data.next_cursor;
+      msg.textContent = `Matching games… ${doneCount} / ${data.total}`;
+      cursor = data.done ? null : data.next_cursor;
     }
+
     msg.textContent = "";
     results.style.display = "block";
     const lines = [
-      `<strong>${data.applied}</strong> game${data.applied === 1 ? "" : "s"} added to your library`,
-      data.already_set ? `<strong>${data.already_set}</strong> already had a status (left as-is)` : "",
-      data.unmatched ? `<strong>${data.unmatched}</strong> not in Chekpoint's catalogue yet` : "",
+      `<strong>${totals.applied}</strong> game${totals.applied === 1 ? "" : "s"} added to your library`,
+      totals.imported ? `<strong>${totals.imported}</strong> new game${totals.imported === 1 ? "" : "s"} pulled in from IGDB` : "",
+      totals.already ? `<strong>${totals.already}</strong> already had a status (left as-is)` : "",
+      totals.unmatched ? `<strong>${totals.unmatched}</strong> couldn't be identified` : "",
     ].filter(Boolean);
     results.innerHTML =
       lines.join("<br>") +
-      (data.unmatched_sample?.length
-        ? `<br><span style="color:var(--text-tertiary);font-size:11px">e.g. ${data.unmatched_sample.slice(0, 8).join(", ")}</span>`
+      (unmatchedSample.length
+        ? `<br><span style="color:var(--text-tertiary);font-size:11px">e.g. ${unmatchedSample.slice(0, 8).join(", ")}</span>`
         : "");
   } catch {
     msg.textContent = "Could not reach the server. Try again.";

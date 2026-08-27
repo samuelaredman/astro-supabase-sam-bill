@@ -8,9 +8,7 @@
 // directly and do just the one harmless side-effect a normal review has — mark
 // the game "completed" in the author's library.
 
-import { foldDiacritics } from "../games";
-import { importGameByIgdbId } from "../games";
-import { igdbGameBySlug } from "../igdb";
+import { matchOrImportGame } from "./matchGame";
 import type { BackloggdRow } from "./parse";
 
 export type ImportItemInput = BackloggdRow & { id: string; matched_game_id?: string | null };
@@ -21,14 +19,6 @@ export type ImportItemOutcome = {
   review_id?: string | null;
   detail?: string | null;
 };
-
-function titlesMatch(a: string, b: string): boolean {
-  const norm = (s: string) => foldDiacritics(s).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const x = norm(a);
-  const y = norm(b);
-  if (!x || !y) return false;
-  return x === y || x.startsWith(y) || y.startsWith(x);
-}
 
 /** Resolve a Backloggd platform name to a platforms.id, cached per run. Best effort. */
 export async function resolvePlatformId(
@@ -62,48 +52,20 @@ export async function importBacklogItem(
   item: ImportItemInput,
   opts: { platformCache?: Map<string, string | null> } = {},
 ): Promise<ImportItemOutcome> {
-  // ── 1. Match the game ──────────────────────────────────────────────────────
+  // ── 1. Match the game (local -> IGDB by slug -> fuzzy -> IGDB search),
+  //       importing from IGDB when we don't have it. ─────────────────────────
   let gameId: string | null = item.matched_game_id ?? null;
   let matchMethod = item.matched_game_id ? "manual" : "";
 
   if (!gameId) {
-    const { data: bySlug } = await db
-      .from("games")
-      .select("id, title, slug")
-      .eq("slug", item.game_slug)
-      .maybeSingle();
-    if (bySlug) {
-      gameId = bySlug.id;
-      matchMethod = "slug";
-    }
-  }
-
-  if (!gameId) {
-    const igdb = await igdbGameBySlug(item.game_slug);
-    if (igdb) {
-      const imported = await importGameByIgdbId(db, igdb.id);
-      if (imported.ok) {
-        gameId = imported.game.id;
-        matchMethod = "igdb-slug";
-      }
-    }
-  }
-
-  if (!gameId) {
-    const { data: candidates } = await db.rpc("search_games", {
-      search_query: item.game_title,
-      result_limit: 3,
+    const match = await matchOrImportGame(db, {
+      slug: item.game_slug,
+      title: item.game_title,
+      year: item.release_year,
     });
-    const top = Array.isArray(candidates) ? candidates[0] : null;
-    if (top && titlesMatch(top.title ?? "", item.game_title)) {
-      const yearOk =
-        item.release_year == null ||
-        !top.date_released ||
-        new Date(top.date_released).getFullYear() === item.release_year;
-      if (yearOk) {
-        gameId = top.id;
-        matchMethod = "fuzzy";
-      }
+    if (match) {
+      gameId = match.gameId;
+      matchMethod = match.method;
     }
   }
 
