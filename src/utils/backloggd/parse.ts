@@ -316,13 +316,14 @@ export function parseGamesPage(html: string): ParsedGamesPage {
   const slugs: { game_slug: string; game_title: string }[] = [];
   const seen = new Set<string>();
 
-  // Every game-cover card is an <a href="/games/<slug>/"> wrapping an <img alt="Title">.
+  // Game-cover card: <a href="/games/<slug>/" class="cover-link"></a> followed by
+  // a sibling <div class="overflow-wrapper"><img … alt="Title">.
   const cardRe =
-    /<a[^>]+href="\/games\/([a-z0-9-]+)\/"[^>]*>[\s\S]{0,400}?<img[^>]*\balt="([^"]*)"/g;
+    /href="\/games\/([a-z0-9][a-z0-9-]*)\/"[^>]*class="cover-link"[\s\S]{0,240}?alt="([^"]*)"/g;
   let m: RegExpExecArray | null;
   while ((m = cardRe.exec(html))) {
     const slug = m[1];
-    if (seen.has(slug)) continue;
+    if (slug === "lib" || seen.has(slug)) continue;
     seen.add(slug);
     slugs.push({ game_slug: slug, game_title: decodeEntities(m[2]).trim() || slug.replace(/-/g, " ") });
   }
@@ -330,9 +331,9 @@ export function parseGamesPage(html: string): ParsedGamesPage {
   // Fallback: bare /games/<slug>/ links if the card regex matched nothing
   // (markup drift) — still lets a status transfer even without the title.
   if (slugs.length === 0) {
-    for (const mm of html.matchAll(/href="\/games\/([a-z0-9-]+)\/"/g)) {
+    for (const mm of html.matchAll(/href="\/games\/([a-z0-9][a-z0-9-]*)\/"/g)) {
       const slug = mm[1];
-      if (seen.has(slug)) continue;
+      if (slug === "lib" || seen.has(slug)) continue;
       seen.add(slug);
       slugs.push({ game_slug: slug, game_title: slug.replace(/-/g, " ") });
     }

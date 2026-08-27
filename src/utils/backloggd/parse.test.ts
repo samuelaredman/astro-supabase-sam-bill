@@ -164,9 +164,9 @@ describe("parseGamesPage", () => {
 
   it("pulls slug + title from each game-cover card", () => {
     expect(parsed.slugs).toEqual([
-      { game_slug: "hollow-knight", game_title: "Hollow Knight" },
+      { game_slug: "super-mario-64", game_title: "Super Mario 64" },
       { game_slug: "celeste", game_title: "Celeste" },
-      { game_slug: "hades--1", game_title: "Hades: Battle Out of Hell" },
+      { game_slug: "hades--1", game_title: "Hades" },
     ]);
   });
 
