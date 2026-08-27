@@ -70,8 +70,8 @@ const { username = null } = Astro.props;
       }));
   }
 
-  function drive(steps: any[]) {
-    if (!steps.length) return;
+  function drive(steps: any[], onDone?: () => void) {
+    if (!steps.length) { onDone?.(); return; }
     const d = driver({
       showProgress: steps.length > 1,
       allowClose: true,
@@ -81,21 +81,30 @@ const { username = null } = Astro.props;
       prevBtnText: 'Back',
       doneBtnText: 'Done',
       steps,
-      onDestroyed: () => { try { localStorage.setItem('ck_tour_done', '1'); } catch (e) {} },
+      onDestroyed: () => {
+        try { localStorage.setItem('ck_tour_done', '1'); } catch (e) {}
+        onDone?.();
+      },
     });
     d.drive();
   }
 
-  (window as any).startTour = function (name: string) {
+  // `next`, if given, is started as soon as `name` finishes (or immediately, if
+  // `name`'s steps aren't on this page and it has to be skipped) — including
+  // across the page navigation `startTour` does when a tour's steps live
+  // elsewhere, via the `&next=` URL param handled in the auto-start block below.
+  (window as any).startTour = function (name: string, next?: string) {
     const tour = TOURS[name];
-    if (!tour) return;
+    const chain = next ? () => (window as any).startTour(next) : undefined;
+    if (!tour) { chain?.(); return; }
     // If any of the tour's target elements are on this page, drive it now;
     // otherwise navigate to the tour's page with ?tour= so it auto-starts there.
     const here = existingSteps(name);
     if (here.length) {
-      drive(here);
+      drive(here, chain);
     } else {
-      window.location.href = (tour[0].page) + '?tour=' + encodeURIComponent(name);
+      const qs = new URLSearchParams({ tour: name, ...(next ? { next } : {}) });
+      window.location.href = tour[0].page + '?' + qs.toString();
     }
   };
 
@@ -108,13 +117,17 @@ const { username = null } = Astro.props;
   });
 
   // Auto-start from ?tour= (strip the param first so refresh/back won't re-trigger).
+  // ?next= carries a tour to chain afterward — see startTour above.
   const params = new URLSearchParams(window.location.search);
   const auto = params.get('tour');
+  const autoNext = params.get('next');
   if (auto && TOURS[auto]) {
     params.delete('tour');
+    params.delete('next');
     const qs = params.toString();
     history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash);
-    setTimeout(() => drive(existingSteps(auto)), 400);
+    const chain = autoNext ? () => (window as any).startTour(autoNext) : undefined;
+    setTimeout(() => drive(existingSteps(auto), chain), 400);
   }
 </script>
 

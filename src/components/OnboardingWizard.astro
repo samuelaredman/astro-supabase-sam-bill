@@ -1,0 +1,581 @@
+---
+// Hard-blocking, non-dismissable post-signup setup wizard — the first thing a
+// new user sees, in place of the feed/nav/optional-tour entry points. A fixed
+// sequence: welcome greeting, then whichever of {photo, favorite game, 3
+// showcase games} aren't already set, then a final step whose only action is
+// an explicit "Start the tour" button that chains the profile + review
+// driver.js tours back to back. For a brand-new user that's 5 steps total.
+// Reuses the exact same primitives as the profile page's own picker
+// (CropModal, /api/profile/avatar, /api/games/search, /api/profile/update)
+// rather than inventing new ones.
+//
+// Data steps already satisfied (e.g. a returning user missing just one field)
+// are skipped — only rendered here so `pending` can address them by
+// data-step-key. Mounted globally from Layout.astro, on whatever page an
+// incomplete profile lands on — not just a fresh signup landing on /welcome —
+// so existing users who never got this treatment are swept in too.
+import CropModal from './CropModal.astro';
+
+interface ShowcaseGame { id: string; title: string; cover_img_url?: string | null; slug?: string | null }
+interface FavoriteGame { id: string; title: string; cover_img_url?: string | null; slug?: string | null }
+
+interface Props {
+  username: string;
+  hasAvatar: boolean;
+  hasFavorite: boolean;
+  hasShowcase: boolean;
+  existingFavorite?: FavoriteGame | null;
+  existingShowcase?: ShowcaseGame[];
+}
+
+const {
+  username,
+  hasAvatar,
+  hasFavorite,
+  hasShowcase,
+  existingFavorite = null,
+  existingShowcase = [],
+} = Astro.props;
+
+const pending = [
+  'welcome',
+  !hasAvatar && 'avatar',
+  !hasFavorite && 'favorite',
+  !hasShowcase && 'showcase',
+  'tour',
+].filter(Boolean) as string[];
+
+const initial = username?.charAt(0)?.toUpperCase() || '?';
+---
+
+<div id="ck-onboarding" class="ob-overlay">
+  <div class="ob-modal">
+    <div class="ob-progress">
+      <div class="ob-progress-bar"><div class="ob-progress-fill" id="obProgressFill"></div></div>
+      <div class="ob-progress-label">Step <span id="obStepNum">1</span> of <span id="obTotalSteps">{pending.length}</span></div>
+    </div>
+
+    <section class="ob-step" data-step-key="welcome" hidden>
+      <div class="ob-icon">🎮</div>
+      <h2>Welcome to Chekpoint, <span class="ob-username">@{username}</span>!</h2>
+      <p>Let's get your profile set up — just a few quick steps.</p>
+      <button class="ob-continue" id="obWelcomeContinue" type="button">Let's go →</button>
+    </section>
+
+    <section class="ob-step" data-step-key="avatar" hidden>
+      <div class="ob-icon">📸</div>
+      <h2>Add a profile photo</h2>
+      <p>Help other reviewers recognize you around Chekpoint.</p>
+      <div class="ob-avatar-picker">
+        <div class="ob-avatar-preview" id="obAvatarPreview"><span class="ob-avatar-placeholder">{initial}</span></div>
+        <label class="ob-upload-btn">
+          <input type="file" id="obAvatarInput" accept="image/*" hidden />
+          <span id="obAvatarBtnLabel">Choose a photo</span>
+        </label>
+      </div>
+      <button class="ob-continue" id="obAvatarContinue" type="button" disabled>Continue</button>
+    </section>
+
+    <section class="ob-step" data-step-key="favorite" hidden>
+      <div class="ob-icon">⭐</div>
+      <h2>Pick your favorite game</h2>
+      <p>The one game that defines your taste — shown at the top of your profile.</p>
+      <input type="text" class="ob-search" id="obFavSearch" placeholder="Search for a game…" autocomplete="off" />
+      <div class="ob-results" id="obFavResults"></div>
+      <div class="ob-selected" id="obFavSelected" hidden></div>
+      <button class="ob-continue" id="obFavContinue" type="button" disabled>Continue</button>
+    </section>
+
+    <section class="ob-step" data-step-key="showcase" hidden>
+      <div class="ob-icon">🎮</div>
+      <h2>Add 3 games to your showcase</h2>
+      <p>Feature a few games you love on your profile.</p>
+      <input type="text" class="ob-search" id="obShowcaseSearch" placeholder="Search for a game…" autocomplete="off" />
+      <div class="ob-results" id="obShowcaseResults"></div>
+      <div class="ob-showcase-slots" id="obShowcaseSlots">
+        <div class="ob-slot" data-slot="0"></div>
+        <div class="ob-slot" data-slot="1"></div>
+        <div class="ob-slot" data-slot="2"></div>
+      </div>
+      <button class="ob-continue" id="obShowcaseContinue" type="button" disabled>Continue</button>
+    </section>
+
+    <section class="ob-step" data-step-key="tour" hidden>
+      <div class="ob-icon">🧭</div>
+      <h2>One last thing — take the tour</h2>
+      <p>A quick guided walkthrough of your profile, then how to write your first review.</p>
+      <button class="ob-continue" id="obTourStart" type="button">Start the tour →</button>
+    </section>
+  </div>
+</div>
+
+<CropModal />
+
+<script
+  define:vars={{
+    pending,
+    existingFavorite,
+    existingShowcase,
+  }}
+>
+  window.__lockScroll && window.__lockScroll();
+
+  var flow = pending;
+  var flowIndex = -1;
+  var favGame = existingFavorite || null;
+  var showcaseSlots = [0, 1, 2].map(function (i) { return existingShowcase[i] || null; });
+
+  function showStepByKey(key) {
+    document.querySelectorAll('.ob-step').forEach(function (el) {
+      el.hidden = el.dataset.stepKey !== key;
+    });
+    document.getElementById('obStepNum').textContent = String(flowIndex + 1);
+    var fill = document.getElementById('obProgressFill');
+    if (fill) fill.style.width = ((flowIndex + 1) / flow.length * 100) + '%';
+  }
+
+  function advance() {
+    flowIndex++;
+    if (flowIndex >= flow.length) { finish(); return; }
+    showStepByKey(flow[flowIndex]);
+  }
+
+  function finish() {
+    window.__unlockScroll && window.__unlockScroll();
+    var root = document.getElementById('ck-onboarding');
+    if (root) root.remove();
+    if (window.startTour) window.startTour('profile', 'review');
+    else window.location.href = '/';
+  }
+
+  // ---- shared helpers ----
+  function coverUrl(game) {
+    return game && game.cover_img_url ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big') : null;
+  }
+
+  function buildResultRow(game) {
+    var item = document.createElement('div');
+    item.className = 'ob-result';
+    var coverWrap = document.createElement('div');
+    coverWrap.className = 'ob-result-cover';
+    var cover = coverUrl(game);
+    if (cover) {
+      var img = document.createElement('img');
+      img.src = cover; img.alt = '';
+      coverWrap.appendChild(img);
+    } else {
+      coverWrap.textContent = '🎮';
+    }
+    var info = document.createElement('div');
+    var title = document.createElement('div');
+    title.className = 'ob-result-title';
+    title.textContent = game.title;
+    var meta = document.createElement('div');
+    meta.className = 'ob-result-meta';
+    meta.textContent = game.date_released ? new Date(game.date_released).getFullYear() : (game.year || '');
+    info.appendChild(title); info.appendChild(meta);
+    item.appendChild(coverWrap); item.appendChild(info);
+    return item;
+  }
+
+  var searchTimer;
+  async function searchGames(q, callback) {
+    try {
+      var res = await fetch('/api/games/search?q=' + encodeURIComponent(q) + '&limit=10');
+      if (!res.ok) throw new Error();
+      callback(await res.json());
+    } catch (e) { /* leave results as-is */ }
+  }
+
+  // ---- Step: welcome ----
+  document.getElementById('obWelcomeContinue').addEventListener('click', advance);
+
+  // ---- Step: tour (final step — button triggers finish() via advance()) ----
+  document.getElementById('obTourStart').addEventListener('click', advance);
+
+  // ---- Step: avatar ----
+  var avatarInput = document.getElementById('obAvatarInput');
+  var avatarBtnLabel = document.getElementById('obAvatarBtnLabel');
+  var avatarPreview = document.getElementById('obAvatarPreview');
+  var avatarContinue = document.getElementById('obAvatarContinue');
+
+  avatarInput.addEventListener('change', async function () {
+    var file = avatarInput.files && avatarInput.files[0];
+    if (!file) return;
+    var blob;
+    try {
+      blob = await window.openImageCropper(file, { aspectRatio: 1, minWidth: 200, minHeight: 200, title: 'Crop Profile Photo' });
+    } catch (e) { avatarInput.value = ''; return; }
+    var croppedFile = new File([blob], 'avatar.' + (blob.type === 'image/png' ? 'png' : 'jpg'), { type: blob.type });
+
+    avatarBtnLabel.textContent = 'Uploading…';
+    var formData = new FormData();
+    formData.append('avatar', croppedFile);
+    try {
+      var res = await fetch('/api/profile/avatar', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error();
+      var data = await res.json();
+      avatarPreview.innerHTML = '';
+      var img = document.createElement('img');
+      img.src = data.url; img.alt = '';
+      avatarPreview.appendChild(img);
+      avatarBtnLabel.textContent = 'Change photo';
+      avatarContinue.disabled = false;
+    } catch (e) {
+      avatarBtnLabel.textContent = 'Choose a photo';
+      alert('Upload failed — please try again.');
+    }
+    avatarInput.value = '';
+  });
+  avatarContinue.addEventListener('click', advance);
+
+  // ---- Step: favorite game ----
+  var favSearch = document.getElementById('obFavSearch');
+  var favResults = document.getElementById('obFavResults');
+  var favSelected = document.getElementById('obFavSelected');
+  var favContinue = document.getElementById('obFavContinue');
+
+  function renderFavSelected() {
+    favSelected.innerHTML = '';
+    if (!favGame) { favSelected.hidden = true; return; }
+    favSelected.hidden = false;
+    var card = document.createElement('div');
+    card.className = 'ob-selected-card';
+    var cover = coverUrl(favGame);
+    if (cover) {
+      var img = document.createElement('img');
+      img.src = cover; img.alt = '';
+      card.appendChild(img);
+    } else {
+      var fb = document.createElement('span');
+      fb.className = 'ob-selected-fallback'; fb.textContent = '🎮';
+      card.appendChild(fb);
+    }
+    var label = document.createElement('span');
+    label.textContent = favGame.title;
+    card.appendChild(label);
+    favSelected.appendChild(card);
+  }
+  renderFavSelected();
+  favContinue.disabled = !favGame;
+
+  favSearch.addEventListener('input', function () {
+    var q = favSearch.value;
+    clearTimeout(searchTimer);
+    if (!q.trim()) { favResults.innerHTML = ''; return; }
+    searchTimer = setTimeout(function () { searchGames(q, renderFavResults); }, 300);
+  });
+
+  function renderFavResults(games) {
+    favResults.innerHTML = '';
+    if (!games.length) { favResults.innerHTML = '<div class="ob-empty">No games found</div>'; return; }
+    games.forEach(function (game) {
+      var item = buildResultRow(game);
+      item.onclick = async function () {
+        var previous = favGame;
+        favGame = game;
+        favSearch.value = '';
+        favResults.innerHTML = '';
+        renderFavSelected();
+        favContinue.disabled = true;
+        try {
+          var res = await fetch('/api/profile/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ favorite_game_id: game.id }),
+          });
+          if (!res.ok) throw new Error();
+          favContinue.disabled = false;
+        } catch (e) {
+          favGame = previous;
+          renderFavSelected();
+          alert('Failed to save — please try again.');
+        }
+      };
+      favResults.appendChild(item);
+    });
+  }
+  favContinue.addEventListener('click', advance);
+
+  // ---- Step: showcase ----
+  var showcaseSearch = document.getElementById('obShowcaseSearch');
+  var showcaseResults = document.getElementById('obShowcaseResults');
+  var showcaseContinue = document.getElementById('obShowcaseContinue');
+
+  function renderShowcaseSlots() {
+    var slotEls = document.querySelectorAll('#obShowcaseSlots .ob-slot');
+    slotEls.forEach(function (slotEl, i) {
+      slotEl.innerHTML = '';
+      var game = showcaseSlots[i];
+      if (game) {
+        slotEl.classList.add('ob-slot-filled');
+        var cover = coverUrl(game);
+        if (cover) {
+          var img = document.createElement('img');
+          img.src = cover; img.alt = '';
+          slotEl.appendChild(img);
+        } else {
+          var fb = document.createElement('span');
+          fb.className = 'ob-slot-fallback'; fb.textContent = '🎮';
+          slotEl.appendChild(fb);
+        }
+        var rm = document.createElement('button');
+        rm.type = 'button'; rm.className = 'ob-slot-remove'; rm.textContent = '×';
+        rm.setAttribute('aria-label', 'Remove');
+        rm.addEventListener('click', function () { removeFromShowcase(i); });
+        slotEl.appendChild(rm);
+      } else {
+        slotEl.classList.remove('ob-slot-filled');
+        var ph = document.createElement('span');
+        ph.className = 'ob-slot-empty'; ph.textContent = String(i + 1);
+        slotEl.appendChild(ph);
+      }
+    });
+    showcaseContinue.disabled = showcaseSlots.filter(Boolean).length < 3;
+  }
+  renderShowcaseSlots();
+
+  async function saveShowcase() {
+    var payload = showcaseSlots.filter(Boolean).map(function (g) {
+      return { id: g.id, title: g.title, cover_img_url: g.cover_img_url, slug: g.slug };
+    });
+    try {
+      var res = await fetch('/api/profile/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ showcase_games: payload }),
+      });
+      if (!res.ok) throw new Error();
+    } catch (e) { alert('Failed to save showcase — please try again.'); }
+  }
+
+  function addToShowcase(game) {
+    var slot = showcaseSlots.findIndex(function (g) { return !g; });
+    if (slot === -1) return;
+    showcaseSlots[slot] = game;
+    showcaseSearch.value = '';
+    showcaseResults.innerHTML = '';
+    renderShowcaseSlots();
+    saveShowcase();
+  }
+
+  function removeFromShowcase(slot) {
+    showcaseSlots[slot] = null;
+    renderShowcaseSlots();
+    saveShowcase();
+  }
+
+  showcaseSearch.addEventListener('input', function () {
+    var q = showcaseSearch.value;
+    clearTimeout(searchTimer);
+    if (!q.trim()) { showcaseResults.innerHTML = ''; return; }
+    searchTimer = setTimeout(function () { searchGames(q, renderShowcaseResults); }, 300);
+  });
+
+  function renderShowcaseResults(games) {
+    showcaseResults.innerHTML = '';
+    if (showcaseSlots.filter(Boolean).length >= 3) {
+      showcaseResults.innerHTML = '<div class="ob-empty">You’ve picked 3 — remove one to swap.</div>';
+      return;
+    }
+    if (!games.length) { showcaseResults.innerHTML = '<div class="ob-empty">No games found</div>'; return; }
+    games.forEach(function (game) {
+      if (showcaseSlots.some(function (g) { return g && g.id === game.id; })) return;
+      var item = buildResultRow(game);
+      item.onclick = function () { addToShowcase(game); };
+      showcaseResults.appendChild(item);
+    });
+  }
+  showcaseContinue.addEventListener('click', advance);
+
+  // ---- kick off ----
+  advance();
+</script>
+
+<style is:global>
+  /* is:global (not scoped) is required here: search results, the selected-game
+     card, and showcase slot contents are all built with document.createElement
+     in the client script below, so they never receive Astro's scoped-style
+     attribute — a scoped <style> here would silently fail to style any of
+     them. Matches the same is:global choice reviewers/[username].astro makes
+     for its own JS-built .modal-result rows. */
+  .ob-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    overflow-y: auto;
+  }
+
+  .ob-modal {
+    background: var(--bg-card, #1a1a1a);
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 16px;
+    padding: 40px 36px 32px;
+    max-width: 460px;
+    width: 100%;
+    text-align: center;
+  }
+
+  .ob-progress { margin-bottom: 24px; }
+  .ob-progress-bar {
+    height: 4px;
+    background: var(--bg-hover, #2a2a2a);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .ob-progress-fill {
+    height: 100%;
+    background: var(--accent, #7c3aed);
+    border-radius: 4px;
+    transition: width 0.25s ease;
+    width: 0%;
+  }
+  .ob-progress-label { font-size: 12px; color: var(--text-tertiary, #777); font-weight: 500; }
+
+  .ob-icon { font-size: 40px; margin-bottom: 12px; }
+  .ob-username { color: var(--accent, #7c3aed); }
+
+  .ob-step h2 {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary, #fff);
+    margin: 0 0 8px;
+  }
+  .ob-step p {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-secondary, #a0a0a0);
+    margin: 0 0 24px;
+  }
+
+  .ob-avatar-picker { display: flex; flex-direction: column; align-items: center; gap: 16px; margin-bottom: 24px; }
+  /* Matches .avatar-lg on the profile page (reviewers/[username].astro) exactly —
+     same size, border, and accent ring — so the cropped result reads the same
+     here as it does there instead of looking more tightly zoomed. */
+  .ob-avatar-preview {
+    width: 104px; height: 104px;
+    border-radius: 50%;
+    background: var(--bg-card, #1a1a1a);
+    border: 4px solid var(--bg, #0f0f0e);
+    box-shadow: 0 0 0 2px var(--accent, #7c3aed);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .ob-avatar-preview img { width: 100%; height: 100%; object-fit: cover; }
+  .ob-avatar-placeholder { font-size: 32px; font-weight: 700; color: var(--text-tertiary, #777); }
+
+  .ob-upload-btn span {
+    display: inline-block;
+    background: var(--bg-hover, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 20px;
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .ob-upload-btn:hover span { border-color: var(--accent, #7c3aed); }
+
+  /* Matches .modal-search-input / .modal-results / .modal-result on the
+     profile page's own favorite/showcase game picker (reviewers/[username].astro)
+     exactly, so search here doesn't look or behave differently. */
+  .ob-search {
+    width: 100%;
+    background: var(--bg-hover, #2a2a2a);
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 10px;
+    color: var(--text-primary, #fff);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    box-sizing: border-box;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .ob-search:focus { border-color: var(--accent, #7c3aed); }
+  .ob-search::placeholder { color: var(--text-tertiary, #777); }
+
+  .ob-results { max-height: 240px; overflow-y: auto; text-align: left; margin-bottom: 12px; }
+  .ob-result {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px; border-radius: 10px; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .ob-result:hover { background: var(--bg-hover, #2a2a2a); }
+  .ob-result-cover {
+    width: 38px; height: 50px; flex-shrink: 0; border-radius: 6px; overflow: hidden;
+    border: 1px solid var(--border, #2a2a2a);
+    background: var(--tag-bg, #2a2a2a);
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
+  .ob-result-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .ob-result-title { font-size: 14px; font-weight: 500; color: var(--text-primary, #fff); margin-bottom: 2px; }
+  .ob-result-meta { font-size: 12px; color: var(--text-tertiary, #777); }
+  .ob-empty { padding: 32px; text-align: center; color: var(--text-tertiary, #777); font-size: 14px; }
+
+  .ob-selected-card {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--bg-hover, #2a2a2a);
+    border: 1px solid var(--accent, #7c3aed);
+    border-radius: 10px;
+    padding: 8px 12px;
+    margin-bottom: 20px;
+    text-align: left;
+  }
+  .ob-selected-card img { width: 32px; height: 43px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+  .ob-selected-fallback { font-size: 18px; }
+  .ob-selected-card span:last-child { font-size: 13px; font-weight: 600; color: var(--text-primary, #fff); }
+
+  .ob-showcase-slots { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; }
+  .ob-slot {
+    position: relative;
+    width: 76px; height: 100px;
+    border-radius: 8px;
+    border: 1.5px dashed var(--border, #2a2a2a);
+    background: var(--bg-hover, #2a2a2a);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .ob-slot.ob-slot-filled { border-style: solid; border-color: var(--accent, #7c3aed); }
+  .ob-slot img { width: 100%; height: 100%; object-fit: cover; }
+  .ob-slot-empty { font-size: 20px; font-weight: 700; color: var(--text-tertiary, #555); }
+  .ob-slot-fallback { font-size: 22px; }
+  .ob-slot-remove {
+    position: absolute; top: 2px; right: 2px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    border: none;
+    font-size: 13px; line-height: 1;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .ob-continue {
+    width: 100%;
+    background: var(--accent, #7c3aed);
+    color: var(--accent-text, #fff);
+    border: none;
+    border-radius: 22px;
+    padding: 12px 26px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .ob-continue:hover:not(:disabled) { opacity: 0.9; }
+  .ob-continue:disabled { opacity: 0.4; cursor: not-allowed; }
+</style>
