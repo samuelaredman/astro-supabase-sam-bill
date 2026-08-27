@@ -60,9 +60,19 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
   var sleep = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
 
   var um = location.pathname.match(/\/u\/([^\/]+)/);
-  if (!um) { alert("Open your Backloggd profile first (backloggd.com/u/yourname/games/), then run this."); return; }
+  if (!um) { alert("Open your own Backloggd games tab first (backloggd.com/u/yourname/games/), then run this."); return; }
   var username = um[1];
   var base = "/u/" + username + "/games/";
+
+  // The library filters and per-card state only reflect the OWNER of the profile
+  // you're viewing. Backloggd puts the *logged-in viewer's* handle on the
+  // per-card "quick-logs" link — bail unless it matches the profile in the URL.
+  function viewerHandle(html){
+    var m = html.match(/class="[^"]*\bquick-logs\b[^"]*"[^>]*username="([^"]+)"/);
+    if (m) return m[1];
+    m = html.match(/href="\/u\/([^\/"]+)\/(?:settings|following)\/?"/);
+    return m ? m[1] : null;
+  }
 
   var box = document.createElement("div");
   box.style.cssText = "position:fixed;z-index:99999;right:16px;bottom:16px;background:#1b1b22;color:#fff;" +
@@ -89,9 +99,23 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
 
   try {
     box.textContent = "Chekpoint: reading your library…";
+    var firstHtml = await getText(base + "?page=1");
+    if (/anubis|not a bot/i.test(firstHtml)) { box.textContent = "Chekpoint: Backloggd is showing a bot check — reload the page and try again."; return; }
+
+    var viewer = viewerHandle(firstHtml);
+    if (!viewer) {
+      box.textContent = "Chekpoint: you don't seem to be signed in to Backloggd. Sign in, then run this on your own games tab.";
+      return;
+    }
+    if (viewer.toLowerCase() !== username.toLowerCase()) {
+      box.textContent = "Chekpoint: this is " + username + "'s library, but you're signed in as " + viewer +
+        ". Open YOUR games tab — backloggd.com/u/" + viewer + "/games/ — and run this there.";
+      return;
+    }
+
     var baseline = await crawl(base, "all games");
     var baseCount = baseline.length;
-    if (!baseCount) { box.textContent = "Chekpoint: no games found. Are you signed in, on your own games tab?"; return; }
+    if (!baseCount) { box.textContent = "Chekpoint: no games found in your library."; return; }
 
     // Most-current status first so it wins on de-dupe (playing > played > backlog > wishlist).
     var SHELVES = ["playing", "played", "backlog", "wishlist"];
