@@ -149,6 +149,24 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
       await sleep(300);
     }
 
+    // Refinement: Retired / Abandoned / Shelved are sub-states of Played that
+    // mean the player stopped without finishing -> map to "dropped", overriding
+    // the plain "played" (which would otherwise become "completed").
+    var DROPPED = ["retired", "abandoned", "shelved"];
+    for (var g = 0; g < DROPPED.length; g++) {
+      var gs = DROPPED[g];
+      box.textContent = "Chekpoint: reading " + gs + "…";
+      var gcards = await crawl(base + "added:desc/game_status:" + gs + "/", gs);
+      if (!gcards.length || (baseCount > 0 && gcards.length > baseCount * 3)) continue;
+      for (var gc = 0; gc < gcards.length; gc++) {
+        var gslug = gcards[gc].slug;
+        librarySlugs[gslug] = 1;
+        if (!assigned[gslug] || assigned[gslug] === "played") assigned[gslug] = gs;
+        if (gcards[gc].title && !titleBySlug[gslug]) titleBySlug[gslug] = gcards[gc].title;
+      }
+      await sleep(300);
+    }
+
     var libraryTotal = Object.keys(librarySlugs).length || baseCount;
 
     var rows = [];
@@ -162,8 +180,11 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
       return;
     }
 
-    var counts = { playing: 0, played: 0, backlog: 0, wishlist: 0 };
-    for (var rr = 0; rr < rows.length; rr++) counts[rows[rr].backloggd_status]++;
+    var counts = { playing: 0, played: 0, dropped: 0, backlog: 0, wishlist: 0 };
+    for (var rr = 0; rr < rows.length; rr++) {
+      var st = rows[rr].backloggd_status;
+      counts[(st === "retired" || st === "abandoned" || st === "shelved") ? "dropped" : st]++;
+    }
 
     var payload = { version: 1, source: "backloggd", kind: "library", username: username,
       scrapedAt: new Date().toISOString(), totalGames: libraryTotal, counts: counts, rows: rows };
@@ -173,8 +194,8 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     a.download = "backloggd-chekpoint-library.json";
     document.body.appendChild(a); a.click(); a.remove();
     box.textContent = "Chekpoint: done — " + rows.length + " games with a status (" +
-      counts.played + " played, " + counts.playing + " playing, " + counts.backlog + " backlog, " +
-      counts.wishlist + " wishlist). Upload the file on Chekpoint.";
+      counts.played + " played, " + counts.playing + " playing, " + counts.dropped + " dropped, " +
+      counts.backlog + " backlog, " + counts.wishlist + " wishlist). Upload the file on Chekpoint.";
   } catch (e) {
     box.textContent = "Chekpoint library importer: failed — " + (e && e.message ? e.message : e);
     throw e;
