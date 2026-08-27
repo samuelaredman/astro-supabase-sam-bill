@@ -24,6 +24,7 @@ interface Props {
   hasAvatar: boolean;
   hasFavorite: boolean;
   hasShowcase: boolean;
+  hasImportedBackloggd?: boolean;
   existingFavorite?: FavoriteGame | null;
   existingShowcase?: ShowcaseGame[];
 }
@@ -33,6 +34,7 @@ const {
   hasAvatar,
   hasFavorite,
   hasShowcase,
+  hasImportedBackloggd = false,
   existingFavorite = null,
   existingShowcase = [],
 } = Astro.props;
@@ -42,6 +44,7 @@ const pending = [
   !hasAvatar && 'avatar',
   !hasFavorite && 'favorite',
   !hasShowcase && 'showcase',
+  !hasImportedBackloggd && 'backloggd',
   'tour',
 ].filter(Boolean) as string[];
 
@@ -100,6 +103,17 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
       <button class="ob-continue" id="obShowcaseContinue" type="button" disabled>Continue</button>
     </section>
 
+    <section class="ob-step" data-step-key="backloggd" hidden>
+      <div class="ob-icon">📥</div>
+      <h2>Coming from Backloggd?</h2>
+      <p>Bring your written reviews with you. Enter your Backloggd username and we'll import them — ratings and all.</p>
+      <input type="text" class="ob-search" id="obBlUsername" placeholder="Backloggd username" autocomplete="off" />
+      <div class="ob-bl-status" id="obBlStatus" hidden></div>
+      <div class="ob-progress-bar" id="obBlBar" hidden style="margin-bottom:16px"><div class="ob-progress-fill" id="obBlBarFill"></div></div>
+      <button class="ob-continue" id="obBlImport" type="button">Import my reviews</button>
+      <button class="ob-skip" id="obBlSkip" type="button">I'm not on Backloggd — skip</button>
+    </section>
+
     <section class="ob-step" data-step-key="tour" hidden>
       <div class="ob-icon">🧭</div>
       <h2>One last thing — take the tour</h2>
@@ -110,6 +124,13 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
 </div>
 
 <CropModal />
+
+{/* Bundled module — resolves the import that the define:vars script below (forced
+    inline) cannot. Exposes the Backloggd import helpers on window for that script. */}
+<script>
+  import { previewBackloggd, startAndDrive } from '../utils/backloggd/importClient';
+  (window as any).__ckBacklogImport = { previewBackloggd, startAndDrive };
+</script>
 
 <script
   define:vars={{
@@ -388,6 +409,61 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   }
   showcaseContinue.addEventListener('click', advance);
 
+  // ---- Step: backloggd import ----
+  var blUsername = document.getElementById('obBlUsername');
+  var blImportBtn = document.getElementById('obBlImport');
+  var blSkipBtn = document.getElementById('obBlSkip');
+  var blStatus = document.getElementById('obBlStatus');
+  var blBar = document.getElementById('obBlBar');
+  var blBarFill = document.getElementById('obBlBarFill');
+  var blDone = false;
+
+  function blMarkStepDone() {
+    if (blDone) return;
+    blDone = true;
+    fetch('/api/import/backloggd/skip-onboarding', { method: 'POST' }).catch(function () {});
+  }
+
+  blSkipBtn.addEventListener('click', function () {
+    blMarkStepDone();
+    advance();
+  });
+
+  blImportBtn.addEventListener('click', async function () {
+    var api = window.__ckBacklogImport;
+    if (!api) { blStatus.hidden = false; blStatus.textContent = 'Still loading — try again in a second.'; return; }
+    var username = (blUsername.value || '').trim();
+    if (!username) { blStatus.hidden = false; blStatus.textContent = 'Enter your Backloggd username, or skip.'; return; }
+    blImportBtn.disabled = true;
+    blSkipBtn.disabled = true;
+    blUsername.disabled = true;
+    blStatus.hidden = false;
+    blStatus.textContent = 'Checking your Backloggd profile…';
+    try {
+      var preview = await api.previewBackloggd(username);
+      blStatus.textContent = 'Importing ' + preview.totalReviews + ' review' + (preview.totalReviews === 1 ? '' : 's') + '…';
+      blBar.hidden = false;
+      await api.startAndDrive({ username: preview.username }, {
+        onProgress: function (p) {
+          if (p.fraction != null) blBarFill.style.width = Math.round(p.fraction * 100) + '%';
+          blStatus.textContent = p.message;
+        },
+      });
+      blBarFill.style.width = '100%';
+      blStatus.textContent = 'Done! Your reviews are on your profile. Match any leftovers later in Settings.';
+      blMarkStepDone();
+      blImportBtn.textContent = 'Continue →';
+      blImportBtn.disabled = false;
+      blImportBtn.onclick = advance;
+    } catch (e) {
+      blStatus.textContent = (e && e.message ? e.message : 'Import failed') + ' — you can try again from Settings later.';
+      blImportBtn.textContent = 'Skip for now';
+      blImportBtn.disabled = false;
+      blSkipBtn.disabled = false;
+      blImportBtn.onclick = function () { blMarkStepDone(); advance(); };
+    }
+  });
+
   // ---- kick off ----
   advance();
 </script>
@@ -585,6 +661,21 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   }
   .ob-continue:hover:not(:disabled) { opacity: 0.9; }
   .ob-continue:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .ob-skip {
+    width: 100%;
+    margin-top: 10px;
+    background: none;
+    border: none;
+    color: var(--text-tertiary, #777);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 6px;
+  }
+  .ob-skip:hover:not(:disabled) { color: var(--text-secondary, #a0a0a0); }
+  .ob-skip:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ob-bl-status { font-size: 13px; color: var(--text-secondary, #a0a0a0); margin-bottom: 14px; }
 
   @media (max-width: 480px) {
     /* Room for the iOS/Android home-indicator and notch instead of the
