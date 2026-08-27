@@ -48,6 +48,7 @@ export const POST: APIRoute = async (context) => {
     review_text: item.review_text,
     review_date: item.review_date,
     platform_name: item.platform_name,
+    play_status: item.play_status,
     contains_spoilers: item.contains_spoilers,
     source_url: item.source_url ?? "",
     matched_game_id: imported.game.id,

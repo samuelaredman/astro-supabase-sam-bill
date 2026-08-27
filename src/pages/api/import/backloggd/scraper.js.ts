@@ -55,13 +55,15 @@ const SCRAPER = String.raw`(async function () {
       var platform = pm ? (text(pm[1]) || null) : null;
       var dm = c.match(/<time[^>]*datetime="([^"]+)"/);
       var rdate = date(dm ? dm[1] : null);
+      var stm = c.match(/\bplay-type\s+([a-z_]+)\b/);
+      var pstatus = stm ? stm[1].toLowerCase() : null;
       var bb = c.match(/class="[^"]*\breview-body\b[^"]*"\s+review_id="(\d+)"[\s\S]*?<div class="[^"]*\bcard-text\b[^"]*"[^>]*>([\s\S]*?)<\/div>/);
       var rid = bb ? bb[1] : null;
       var body = bb ? text(bb[2]) : "";
       if (!body) continue;
       rows.push({
         game_slug: slug, game_title: title, release_year: year, rating: rating,
-        review_text: body, review_date: rdate, platform_name: platform,
+        review_text: body, review_date: rdate, platform_name: platform, play_status: pstatus,
         contains_spoilers: /\bspoiler(?:s|-|_|")/i.test(c),
         source_url: rid ? ("https://backloggd.com/u/" + username + "/review/" + rid + "/")
                         : ("https://backloggd.com/games/" + slug + "/")

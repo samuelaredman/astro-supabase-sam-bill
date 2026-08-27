@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS import_job_items (
   review_text        TEXT NOT NULL,
   review_date        DATE,
   platform_name      TEXT,
+  play_status        TEXT,
   contains_spoilers  BOOLEAN NOT NULL DEFAULT false,
   source_url         TEXT,
   matched_game_id    UUID REFERENCES games(id) ON DELETE SET NULL,

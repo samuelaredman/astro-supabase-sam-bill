@@ -56,6 +56,7 @@ export const POST: APIRoute = async (context) => {
     review_text: string;
     review_date: string | null;
     platform_name: string | null;
+    play_status: string | null;
     contains_spoilers: boolean;
     source_url: string;
   }[] = [];
@@ -77,6 +78,7 @@ export const POST: APIRoute = async (context) => {
           review_text: row.review_text,
           review_date: row.review_date,
           platform_name: row.platform_name,
+          play_status: row.play_status,
           contains_spoilers: row.contains_spoilers,
           source_url: row.source_url,
         });

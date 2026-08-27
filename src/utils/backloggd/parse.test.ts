@@ -75,6 +75,7 @@ describe("parseReviewsPage", () => {
     expect(r.review_date).toBe("2024-05-13");
     expect(r.platform_name).toBe("Nintendo Switch");
     expect(r.contains_spoilers).toBe(false);
+    expect(r.play_status).toBe("completed");
     expect(r.source_url).toBe("https://backloggd.com/u/Depth/review/1611785/");
     expect(r.review_text).toMatch(/^Endless Ocean: Luminous offers a relaxing underwater escape/);
     expect(r.review_text).toMatch(/shallow compared to its predecessors\.$/);
@@ -105,6 +106,7 @@ describe("coerceRow (upload path)", () => {
       review_text: "  Masterpiece.  ",
       review_date: "2020-01-02T00:00:00Z",
       platform_name: "PC",
+      play_status: "Playing",
       contains_spoilers: true,
       source_url: "https://backloggd.com/u/x/review/9/",
     });
@@ -114,6 +116,7 @@ describe("coerceRow (upload path)", () => {
     expect(row!.release_year).toBe(2017);
     expect(row!.review_text).toBe("Masterpiece.");
     expect(row!.review_date).toBe("2020-01-02");
+    expect(row!.play_status).toBe("playing");
     expect(row!.contains_spoilers).toBe(true);
   });
 

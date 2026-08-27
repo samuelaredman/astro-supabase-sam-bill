@@ -70,6 +70,7 @@ export const POST: APIRoute = async (context) => {
         review_text: r!.review_text,
         review_date: r!.review_date,
         platform_name: r!.platform_name,
+        play_status: r!.play_status,
         contains_spoilers: r!.contains_spoilers,
         source_url: r!.source_url,
       }));

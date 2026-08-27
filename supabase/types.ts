@@ -954,6 +954,7 @@ export type Database = {
           job_id: string
           matched_game_id: string | null
           platform_name: string | null
+          play_status: string | null
           rating: number | null
           release_year: number | null
           review_date: string | null
@@ -973,6 +974,7 @@ export type Database = {
           job_id: string
           matched_game_id?: string | null
           platform_name?: string | null
+          play_status?: string | null
           rating?: number | null
           release_year?: number | null
           review_date?: string | null
@@ -992,6 +994,7 @@ export type Database = {
           job_id?: string
           matched_game_id?: string | null
           platform_name?: string | null
+          play_status?: string | null
           rating?: number | null
           release_year?: number | null
           review_date?: string | null

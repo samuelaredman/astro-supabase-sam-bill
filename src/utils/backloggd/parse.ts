@@ -33,6 +33,8 @@ export type BackloggdRow = {
   /** ISO date (YYYY-MM-DD) parsed from the <time datetime> attribute, or null. */
   review_date: string | null;
   platform_name: string | null;
+  /** Raw Backloggd play state shown on the card (completed/playing/retired/…), or null. */
+  play_status: string | null;
   contains_spoilers: boolean;
   /** Permalink to the review on Backloggd, or the game page as a fallback. */
   source_url: string;
@@ -164,6 +166,10 @@ function parseOneEntry(chunk: string, username: string): BackloggdRow | null {
   const timeMatch = chunk.match(/<time[^>]*datetime="([^"]+)"/);
   const review_date = parseBackloggdDate(timeMatch?.[1]);
 
+  // Play state shown on the card: <p class="mb-0 play-type completed">Completed</p>
+  const statusMatch = chunk.match(/\bplay-type\s+([a-z_]+)\b/);
+  const play_status = statusMatch ? statusMatch[1].toLowerCase() : null;
+
   const bodyBlock = chunk.match(
     /class="[^"]*\breview-body\b[^"]*"\s+review_id="(\d+)"[\s\S]*?<div class="[^"]*\bcard-text\b[^"]*"[^>]*>([\s\S]*?)<\/div>/,
   );
@@ -185,6 +191,7 @@ function parseOneEntry(chunk: string, username: string): BackloggdRow | null {
     review_text,
     review_date,
     platform_name,
+    play_status,
     contains_spoilers,
     source_url,
   };
@@ -264,6 +271,7 @@ export function coerceRow(input: unknown): BackloggdRow | null {
     review_text: review_text.slice(0, 20000),
     review_date: parseBackloggdDate(typeof r.review_date === "string" ? r.review_date : null),
     platform_name,
+    play_status: typeof r.play_status === "string" ? r.play_status.trim().toLowerCase() || null : null,
     contains_spoilers: r.contains_spoilers === true,
     source_url,
   };

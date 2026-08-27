@@ -9,7 +9,7 @@
 // the game "completed" in the author's library.
 
 import { matchOrImportGame } from "./matchGame";
-import type { BackloggdRow } from "./parse";
+import { mapBackloggdStatus, type BackloggdRow } from "./parse";
 
 export type ImportItemInput = BackloggdRow & { id: string; matched_game_id?: string | null };
 
@@ -127,10 +127,13 @@ export async function importBacklogItem(
     };
   }
 
-  // ── 4. Mark the game completed in the author's library (best effort) ──────
+  // ── 4. Carry over the play state shown on the Backloggd review card
+  //       (Completed / Playing / Retired…), defaulting to completed. Never
+  //       overwrites a status the user already has. ─────────────────────────
   try {
+    const libStatus = mapBackloggdStatus(item.play_status) ?? "completed";
     await db.from("user_game_status").upsert(
-      { profile_id: profileId, game_id: gameId, status: "completed", updated_at: new Date().toISOString() },
+      { profile_id: profileId, game_id: gameId, status: libStatus, updated_at: new Date().toISOString() },
       { onConflict: "profile_id,game_id", ignoreDuplicates: true },
     );
   } catch {
