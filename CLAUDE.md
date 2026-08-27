@@ -437,7 +437,48 @@ POSTing the tokens to `/api/auth/set-session`, which uses the cookie-syncing
 server-readable auth cookie. Do not "simplify" this back down to a single mechanism — both
 paths are load-bearing for different possible email template configurations.
 
+### Rule 4 — every link in an auth email MUST point at our own domain, never at `<project>.supabase.co`
+
+Gmail (and other providers) silently drop mail whose in-body link domain doesn't match the
+sending domain — it reads as phishing. The failure is invisible: Resend reports the message
+as `delivered` (the recipient MTA returned `250 OK` and accepted it), but Gmail then discards
+it — not in inbox, not in spam, not in All Mail. This cost us real, undiagnosed lost signups
+and password resets until it was tracked down 2026-08-20.
+
+Root cause: auth emails are now sent via **custom SMTP (Resend)** from `noreply@chekpoint.gg`
+(Supabase → Authentication → Emails → SMTP: `smtp.resend.com`, user `resend`). Do NOT rely on
+Supabase's built-in email service — it is severely rate-limited and sends from a `supabase.co`
+address with no SPF/DKIM alignment to us. But the stock templates still link to
+`{{ .ConfirmationURL }}`, which resolves to `https://<project>.supabase.co/auth/v1/verify?...`.
+A `chekpoint.gg` From with a `supabase.co` link is the exact mismatch Gmail drops.
+
+Fix (in Supabase → Authentication → Email Templates): every link-based template links to OUR
+domain via `{{ .SiteURL }}/<path>?token_hash={{ .TokenHash }}&type=<type>` — no `supabase.co`
+anywhere in the rendered email. `{{ .SiteURL }}` must be `https://chekpoint.gg` (URL
+Configuration). Current mapping:
+
+| Template | Link target | `type` | Landing page |
+|----------|-------------|--------|--------------|
+| Confirm signup | `/auth/confirm` | `email` (fall back to `signup` if verify fails) | `src/pages/auth/confirm.astro` |
+| Reset password | `/reset-password-confirm` | `recovery` | `src/pages/reset-password-confirm.astro` |
+| Magic Link (dormant — app is password-only) | `/auth/confirm` | `magiclink` | `src/pages/auth/confirm.astro` |
+
+The landing page must actually PARSE `token_hash`+`type` and call `verifyOtp({ type, token_hash })`.
+`/auth/confirm` already did. `/reset-password-confirm` was hash-fragment-only (implicit flow)
+and had a `?token_hash=...&type=recovery` branch added 2026-08-20 — do not remove it, the
+customized recovery email depends on it. OTP *code* emails (`{{ .Token }}`, the 6-digit code)
+have no link and are unaffected.
+
+**Never revert a template to `{{ .ConfirmationURL }}`** — it reintroduces the `supabase.co`
+link and silently breaks Gmail delivery again with zero error anywhere in our stack.
+
 ### Verification standard for any change in this area
+
+**`generateLink` below does NOT send an email — it only builds the link.** It verifies that a
+confirmation *link resolves*, not that mail is *delivered*. To test deliverability (Rule 4) you
+must trigger a REAL `signUp()`/password-reset so GoTrue actually sends through SMTP, then
+confirm the message lands in a real inbox from `noreply@chekpoint.gg` with a `chekpoint.gg`
+link, and check Resend → Emails (Logs) for the send.
 
 `npx astro check` passing is not sufficient evidence this works — the historical bugs above
 all passed type-checking. Before considering an auth-flow change done, generate a real link

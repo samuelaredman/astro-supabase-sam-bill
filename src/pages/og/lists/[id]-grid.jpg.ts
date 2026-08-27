@@ -101,8 +101,8 @@ export const GET: APIRoute = async ({ params }) => {
     headers: {
       "Content-Type": "image/jpeg",
       "Access-Control-Allow-Origin": "*",
-      "Cache-Control": "public, max-age=300",
-      "Netlify-CDN-Cache-Control": "public, max-age=1800, stale-while-revalidate=86400",
+      "Cache-Control": "public, max-age=3600",
+      "Netlify-CDN-Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
     },
   });
 };
