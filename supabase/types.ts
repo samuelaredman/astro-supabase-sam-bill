@@ -943,6 +943,159 @@ export type Database = {
           },
         ]
       }
+      import_job_items: {
+        Row: {
+          contains_spoilers: boolean
+          created_at: string
+          detail: string | null
+          game_slug: string
+          game_title: string
+          id: string
+          job_id: string
+          matched_game_id: string | null
+          platform_name: string | null
+          play_status: string | null
+          rating: number | null
+          release_year: number | null
+          review_date: string | null
+          review_id: string | null
+          review_text: string
+          source_url: string | null
+          status: string
+          updated_at: string | null
+        }
+        Insert: {
+          contains_spoilers?: boolean
+          created_at?: string
+          detail?: string | null
+          game_slug: string
+          game_title: string
+          id?: string
+          job_id: string
+          matched_game_id?: string | null
+          platform_name?: string | null
+          play_status?: string | null
+          rating?: number | null
+          release_year?: number | null
+          review_date?: string | null
+          review_id?: string | null
+          review_text: string
+          source_url?: string | null
+          status?: string
+          updated_at?: string | null
+        }
+        Update: {
+          contains_spoilers?: boolean
+          created_at?: string
+          detail?: string | null
+          game_slug?: string
+          game_title?: string
+          id?: string
+          job_id?: string
+          matched_game_id?: string | null
+          platform_name?: string | null
+          play_status?: string | null
+          rating?: number | null
+          release_year?: number | null
+          review_date?: string | null
+          review_id?: string | null
+          review_text?: string
+          source_url?: string | null
+          status?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "import_job_items_job_id_fkey"
+            columns: ["job_id"]
+            isOneToOne: false
+            referencedRelation: "import_jobs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "import_job_items_matched_game_id_fkey"
+            columns: ["matched_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "import_job_items_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
+            referencedRelation: "reviews"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      import_jobs: {
+        Row: {
+          backloggd_username: string | null
+          created_at: string
+          draft_count: number
+          error: string | null
+          failed_count: number
+          id: string
+          imported_count: number
+          needs_mapping_count: number
+          processed_items: number
+          profile_id: string
+          scraped_pages: number
+          skipped_count: number
+          source: string
+          status: string
+          total_items: number
+          total_pages: number | null
+          updated_at: string | null
+        }
+        Insert: {
+          backloggd_username?: string | null
+          created_at?: string
+          draft_count?: number
+          error?: string | null
+          failed_count?: number
+          id?: string
+          imported_count?: number
+          needs_mapping_count?: number
+          processed_items?: number
+          profile_id: string
+          scraped_pages?: number
+          skipped_count?: number
+          source?: string
+          status?: string
+          total_items?: number
+          total_pages?: number | null
+          updated_at?: string | null
+        }
+        Update: {
+          backloggd_username?: string | null
+          created_at?: string
+          draft_count?: number
+          error?: string | null
+          failed_count?: number
+          id?: string
+          imported_count?: number
+          needs_mapping_count?: number
+          processed_items?: number
+          profile_id?: string
+          scraped_pages?: number
+          skipped_count?: number
+          source?: string
+          status?: string
+          total_items?: number
+          total_pages?: number | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "import_jobs_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       list_comment_reactions: {
         Row: {
           comment_id: string
@@ -1450,6 +1603,8 @@ export type Database = {
         Row: {
           auth_user_id: string
           avatar_url: string | null
+          backloggd_import_done_at: string | null
+          backloggd_synced_at: string | null
           banner_position: string
           banner_url: string | null
           bio: string | null
@@ -1475,6 +1630,8 @@ export type Database = {
         Insert: {
           auth_user_id: string
           avatar_url?: string | null
+          backloggd_import_done_at?: string | null
+          backloggd_synced_at?: string | null
           banner_position?: string
           banner_url?: string | null
           bio?: string | null
@@ -1500,6 +1657,8 @@ export type Database = {
         Update: {
           auth_user_id?: string
           avatar_url?: string | null
+          backloggd_import_done_at?: string | null
+          backloggd_synced_at?: string | null
           banner_position?: string
           banner_url?: string | null
           bio?: string | null

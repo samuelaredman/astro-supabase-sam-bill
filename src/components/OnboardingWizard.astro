@@ -15,6 +15,9 @@
 // incomplete profile lands on — not just a fresh signup landing on /welcome —
 // so existing users who never got this treatment are swept in too.
 import CropModal from './CropModal.astro';
+import { LIBRARY_SCRAPER_SOURCE } from '../utils/backloggd/libraryScraperSource';
+
+const backloggdLibraryBookmarklet = `javascript:${encodeURIComponent(LIBRARY_SCRAPER_SOURCE)}`;
 
 interface ShowcaseGame { id: string; title: string; cover_img_url?: string | null; slug?: string | null }
 interface FavoriteGame { id: string; title: string; cover_img_url?: string | null; slug?: string | null }
@@ -24,6 +27,7 @@ interface Props {
   hasAvatar: boolean;
   hasFavorite: boolean;
   hasShowcase: boolean;
+  hasImportedBackloggd?: boolean;
   existingFavorite?: FavoriteGame | null;
   existingShowcase?: ShowcaseGame[];
 }
@@ -33,6 +37,7 @@ const {
   hasAvatar,
   hasFavorite,
   hasShowcase,
+  hasImportedBackloggd = false,
   existingFavorite = null,
   existingShowcase = [],
 } = Astro.props;
@@ -42,6 +47,7 @@ const pending = [
   !hasAvatar && 'avatar',
   !hasFavorite && 'favorite',
   !hasShowcase && 'showcase',
+  !hasImportedBackloggd && 'backloggd',
   'tour',
 ].filter(Boolean) as string[];
 
@@ -100,6 +106,38 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
       <button class="ob-continue" id="obShowcaseContinue" type="button" disabled>Continue</button>
     </section>
 
+    <section class="ob-step" data-step-key="backloggd" hidden>
+      <div class="ob-icon">📥</div>
+      <h2>Coming from Backloggd?</h2>
+      <p>Bring your reviews and library over — or skip this and do it later from Settings.</p>
+
+      <div class="ob-bl-tabs">
+        <button type="button" class="ob-bl-tab active" data-bltab="reviews">Reviews</button>
+        <button type="button" class="ob-bl-tab" data-bltab="library">Full library</button>
+      </div>
+
+      <div class="ob-bl-panel" data-blpanel="reviews">
+        <p class="ob-bl-sub">Your reviews — ratings, dates, and the play status of each reviewed game.</p>
+        <input type="text" class="ob-search" id="obBlUsername" placeholder="Backloggd username" autocomplete="off" />
+        <button class="ob-continue" id="obBlImport" type="button">Import my reviews</button>
+      </div>
+
+      <div class="ob-bl-panel" data-blpanel="library" hidden>
+        <p class="ob-bl-sub">Every game and its status (backlog, wishlist, playing, played…).</p>
+        <ol class="ob-bl-steps">
+          <li>Drag to your bookmarks bar: <a class="bl-bookmarklet" href={backloggdLibraryBookmarklet}>📥 Import Backloggd Library</a></li>
+          <li>Open <a href="https://backloggd.com" target="_blank" rel="noopener">your Backloggd library</a>, click that bookmark, then choose the downloaded file:</li>
+        </ol>
+        <input type="file" id="obBlLibFile" accept="application/json" class="ob-bl-file" />
+        <button class="ob-continue" id="obBlLibImport" type="button">Import library</button>
+      </div>
+
+      <div class="ob-bl-status" id="obBlStatus" hidden></div>
+      <div class="ob-progress-bar" id="obBlBar" hidden style="margin:12px 0 0"><div class="ob-progress-fill" id="obBlBarFill"></div></div>
+
+      <button class="ob-skip" id="obBlSkip" type="button">Skip — I'll do this later</button>
+    </section>
+
     <section class="ob-step" data-step-key="tour" hidden>
       <div class="ob-icon">🧭</div>
       <h2>One last thing — take the tour</h2>
@@ -110,6 +148,13 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
 </div>
 
 <CropModal />
+
+{/* Bundled module — resolves the import that the define:vars script below (forced
+    inline) cannot. Exposes the Backloggd import helpers on window for that script. */}
+<script>
+  import { previewBackloggd, startAndDrive, importLibraryFile } from '../utils/backloggd/importClient';
+  (window as any).__ckBacklogImport = { previewBackloggd, startAndDrive, importLibraryFile };
+</script>
 
 <script
   define:vars={{
@@ -388,6 +433,127 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   }
   showcaseContinue.addEventListener('click', advance);
 
+  // ---- Step: backloggd import (reviews + full library; the only skippable step) ----
+  var blUsername = document.getElementById('obBlUsername');
+  var blImportBtn = document.getElementById('obBlImport');
+  var blLibImportBtn = document.getElementById('obBlLibImport');
+  var blLibFile = document.getElementById('obBlLibFile');
+  var blSkipBtn = document.getElementById('obBlSkip');
+  var blStatus = document.getElementById('obBlStatus');
+  var blBar = document.getElementById('obBlBar');
+  var blBarFill = document.getElementById('obBlBarFill');
+  // phase: 'idle' -> 'running' -> 'done' | 'failed'. Once done/failed, the action
+  // button (and skip) just advance — so a single click handler per button, no
+  // onclick reassignment fighting the listener.
+  var blPhase = 'idle';
+  var blMarked = false;
+
+  function blMarkStepDone() {
+    if (blMarked) return;
+    blMarked = true;
+    fetch('/api/import/backloggd/skip-onboarding', { method: 'POST' }).catch(function () {});
+  }
+
+  function blLeaveStep() {
+    blMarkStepDone();
+    advance();
+  }
+
+  function blOnProgress(p) {
+    if (p.fraction != null) blBarFill.style.width = Math.round(p.fraction * 100) + '%';
+    blStatus.textContent = p.message;
+  }
+
+  function blFinish(btn, message) {
+    blPhase = 'done';
+    blBarFill.style.width = '100%';
+    blStatus.textContent = message;
+    blMarkStepDone();
+    btn.textContent = 'Continue →';
+    btn.disabled = false;
+    blSkipBtn.style.display = 'none';
+  }
+
+  function blFail(btn, e) {
+    blPhase = 'failed';
+    blStatus.textContent = (e && e.message ? e.message : 'Import failed') + ' — you can try again from Settings later.';
+    btn.textContent = 'Skip for now';
+    btn.disabled = false;
+    blSkipBtn.disabled = false;
+  }
+
+  // Tabs
+  document.querySelectorAll('.ob-bl-tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      if (blPhase !== 'idle') return;
+      var key = tab.dataset.bltab;
+      document.querySelectorAll('.ob-bl-tab').forEach(function (t) { t.classList.toggle('active', t === tab); });
+      document.querySelectorAll('.ob-bl-panel').forEach(function (panel) {
+        panel.hidden = panel.dataset.blpanel !== key;
+      });
+    });
+  });
+
+  blSkipBtn.addEventListener('click', blLeaveStep);
+
+  blImportBtn.addEventListener('click', async function () {
+    if (blPhase === 'done' || blPhase === 'failed') { blLeaveStep(); return; }
+    if (blPhase === 'running') return;
+    var api = window.__ckBacklogImport;
+    if (!api) { blStatus.hidden = false; blStatus.textContent = 'Still loading — try again in a second.'; return; }
+    var username = (blUsername.value || '').trim();
+    if (!username) { blStatus.hidden = false; blStatus.textContent = 'Enter your Backloggd username, or skip.'; return; }
+    blPhase = 'running';
+    blImportBtn.disabled = true;
+    blSkipBtn.disabled = true;
+    blUsername.disabled = true;
+    blStatus.hidden = false;
+    blStatus.textContent = 'Checking your Backloggd profile…';
+    try {
+      var preview = await api.previewBackloggd(username);
+      blStatus.textContent = 'Importing ' + preview.totalReviews + ' review' + (preview.totalReviews === 1 ? '' : 's') + '…';
+      blBar.hidden = false;
+      await api.startAndDrive({ username: preview.username }, { onProgress: blOnProgress });
+      blFinish(blImportBtn, 'Done! Your reviews and their play statuses are on your profile.');
+    } catch (e) {
+      blFail(blImportBtn, e);
+    }
+  });
+
+  blLibImportBtn.addEventListener('click', async function () {
+    if (blPhase === 'done' || blPhase === 'failed') { blLeaveStep(); return; }
+    if (blPhase === 'running') return;
+    var api = window.__ckBacklogImport;
+    if (!api) { blStatus.hidden = false; blStatus.textContent = 'Still loading — try again in a second.'; return; }
+    var file = blLibFile.files && blLibFile.files[0];
+    if (!file) { blStatus.hidden = false; blStatus.textContent = 'Choose the downloaded library file first, or skip.'; return; }
+    var rows;
+    try {
+      var parsed = JSON.parse(await file.text());
+      rows = Array.isArray(parsed) ? parsed : parsed && parsed.rows;
+      if (!Array.isArray(rows) || !rows.length) throw new Error();
+    } catch (e) {
+      blStatus.hidden = false;
+      blStatus.textContent = "That file doesn't look like a Backloggd library export.";
+      return;
+    }
+    blPhase = 'running';
+    blLibImportBtn.disabled = true;
+    blSkipBtn.disabled = true;
+    blStatus.hidden = false;
+    blBar.hidden = false;
+    try {
+      var totals = await api.importLibraryFile(rows, { onProgress: blOnProgress });
+      blFinish(
+        blLibImportBtn,
+        totals.applied + ' game' + (totals.applied === 1 ? '' : 's') + ' added to your library' +
+          (totals.imported ? ' (' + totals.imported + ' new from IGDB)' : '') + '.',
+      );
+    } catch (e) {
+      blFail(blLibImportBtn, e);
+    }
+  });
+
   // ---- kick off ----
   advance();
 </script>
@@ -585,6 +751,54 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   }
   .ob-continue:hover:not(:disabled) { opacity: 0.9; }
   .ob-continue:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .ob-skip {
+    width: 100%;
+    margin-top: 10px;
+    background: none;
+    border: none;
+    color: var(--text-tertiary, #777);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 6px;
+  }
+  .ob-skip:hover:not(:disabled) { color: var(--text-secondary, #a0a0a0); }
+  .ob-skip:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ob-bl-status { font-size: 13px; color: var(--text-secondary, #a0a0a0); margin-top: 14px; }
+
+  .ob-bl-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .ob-bl-tab {
+    flex: 1;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border, #2a2a2a);
+    background: var(--bg-hover, #2a2a2a);
+    color: var(--text-secondary, #a0a0a0);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .ob-bl-tab.active { border-color: var(--accent, #7c3aed); color: var(--text-primary, #fff); }
+  .ob-bl-panel { text-align: left; }
+  .ob-bl-sub { font-size: 13px !important; color: var(--text-secondary, #a0a0a0); margin: 0 0 12px !important; }
+  .ob-bl-steps { font-size: 13px; color: var(--text-secondary, #a0a0a0); line-height: 1.7; margin: 0 0 12px; padding-left: 18px; }
+  .ob-bl-file { display: block; width: 100%; font-size: 12px; margin-bottom: 12px; color: var(--text-secondary, #a0a0a0); }
+  .bl-bookmarklet {
+    display: inline-block;
+    margin: 4px 0;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: var(--accent, #7c3aed);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: grab;
+    white-space: nowrap;
+  }
+  .bl-bookmarklet:active { cursor: grabbing; }
 
   @media (max-width: 480px) {
     /* Room for the iOS/Android home-indicator and notch instead of the
