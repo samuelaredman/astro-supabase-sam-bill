@@ -65,7 +65,7 @@ const [
     ? db.from('profiles').select('id, username, avatar_url, bio, favorite_game_id').eq('auth_user_id', user.id).single()
     : Promise.resolve({ data: null }),
   db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
-  db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(60),
+  db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(30),
   db.from('reviews').select('game_id, published_at, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', yesterdayPstStart.toISOString()).limit(200),
   db.from('reviews').select('game_id, score, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
   db.from('reviews').select('*', { count: 'exact', head: true }).eq('status', 'published'),
@@ -169,7 +169,7 @@ const { data: recentRecsRaw, error: recsError } = await adminDb
   .select(REC_SELECT)
   .eq('status', 'published')
   .order('created_at', { ascending: false })
-  .limit(60);
+  .limit(30);
 if (recsError) console.error('[index] recommendations query error:', JSON.stringify(recsError));
 const recentRecs = (recentRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
 
@@ -184,14 +184,13 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// Merge all types into one pool, sort chronologically, take the top 20 globally.
-// Over-fetching (60 each) ensures the top 20 are correct regardless of type distribution.
-// The cursor is set to the 20th item's date so loadMore continues from the right point.
+// Merge all types, sort by date. Shows all SSR-fetched items in one chronological feed.
+// Infinite scroll (loadMore) continues from the oldest item's date.
 const feedItems: any[] = [
   ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
   ...recentLists.map((l: any) => ({ ...l, _date: l.created_at })),
   ...recentRecs,
-].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime()).slice(0, 20);
+].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>
 const todayMap: DayMap = {}
@@ -347,7 +346,7 @@ const lastFollowingReview = followingReviews.length > 0 ? followingReviews[follo
 const lastFeedItem = feedItems.length > 0 ? feedItems[feedItems.length - 1] : null
 const initialRecentCursor = lastFeedItem?._date ?? null
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
-const initialRecentDone = feedItems.length < 20
+const initialRecentDone = reviews.length < 30 && recentRecs.length < 30 && recentLists.length < 10
 const initialFollowingDone = followingReviews.length < 20
 
 const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
