@@ -2,6 +2,11 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../utils/database";
 import Layout from "../components/Layout.astro";
+import { LIBRARY_SCRAPER_SOURCE } from "../utils/backloggd/libraryScraperSource";
+
+// Drag-to-bookmarks-bar bookmarklet: the library scraper as a javascript: URI.
+// encodeURIComponent so it's safe inside a double-quoted href with no eval().
+const backloggdLibraryBookmarklet = `javascript:${encodeURIComponent(LIBRARY_SCRAPER_SOURCE)}`;
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await serverClient.auth.getUser();
@@ -201,6 +206,95 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           </div>
         )}
 
+      </div>
+    </section>
+
+    <!-- Backloggd -->
+    <section class="settings-section" id="backloggd">
+      <div class="settings-section-label">Backloggd</div>
+      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+        <div class="settings-row-text">
+          <div class="settings-row-label">Import your reviews</div>
+          <div class="settings-row-sub">
+            Brings your written Backloggd reviews across as Chekpoint reviews, and sets the
+            play status (Completed / Playing / Dropped) for each reviewed game. Ratings map
+            0.5&#9733; &rarr; 1 and 5&#9733; &rarr; 10; a review with no rating comes in as a draft.
+            Games you already reviewed here are skipped. For backlog / wishlist / unreviewed games,
+            use the full-library import below.
+          </div>
+        </div>
+
+        <div id="blStartRow" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <input id="blUsername" type="text" placeholder="Backloggd username" autocomplete="off"
+            style="flex:1;min-width:180px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px" />
+          <button class="settings-save-btn" id="blPreviewBtn" onclick="blPreview()">Preview</button>
+          <span id="blMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+        </div>
+
+        <div id="blPreview" class="bl-preview" style="display:none"></div>
+
+        <div id="blProgress" class="bl-progress" style="display:none">
+          <div class="bl-bar"><div class="bl-bar-fill" id="blBarFill"></div></div>
+          <div class="bl-progress-text" id="blProgressText"></div>
+        </div>
+
+        <div id="blResults" class="steam-results" style="display:none"></div>
+        <div id="blNeedsMapping" class="bl-needs-mapping" style="display:none"></div>
+
+        <details class="bl-manual">
+          <summary>Import isn&rsquo;t working, or my reviews are private</summary>
+          <div class="bl-manual-body">
+            <ol style="margin:8px 0 0 0;padding-left:18px;line-height:1.7">
+              <li>Open <a href="https://backloggd.com" target="_blank" rel="noopener">backloggd.com</a> and sign in, then go to your profile.</li>
+              <li>Open your browser&rsquo;s developer console (F12, then the <strong>Console</strong> tab).</li>
+              <li>Paste this and press Enter:
+                <code class="bl-snippet" id="blSnippet">fetch('https://chekpoint.gg/api/import/backloggd/scraper.js').then(r=&gt;r.text()).then(eval)</code>
+                <button type="button" class="settings-ghost-btn" onclick="blCopySnippet()" style="margin-top:6px">Copy</button>
+              </li>
+              <li>Wait for it to download <code>backloggd-chekpoint-export.json</code>, then choose that file here:</li>
+            </ol>
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px">
+              <input type="file" id="blFile" accept="application/json" />
+              <button class="settings-save-btn" id="blUploadBtn" onclick="blUpload()">Import from file</button>
+            </div>
+          </div>
+        </details>
+
+        <div style="border-top:1px solid var(--border-subtle);padding-top:16px;margin-top:4px">
+          <div class="settings-row-label" style="margin-bottom:4px">Import your full library &amp; statuses</div>
+          <div class="settings-row-sub" style="margin-bottom:12px">
+            The review import above already carries over statuses for games you reviewed.
+            This adds the rest &mdash; backlog, wishlist, and played games you didn&rsquo;t review.
+            Played &rarr; Completed, Playing &rarr; Playing, Backlog &amp; Wishlist &rarr; Want to play,
+            Retired &rarr; Dropped. Won&rsquo;t change a status you&rsquo;ve already set.
+          </div>
+          <div class="settings-row-sub" style="margin-bottom:8px">
+            Backloggd blocks automated access to its library pages, so this runs in your browser:
+          </div>
+          <ol style="margin:0;padding-left:18px;line-height:1.8">
+            <li>Drag this button to your bookmarks bar:
+              <a class="bl-bookmarklet" href={backloggdLibraryBookmarklet}>&#128229; Import Backloggd Library</a>
+            </li>
+            <li>Open <a href="https://backloggd.com" target="_blank" rel="noopener">your Backloggd library</a> (signed in), then click that bookmark. It downloads <code>backloggd-chekpoint-library.json</code>.</li>
+            <li>Choose that file here:</li>
+          </ol>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px">
+            <input type="file" id="blLibFile" accept="application/json" />
+            <button class="settings-save-btn" id="blLibBtn" onclick="blLibImport()">Import library</button>
+            <span id="blLibMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+          </div>
+          <div id="blLibResults" class="steam-results" style="display:none"></div>
+
+          <details class="bl-manual" style="margin-top:12px">
+            <summary>Can&rsquo;t use a bookmark? Use the console instead</summary>
+            <div class="bl-manual-body">
+              On <a href="https://backloggd.com" target="_blank" rel="noopener">backloggd.com</a> (signed in, on your library), open the developer console (F12 &rarr; Console) and run:
+              <code class="bl-snippet" id="blLibSnippet">fetch('https://chekpoint.gg/api/import/backloggd/library-scraper.js').then(r=&gt;r.text()).then(eval)</code>
+              <button type="button" class="settings-ghost-btn" onclick="blCopyLibSnippet()" style="margin-top:6px">Copy</button>
+              <div style="margin-top:6px">Then upload the downloaded file above.</div>
+            </div>
+          </details>
+        </div>
       </div>
     </section>
 
@@ -498,6 +592,101 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     color: var(--text-secondary);
   }
 
+  /* ── Backloggd ── */
+  .bl-preview {
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+  }
+  .bl-preview .bl-sample { margin: 8px 0 10px; padding-left: 16px; }
+  .bl-preview .bl-sample li { margin-bottom: 2px; }
+  .bl-bar {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    overflow: hidden;
+  }
+  .bl-bar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 999px;
+    background: var(--accent);
+    transition: width .3s ease;
+  }
+  .bl-progress-text { margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
+  .bl-needs-mapping {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .bl-map-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .bl-map-row .bl-map-title { font-weight: 500; color: var(--text-primary); }
+  .bl-map-row input {
+    flex: 1;
+    min-width: 160px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 12px;
+  }
+  .bl-map-candidates { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+  .bl-map-candidate {
+    text-align: left;
+    padding: 6px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .bl-map-candidate:hover { border-color: var(--accent); color: var(--text-primary); }
+  .bl-bookmarklet {
+    display: inline-block;
+    margin: 4px 0 2px 6px;
+    padding: 7px 14px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: grab;
+    white-space: nowrap;
+  }
+  .bl-bookmarklet:active { cursor: grabbing; }
+  .bl-manual { margin-top: 4px; font-size: 13px; }
+  .bl-manual summary { cursor: pointer; color: var(--text-secondary); }
+  .bl-manual-body { margin-top: 10px; color: var(--text-secondary); line-height: 1.6; }
+  .bl-snippet {
+    display: block;
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    word-break: break-all;
+    color: var(--text-primary);
+  }
+
   @media (max-width: 768px) {
     .settings-main { padding: 16px 16px 80px; }
     .settings-account-card { flex-wrap: wrap; }
@@ -517,6 +706,12 @@ declare global {
     setSearchIndexable: (value: boolean, btn: HTMLElement) => Promise<void>;
     steamSync: () => Promise<void>;
     steamDisconnect: () => Promise<void>;
+    blPreview: () => Promise<void>;
+    blRun: (mode: "username") => Promise<void>;
+    blUpload: () => Promise<void>;
+    blCopySnippet: () => void;
+    blCopyLibSnippet: () => void;
+    blLibImport: () => Promise<void>;
   }
 }
 
@@ -719,4 +914,298 @@ async function steamDisconnect() {
   }
 }
 window.steamDisconnect = steamDisconnect;
+
+// ─── Backloggd import ────────────────────────────────────────────────────────
+import {
+  previewBackloggd,
+  startAndDrive,
+  resumeActive,
+  fetchStatus,
+  mapItem,
+  importLibraryFile,
+  type ImportProgress,
+} from "../utils/backloggd/importClient";
+
+const blEl = (id: string) => document.getElementById(id);
+let blActiveController: AbortController | null = null;
+
+function blSetMsg(text: string, ok = false) {
+  const m = blEl("blMsg");
+  if (!m) return;
+  m.textContent = text;
+  m.style.color = ok ? "var(--score-great, #4ade80)" : "#f87171";
+}
+
+function blRenderProgress(p: ImportProgress) {
+  const wrap = blEl("blProgress");
+  const fill = blEl("blBarFill");
+  const txt = blEl("blProgressText");
+  if (!wrap || !fill || !txt) return;
+  wrap.style.display = "block";
+  fill.style.width = p.fraction == null ? "50%" : `${Math.round(p.fraction * 100)}%`;
+  fill.style.opacity = p.phase === "rate-limited" ? "0.5" : "1";
+  txt.textContent = p.message;
+}
+
+function blRenderResults(job: any) {
+  const box = blEl("blResults");
+  if (!box) return;
+  box.style.display = "block";
+  const parts = [
+    `<strong>${job.imported_count}</strong> reviews imported`,
+    job.draft_count ? `<strong>${job.draft_count}</strong> saved as drafts (no rating)` : "",
+    job.skipped_count ? `<strong>${job.skipped_count}</strong> skipped (already reviewed)` : "",
+    job.failed_count ? `<strong>${job.failed_count}</strong> failed` : "",
+  ].filter(Boolean);
+  box.innerHTML =
+    parts.join("<br>") +
+    (job.needs_mapping_count
+      ? `<br><strong>${job.needs_mapping_count}</strong> game${job.needs_mapping_count === 1 ? "" : "s"} need matching below.`
+      : "");
+}
+
+function blDebounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
+  let t: any;
+  return (...a: Parameters<T>) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
+  };
+}
+
+async function blMatchAndRemove(row: HTMLElement, itemId: string, igdbId: number) {
+  try {
+    const r = await mapItem(itemId, igdbId);
+    row.innerHTML = `<span class="bl-map-title">${r.game.title}</span> <span style="color:var(--score-great,#4ade80)">${r.status === "imported" || r.status === "drafted" ? "imported" : r.status}</span>`;
+    if (r.job) blRenderResults(r.job);
+  } catch (e: any) {
+    blSetMsg(e?.message ?? "Match failed.");
+  }
+}
+
+function blRenderNeedsMapping(items: any[]) {
+  const box = blEl("blNeedsMapping");
+  if (!box) return;
+  if (!items.length) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "flex";
+  box.innerHTML = "";
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "bl-map-row";
+    const yr = item.release_year ? ` (${item.release_year})` : "";
+    row.innerHTML = `
+      <span class="bl-map-title">${item.game_title}${yr}</span>
+      <input type="text" placeholder="Search Chekpoint / IGDB…" />
+      <div class="bl-map-candidates"></div>`;
+    const input = row.querySelector("input") as HTMLInputElement;
+    const list = row.querySelector(".bl-map-candidates") as HTMLElement;
+    input.value = item.game_title;
+    const search = blDebounce(async () => {
+      const q = input.value.trim();
+      if (q.length < 2) return;
+      try {
+        const res = await fetch(`/api/games/search?q=${encodeURIComponent(q)}`);
+        const results = await res.json();
+        list.innerHTML = "";
+        for (const g of (results ?? []).slice(0, 6)) {
+          const igdbId = g.igdb_id ?? g.igdbId ?? null;
+          if (!igdbId) continue; // can only import via IGDB id
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "bl-map-candidate";
+          btn.textContent = `${g.title}${g.year ? ` (${g.year})` : ""}`;
+          btn.onclick = () => blMatchAndRemove(row, item.id, Number(igdbId));
+          list.appendChild(btn);
+        }
+        if (!list.children.length) {
+          list.innerHTML = `<div style="font-size:12px;color:var(--text-tertiary)">No IGDB match — try a different title.</div>`;
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 300);
+    input.addEventListener("input", search);
+    box.appendChild(row);
+  }
+}
+
+async function blFinish(jobId: string) {
+  try {
+    const { job, needs_mapping } = await fetchStatus(jobId);
+    blRenderResults(job);
+    blRenderNeedsMapping(needs_mapping);
+    // Suppress the one-time onboarding step now that they've run an import.
+    fetch("/api/import/backloggd/skip-onboarding", { method: "POST" }).catch(() => {});
+  } catch {
+    /* results are best-effort */
+  }
+}
+
+async function blDrive(start: { username: string } | { rows: unknown[] }) {
+  blEl("blStartRow")!.style.display = "none";
+  blEl("blPreview")!.style.display = "none";
+  blActiveController?.abort();
+  blActiveController = new AbortController();
+  try {
+    const { job } = await startAndDrive(start, {
+      onProgress: blRenderProgress,
+      signal: blActiveController.signal,
+    });
+    blRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+    await blFinish(job.id);
+  } catch (e: any) {
+    if (e?.name === "AbortError") return;
+    blSetMsg(e?.message ?? "Import failed.");
+    blEl("blStartRow")!.style.display = "flex";
+  }
+}
+
+async function blPreview() {
+  const input = blEl("blUsername") as HTMLInputElement | null;
+  const btn = blEl("blPreviewBtn") as HTMLButtonElement | null;
+  if (!input || !btn) return;
+  const username = input.value.trim();
+  if (!username) return blSetMsg("Enter your Backloggd username.");
+  btn.disabled = true;
+  blSetMsg("Checking…", true);
+  try {
+    const p = await previewBackloggd(username);
+    blSetMsg("");
+    const box = blEl("blPreview")!;
+    box.style.display = "block";
+    box.innerHTML = `
+      Found <strong>${p.totalReviews}</strong> review${p.totalReviews === 1 ? "" : "s"} for
+      <strong>${p.username}</strong>${p.totalPages > 1 ? ` across ${p.totalPages} pages` : ""}.
+      <ul class="bl-sample">${p.sample
+        .map(
+          (s: any) =>
+            `<li>${s.game_title}${s.rating ? ` — ${s.rating}&#9733;` : " — (no rating)"}</li>`,
+        )
+        .join("")}</ul>
+      <button class="settings-save-btn" id="blGoBtn">Import ${p.totalReviews} review${p.totalReviews === 1 ? "" : "s"}</button>`;
+    blEl("blGoBtn")!.addEventListener("click", () => blDrive({ username: p.username }));
+  } catch (e: any) {
+    blSetMsg(e?.message ?? "Could not check that username.");
+  } finally {
+    btn.disabled = false;
+  }
+}
+window.blPreview = blPreview;
+
+async function blRun(_mode: "username") {
+  const input = blEl("blUsername") as HTMLInputElement | null;
+  if (input?.value.trim()) blDrive({ username: input.value.trim() });
+}
+window.blRun = blRun;
+
+async function blUpload() {
+  const fileInput = blEl("blFile") as HTMLInputElement | null;
+  const file = fileInput?.files?.[0];
+  if (!file) return blSetMsg("Choose the exported .json file first.");
+  try {
+    const parsed = JSON.parse(await file.text());
+    const rows = Array.isArray(parsed) ? parsed : parsed?.rows;
+    if (!Array.isArray(rows) || !rows.length) {
+      return blSetMsg("That file doesn't look like a Backloggd export.");
+    }
+    blSetMsg("");
+    blDrive({ rows });
+  } catch {
+    blSetMsg("Could not read that file — is it the .json the console step downloaded?");
+  }
+}
+window.blUpload = blUpload;
+
+function blCopySnippet() {
+  const el = blEl("blSnippet");
+  if (!el) return;
+  navigator.clipboard?.writeText(el.textContent ?? "").then(
+    () => blSetMsg("Copied — paste it into the console on backloggd.com.", true),
+    () => blSetMsg("Press Ctrl/Cmd+C to copy."),
+  );
+}
+window.blCopySnippet = blCopySnippet;
+
+function blCopyLibSnippet() {
+  const el = blEl("blLibSnippet");
+  const msg = blEl("blLibMsg");
+  if (!el || !msg) return;
+  navigator.clipboard?.writeText(el.textContent ?? "").then(
+    () => { msg.textContent = "Copied — paste into the console on backloggd.com."; msg.style.color = "var(--score-great, #4ade80)"; },
+    () => { msg.textContent = "Press Ctrl/Cmd+C to copy."; msg.style.color = "#f87171"; },
+  );
+}
+window.blCopyLibSnippet = blCopyLibSnippet;
+
+async function blLibImport() {
+  const fileInput = blEl("blLibFile") as HTMLInputElement | null;
+  const btn = blEl("blLibBtn") as HTMLButtonElement | null;
+  const msg = blEl("blLibMsg");
+  const results = blEl("blLibResults");
+  if (!fileInput || !btn || !msg || !results) return;
+  const file = fileInput.files?.[0];
+  if (!file) { msg.textContent = "Choose the exported .json file first."; msg.style.color = "#f87171"; return; }
+
+  let rows: unknown[];
+  try {
+    const parsed = JSON.parse(await file.text());
+    rows = Array.isArray(parsed) ? parsed : parsed?.rows;
+    if (!Array.isArray(rows) || !rows.length) throw new Error();
+  } catch {
+    msg.textContent = "That file doesn't look like a Backloggd library export.";
+    msg.style.color = "#f87171";
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "Importing…";
+  msg.style.color = "var(--text-secondary)";
+
+  try {
+    const totals = await importLibraryFile(rows, {
+      onProgress: (p) => { msg.textContent = p.message; },
+    });
+    msg.textContent = "";
+    results.style.display = "block";
+    const lines = [
+      `<strong>${totals.applied}</strong> game${totals.applied === 1 ? "" : "s"} added to your library`,
+      totals.imported ? `<strong>${totals.imported}</strong> new game${totals.imported === 1 ? "" : "s"} pulled in from IGDB` : "",
+      totals.already ? `<strong>${totals.already}</strong> already had a status (left as-is)` : "",
+      totals.unmatched ? `<strong>${totals.unmatched}</strong> couldn't be identified` : "",
+    ].filter(Boolean);
+    results.innerHTML =
+      lines.join("<br>") +
+      (totals.unmatchedSample.length
+        ? `<br><span style="color:var(--text-tertiary);font-size:11px">e.g. ${totals.unmatchedSample.slice(0, 8).join(", ")}</span>`
+        : "");
+  } catch (e: any) {
+    msg.textContent = e?.message ?? "Could not reach the server. Try again.";
+    msg.style.color = "#f87171";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Import library";
+  }
+}
+window.blLibImport = blLibImport;
+
+// Reattach to an import that's still running (e.g. after a page reload).
+(async () => {
+  try {
+    blActiveController = new AbortController();
+    const resumed = await resumeActive({
+      onProgress: blRenderProgress,
+      signal: blActiveController.signal,
+    });
+    if (resumed?.job) {
+      blEl("blStartRow")!.style.display = "none";
+      blRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+      await blFinish(resumed.job.id);
+    }
+  } catch {
+    /* nothing to resume */
+  }
+})();
 </script>

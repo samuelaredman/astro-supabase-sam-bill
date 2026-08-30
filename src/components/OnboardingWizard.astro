@@ -1,0 +1,818 @@
+---
+// Hard-blocking, non-dismissable post-signup setup wizard — the first thing a
+// new user sees, in place of the feed/nav/optional-tour entry points. A fixed
+// sequence: welcome greeting, then whichever of {photo, favorite game, 3
+// showcase games} aren't already set, then a final step whose only action is
+// an explicit "Start the tour" button that chains the profile + review
+// driver.js tours back to back. For a brand-new user that's 5 steps total.
+// Reuses the exact same primitives as the profile page's own picker
+// (CropModal, /api/profile/avatar, /api/games/search, /api/profile/update)
+// rather than inventing new ones.
+//
+// Data steps already satisfied (e.g. a returning user missing just one field)
+// are skipped — only rendered here so `pending` can address them by
+// data-step-key. Mounted globally from Layout.astro, on whatever page an
+// incomplete profile lands on — not just a fresh signup landing on /welcome —
+// so existing users who never got this treatment are swept in too.
+import CropModal from './CropModal.astro';
+import { LIBRARY_SCRAPER_SOURCE } from '../utils/backloggd/libraryScraperSource';
+
+const backloggdLibraryBookmarklet = `javascript:${encodeURIComponent(LIBRARY_SCRAPER_SOURCE)}`;
+
+interface ShowcaseGame { id: string; title: string; cover_img_url?: string | null; slug?: string | null }
+interface FavoriteGame { id: string; title: string; cover_img_url?: string | null; slug?: string | null }
+
+interface Props {
+  username: string;
+  hasAvatar: boolean;
+  hasFavorite: boolean;
+  hasShowcase: boolean;
+  hasImportedBackloggd?: boolean;
+  existingFavorite?: FavoriteGame | null;
+  existingShowcase?: ShowcaseGame[];
+}
+
+const {
+  username,
+  hasAvatar,
+  hasFavorite,
+  hasShowcase,
+  hasImportedBackloggd = false,
+  existingFavorite = null,
+  existingShowcase = [],
+} = Astro.props;
+
+const pending = [
+  'welcome',
+  !hasAvatar && 'avatar',
+  !hasFavorite && 'favorite',
+  !hasShowcase && 'showcase',
+  !hasImportedBackloggd && 'backloggd',
+  'tour',
+].filter(Boolean) as string[];
+
+const initial = username?.charAt(0)?.toUpperCase() || '?';
+---
+
+<div id="ck-onboarding" class="ob-overlay">
+  <div class="ob-modal">
+    <div class="ob-progress">
+      <div class="ob-progress-bar"><div class="ob-progress-fill" id="obProgressFill"></div></div>
+      <div class="ob-progress-label">Step <span id="obStepNum">1</span> of <span id="obTotalSteps">{pending.length}</span></div>
+    </div>
+
+    <section class="ob-step" data-step-key="welcome" hidden>
+      <div class="ob-icon">🎮</div>
+      <h2>Welcome to Chekpoint, <span class="ob-username">@{username}</span>!</h2>
+      <p>Let's get your profile set up — just a few quick steps.</p>
+      <button class="ob-continue" id="obWelcomeContinue" type="button">Let's go →</button>
+    </section>
+
+    <section class="ob-step" data-step-key="avatar" hidden>
+      <div class="ob-icon">📸</div>
+      <h2>Add a profile photo</h2>
+      <p>Help other reviewers recognize you around Chekpoint.</p>
+      <div class="ob-avatar-picker">
+        <div class="ob-avatar-preview" id="obAvatarPreview"><span class="ob-avatar-placeholder">{initial}</span></div>
+        <label class="ob-upload-btn">
+          <input type="file" id="obAvatarInput" accept="image/*" hidden />
+          <span id="obAvatarBtnLabel">Choose a photo</span>
+        </label>
+      </div>
+      <button class="ob-continue" id="obAvatarContinue" type="button" disabled>Continue</button>
+    </section>
+
+    <section class="ob-step" data-step-key="favorite" hidden>
+      <div class="ob-icon">⭐</div>
+      <h2>Pick your favorite game</h2>
+      <p>The one game that defines your taste — shown at the top of your profile.</p>
+      <input type="text" class="ob-search" id="obFavSearch" placeholder="Search for a game…" autocomplete="off" />
+      <div class="ob-results" id="obFavResults"></div>
+      <div class="ob-selected" id="obFavSelected" hidden></div>
+      <button class="ob-continue" id="obFavContinue" type="button" disabled>Continue</button>
+    </section>
+
+    <section class="ob-step" data-step-key="showcase" hidden>
+      <div class="ob-icon">🎮</div>
+      <h2>Add 3 games to your showcase</h2>
+      <p>Feature a few games you love on your profile.</p>
+      <input type="text" class="ob-search" id="obShowcaseSearch" placeholder="Search for a game…" autocomplete="off" />
+      <div class="ob-results" id="obShowcaseResults"></div>
+      <div class="ob-showcase-slots" id="obShowcaseSlots">
+        <div class="ob-slot" data-slot="0"></div>
+        <div class="ob-slot" data-slot="1"></div>
+        <div class="ob-slot" data-slot="2"></div>
+      </div>
+      <button class="ob-continue" id="obShowcaseContinue" type="button" disabled>Continue</button>
+    </section>
+
+    <section class="ob-step" data-step-key="backloggd" hidden>
+      <div class="ob-icon">📥</div>
+      <h2>Coming from Backloggd?</h2>
+      <p>Bring your reviews and library over — or skip this and do it later from Settings.</p>
+
+      <div class="ob-bl-tabs">
+        <button type="button" class="ob-bl-tab active" data-bltab="reviews">Reviews</button>
+        <button type="button" class="ob-bl-tab" data-bltab="library">Full library</button>
+      </div>
+
+      <div class="ob-bl-panel" data-blpanel="reviews">
+        <p class="ob-bl-sub">Your reviews — ratings, dates, and the play status of each reviewed game.</p>
+        <input type="text" class="ob-search" id="obBlUsername" placeholder="Backloggd username" autocomplete="off" />
+        <button class="ob-continue" id="obBlImport" type="button">Import my reviews</button>
+      </div>
+
+      <div class="ob-bl-panel" data-blpanel="library" hidden>
+        <p class="ob-bl-sub">Every game and its status (backlog, wishlist, playing, played…).</p>
+        <ol class="ob-bl-steps">
+          <li>Drag to your bookmarks bar: <a class="bl-bookmarklet" href={backloggdLibraryBookmarklet}>📥 Import Backloggd Library</a></li>
+          <li>Open <a href="https://backloggd.com" target="_blank" rel="noopener">your Backloggd library</a>, click that bookmark, then choose the downloaded file:</li>
+        </ol>
+        <input type="file" id="obBlLibFile" accept="application/json" class="ob-bl-file" />
+        <button class="ob-continue" id="obBlLibImport" type="button">Import library</button>
+      </div>
+
+      <div class="ob-bl-status" id="obBlStatus" hidden></div>
+      <div class="ob-progress-bar" id="obBlBar" hidden style="margin:12px 0 0"><div class="ob-progress-fill" id="obBlBarFill"></div></div>
+
+      <button class="ob-skip" id="obBlSkip" type="button">Skip — I'll do this later</button>
+    </section>
+
+    <section class="ob-step" data-step-key="tour" hidden>
+      <div class="ob-icon">🧭</div>
+      <h2>One last thing — take the tour</h2>
+      <p>A quick guided walkthrough of your profile, then how to write your first review.</p>
+      <button class="ob-continue" id="obTourStart" type="button">Start the tour →</button>
+    </section>
+  </div>
+</div>
+
+<CropModal />
+
+{/* Bundled module — resolves the import that the define:vars script below (forced
+    inline) cannot. Exposes the Backloggd import helpers on window for that script. */}
+<script>
+  import { previewBackloggd, startAndDrive, importLibraryFile } from '../utils/backloggd/importClient';
+  (window as any).__ckBacklogImport = { previewBackloggd, startAndDrive, importLibraryFile };
+</script>
+
+<script
+  define:vars={{
+    pending,
+    existingFavorite,
+    existingShowcase,
+  }}
+>
+  window.__lockScroll && window.__lockScroll();
+
+  var flow = pending;
+  var flowIndex = -1;
+  var favGame = existingFavorite || null;
+  var showcaseSlots = [0, 1, 2].map(function (i) { return existingShowcase[i] || null; });
+
+  function showStepByKey(key) {
+    document.querySelectorAll('.ob-step').forEach(function (el) {
+      el.hidden = el.dataset.stepKey !== key;
+    });
+    document.getElementById('obStepNum').textContent = String(flowIndex + 1);
+    var fill = document.getElementById('obProgressFill');
+    if (fill) fill.style.width = ((flowIndex + 1) / flow.length * 100) + '%';
+  }
+
+  function advance() {
+    flowIndex++;
+    if (flowIndex >= flow.length) { finish(); return; }
+    showStepByKey(flow[flowIndex]);
+  }
+
+  function finish() {
+    fetch('/api/profile/complete-onboarding', { method: 'POST' }).catch(function () {});
+    window.__unlockScroll && window.__unlockScroll();
+    var root = document.getElementById('ck-onboarding');
+    if (root) root.remove();
+    if (window.startTour) window.startTour('profile', 'review');
+    else window.location.href = '/';
+  }
+
+  // ---- shared helpers ----
+  function coverUrl(game) {
+    return game && game.cover_img_url ? game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_cover_big') : null;
+  }
+
+  function buildResultRow(game) {
+    var item = document.createElement('div');
+    item.className = 'ob-result';
+    var coverWrap = document.createElement('div');
+    coverWrap.className = 'ob-result-cover';
+    var cover = coverUrl(game);
+    if (cover) {
+      var img = document.createElement('img');
+      img.src = cover; img.alt = '';
+      coverWrap.appendChild(img);
+    } else {
+      coverWrap.textContent = '🎮';
+    }
+    var info = document.createElement('div');
+    var title = document.createElement('div');
+    title.className = 'ob-result-title';
+    title.textContent = game.title;
+    var meta = document.createElement('div');
+    meta.className = 'ob-result-meta';
+    meta.textContent = game.date_released ? new Date(game.date_released).getFullYear() : (game.year || '');
+    info.appendChild(title); info.appendChild(meta);
+    item.appendChild(coverWrap); item.appendChild(info);
+    return item;
+  }
+
+  var searchTimer;
+  async function searchGames(q, callback) {
+    try {
+      var res = await fetch('/api/games/search?q=' + encodeURIComponent(q) + '&limit=10');
+      if (!res.ok) throw new Error();
+      callback(await res.json());
+    } catch (e) { /* leave results as-is */ }
+  }
+
+  // ---- Step: welcome ----
+  document.getElementById('obWelcomeContinue').addEventListener('click', advance);
+
+  // ---- Step: tour (final step — button triggers finish() via advance()) ----
+  document.getElementById('obTourStart').addEventListener('click', advance);
+
+  // ---- Step: avatar ----
+  var avatarInput = document.getElementById('obAvatarInput');
+  var avatarBtnLabel = document.getElementById('obAvatarBtnLabel');
+  var avatarPreview = document.getElementById('obAvatarPreview');
+  var avatarContinue = document.getElementById('obAvatarContinue');
+
+  avatarInput.addEventListener('change', async function () {
+    var file = avatarInput.files && avatarInput.files[0];
+    if (!file) return;
+    var blob;
+    try {
+      blob = await window.openImageCropper(file, { aspectRatio: 1, minWidth: 200, minHeight: 200, title: 'Crop Profile Photo' });
+    } catch (e) { avatarInput.value = ''; return; }
+    var croppedFile = new File([blob], 'avatar.' + (blob.type === 'image/png' ? 'png' : 'jpg'), { type: blob.type });
+
+    avatarBtnLabel.textContent = 'Uploading…';
+    var formData = new FormData();
+    formData.append('avatar', croppedFile);
+    try {
+      var res = await fetch('/api/profile/avatar', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error();
+      var data = await res.json();
+      avatarPreview.innerHTML = '';
+      var img = document.createElement('img');
+      img.src = data.url; img.alt = '';
+      avatarPreview.appendChild(img);
+      avatarBtnLabel.textContent = 'Change photo';
+      avatarContinue.disabled = false;
+    } catch (e) {
+      avatarBtnLabel.textContent = 'Choose a photo';
+      alert('Upload failed — please try again.');
+    }
+    avatarInput.value = '';
+  });
+  avatarContinue.addEventListener('click', advance);
+
+  // ---- Step: favorite game ----
+  var favSearch = document.getElementById('obFavSearch');
+  var favResults = document.getElementById('obFavResults');
+  var favSelected = document.getElementById('obFavSelected');
+  var favContinue = document.getElementById('obFavContinue');
+
+  function renderFavSelected() {
+    favSelected.innerHTML = '';
+    if (!favGame) { favSelected.hidden = true; return; }
+    favSelected.hidden = false;
+    var card = document.createElement('div');
+    card.className = 'ob-selected-card';
+    var cover = coverUrl(favGame);
+    if (cover) {
+      var img = document.createElement('img');
+      img.src = cover; img.alt = '';
+      card.appendChild(img);
+    } else {
+      var fb = document.createElement('span');
+      fb.className = 'ob-selected-fallback'; fb.textContent = '🎮';
+      card.appendChild(fb);
+    }
+    var label = document.createElement('span');
+    label.textContent = favGame.title;
+    card.appendChild(label);
+    favSelected.appendChild(card);
+  }
+  renderFavSelected();
+  favContinue.disabled = !favGame;
+
+  favSearch.addEventListener('input', function () {
+    var q = favSearch.value;
+    clearTimeout(searchTimer);
+    if (!q.trim()) { favResults.innerHTML = ''; return; }
+    searchTimer = setTimeout(function () { searchGames(q, renderFavResults); }, 300);
+  });
+
+  function renderFavResults(games) {
+    favResults.innerHTML = '';
+    if (!games.length) { favResults.innerHTML = '<div class="ob-empty">No games found</div>'; return; }
+    games.forEach(function (game) {
+      var item = buildResultRow(game);
+      item.onclick = async function () {
+        var previous = favGame;
+        favGame = game;
+        favSearch.value = '';
+        favResults.innerHTML = '';
+        renderFavSelected();
+        favContinue.disabled = true;
+        try {
+          var res = await fetch('/api/profile/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ favorite_game_id: game.id }),
+          });
+          if (!res.ok) throw new Error();
+          favContinue.disabled = false;
+        } catch (e) {
+          favGame = previous;
+          renderFavSelected();
+          alert('Failed to save — please try again.');
+        }
+      };
+      favResults.appendChild(item);
+    });
+  }
+  favContinue.addEventListener('click', advance);
+
+  // ---- Step: showcase ----
+  var showcaseSearch = document.getElementById('obShowcaseSearch');
+  var showcaseResults = document.getElementById('obShowcaseResults');
+  var showcaseContinue = document.getElementById('obShowcaseContinue');
+
+  function renderShowcaseSlots() {
+    var slotEls = document.querySelectorAll('#obShowcaseSlots .ob-slot');
+    slotEls.forEach(function (slotEl, i) {
+      slotEl.innerHTML = '';
+      var game = showcaseSlots[i];
+      if (game) {
+        slotEl.classList.add('ob-slot-filled');
+        var cover = coverUrl(game);
+        if (cover) {
+          var img = document.createElement('img');
+          img.src = cover; img.alt = '';
+          slotEl.appendChild(img);
+        } else {
+          var fb = document.createElement('span');
+          fb.className = 'ob-slot-fallback'; fb.textContent = '🎮';
+          slotEl.appendChild(fb);
+        }
+        var rm = document.createElement('button');
+        rm.type = 'button'; rm.className = 'ob-slot-remove'; rm.textContent = '×';
+        rm.setAttribute('aria-label', 'Remove');
+        rm.addEventListener('click', function () { removeFromShowcase(i); });
+        slotEl.appendChild(rm);
+      } else {
+        slotEl.classList.remove('ob-slot-filled');
+        var ph = document.createElement('span');
+        ph.className = 'ob-slot-empty'; ph.textContent = String(i + 1);
+        slotEl.appendChild(ph);
+      }
+    });
+    showcaseContinue.disabled = showcaseSlots.filter(Boolean).length < 3;
+  }
+  renderShowcaseSlots();
+
+  async function saveShowcase() {
+    var payload = showcaseSlots.filter(Boolean).map(function (g) {
+      return { id: g.id, title: g.title, cover_img_url: g.cover_img_url, slug: g.slug };
+    });
+    try {
+      var res = await fetch('/api/profile/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ showcase_games: payload }),
+      });
+      if (!res.ok) throw new Error();
+    } catch (e) { alert('Failed to save showcase — please try again.'); }
+  }
+
+  function addToShowcase(game) {
+    var slot = showcaseSlots.findIndex(function (g) { return !g; });
+    if (slot === -1) return;
+    showcaseSlots[slot] = game;
+    showcaseSearch.value = '';
+    showcaseResults.innerHTML = '';
+    renderShowcaseSlots();
+    saveShowcase();
+  }
+
+  function removeFromShowcase(slot) {
+    showcaseSlots[slot] = null;
+    renderShowcaseSlots();
+    saveShowcase();
+  }
+
+  showcaseSearch.addEventListener('input', function () {
+    var q = showcaseSearch.value;
+    clearTimeout(searchTimer);
+    if (!q.trim()) { showcaseResults.innerHTML = ''; return; }
+    searchTimer = setTimeout(function () { searchGames(q, renderShowcaseResults); }, 300);
+  });
+
+  function renderShowcaseResults(games) {
+    showcaseResults.innerHTML = '';
+    if (showcaseSlots.filter(Boolean).length >= 3) {
+      showcaseResults.innerHTML = '<div class="ob-empty">You’ve picked 3 — remove one to swap.</div>';
+      return;
+    }
+    if (!games.length) { showcaseResults.innerHTML = '<div class="ob-empty">No games found</div>'; return; }
+    games.forEach(function (game) {
+      if (showcaseSlots.some(function (g) { return g && g.id === game.id; })) return;
+      var item = buildResultRow(game);
+      item.onclick = function () { addToShowcase(game); };
+      showcaseResults.appendChild(item);
+    });
+  }
+  showcaseContinue.addEventListener('click', advance);
+
+  // ---- Step: backloggd import (reviews + full library; the only skippable step) ----
+  var blUsername = document.getElementById('obBlUsername');
+  var blImportBtn = document.getElementById('obBlImport');
+  var blLibImportBtn = document.getElementById('obBlLibImport');
+  var blLibFile = document.getElementById('obBlLibFile');
+  var blSkipBtn = document.getElementById('obBlSkip');
+  var blStatus = document.getElementById('obBlStatus');
+  var blBar = document.getElementById('obBlBar');
+  var blBarFill = document.getElementById('obBlBarFill');
+  // phase: 'idle' -> 'running' -> 'done' | 'failed'. Once done/failed, the action
+  // button (and skip) just advance — so a single click handler per button, no
+  // onclick reassignment fighting the listener.
+  var blPhase = 'idle';
+  var blMarked = false;
+
+  function blMarkStepDone() {
+    if (blMarked) return;
+    blMarked = true;
+    fetch('/api/import/backloggd/skip-onboarding', { method: 'POST' }).catch(function () {});
+  }
+
+  function blLeaveStep() {
+    blMarkStepDone();
+    advance();
+  }
+
+  function blOnProgress(p) {
+    if (p.fraction != null) blBarFill.style.width = Math.round(p.fraction * 100) + '%';
+    blStatus.textContent = p.message;
+  }
+
+  function blFinish(btn, message) {
+    blPhase = 'done';
+    blBarFill.style.width = '100%';
+    blStatus.textContent = message;
+    blMarkStepDone();
+    btn.textContent = 'Continue →';
+    btn.disabled = false;
+    blSkipBtn.style.display = 'none';
+  }
+
+  function blFail(btn, e) {
+    blPhase = 'failed';
+    blStatus.textContent = (e && e.message ? e.message : 'Import failed') + ' — you can try again from Settings later.';
+    btn.textContent = 'Skip for now';
+    btn.disabled = false;
+    blSkipBtn.disabled = false;
+  }
+
+  // Tabs
+  document.querySelectorAll('.ob-bl-tab').forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      if (blPhase !== 'idle') return;
+      var key = tab.dataset.bltab;
+      document.querySelectorAll('.ob-bl-tab').forEach(function (t) { t.classList.toggle('active', t === tab); });
+      document.querySelectorAll('.ob-bl-panel').forEach(function (panel) {
+        panel.hidden = panel.dataset.blpanel !== key;
+      });
+    });
+  });
+
+  blSkipBtn.addEventListener('click', blLeaveStep);
+
+  blImportBtn.addEventListener('click', async function () {
+    if (blPhase === 'done' || blPhase === 'failed') { blLeaveStep(); return; }
+    if (blPhase === 'running') return;
+    var api = window.__ckBacklogImport;
+    if (!api) { blStatus.hidden = false; blStatus.textContent = 'Still loading — try again in a second.'; return; }
+    var username = (blUsername.value || '').trim();
+    if (!username) { blStatus.hidden = false; blStatus.textContent = 'Enter your Backloggd username, or skip.'; return; }
+    blPhase = 'running';
+    blImportBtn.disabled = true;
+    blSkipBtn.disabled = true;
+    blUsername.disabled = true;
+    blStatus.hidden = false;
+    blStatus.textContent = 'Checking your Backloggd profile…';
+    try {
+      var preview = await api.previewBackloggd(username);
+      blStatus.textContent = 'Importing ' + preview.totalReviews + ' review' + (preview.totalReviews === 1 ? '' : 's') + '…';
+      blBar.hidden = false;
+      await api.startAndDrive({ username: preview.username }, { onProgress: blOnProgress });
+      blFinish(blImportBtn, 'Done! Your reviews and their play statuses are on your profile.');
+    } catch (e) {
+      blFail(blImportBtn, e);
+    }
+  });
+
+  blLibImportBtn.addEventListener('click', async function () {
+    if (blPhase === 'done' || blPhase === 'failed') { blLeaveStep(); return; }
+    if (blPhase === 'running') return;
+    var api = window.__ckBacklogImport;
+    if (!api) { blStatus.hidden = false; blStatus.textContent = 'Still loading — try again in a second.'; return; }
+    var file = blLibFile.files && blLibFile.files[0];
+    if (!file) { blStatus.hidden = false; blStatus.textContent = 'Choose the downloaded library file first, or skip.'; return; }
+    var rows;
+    try {
+      var parsed = JSON.parse(await file.text());
+      rows = Array.isArray(parsed) ? parsed : parsed && parsed.rows;
+      if (!Array.isArray(rows) || !rows.length) throw new Error();
+    } catch (e) {
+      blStatus.hidden = false;
+      blStatus.textContent = "That file doesn't look like a Backloggd library export.";
+      return;
+    }
+    blPhase = 'running';
+    blLibImportBtn.disabled = true;
+    blSkipBtn.disabled = true;
+    blStatus.hidden = false;
+    blBar.hidden = false;
+    try {
+      var totals = await api.importLibraryFile(rows, { onProgress: blOnProgress });
+      blFinish(
+        blLibImportBtn,
+        totals.applied + ' game' + (totals.applied === 1 ? '' : 's') + ' added to your library' +
+          (totals.imported ? ' (' + totals.imported + ' new from IGDB)' : '') + '.',
+      );
+    } catch (e) {
+      blFail(blLibImportBtn, e);
+    }
+  });
+
+  // ---- kick off ----
+  advance();
+</script>
+
+<style is:global>
+  /* is:global (not scoped) is required here: search results, the selected-game
+     card, and showcase slot contents are all built with document.createElement
+     in the client script below, so they never receive Astro's scoped-style
+     attribute — a scoped <style> here would silently fail to style any of
+     them. Matches the same is:global choice reviewers/[username].astro makes
+     for its own JS-built .modal-result rows. */
+  .ob-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(6px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    overflow-y: auto;
+  }
+
+  .ob-modal {
+    background: var(--bg-card, #1a1a1a);
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 16px;
+    padding: 40px 36px 32px;
+    max-width: 460px;
+    width: 100%;
+    text-align: center;
+  }
+
+  .ob-progress { margin-bottom: 24px; }
+  .ob-progress-bar {
+    height: 4px;
+    background: var(--bg-hover, #2a2a2a);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .ob-progress-fill {
+    height: 100%;
+    background: var(--accent, #7c3aed);
+    border-radius: 4px;
+    transition: width 0.25s ease;
+    width: 0%;
+  }
+  .ob-progress-label { font-size: 12px; color: var(--text-tertiary, #777); font-weight: 500; }
+
+  .ob-icon { font-size: 40px; margin-bottom: 12px; }
+  .ob-username { color: var(--accent, #7c3aed); }
+
+  .ob-step h2 {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary, #fff);
+    margin: 0 0 8px;
+  }
+  .ob-step p {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-secondary, #a0a0a0);
+    margin: 0 0 24px;
+  }
+
+  .ob-avatar-picker { display: flex; flex-direction: column; align-items: center; gap: 16px; margin-bottom: 24px; }
+  /* Matches .avatar-lg on the profile page (reviewers/[username].astro) exactly —
+     same size, border, and accent ring — so the cropped result reads the same
+     here as it does there instead of looking more tightly zoomed. */
+  .ob-avatar-preview {
+    width: 104px; height: 104px;
+    border-radius: 50%;
+    background: var(--bg-card, #1a1a1a);
+    border: 4px solid var(--bg, #0f0f0e);
+    box-shadow: 0 0 0 2px var(--accent, #7c3aed);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .ob-avatar-preview img { width: 100%; height: 100%; object-fit: cover; }
+  .ob-avatar-placeholder { font-size: 32px; font-weight: 700; color: var(--text-tertiary, #777); }
+
+  .ob-upload-btn span {
+    display: inline-block;
+    background: var(--bg-hover, #2a2a2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 20px;
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .ob-upload-btn:hover span { border-color: var(--accent, #7c3aed); }
+
+  /* Matches .modal-search-input / .modal-results / .modal-result on the
+     profile page's own favorite/showcase game picker (reviewers/[username].astro)
+     exactly, so search here doesn't look or behave differently. */
+  .ob-search {
+    width: 100%;
+    background: var(--bg-hover, #2a2a2a);
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 10px;
+    color: var(--text-primary, #fff);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    box-sizing: border-box;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .ob-search:focus { border-color: var(--accent, #7c3aed); }
+  .ob-search::placeholder { color: var(--text-tertiary, #777); }
+
+  .ob-results { max-height: 240px; overflow-y: auto; text-align: left; margin-bottom: 12px; }
+  .ob-result {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px; border-radius: 10px; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .ob-result:hover { background: var(--bg-hover, #2a2a2a); }
+  .ob-result-cover {
+    width: 38px; height: 50px; flex-shrink: 0; border-radius: 6px; overflow: hidden;
+    border: 1px solid var(--border, #2a2a2a);
+    background: var(--tag-bg, #2a2a2a);
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
+  .ob-result-cover img { width: 100%; height: 100%; object-fit: cover; }
+  .ob-result-title { font-size: 14px; font-weight: 500; color: var(--text-primary, #fff); margin-bottom: 2px; }
+  .ob-result-meta { font-size: 12px; color: var(--text-tertiary, #777); }
+  .ob-empty { padding: 32px; text-align: center; color: var(--text-tertiary, #777); font-size: 14px; }
+
+  .ob-selected-card {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--bg-hover, #2a2a2a);
+    border: 1px solid var(--accent, #7c3aed);
+    border-radius: 10px;
+    padding: 8px 12px;
+    margin-bottom: 20px;
+    text-align: left;
+  }
+  .ob-selected-card img { width: 32px; height: 43px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+  .ob-selected-fallback { font-size: 18px; }
+  .ob-selected-card span:last-child { font-size: 13px; font-weight: 600; color: var(--text-primary, #fff); }
+
+  /* flex + a max-width cap (rather than a fixed width) lets the 3 slots
+     shrink together to fit narrow phones instead of overflowing the modal —
+     76px each plus gaps doesn't reliably fit inside the content width on a
+     320-375px viewport. aspect-ratio keeps them from looking squashed as
+     they shrink. */
+  .ob-showcase-slots { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; }
+  .ob-slot {
+    position: relative;
+    flex: 1 1 0;
+    max-width: 76px;
+    aspect-ratio: 76 / 100;
+    border-radius: 8px;
+    border: 1.5px dashed var(--border, #2a2a2a);
+    background: var(--bg-hover, #2a2a2a);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .ob-slot.ob-slot-filled { border-style: solid; border-color: var(--accent, #7c3aed); }
+  .ob-slot img { width: 100%; height: 100%; object-fit: cover; }
+  .ob-slot-empty { font-size: 20px; font-weight: 700; color: var(--text-tertiary, #555); }
+  .ob-slot-fallback { font-size: 22px; }
+  .ob-slot-remove {
+    position: absolute; top: 2px; right: 2px;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    border: none;
+    font-size: 14px; line-height: 1;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .ob-continue {
+    width: 100%;
+    background: var(--accent, #7c3aed);
+    color: var(--accent-text, #fff);
+    border: none;
+    border-radius: 22px;
+    padding: 12px 26px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .ob-continue:hover:not(:disabled) { opacity: 0.9; }
+  .ob-continue:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .ob-skip {
+    width: 100%;
+    margin-top: 10px;
+    background: none;
+    border: none;
+    color: var(--text-tertiary, #777);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 6px;
+  }
+  .ob-skip:hover:not(:disabled) { color: var(--text-secondary, #a0a0a0); }
+  .ob-skip:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ob-bl-status { font-size: 13px; color: var(--text-secondary, #a0a0a0); margin-top: 14px; }
+
+  .ob-bl-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .ob-bl-tab {
+    flex: 1;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border, #2a2a2a);
+    background: var(--bg-hover, #2a2a2a);
+    color: var(--text-secondary, #a0a0a0);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .ob-bl-tab.active { border-color: var(--accent, #7c3aed); color: var(--text-primary, #fff); }
+  .ob-bl-panel { text-align: left; }
+  .ob-bl-sub { font-size: 13px !important; color: var(--text-secondary, #a0a0a0); margin: 0 0 12px !important; }
+  .ob-bl-steps { font-size: 13px; color: var(--text-secondary, #a0a0a0); line-height: 1.7; margin: 0 0 12px; padding-left: 18px; }
+  .ob-bl-file { display: block; width: 100%; font-size: 12px; margin-bottom: 12px; color: var(--text-secondary, #a0a0a0); }
+  .bl-bookmarklet {
+    display: inline-block;
+    margin: 4px 0;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: var(--accent, #7c3aed);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: grab;
+    white-space: nowrap;
+  }
+  .bl-bookmarklet:active { cursor: grabbing; }
+
+  @media (max-width: 480px) {
+    /* Room for the iOS/Android home-indicator and notch instead of the
+       overlay's flat 20px padding butting right up against them. */
+    .ob-overlay {
+      padding: 12px;
+      padding-top: max(12px, env(safe-area-inset-top));
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+    }
+    .ob-modal { padding: 28px 20px 24px; border-radius: 14px; }
+    /* Below 16px, iOS Safari auto-zooms the whole page on input focus —
+       jarring inside a fixed-position overlay. Keeps the exact 14px used on
+       the profile page's own search input everywhere above this breakpoint. */
+    .ob-search { font-size: 16px; }
+  }
+</style>
