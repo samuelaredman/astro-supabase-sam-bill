@@ -342,9 +342,10 @@ function formatCount(n: number): string {
 
 const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
 const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
-const initialRecentCursor = lastRecentReview?.published_at ?? lastRecentReview?.created_at ?? null
+const lastFeedItem = feedItems.length > 0 ? feedItems[feedItems.length - 1] : null
+const initialRecentCursor = lastFeedItem?._date ?? null
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
-const initialRecentDone = reviews.length < 20
+const initialRecentDone = feedItems.length < 20
 const initialFollowingDone = followingReviews.length < 20
 
 const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
@@ -1223,6 +1224,241 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       return h;
     }
 
+    // ── Build rec card HTML matching RecommendationFeedCard.astro ──────────────
+    function buildRecCard(r) {
+      var li = isLoggedIn ? 'true' : 'false';
+      var isOwn = !!(currentProfileId && r.profile_id === currentProfileId);
+      var ts = r.created_at;
+      var inits = (r.profiles?.username || r.ownerUsername || '?').slice(0, 2).toUpperCase();
+      var username = r.profiles?.username || r.ownerUsername || '';
+      var avatar = r.profiles?.avatar_url || r.ownerAvatar || null;
+
+      var votesArr = Array.isArray(r.recommendation_votes) ? r.recommendation_votes : [];
+      var up = 0, down = 0, myV = 0;
+      votesArr.forEach(function(v) {
+        if (v.vote === 1) up++;
+        else if (v.vote === -1) down++;
+        if (currentProfileId && v.profile_id === currentProfileId) myV = v.vote;
+      });
+      var rxArr = Array.isArray(r.recommendation_reactions) ? r.recommendation_reactions : [];
+      var rxCountMap = {};
+      rxArr.forEach(function(rx) {
+        if (!rxCountMap[rx.reaction_type]) rxCountMap[rx.reaction_type] = { count: 0, active: false };
+        rxCountMap[rx.reaction_type].count++;
+        if (currentProfileId && rx.profile_id === currentProfileId) rxCountMap[rx.reaction_type].active = true;
+      });
+      var commentCount = Array.isArray(r.recommendation_comments) ? r.recommendation_comments.length : 0;
+
+      var src = r.source_game || {};
+      var tgt = r.target_game || {};
+      var srcCover = igdbThumb(src.cover_img_url);
+      var tgtCover = igdbThumb(tgt.cover_img_url);
+      var recHref = '/recommendations/' + esc(r.id);
+
+      var h = '<div data-feed-type="rec"><article class="rfc" data-rec-id="' + esc(r.id) + '">';
+
+      if (!isOwn) {
+        h += '<div class="rfc-menu-wrap">'
+           + '<button class="rfc-menu-btn" data-menu-id="' + esc(r.id) + '" aria-label="More options">⋯</button>'
+           + '<div class="rfc-menu-dropdown" id="rfcm-' + esc(r.id) + '" style="display:none">'
+           + '<button class="rfc-menu-item rfc-menu-report" data-rec-id="' + esc(r.id) + '" data-logged-in="' + li + '">Report</button>'
+           + '</div></div>';
+      }
+
+      h += '<div class="rfc-card-actions">'
+         + '<button class="share-btn share-btn-icon" data-share-url="' + esc(recHref) + '" data-share-title="Share recommendation" data-share-image="/og/recommendations/' + esc(r.id) + '.jpg" title="Share recommendation">'
+         + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>'
+         + '</button>';
+      if (isOwn) {
+        h += '<button class="rfc-feed-edit-btn" data-rec-id="' + esc(r.id) + '" title="Edit recommendation">'
+           + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
+           + '</button>'
+           + '<button class="rfc-feed-delete-btn" data-rec-id="' + esc(r.id) + '" title="Delete recommendation">'
+           + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>'
+           + '</button>';
+      }
+      h += '</div>';
+
+      h += '<div class="rfc-reviewer">'
+         + '<a href="/reviewers/' + esc(username) + '" class="rfc-avatar">'
+         + (avatar ? '<img src="' + esc(avatar) + '" alt="' + esc(username) + '" />' : '<span>' + esc(inits) + '</span>')
+         + '</a>'
+         + '<a href="/reviewers/' + esc(username) + '" class="rfc-reviewer-name">@' + esc(username) + '</a>'
+         + '<span class="rfc-action">recommends</span>'
+         + '<span class="rfc-dot">·</span>'
+         + '<span class="rfc-ts">' + esc(timeAgo(ts)) + '</span>'
+         + '</div>';
+
+      h += '<div class="rfc-pair">'
+         + '<a href="' + esc(recHref) + '" class="rfc-game">'
+         + '<div class="rfc-cover">'
+         + (srcCover ? '<img src="' + esc(srcCover) + '" alt="' + esc(src.title || '') + '" loading="lazy" />' : '<span class="rfc-cover-ph">🎮</span>')
+         + '</div>'
+         + '<div class="rfc-game-title">' + esc(src.title || 'a game') + '</div>'
+         + '<div class="rfc-game-role">If you liked</div>'
+         + '</a>'
+         + '<div class="rfc-arrow" aria-hidden="true">'
+         + '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10h16"/><path d="M6 6l-4 4 4 4"/><path d="M14 6l4 4-4 4"/></svg>'
+         + '</div>'
+         + '<a href="' + esc(recHref) + '" class="rfc-game">'
+         + '<div class="rfc-cover">'
+         + (tgtCover ? '<img src="' + esc(tgtCover) + '" alt="' + esc(tgt.title || '') + '" loading="lazy" />' : '<span class="rfc-cover-ph">🎮</span>')
+         + '</div>'
+         + '<div class="rfc-game-title">' + esc(tgt.title || 'another game') + '</div>'
+         + '<div class="rfc-game-role">try</div>'
+         + '</a>'
+         + '</div>';
+
+      if (r.contains_spoilers) h += '<div class="rfc-spoiler-pill">⚠ spoilers</div>';
+      h += '<div class="rfc-body' + (r.contains_spoilers ? ' spoiler-hidden' : '') + '"'
+         + ' data-rec-id="' + esc(r.id) + '"'
+         + ' data-spoiler="' + (r.contains_spoilers ? 'true' : 'false') + '"'
+         + ' data-detail="false"'
+         + ' data-raw-body="' + esc(r.body) + '">'
+         + esc(r.body)
+         + '</div>';
+
+      h += '<div class="rfc-footer">'
+         + '<a href="' + esc(recHref) + '#comments" class="rfc-comment-bubble">'
+         + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 10a2 2 0 0 1-2 2H5l-3 3V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6z"/></svg>'
+         + commentCount
+         + '</a></div>';
+
+      h += '<div class="rfc-interact">'
+         + '<button class="rfc-vote-btn' + (myV === 1 ? ' rfc-vote-active-up' : '') + '" data-rec-id="' + esc(r.id) + '" data-vote="1" data-logged-in="' + li + '">▲ ' + up + '</button>'
+         + '<button class="rfc-vote-btn' + (myV === -1 ? ' rfc-vote-active-down' : '') + '" data-rec-id="' + esc(r.id) + '" data-vote="-1" data-logged-in="' + li + '">▼ ' + down + '</button>'
+         + '<span class="rfc-sep"></span>'
+         + '<div class="rfc-reaction-wrap" data-rec-id="' + esc(r.id) + '">';
+
+      Object.keys(rxCountMap).forEach(function(type) {
+        var rx = rxCountMap[type];
+        h += '<button class="rfc-reaction-btn' + (rx.active ? ' rfc-reaction-active' : '') + '"'
+           + ' data-rec-id="' + esc(r.id) + '" data-reaction="' + esc(type) + '"'
+           + ' data-reacted="' + (rx.active ? 'true' : 'false') + '" data-count="' + rx.count + '"'
+           + ' data-logged-in="' + li + '" data-is-image="false">'
+           + renderReactionDisplay(type) + ' ' + rx.count
+           + '</button>';
+      });
+
+      h += '<button class="rfc-react-toggle" data-rec-id="' + esc(r.id) + '" data-logged-in="' + li + '" title="React">+</button>'
+         + '</div></div>'
+         + '</article></div>';
+
+      return h;
+    }
+
+    // ── Build list card HTML matching ListFeedCard.astro ───────────────────────
+    function buildListCard(l) {
+      var li = isLoggedIn ? 'true' : 'false';
+      var isOwn = !!(currentProfileId && l.profile_id === currentProfileId);
+      var ts = l.created_at;
+      var username = l.profiles?.username || l.ownerUsername || '';
+      var avatar = l.profiles?.avatar_url || l.ownerAvatar || null;
+      var inits = (username || '?').slice(0, 2).toUpperCase();
+      var listHref = '/lists/' + esc(l.id);
+
+      var votesArr = Array.isArray(l.list_votes) ? l.list_votes : [];
+      var up = 0, down = 0, myV = 0;
+      votesArr.forEach(function(v) {
+        if (v.vote === 1) up++;
+        else if (v.vote === -1) down++;
+        if (currentProfileId && v.profile_id === currentProfileId) myV = v.vote;
+      });
+      var rxArr = Array.isArray(l.list_reactions) ? l.list_reactions : [];
+      var rxCountMap = {};
+      rxArr.forEach(function(rx) {
+        if (!rxCountMap[rx.reaction_type]) rxCountMap[rx.reaction_type] = { count: 0, active: false };
+        rxCountMap[rx.reaction_type].count++;
+        if (currentProfileId && rx.profile_id === currentProfileId) rxCountMap[rx.reaction_type].active = true;
+      });
+      var commentCount = Array.isArray(l.list_comments) ? l.list_comments.length : 0;
+      var coverUrls = Array.isArray(l.coverUrls) ? l.coverUrls : [];
+      var entryCount = l.entryCount || 0;
+
+      var h = '<div data-feed-type="list"><article class="lfc" data-list-id="' + esc(l.id) + '">';
+
+      h += '<div class="lfc-owner-actions">'
+         + '<button class="share-btn share-btn-icon" data-share-url="' + esc(listHref) + '" data-share-title="Share list" data-share-image="/og/lists/' + esc(l.id) + '-grid.jpg" title="Share list">'
+         + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>'
+         + '</button>';
+      if (isOwn) {
+        h += '<a href="' + esc(listHref) + '/edit" class="lfc-edit-btn" title="Edit list">'
+           + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
+           + '</a>'
+           + '<button class="lfc-delete-btn" data-delete-list-id="' + esc(l.id) + '" title="Delete list">'
+           + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>'
+           + '</button>';
+      }
+      h += '</div>';
+
+      h += '<div class="lfc-reviewer">'
+         + '<a href="/reviewers/' + esc(username) + '" class="lfc-avatar">'
+         + (avatar ? '<img src="' + esc(avatar) + '" alt="' + esc(username) + '" />' : '<span>' + esc(inits) + '</span>')
+         + '</a>'
+         + '<a href="/reviewers/' + esc(username) + '" class="lfc-reviewer-name">@' + esc(username) + '</a>'
+         + '<span class="lfc-action">shared a list</span>'
+         + '<span class="lfc-dot">·</span>'
+         + '<span class="lfc-ts">' + esc(timeAgo(ts)) + '</span>'
+         + '</div>';
+
+      h += '<div class="lfc-main">';
+      if (l.cover_image_url) {
+        h += '<a href="' + esc(listHref) + '" class="lfc-list-cover">'
+           + '<img src="' + esc(l.cover_image_url) + '" alt="" loading="lazy" width="52" height="52" />'
+           + '</a>';
+      }
+      h += '<div class="lfc-content">'
+         + '<a href="' + esc(listHref) + '" class="lfc-body-link">'
+         + '<div class="lfc-title">' + esc(l.title) + '</div>'
+         + (l.description ? '<p class="lfc-desc">' + esc(l.description) + '</p>' : '')
+         + '</a>';
+
+      if (coverUrls.length > 0) {
+        h += '<a href="' + esc(listHref) + '" class="lfc-covers" aria-label="View list">';
+        coverUrls.forEach(function(src) {
+          h += '<img class="lfc-cover" src="' + esc(src) + '" alt="" loading="lazy" />';
+        });
+        if (entryCount > coverUrls.length) {
+          h += '<div class="lfc-cover-more">+' + (entryCount - coverUrls.length) + '</div>';
+        }
+        h += '</a>';
+      }
+
+      h += '<div class="lfc-footer">'
+         + '<div class="lfc-badges">'
+         + (l.is_ranked ? '<span class="lfc-badge-ranked">Ranked</span>' : '')
+         + '<span class="lfc-count">' + entryCount + ' ' + (entryCount === 1 ? 'game' : 'games') + '</span>'
+         + '</div>'
+         + '<a href="' + esc(listHref) + '#comments" class="lfc-comment-bubble">'
+         + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 10a2 2 0 0 1-2 2H5l-3 3V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6z"/></svg>'
+         + commentCount
+         + '</a>'
+         + '</div>';
+
+      h += '<div class="lfc-interact">'
+         + '<button class="lfc-vote-btn' + (myV === 1 ? ' lfc-vote-active-up' : '') + '" data-list-id="' + esc(l.id) + '" data-vote="1" data-logged-in="' + li + '">▲ ' + up + '</button>'
+         + '<button class="lfc-vote-btn' + (myV === -1 ? ' lfc-vote-active-down' : '') + '" data-list-id="' + esc(l.id) + '" data-vote="-1" data-logged-in="' + li + '">▼ ' + down + '</button>'
+         + '<span class="lfc-sep"></span>'
+         + '<div class="lfc-reaction-wrap" data-list-id="' + esc(l.id) + '">';
+
+      Object.keys(rxCountMap).forEach(function(type) {
+        var rx = rxCountMap[type];
+        h += '<button class="lfc-reaction-btn' + (rx.active ? ' lfc-reaction-active' : '') + '"'
+           + ' data-list-id="' + esc(l.id) + '" data-reaction="' + esc(type) + '"'
+           + ' data-reacted="' + (rx.active ? 'true' : 'false') + '" data-count="' + rx.count + '"'
+           + ' data-logged-in="' + li + '" data-is-image="false">'
+           + renderReactionDisplay(type) + ' ' + rx.count
+           + '</button>';
+      });
+
+      h += '<button class="lfc-react-toggle" data-list-id="' + esc(l.id) + '" data-logged-in="' + li + '" title="React">+</button>'
+         + '</div></div>'
+         + '</div></div>'
+         + '</article></div>';
+
+      return h;
+    }
+
     // ── Per-tab state ──────────────────────────────────────────────────────────
     var state = {
       recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
@@ -1238,27 +1474,30 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       var endEl    = document.getElementById('end-' + tab);
       if (loader) loader.style.display = 'block';
       try {
-        var url = '/api/reviews/feed?tab=' + tab + '&limit=20';
-        if (s.cursor) url += '&cursor=' + encodeURIComponent(s.cursor);
-        var res = await fetch(url);
+        var feedUrl = tab === 'following'
+          ? '/api/reviews/feed?tab=following&limit=20' + (s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '')
+          : '/api/feed/recent?limit=20' + (s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '');
+        var res = await fetch(feedUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        var reviews = await res.json();
-        if (!Array.isArray(reviews) || reviews.length === 0) {
+        var items = await res.json();
+        if (!Array.isArray(items) || items.length === 0) {
           s.done = true;
           if (endEl) endEl.style.display = 'block';
           if (sentinel) sentinel.remove();
           return;
         }
         var tmp = document.createElement('div');
-        reviews.forEach(function(review) {
-          tmp.innerHTML = buildCard(review);
+        items.forEach(function(item) {
+          tmp.innerHTML = item._type === 'rec' ? buildRecCard(item)
+                        : item._type === 'list' ? buildListCard(item)
+                        : buildCard(item);
           if (tmp.firstChild && sentinel && sentinel.parentNode) {
             sentinel.parentNode.insertBefore(tmp.firstChild, sentinel);
           }
         });
-        var last = reviews[reviews.length - 1];
-        s.cursor = last.published_at || last.created_at;
-        if (reviews.length < 20) {
+        var last = items[items.length - 1];
+        s.cursor = last._date || last.published_at || last.created_at;
+        if (items.length < 20) {
           s.done = true;
           if (endEl) endEl.style.display = 'block';
           if (sentinel) sentinel.remove();
