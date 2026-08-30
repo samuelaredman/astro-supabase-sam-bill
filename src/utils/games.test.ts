@@ -15,6 +15,7 @@ import {
   collapseParentCandidates,
   normalizeClusterTitle,
   chooseClusterCanonical,
+  revisionKindForEdition,
 } from "./games";
 
 describe("canonical-node classification sets", () => {
@@ -214,6 +215,16 @@ describe("chooseClusterCanonical", () => {
       { id: "x", igdb_category: 0, date_released: null },
     ])).toBe("x");
     expect(chooseClusterCanonical([])).toBeNull();
+  });
+});
+
+describe("revisionKindForEdition", () => {
+  it("maps a remaster to remaster_merge and everything else to edition", () => {
+    expect(revisionKindForEdition(9)).toBe("remaster_merge");
+    expect(revisionKindForEdition(3)).toBe("edition");   // bundle
+    expect(revisionKindForEdition(11)).toBe("edition");  // port
+    expect(revisionKindForEdition(13)).toBe("edition");  // pack
+    expect(revisionKindForEdition(null)).toBe("edition");
   });
 });
 

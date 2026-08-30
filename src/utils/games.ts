@@ -320,6 +320,16 @@ export function normalizeClusterTitle(title: string): string {
   return foldDiacritics(title).trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+export type GameRevisionKind =
+  | 'release' | 'version' | 'major_patch' | 'dlc' | 'remaster_merge' | 'edition';
+
+// The revision kind to record for a collapsed edition, so reviewers of that
+// edition are pinned to the content state they experienced. A remaster is its
+// own "merge" event; everything else that collapses is an alternate edition.
+export function revisionKindForEdition(category: number | null | undefined): GameRevisionKind {
+  return category === 9 ? 'remaster_merge' : 'edition';
+}
+
 // Choose the canonical node within a cluster: the earliest-released main_game
 // (category 0 / null), or if the cluster has no main game, the earliest release
 // overall. Deterministic — ties break on id. Returns null for an empty cluster.
