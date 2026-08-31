@@ -12,19 +12,23 @@ export interface ReviewOgData {
   reviewerAvatarDataUri: string | null;
 }
 
-const WIDTH    = 1200;
-const HEIGHT   = 630;
-const LEFT_W   = 380;
-const RIGHT_W  = WIDTH - LEFT_W; // 820
-const PAD      = 52;
+const WIDTH      = 1200;
+const HEIGHT     = 630;
+const LEFT_W     = 380;
+const RIGHT_W    = WIDTH - LEFT_W;   // 820
+const PAD_V      = 40;               // top/bottom padding — tighter to fill height
+const PAD_H      = 48;               // left/right padding
 const BADGE_SIZE = 150;
+const GAP        = 16;               // gap between flex items
+// usable content width inside the right panel
+const CONTENT_W  = RIGHT_W - PAD_H * 2; // 724px
 
 function gameTitleFontSize(title: string): number {
   const len = title.length;
-  if (len <= 18) return 58;
-  if (len <= 30) return 50;
-  if (len <= 50) return 42;
-  return 36;
+  if (len <= 16) return 54;
+  if (len <= 28) return 46;
+  if (len <= 44) return 40;
+  return 34;
 }
 
 export function buildReviewOgTree(data: ReviewOgData): any {
@@ -32,7 +36,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   const badgeText = scoreBadgeText(data.score);
 
   // ── Left panel: cover art centred on a purple-glow backdrop ──────────────
-  const coverW = 270;
+  const coverW = 272;
   const coverH = Math.round(coverW * (374 / 264));
 
   const leftChildren: any[] = [
@@ -110,13 +114,13 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     ]),
   ]);
 
-  // ── Game title ────────────────────────────────────────────────────────────
-  const titleMaxW = RIGHT_W - PAD * 2 - BADGE_SIZE - 24;
+  // ── Game title (beside the score badge) ───────────────────────────────────
+  const titleMaxW = CONTENT_W - BADGE_SIZE - 24;
   const gameTitleBlock = h("div", {
     style: {
       fontFamily: "DM Serif Display", fontSize: gameTitleFontSize(data.gameTitle),
       color: "#f8f6f2", lineHeight: 1.2, minWidth: 0, maxWidth: titleMaxW,
-      display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 3,
+      display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
       overflow: "hidden", textOverflow: "ellipsis",
     },
   }, truncate(data.gameTitle, 200));
@@ -125,14 +129,38 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     style: { display: "flex", alignItems: "center", gap: 24 },
   }, [scoreBadgeWrap, gameTitleBlock]);
 
-  // ── Review body excerpt ───────────────────────────────────────────────────
-  const excerpt = data.reviewBody
-    ? truncate(data.reviewBody.replace(/\n+/g, " ").trim(), 200)
+  // ── Review title — prominent, sits directly below the score row ───────────
+  const reviewTitleBlock = data.reviewTitle
+    ? h("div", {
+        style: {
+          fontFamily: "DM Serif Display", fontSize: 28, color: "#d6d2ca",
+          lineHeight: 1.3, display: "-webkit-box",
+          WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
+          overflow: "hidden", textOverflow: "ellipsis",
+        },
+      }, `"${truncate(data.reviewTitle, 120)}"`)
     : null;
 
+  // ── Divider ───────────────────────────────────────────────────────────────
   const divider = h("div", {
-    style: { height: 1, background: "rgba(255,255,255,0.08)", display: "flex" },
+    style: { height: 1, background: "rgba(255,255,255,0.09)", display: "flex" },
   });
+
+  // ── Review body — 5 lines, large enough to read in previews ──────────────
+  const excerpt = data.reviewBody
+    ? truncate(data.reviewBody.replace(/\n+/g, " ").trim(), 260)
+    : null;
+
+  const bodyBlock = excerpt
+    ? h("div", {
+        style: {
+          fontSize: 24, color: "rgba(218,213,206,0.78)", lineHeight: 1.6,
+          fontStyle: "italic", display: "-webkit-box",
+          WebkitLineClamp: 5, WebkitBoxOrient: "vertical",
+          overflow: "hidden", textOverflow: "ellipsis",
+        },
+      }, `"${excerpt}"`)
+    : null;
 
   // ── Reviewer row ──────────────────────────────────────────────────────────
   const AVATAR_SIZE = 46;
@@ -152,70 +180,46 @@ export function buildReviewOgTree(data: ReviewOgData): any {
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
 
-  const reviewerRowChildren: any[] = [
+  const reviewerRow = h("div", {
+    style: { display: "flex", alignItems: "center", gap: 14 },
+  }, [
     avatar,
     h("div", {
       style: {
-        fontSize: 22, fontWeight: 700, color: "#c9c6c0",
-        display: "flex", flexShrink: 0,
-        maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        fontSize: 22, fontWeight: 700, color: "#b8b4ac",
+        display: "flex", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       },
-    }, `@${truncate(data.reviewerUsername, 22)}`),
-  ];
+    }, `@${truncate(data.reviewerUsername, 24)}`),
+  ]);
 
-  if (data.reviewTitle) {
-    reviewerRowChildren.push(
-      h("div", { style: { width: 1, height: 24, background: "rgba(255,255,255,0.2)", display: "flex", flexShrink: 0 } }),
-      h("div", {
-        style: {
-          fontSize: 18, color: "#7a7872", fontStyle: "italic",
-          display: "flex", minWidth: 0, overflow: "hidden",
-          textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
-        },
-      }, truncate(data.reviewTitle, 48)),
-    );
-  }
-
-  const reviewerRow = h("div", {
-    style: { display: "flex", alignItems: "center", gap: 14 },
-  }, reviewerRowChildren);
-
-  // ── Right panel: vertical column, centred ─────────────────────────────────
-  const rightPanelItems: any[] = [scoreRow];
-  if (excerpt) {
-    rightPanelItems.push(
-      divider,
-      h("div", {
-        style: {
-          fontSize: 19, color: "rgba(210,206,200,0.72)", lineHeight: 1.65,
-          fontStyle: "italic", display: "-webkit-box",
-          WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
-          overflow: "hidden", textOverflow: "ellipsis",
-        },
-      }, `"${excerpt}"`),
-    );
-  }
-  rightPanelItems.push(divider, reviewerRow);
+  // ── Right panel ───────────────────────────────────────────────────────────
+  const items: any[] = [scoreRow];
+  if (reviewTitleBlock) items.push(reviewTitleBlock);
+  if (bodyBlock)        items.push(divider, bodyBlock);
+  items.push(divider, reviewerRow);
 
   const rightPanel = h("div", {
     style: {
-      width: RIGHT_W, height: HEIGHT, display: "flex", flexDirection: "column",
-      justifyContent: "center", padding: PAD, gap: 22,
+      width: RIGHT_W, height: HEIGHT,
+      display: "flex", flexDirection: "column", justifyContent: "center",
+      paddingTop: PAD_V, paddingBottom: PAD_V,
+      paddingLeft: PAD_H, paddingRight: PAD_H,
+      gap: GAP,
     },
-  }, rightPanelItems);
+  }, items);
 
   // ── CHEKPOINT wordmark ────────────────────────────────────────────────────
   const wordmark = h("div", {
     style: {
-      position: "absolute", top: 24, right: 32,
+      position: "absolute", top: 22, right: 28,
       display: "flex", alignItems: "center", gap: 9,
       background: "rgba(9,9,10,0.45)", borderRadius: 20,
-      padding: "8px 16px 8px 14px",
+      padding: "7px 14px 7px 12px",
     },
   }, [
-    h("div", { style: { width: 9, height: 9, borderRadius: 5, background: OG_ACCENT, display: "flex" } }),
+    h("div", { style: { width: 8, height: 8, borderRadius: 4, background: OG_ACCENT, display: "flex" } }),
     h("div", {
-      style: { fontSize: 21, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.95)", display: "flex" },
+      style: { fontSize: 19, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.9)", display: "flex" },
     }, "CHEKPOINT"),
   ]);
 
