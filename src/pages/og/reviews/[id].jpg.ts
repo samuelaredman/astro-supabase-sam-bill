@@ -17,7 +17,7 @@ export const GET: APIRoute = async ({ params }) => {
   const { data: review } = await db
     .from("reviews")
     .select(`
-      score, title, status,
+      score, title, body, status,
       games ( title, cover_img_url ),
       profiles ( username, avatar_url )
     `)
@@ -42,6 +42,7 @@ export const GET: APIRoute = async ({ params }) => {
     coverDataUri,
     score: review.score,
     reviewTitle: review.title ?? null,
+    reviewBody: review.body ?? "",
     reviewerUsername: review.profiles?.username ?? "unknown",
     reviewerAvatarDataUri,
   });

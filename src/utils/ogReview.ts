@@ -1,6 +1,5 @@
 import {
   h, truncate, scoreBadgeBg, scoreBadgeText, scoreColor, hexToRgba, OG_ACCENT, OG_BG,
-  BOTTOM_TITLE_WRAP_THRESHOLD, bottomTitleFontSize, bottomTitleFontSizeShort,
 } from "./og";
 
 export interface ReviewOgData {
@@ -8,60 +7,51 @@ export interface ReviewOgData {
   coverDataUri: string | null;
   score: number;
   reviewTitle: string | null;
+  reviewBody: string;
   reviewerUsername: string;
   reviewerAvatarDataUri: string | null;
 }
 
-const WIDTH = 1200;
-const HEIGHT = 630;
-const ACCENT = OG_ACCENT;
-const BG = OG_BG;
-const LEFT_W = 420;
-const RIGHT_W = WIDTH - LEFT_W;
-const PAD = 56;
-const BADGE_SIZE = 200;
+const WIDTH    = 1200;
+const HEIGHT   = 630;
+const LEFT_W   = 380;
+const RIGHT_W  = WIDTH - LEFT_W; // 820
+const PAD      = 52;
+const BADGE_SIZE = 150;
 
-// Font size only — the block below always wraps naturally up to 4 lines via
-// WebkitLineClamp rather than forcing a single non-wrapping line, so a short
-// title never gets a "…" just because it's a hair wider than the column at
-// this font size. Ellipsis only kicks in once a title would need a 5th line.
 function gameTitleFontSize(title: string): number {
   const len = title.length;
-  if (len <= 20) return 74;
-  if (len <= 34) return 60;
-  if (len <= 55) return 50;
-  return 42;
+  if (len <= 18) return 58;
+  if (len <= 30) return 50;
+  if (len <= 50) return 42;
+  return 36;
 }
 
 export function buildReviewOgTree(data: ReviewOgData): any {
-  const badgeBg = scoreBadgeBg(data.score);
+  const badgeBg   = scoreBadgeBg(data.score);
   const badgeText = scoreBadgeText(data.score);
 
-  // ── Left panel: poster-style cover art on a softly lit backdrop ──
-  const coverW = 300;
+  // ── Left panel: cover art centred on a purple-glow backdrop ──────────────
+  const coverW = 270;
   const coverH = Math.round(coverW * (374 / 264));
+
   const leftChildren: any[] = [
     h("div", {
       style: {
-        position: "absolute", top: -140, left: -140, width: 480, height: 480, borderRadius: 240,
-        backgroundImage: `radial-gradient(circle, ${hexToRgba(ACCENT, 0.20)} 0%, ${hexToRgba(ACCENT, 0)} 70%)`,
-        display: "flex",
+        position: "absolute", top: -150, left: -150,
+        width: 500, height: 500, borderRadius: 250, display: "flex",
+        backgroundImage: `radial-gradient(circle, ${hexToRgba(OG_ACCENT, 0.22)} 0%, transparent 68%)`,
       },
     }),
   ];
+
   if (data.coverDataUri) {
     leftChildren.push(
-      // Slightly oversized soft-tinted rect behind the cover reads as a frame/glow
-      // without relying on box-shadow, which satori/resvg render inconsistently.
-      // The cover is a real <img> with objectFit "contain", not a div with a
-      // backgroundImage — satori's backgroundSize:"contain" is broken (renders
-      // an unscaled, top-left-anchored corner of the image instead of scaling
-      // it to fit); <img>+objectFit doesn't have that bug and box art isn't
-      // reliably exactly 264:374, so plain "cover" would crop some games.
       h("div", {
         style: {
           width: coverW + 16, height: coverH + 16, borderRadius: 20,
-          background: hexToRgba(ACCENT, 0.16), display: "flex", alignItems: "center", justifyContent: "center",
+          background: hexToRgba(OG_ACCENT, 0.18),
+          display: "flex", alignItems: "center", justifyContent: "center",
         },
       }, [
         h("img", {
@@ -71,18 +61,17 @@ export function buildReviewOgTree(data: ReviewOgData): any {
       ])
     );
   } else {
-    // No cover art — fall back to a monogram, same convention as the
-    // avatar-initials fallback below (satori has no emoji font loaded, so an
-    // actual game-controller glyph would render as a missing-character box).
     leftChildren.push(
       h("div", {
         style: {
-          width: coverW, height: coverH, borderRadius: 14, background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center",
+          width: coverW, height: coverH, borderRadius: 14,
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.1)",
+          display: "flex", alignItems: "center", justifyContent: "center",
         },
       }, [
         h("div", {
-          style: { fontFamily: "DM Serif Display", fontSize: 88, color: "rgba(240,237,232,0.25)", display: "flex" },
+          style: { fontFamily: "DM Serif Display", fontSize: 80, color: "rgba(240,237,232,0.2)", display: "flex" },
         }, data.gameTitle.slice(0, 1).toUpperCase()),
       ])
     );
@@ -90,159 +79,150 @@ export function buildReviewOgTree(data: ReviewOgData): any {
 
   const leftPanel = h("div", {
     style: {
-      position: "relative", width: LEFT_W, height: HEIGHT, display: "flex", alignItems: "center",
-      justifyContent: "center", overflow: "hidden",
+      position: "relative", width: LEFT_W, height: HEIGHT, flexShrink: 0,
+      display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
     },
   }, leftChildren);
 
-  // ── Right panel: a big, centered score badge + game title — the only text
-  // in the card itself, so the title is sized like a headline, not a caption.
-  const scoreBadge = h("div", {
-    style: {
-      // No border: satori/resvg render border+large-borderRadius as a subtle
-      // (unwanted) vertical gradient across the fill, most visible on the
-      // white score-10 badge. A flat fill reads cleanly without it.
-      width: BADGE_SIZE, height: BADGE_SIZE, borderRadius: 32, background: badgeBg,
-      display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-    },
-  }, [
-    h("div", {
-      style: { fontFamily: "DM Serif Display", fontSize: 110, fontWeight: 700, color: badgeText, display: "flex", lineHeight: 1 },
-    }, String(data.score)),
-  ]);
-
-  // A second, score-tinted glow bleeding out from behind the badge — the left
-  // panel's glow stays brand purple, so this is the one place per-review color
-  // shows up. Sized/positioned to bleed past the badge on every side, and given
-  // its own relative wrapper so it renders behind the badge without affecting
-  // scoreRow's flex layout (it's absolutely positioned, out of flow).
-  const badgeGlowSize = BADGE_SIZE + 140;
-  const scoreBadgeWrap = h("div", {
-    style: { position: "relative", display: "flex", flexShrink: 0 },
-  }, [
+  // ── Score badge with score-coloured glow ──────────────────────────────────
+  const glowSize = BADGE_SIZE + 110;
+  const scoreBadgeWrap = h("div", { style: { position: "relative", display: "flex", flexShrink: 0 } }, [
     h("div", {
       style: {
-        position: "absolute", top: -70, left: -70, width: badgeGlowSize, height: badgeGlowSize,
-        borderRadius: badgeGlowSize / 2, display: "flex",
-        backgroundImage: `radial-gradient(circle, ${hexToRgba(scoreColor(data.score), 0.30)} 0%, ${hexToRgba(scoreColor(data.score), 0)} 70%)`,
+        position: "absolute",
+        top: -(glowSize - BADGE_SIZE) / 2, left: -(glowSize - BADGE_SIZE) / 2,
+        width: glowSize, height: glowSize, borderRadius: glowSize / 2, display: "flex",
+        backgroundImage: `radial-gradient(circle, ${hexToRgba(scoreColor(data.score), 0.32)} 0%, transparent 68%)`,
       },
     }),
-    scoreBadge,
+    h("div", {
+      style: {
+        width: BADGE_SIZE, height: BADGE_SIZE, borderRadius: 24, background: badgeBg,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      },
+    }, [
+      h("div", {
+        style: {
+          fontFamily: "DM Serif Display", fontSize: 86, fontWeight: 700,
+          color: badgeText, display: "flex", lineHeight: 1,
+        },
+      }, String(data.score)),
+    ]),
   ]);
 
-  const gameTitleMaxWidth = RIGHT_W - PAD * 2 - BADGE_SIZE - 32;
+  // ── Game title ────────────────────────────────────────────────────────────
+  const titleMaxW = RIGHT_W - PAD * 2 - BADGE_SIZE - 24;
   const gameTitleBlock = h("div", {
     style: {
-      fontFamily: "DM Serif Display", fontSize: gameTitleFontSize(data.gameTitle), color: "#f8f6f2",
-      lineHeight: 1.15, minWidth: 0, maxWidth: gameTitleMaxWidth,
-      display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 4,
+      fontFamily: "DM Serif Display", fontSize: gameTitleFontSize(data.gameTitle),
+      color: "#f8f6f2", lineHeight: 1.2, minWidth: 0, maxWidth: titleMaxW,
+      display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 3,
       overflow: "hidden", textOverflow: "ellipsis",
     },
   }, truncate(data.gameTitle, 200));
 
-  const scoreRow = h("div", { style: { display: "flex", alignItems: "center", gap: 32 } }, [
-    scoreBadgeWrap,
-    gameTitleBlock,
-  ]);
+  const scoreRow = h("div", {
+    style: { display: "flex", alignItems: "center", gap: 24 },
+  }, [scoreBadgeWrap, gameTitleBlock]);
 
-  const rightPanel = h("div", {
-    style: {
-      position: "relative", width: RIGHT_W, height: HEIGHT, display: "flex", flexDirection: "column",
-      justifyContent: "center", padding: PAD,
-    },
-  }, [scoreRow]);
+  // ── Review body excerpt ───────────────────────────────────────────────────
+  const excerpt = data.reviewBody
+    ? truncate(data.reviewBody.replace(/\n+/g, " ").trim(), 200)
+    : null;
 
-  const wordmark = h("div", {
-    style: {
-      position: "absolute", top: 24, right: 32, display: "flex", alignItems: "center", gap: 9,
-      background: "rgba(9,9,10,0.45)", borderRadius: 20, padding: "8px 16px 8px 14px",
-    },
-  }, [
-    h("div", { style: { width: 9, height: 9, borderRadius: 5, background: ACCENT, display: "flex" } }),
-    h("div", { style: { fontSize: 21, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.95)" } }, "CHEKPOINT"),
-  ]);
+  const divider = h("div", {
+    style: { height: 1, background: "rgba(255,255,255,0.08)", display: "flex" },
+  });
 
-  // ── Bottom overlay: profile + username, with the review's own title next
-  // to them in the same row — all laid over the full card (cover + score +
-  // game title), with a gradient scrim behind for legibility.
-  const AVATAR_SIZE = 84;
+  // ── Reviewer row ──────────────────────────────────────────────────────────
+  const AVATAR_SIZE = 46;
   const avatar = data.reviewerAvatarDataUri
-    // A real <img> with objectFit, not a div with a backgroundImage — satori
-    // renders backgroundSize/backgroundPosition on a div unreliably (visibly
-    // off-center crops, confirmed against a plain square test image), the
-    // same bug already found and fixed on the cover art.
     ? h("img", {
         src: data.reviewerAvatarDataUri,
-        style: { width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, objectFit: "cover", display: "flex", flexShrink: 0 },
+        style: {
+          width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2,
+          objectFit: "cover", display: "flex", flexShrink: 0,
+        },
       })
     : h("div", {
         style: {
-          width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2, background: ACCENT, display: "flex",
-          alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 30, fontWeight: 700, flexShrink: 0,
+          width: AVATAR_SIZE, height: AVATAR_SIZE, borderRadius: AVATAR_SIZE / 2,
+          background: OG_ACCENT, display: "flex", alignItems: "center",
+          justifyContent: "center", fontSize: 16, fontWeight: 700, color: "#fff", flexShrink: 0,
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
 
-  // Long titles wrap to two smaller lines instead of ellipsizing after a few words —
-  // in that mode the row is centered (not baseline-aligned) so the avatar/username
-  // sit centered between the two title lines rather than pinned to the first line's baseline.
-  const isLongReviewTitle = !!data.reviewTitle && data.reviewTitle.length > BOTTOM_TITLE_WRAP_THRESHOLD;
-
-  const bottomRowChildren: any[] = [
+  const reviewerRowChildren: any[] = [
     avatar,
     h("div", {
       style: {
-        fontSize: 42, fontWeight: 700, color: "#f0ede8", display: "flex", flexShrink: 0,
-        maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        fontSize: 22, fontWeight: 700, color: "#c9c6c0",
+        display: "flex", flexShrink: 0,
+        maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       },
-    }, `@${truncate(data.reviewerUsername, 24)}`),
+    }, `@${truncate(data.reviewerUsername, 22)}`),
   ];
+
   if (data.reviewTitle) {
-    bottomRowChildren.push(
-      h("div", { style: { width: 1, height: isLongReviewTitle ? 78 : 52, background: "rgba(255,255,255,0.18)", display: "flex", flexShrink: 0 } }),
-      isLongReviewTitle
-        ? h("div", {
-            style: {
-              fontFamily: "DM Serif Display", fontSize: bottomTitleFontSize(data.reviewTitle), color: "#f8f6f2",
-              lineHeight: 1.22, minWidth: 0, flex: 1,
-              display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
-              overflow: "hidden", textOverflow: "ellipsis",
-              textShadow: "0 2px 16px rgba(0,0,0,0.6)",
-            },
-          }, truncate(data.reviewTitle, 120))
-        : h("div", {
-            style: {
-              fontFamily: "DM Serif Display", fontSize: bottomTitleFontSizeShort(data.reviewTitle), color: "#f8f6f2",
-              lineHeight: 1.08, display: "flex", minWidth: 0, flex: 1,
-              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              textShadow: "0 2px 16px rgba(0,0,0,0.6)",
-            },
-          }, truncate(data.reviewTitle, 60))
+    reviewerRowChildren.push(
+      h("div", { style: { width: 1, height: 24, background: "rgba(255,255,255,0.2)", display: "flex", flexShrink: 0 } }),
+      h("div", {
+        style: {
+          fontSize: 18, color: "#7a7872", fontStyle: "italic",
+          display: "flex", minWidth: 0, overflow: "hidden",
+          textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
+        },
+      }, truncate(data.reviewTitle, 48)),
     );
   }
 
-  const bottomOverlay: any[] = [
-    // Gradient scrim over the poster only — that's the only region where
-    // legibility depends on the cover art underneath. Letting this span the
-    // full canvas width used to fade into the bottom of the score badge too,
-    // since the badge sits well within the scrim's height range.
+  const reviewerRow = h("div", {
+    style: { display: "flex", alignItems: "center", gap: 14 },
+  }, reviewerRowChildren);
+
+  // ── Right panel: vertical column, centred ─────────────────────────────────
+  const rightPanelItems: any[] = [scoreRow];
+  if (excerpt) {
+    rightPanelItems.push(
+      divider,
+      h("div", {
+        style: {
+          fontSize: 19, color: "rgba(210,206,200,0.72)", lineHeight: 1.65,
+          fontStyle: "italic", display: "-webkit-box",
+          WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
+          overflow: "hidden", textOverflow: "ellipsis",
+        },
+      }, `"${excerpt}"`),
+    );
+  }
+  rightPanelItems.push(divider, reviewerRow);
+
+  const rightPanel = h("div", {
+    style: {
+      width: RIGHT_W, height: HEIGHT, display: "flex", flexDirection: "column",
+      justifyContent: "center", padding: PAD, gap: 22,
+    },
+  }, rightPanelItems);
+
+  // ── CHEKPOINT wordmark ────────────────────────────────────────────────────
+  const wordmark = h("div", {
+    style: {
+      position: "absolute", top: 24, right: 32,
+      display: "flex", alignItems: "center", gap: 9,
+      background: "rgba(9,9,10,0.45)", borderRadius: 20,
+      padding: "8px 16px 8px 14px",
+    },
+  }, [
+    h("div", { style: { width: 9, height: 9, borderRadius: 5, background: OG_ACCENT, display: "flex" } }),
     h("div", {
-      style: {
-        position: "absolute", left: 0, width: LEFT_W + 40, bottom: 0, height: isLongReviewTitle ? 320 : 280, display: "flex",
-        backgroundImage: `linear-gradient(to top, rgba(9,9,10,0.96) 0%, rgba(9,9,10,0.8) 38%, rgba(9,9,10,0.32) 68%, rgba(9,9,10,0) 100%)`,
-      },
-    }),
-    h("div", {
-      style: {
-        position: "absolute", left: 56, right: 56, bottom: isLongReviewTitle ? 40 : 44, display: "flex",
-        alignItems: isLongReviewTitle ? "center" : "baseline", gap: 18,
-      },
-    }, bottomRowChildren),
-  ];
+      style: { fontSize: 21, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.95)", display: "flex" },
+    }, "CHEKPOINT"),
+  ]);
 
   return h("div", {
     style: {
-      width: WIDTH, height: HEIGHT, display: "flex", position: "relative", overflow: "hidden",
-      backgroundColor: BG, fontFamily: "DM Sans",
+      width: WIDTH, height: HEIGHT, display: "flex", position: "relative",
+      overflow: "hidden", backgroundColor: OG_BG, fontFamily: "DM Sans",
     },
-  }, [leftPanel, rightPanel, wordmark, ...bottomOverlay]);
+  }, [leftPanel, rightPanel, wordmark]);
 }
