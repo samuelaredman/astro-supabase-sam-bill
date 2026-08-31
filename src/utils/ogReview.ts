@@ -80,19 +80,20 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     }, `@${truncate(data.reviewerUsername, 22)}`),
   ]);
 
-  // CHEKPOINT wordmark — absolute on root, top-right
+  // CHEKPOINT.GG wordmark — purple gradient pill matching the list share card style
   const wordmark = h("div", {
     style: {
       position: "absolute", top: 22, right: 26,
       display: "flex", alignItems: "center", gap: 8,
-      background: "rgba(9,9,10,0.50)", borderRadius: 18,
-      padding: "7px 13px 7px 11px",
+      background: "linear-gradient(135deg, rgba(96,80,200,0.55) 0%, rgba(139,123,240,0.35) 100%)",
+      border: "1px solid rgba(139,123,240,0.45)",
+      borderRadius: 20, padding: "7px 14px 7px 11px",
     },
   }, [
-    h("div", { style: { width: 8, height: 8, borderRadius: 4, background: OG_ACCENT, display: "flex" } }),
+    h("div", { style: { width: 8, height: 8, borderRadius: 4, background: OG_ACCENT, display: "flex", flexShrink: 0 } }),
     h("div", {
-      style: { fontSize: 18, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.9)", display: "flex" },
-    }, "CHEKPOINT"),
+      style: { fontSize: 18, fontWeight: 700, letterSpacing: 3, color: "#f0ede8", display: "flex" },
+    }, "CHEKPOINT.GG"),
   ]);
 
   // ── Left panel: cover art top-aligned (paddingTop matches right panel's PAD_V) ─
