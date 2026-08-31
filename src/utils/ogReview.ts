@@ -15,13 +15,13 @@ export interface ReviewOgData {
 const WIDTH      = 1200;
 const HEIGHT     = 630;
 const LEFT_W     = 380;
-const RIGHT_W    = WIDTH - LEFT_W;  // 820
-const PAD_V      = 40;              // top/bottom — shared by left + right panels
-const PAD_H      = 48;              // left/right padding on right panel
+const RIGHT_W    = WIDTH - LEFT_W;   // 820
+const PAD_V      = 40;               // top/bottom padding — same on both panels & username
+const PAD_H      = 48;               // left/right padding on right panel
 const BADGE_SIZE = 150;
 const GAP        = 16;
 const COVER_W    = 240;
-const COVER_H    = Math.round(COVER_W * (374 / 264)); // ≈ 340px  (3:4 box art)
+const COVER_H    = Math.round(COVER_W * (374 / 264)); // ≈ 340px
 const AVATAR_SIZE = 44;
 
 function gameTitleFontSize(title: string): number {
@@ -36,7 +36,18 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   const badgeBg   = scoreBadgeBg(data.score);
   const badgeText = scoreBadgeText(data.score);
 
-  // ── Avatar (reused in username row) ──────────────────────────────────────
+  // ── Root-level absolutes (satori only supports absolute on root children) ─
+
+  // Purple glow behind cover — absolute on root, left-panel area
+  const glow = h("div", {
+    style: {
+      position: "absolute", top: -130, left: -130,
+      width: 460, height: 460, borderRadius: 230, display: "flex",
+      backgroundImage: `radial-gradient(circle, ${hexToRgba(OG_ACCENT, 0.22)} 0%, transparent 68%)`,
+    },
+  });
+
+  // Username row — absolute on root, bottom-left, aligned with right-panel bottom padding
   const avatar = data.reviewerAvatarDataUri
     ? h("img", {
         src: data.reviewerAvatarDataUri,
@@ -53,29 +64,43 @@ export function buildReviewOgTree(data: ReviewOgData): any {
         },
       }, data.reviewerUsername.slice(0, 2).toUpperCase());
 
-  // ── Left panel ─────────────────────────────────────────────────────────
-  // Cover is top-pinned (matching score badge top). Username is bottom-pinned.
-  const coverFrameLeft = Math.round((LEFT_W - (COVER_W + 16)) / 2);
-
-  const leftChildren: any[] = [
-    // Purple glow behind cover
+  const usernameRow = h("div", {
+    style: {
+      position: "absolute", bottom: PAD_V, left: 22,
+      display: "flex", alignItems: "center", gap: 12,
+    },
+  }, [
+    avatar,
     h("div", {
       style: {
-        position: "absolute", top: -120, left: -120,
-        width: 460, height: 460, borderRadius: 230, display: "flex",
-        backgroundImage: `radial-gradient(circle, ${hexToRgba(OG_ACCENT, 0.20)} 0%, transparent 68%)`,
+        fontSize: 20, fontWeight: 700, color: "#b8b4ac",
+        display: "flex", overflow: "hidden", textOverflow: "ellipsis",
+        whiteSpace: "nowrap", maxWidth: 280,
       },
-    }),
-  ];
+    }, `@${truncate(data.reviewerUsername, 22)}`),
+  ]);
 
-  // Cover art — top-aligned with score badge (top: PAD_V)
-  if (data.coverDataUri) {
-    leftChildren.push(
-      h("div", {
+  // CHEKPOINT wordmark — absolute on root, top-right
+  const wordmark = h("div", {
+    style: {
+      position: "absolute", top: 22, right: 26,
+      display: "flex", alignItems: "center", gap: 8,
+      background: "rgba(9,9,10,0.50)", borderRadius: 18,
+      padding: "7px 13px 7px 11px",
+    },
+  }, [
+    h("div", { style: { width: 8, height: 8, borderRadius: 4, background: OG_ACCENT, display: "flex" } }),
+    h("div", {
+      style: { fontSize: 18, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.9)", display: "flex" },
+    }, "CHEKPOINT"),
+  ]);
+
+  // ── Left panel: cover art top-aligned (paddingTop matches right panel's PAD_V) ─
+  const coverEl = data.coverDataUri
+    ? h("div", {
         style: {
-          position: "absolute", top: PAD_V, left: coverFrameLeft,
-          width: COVER_W + 16, height: COVER_H + 16,
-          borderRadius: 18, background: hexToRgba(OG_ACCENT, 0.18),
+          width: COVER_W + 16, height: COVER_H + 16, borderRadius: 18,
+          background: hexToRgba(OG_ACCENT, 0.18),
           display: "flex", alignItems: "center", justifyContent: "center",
         },
       }, [
@@ -84,50 +109,26 @@ export function buildReviewOgTree(data: ReviewOgData): any {
           style: { width: COVER_W, height: COVER_H, borderRadius: 12, objectFit: "contain", display: "flex" },
         }),
       ])
-    );
-  } else {
-    leftChildren.push(
-      h("div", {
+    : h("div", {
         style: {
-          position: "absolute", top: PAD_V,
-          left: Math.round((LEFT_W - COVER_W) / 2),
-          width: COVER_W, height: COVER_H,
-          borderRadius: 12, background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.1)",
+          width: COVER_W, height: COVER_H, borderRadius: 12,
+          background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)",
           display: "flex", alignItems: "center", justifyContent: "center",
         },
       }, [
         h("div", {
           style: { fontFamily: "DM Serif Display", fontSize: 72, color: "rgba(240,237,232,0.18)", display: "flex" },
         }, data.gameTitle.slice(0, 1).toUpperCase()),
-      ])
-    );
-  }
-
-  // Username row — bottom-pinned at PAD_V
-  leftChildren.push(
-    h("div", {
-      style: {
-        position: "absolute", bottom: PAD_V, left: 20,
-        display: "flex", alignItems: "center", gap: 12,
-      },
-    }, [
-      avatar,
-      h("div", {
-        style: {
-          fontSize: 20, fontWeight: 700, color: "#b8b4ac",
-          display: "flex", overflow: "hidden", textOverflow: "ellipsis",
-          whiteSpace: "nowrap", maxWidth: 270,
-        },
-      }, `@${truncate(data.reviewerUsername, 22)}`),
-    ])
-  );
+      ]);
 
   const leftPanel = h("div", {
     style: {
-      position: "relative", width: LEFT_W, height: HEIGHT, flexShrink: 0, overflow: "hidden",
+      width: LEFT_W, height: HEIGHT, flexShrink: 0,
+      display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "flex-start",
+      paddingTop: PAD_V, overflow: "hidden",
     },
-  }, leftChildren);
+  }, [coverEl]);
 
   // ── Score badge with score-coloured glow ─────────────────────────────────
   const glowSize = BADGE_SIZE + 110;
@@ -157,7 +158,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
 
   // ── Game title ────────────────────────────────────────────────────────────
   const titleMaxW = RIGHT_W - PAD_H * 2 - BADGE_SIZE - 24;
-  const gameTitleBlock = h("div", {
+  const gameTitle = h("div", {
     style: {
       fontFamily: "DM Serif Display", fontSize: gameTitleFontSize(data.gameTitle),
       color: "#f8f6f2", lineHeight: 1.2, minWidth: 0, maxWidth: titleMaxW,
@@ -168,13 +169,13 @@ export function buildReviewOgTree(data: ReviewOgData): any {
 
   const scoreRow = h("div", {
     style: { display: "flex", alignItems: "center", gap: 24, flexShrink: 0 },
-  }, [scoreBadgeWrap, gameTitleBlock]);
+  }, [scoreBadgeWrap, gameTitle]);
 
-  // ── Review title — prominent serif block ──────────────────────────────────
+  // ── Review title — prominent serif, sits under score row ─────────────────
   const reviewTitleBlock = data.reviewTitle
     ? h("div", {
         style: {
-          fontFamily: "DM Serif Display", fontSize: 27, color: "#ccc8c0",
+          fontFamily: "DM Serif Display", fontSize: 27, color: "#cdc9c1",
           lineHeight: 1.3, flexShrink: 0,
           display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
           overflow: "hidden", textOverflow: "ellipsis",
@@ -184,12 +185,15 @@ export function buildReviewOgTree(data: ReviewOgData): any {
 
   // ── Divider ───────────────────────────────────────────────────────────────
   const divider = h("div", {
-    style: { height: 1, background: "rgba(255,255,255,0.09)", display: "flex", flexShrink: 0 },
+    style: { height: 1, background: "rgba(255,255,255,0.09)", flexShrink: 0, display: "flex" },
   });
 
-  // ── Review body ───────────────────────────────────────────────────────────
+  // ── Review body — clamp sized to fill to bottom padding ──────────────────
+  // Approx available height: HEIGHT - PAD_V(top) - 150(score) - gaps - optional_title - PAD_V(bottom)
+  // ~315-360px → 8-9 lines at 23px × 1.65
+  const bodyClamp = data.reviewTitle ? 8 : 9;
   const excerpt = data.reviewBody
-    ? truncate(data.reviewBody.replace(/\n+/g, " ").trim(), 400)
+    ? truncate(data.reviewBody.replace(/\n+/g, " ").trim(), 380)
     : null;
 
   const bodyBlock = excerpt
@@ -197,16 +201,16 @@ export function buildReviewOgTree(data: ReviewOgData): any {
         style: {
           fontSize: 23, color: "rgba(215,210,203,0.80)", lineHeight: 1.65,
           fontStyle: "italic",
-          display: "-webkit-box", WebkitLineClamp: 9, WebkitBoxOrient: "vertical",
+          display: "-webkit-box", WebkitLineClamp: bodyClamp, WebkitBoxOrient: "vertical",
           overflow: "hidden", textOverflow: "ellipsis",
         },
       }, `"${excerpt}"`)
     : null;
 
-  // ── Right panel: flex column, top-aligned, body fills remaining space ─────
-  const rightPanelItems: any[] = [scoreRow];
-  if (reviewTitleBlock) rightPanelItems.push(reviewTitleBlock);
-  if (bodyBlock)        rightPanelItems.push(divider, bodyBlock);
+  // ── Right panel: top-aligned flex column ──────────────────────────────────
+  const rightItems: any[] = [scoreRow];
+  if (reviewTitleBlock) rightItems.push(reviewTitleBlock);
+  if (bodyBlock)        rightItems.push(divider, bodyBlock);
 
   const rightPanel = h("div", {
     style: {
@@ -216,27 +220,13 @@ export function buildReviewOgTree(data: ReviewOgData): any {
       paddingLeft: PAD_H, paddingRight: PAD_H,
       gap: GAP,
     },
-  }, rightPanelItems);
+  }, rightItems);
 
-  // ── CHEKPOINT wordmark ────────────────────────────────────────────────────
-  const wordmark = h("div", {
-    style: {
-      position: "absolute", top: 20, right: 26,
-      display: "flex", alignItems: "center", gap: 8,
-      background: "rgba(9,9,10,0.45)", borderRadius: 18,
-      padding: "7px 13px 7px 11px",
-    },
-  }, [
-    h("div", { style: { width: 8, height: 8, borderRadius: 4, background: OG_ACCENT, display: "flex" } }),
-    h("div", {
-      style: { fontSize: 18, fontWeight: 700, letterSpacing: 3, color: "rgba(240,237,232,0.9)", display: "flex" },
-    }, "CHEKPOINT"),
-  ]);
-
+  // ── Root ─────────────────────────────────────────────────────────────────
   return h("div", {
     style: {
       width: WIDTH, height: HEIGHT, display: "flex", position: "relative",
       overflow: "hidden", backgroundColor: OG_BG, fontFamily: "DM Sans",
     },
-  }, [leftPanel, rightPanel, wordmark]);
+  }, [glow, leftPanel, rightPanel, usernameRow, wordmark]);
 }
