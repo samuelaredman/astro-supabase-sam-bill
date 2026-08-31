@@ -125,8 +125,8 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     style: {
       width: LEFT_W, height: HEIGHT, flexShrink: 0,
       display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "flex-start",
-      paddingTop: PAD_V, overflow: "hidden",
+      alignItems: "center", justifyContent: "center",
+      overflow: "hidden",
     },
   }, [coverEl]);
 
@@ -215,7 +215,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   const rightPanel = h("div", {
     style: {
       width: RIGHT_W, height: HEIGHT,
-      display: "flex", flexDirection: "column", justifyContent: "flex-start",
+      display: "flex", flexDirection: "column", justifyContent: "center",
       paddingTop: PAD_V, paddingBottom: PAD_V,
       paddingLeft: PAD_H, paddingRight: PAD_H,
       gap: GAP,
