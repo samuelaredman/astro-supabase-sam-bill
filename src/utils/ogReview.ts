@@ -18,10 +18,10 @@ const LEFT_W     = 380;
 const RIGHT_W    = WIDTH - LEFT_W;   // 820
 const PAD_V      = 40;               // top/bottom padding — same on both panels & username
 const PAD_H      = 48;               // left/right padding on right panel
-const BADGE_SIZE = 150;
+const BADGE_SIZE = 118;
 const GAP        = 16;
-const COVER_W    = 240;
-const COVER_H    = Math.round(COVER_W * (374 / 264)); // ≈ 340px
+const COVER_W    = 258;
+const COVER_H    = Math.round(COVER_W * (374 / 264)); // ≈ 366px
 const AVATAR_SIZE = 44;
 
 function gameTitleFontSize(title: string): number {
@@ -38,10 +38,10 @@ export function buildReviewOgTree(data: ReviewOgData): any {
 
   // ── Root-level absolutes (satori only supports absolute on root children) ─
 
-  // Purple glow behind cover — absolute on root, left-panel area
+  // Purple glow centred behind the cover in the left panel
   const glow = h("div", {
     style: {
-      position: "absolute", top: -130, left: -130,
+      position: "absolute", top: 85, left: -45,
       width: 460, height: 460, borderRadius: 230, display: "flex",
       backgroundImage: `radial-gradient(circle, ${hexToRgba(OG_ACCENT, 0.22)} 0%, transparent 68%)`,
     },
@@ -66,7 +66,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
 
   const usernameRow = h("div", {
     style: {
-      position: "absolute", bottom: PAD_V, left: 22,
+      position: "absolute", bottom: 24, left: 26,
       display: "flex", alignItems: "center", gap: 12,
     },
   }, [
@@ -131,7 +131,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
   }, [coverEl]);
 
   // ── Score badge with score-coloured glow ─────────────────────────────────
-  const glowSize = BADGE_SIZE + 110;
+  const glowSize = BADGE_SIZE + 90;
   const scoreBadgeWrap = h("div", { style: { position: "relative", display: "flex", flexShrink: 0 } }, [
     h("div", {
       style: {
@@ -143,13 +143,13 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     }),
     h("div", {
       style: {
-        width: BADGE_SIZE, height: BADGE_SIZE, borderRadius: 22, background: badgeBg,
+        width: BADGE_SIZE, height: BADGE_SIZE, borderRadius: 18, background: badgeBg,
         display: "flex", alignItems: "center", justifyContent: "center",
       },
     }, [
       h("div", {
         style: {
-          fontFamily: "DM Serif Display", fontSize: 86, fontWeight: 700,
+          fontFamily: "DM Serif Display", fontSize: 70, fontWeight: 700,
           color: badgeText, display: "flex", lineHeight: 1,
         },
       }, String(data.score)),
