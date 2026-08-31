@@ -181,7 +181,7 @@ export function buildReviewOgTree(data: ReviewOgData): any {
           display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
           overflow: "hidden", textOverflow: "ellipsis",
         },
-      }, `"${truncate(data.reviewTitle, 120)}"`)
+      }, truncate(data.reviewTitle, 120))
     : null;
 
   // ── Divider ───────────────────────────────────────────────────────────────
