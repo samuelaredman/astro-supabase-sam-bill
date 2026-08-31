@@ -187,26 +187,20 @@ export function buildReviewOgTree(data: ReviewOgData): any {
     style: { height: 1, background: "rgba(255,255,255,0.09)", display: "flex", flexShrink: 0 },
   });
 
-  // ── Review body — fills remaining height down to PAD_V ───────────────────
-  // flex: 1 makes this wrapper grow to fill all remaining right-panel height,
-  // aligning its bottom with the username row in the left panel (both at PAD_V).
+  // ── Review body ───────────────────────────────────────────────────────────
   const excerpt = data.reviewBody
     ? truncate(data.reviewBody.replace(/\n+/g, " ").trim(), 400)
     : null;
 
   const bodyBlock = excerpt
     ? h("div", {
-        style: { flex: 1, overflow: "hidden", display: "flex", alignItems: "flex-start" },
-      }, [
-        h("div", {
-          style: {
-            fontSize: 23, color: "rgba(215,210,203,0.80)", lineHeight: 1.65,
-            fontStyle: "italic",
-            display: "-webkit-box", WebkitLineClamp: 14, WebkitBoxOrient: "vertical",
-            overflow: "hidden", textOverflow: "ellipsis",
-          },
-        }, `"${excerpt}"`),
-      ])
+        style: {
+          fontSize: 23, color: "rgba(215,210,203,0.80)", lineHeight: 1.65,
+          fontStyle: "italic",
+          display: "-webkit-box", WebkitLineClamp: 9, WebkitBoxOrient: "vertical",
+          overflow: "hidden", textOverflow: "ellipsis",
+        },
+      }, `"${excerpt}"`)
     : null;
 
   // ── Right panel: flex column, top-aligned, body fills remaining space ─────
