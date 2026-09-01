@@ -233,11 +233,12 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
 
       <div class="sidebar-bottom">
         <a href="/updates" class={`nav-item${activeNav === 'updates' ? ' active' : ''}`}>
-          <span class="nav-icon">
+          <span class="nav-icon" style="position:relative">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 7v4a1 1 0 0 0 1 1h2l4 3V3L6 6H4a1 1 0 0 0-1 1Z"/>
               <path d="M13 6.5a3 3 0 0 1 0 5"/>
             </svg>
+            <span id="updatesDot" style="display:none;position:absolute;top:-3px;right:-4px;width:8px;height:8px;border-radius:50%;background:var(--accent);border:1.5px solid var(--bg)"></span>
           </span>
           Updates
         </a>
@@ -533,12 +534,105 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
       })
       .catch(function() {});
   })();
+
+  // Updates dot badge + pinned-post banner
+  // Checked once per session (sessionStorage) to avoid fetching on every page.
+  (function() {
+    var dot = document.getElementById('updatesDot');
+    var isUpdatesPage = window.location.pathname === '/updates' || window.location.pathname.startsWith('/updates/');
+
+    // If user is on the updates page, clear the badge and record visit
+    if (isUpdatesPage) {
+      try { localStorage.setItem('updates_last_seen', new Date().toISOString()); } catch(e) {}
+      if (dot) dot.style.display = 'none';
+      return;
+    }
+
+    // Only check once per session
+    var cacheKey = 'updates_latest_cache';
+    var cached = null;
+    try {
+      var raw = sessionStorage.getItem(cacheKey);
+      if (raw) cached = JSON.parse(raw);
+    } catch(e) {}
+
+    function applyUpdatesUI(data) {
+      var lastSeen = null;
+      try { lastSeen = localStorage.getItem('updates_last_seen'); } catch(e) {}
+
+      // Dot badge — show if latest post is newer than last visit
+      if (dot && data.latest_at) {
+        var isNew = !lastSeen || new Date(data.latest_at) > new Date(lastSeen);
+        if (isNew) dot.style.display = 'block';
+      }
+
+      // Pinned-post banner — show on home page only, dismiss per post ID
+      if (data.pinned && window.location.pathname === '/') {
+        var dismissedKey = 'updates_dismissed_' + data.pinned.id;
+        var dismissed = false;
+        try { dismissed = !!localStorage.getItem(dismissedKey); } catch(e) {}
+        if (!dismissed) {
+          var banner = document.createElement('div');
+          banner.id = 'updates-banner';
+          banner.innerHTML =
+            '<span class="ub-icon">📌</span>' +
+            '<span class="ub-text">New from the team: <a class="ub-link" href="/updates/' + data.pinned.id + '">' + data.pinned.title.replace(/</g,'&lt;') + '</a></span>' +
+            '<button class="ub-dismiss" aria-label="Dismiss">×</button>';
+          document.body.appendChild(banner);
+          banner.querySelector('.ub-dismiss').addEventListener('click', function() {
+            try { localStorage.setItem(dismissedKey, '1'); } catch(e) {}
+            banner.style.opacity = '0';
+            setTimeout(function() { banner.remove(); }, 250);
+          });
+          banner.querySelector('.ub-link').addEventListener('click', function() {
+            try { localStorage.setItem(dismissedKey, '1'); } catch(e) {}
+          });
+        }
+      }
+    }
+
+    if (cached) {
+      applyUpdatesUI(cached);
+    } else {
+      fetch('/api/updates/latest')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          try { sessionStorage.setItem(cacheKey, JSON.stringify(data)); } catch(e) {}
+          applyUpdatesUI(data);
+        })
+        .catch(function() {});
+    }
+  })();
 </script>
 
 </body>
 </html>
 
 <style is:global>
+  /* ── Updates pinned-post banner ── */
+  #updates-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 300;
+    display: flex; align-items: center; gap: 10px;
+    background: var(--accent);
+    color: #fff;
+    padding: 10px 16px;
+    font-size: 13px; font-weight: 500;
+    transition: opacity 0.25s;
+  }
+  .ub-icon { font-size: 15px; flex-shrink: 0; }
+  .ub-text { flex: 1; min-width: 0; }
+  .ub-link { color: #fff; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+  .ub-link:hover { opacity: 0.85; }
+  .ub-dismiss {
+    background: rgba(255,255,255,0.2); border: none; border-radius: 50%;
+    color: #fff; width: 22px; height: 22px; font-size: 16px; line-height: 1;
+    cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  .ub-dismiss:hover { background: rgba(255,255,255,0.35); }
+
   /* ─── Mobile responsive: hide both sidebars, collapse grid ─────────────── */
   @media (max-width: 768px) {
     .layout .sidebar-left,
