@@ -2,7 +2,7 @@
 export const prerender = false;
 import Layout from '../../components/Layout.astro';
 import { getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database';
-import { IMAGE_EMOTE_MAP } from '../../utils/reactions';
+import { IMAGE_EMOTE_MAP, IMAGE_EMOTES } from '../../utils/reactions';
 
 const { id } = Astro.params;
 
@@ -18,8 +18,6 @@ const { data: post } = await db
   .eq('id', id)
   .maybeSingle();
 
-if (!post) return Astro.redirect('/404');
-
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
 let isAdmin = false;
 if (user) {
@@ -30,6 +28,37 @@ if (user) {
     isAdmin = !!adminRow;
   }
 }
+
+// Votes + reactions
+const [votesRes, reactionsRes, myVoteRes] = await Promise.all([
+  db.from('forum_post_votes').select('vote').eq('post_id', id),
+  db.from('forum_post_reactions').select('reaction_type, profile_id').eq('post_id', id),
+  currentProfile
+    ? db.from('forum_post_votes').select('vote').eq('post_id', id).eq('profile_id', currentProfile.id).maybeSingle()
+    : Promise.resolve({ data: null }),
+]);
+
+const votes = votesRes.data ?? [];
+const upVotes   = votes.filter((v: any) => v.vote === 1).length;
+const downVotes = votes.filter((v: any) => v.vote === -1).length;
+const myVote    = (myVoteRes.data as any)?.vote ?? 0;
+
+const reactions = reactionsRes.data ?? [];
+const reactionCountMap: Record<string, { count: number; active: boolean }> = {};
+for (const r of reactions as any[]) {
+  if (!reactionCountMap[r.reaction_type]) reactionCountMap[r.reaction_type] = { count: 0, active: false };
+  reactionCountMap[r.reaction_type].count++;
+  if (currentProfile && r.profile_id === currentProfile.id) reactionCountMap[r.reaction_type].active = true;
+}
+const displayReactions = Object.entries(reactionCountMap).map(([type, info]) => ({
+  type,
+  isImage: !!IMAGE_EMOTE_MAP[type],
+  path: IMAGE_EMOTE_MAP[type] ?? null,
+  count: info.count,
+  active: info.active,
+}));
+
+if (!post) return Astro.redirect('/404');
 
 const { data: commentsRaw } = await db
   .from('forum_comments')
@@ -111,6 +140,42 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         {post.updated_at && <span class="edited">(edited)</span>}
       </div>
       <div class="post-body" set:html={renderPostBody(post.body)} />
+
+      <!-- Vote + reaction bar -->
+      <div class="post-interact" data-post-id={post.id}>
+        <button
+          class={`pv-btn${myVote === 1 ? ' pv-up-active' : ''}`}
+          data-post-id={post.id} data-vote="1"
+          data-logged-in={isLoggedIn ? 'true' : 'false'}
+        >▲ {upVotes}</button>
+        <button
+          class={`pv-btn${myVote === -1 ? ' pv-down-active' : ''}`}
+          data-post-id={post.id} data-vote="-1"
+          data-logged-in={isLoggedIn ? 'true' : 'false'}
+        >▼ {downVotes}</button>
+
+        <span class="pv-sep"></span>
+
+        <div class="pv-reaction-wrap" data-post-id={post.id}>
+          {displayReactions.map(r => (
+            <button
+              class={`pv-reaction-btn${r.active ? ' pv-reaction-active' : ''}`}
+              data-post-id={post.id}
+              data-reaction={r.type}
+              data-reacted={r.active ? 'true' : 'false'}
+              data-count={r.count}
+              data-logged-in={isLoggedIn ? 'true' : 'false'}
+              data-is-image={r.isImage ? 'true' : 'false'}
+            >
+              {r.isImage
+                ? <><img src={r.path!} class="pv-emote-img" alt={r.type} loading="lazy" /> {r.count}</>
+                : <>{r.type} {r.count}</>
+              }
+            </button>
+          ))}
+          <button class="pv-react-toggle" data-post-id={post.id} data-logged-in={isLoggedIn ? 'true' : 'false'} title="React">+</button>
+        </div>
+      </div>
 
       {isAdmin && (
         <div class="admin-bar">
@@ -308,6 +373,153 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   })();
 </script>
 
+<script is:inline define:vars={{ _pvImageEmotes: IMAGE_EMOTES, _pvImageEmoteMap: IMAGE_EMOTE_MAP }}>
+if (!window.__pvInit) {
+  window.__pvInit = true;
+
+  // ── Emoji picker ─────────────────────────────────────────────────────────
+  var picker = document.createElement('div');
+  picker.id = 'pv-emoji-picker';
+  picker.style.cssText = 'display:none;position:fixed;z-index:1000';
+  var ph = '<input type="text" id="pv-emote-search" class="pv-emote-search" placeholder="Search emotes…" autocomplete="off">';
+  ph += '<div class="pv-emoji-grid" id="pv-emote-grid">';
+  _pvImageEmotes.forEach(function(e) {
+    ph += '<button class="pv-emoji-pick" data-emoji="' + e.key + '" title="' + e.key + '"><img data-src="' + e.path + '" class="pv-emote-picker-img" alt="' + e.key + '"></button>';
+  });
+  ph += '</div>';
+  picker.innerHTML = ph;
+  document.body.appendChild(picker);
+
+  var pvObserver = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        var img = entry.target;
+        if (img.dataset.src) { img.src = img.dataset.src; img.removeAttribute('data-src'); }
+        pvObserver.unobserve(img);
+      }
+    });
+  }, { root: picker, rootMargin: '80px 0px', threshold: 0 });
+  picker.querySelectorAll('.pv-emote-picker-img').forEach(function(im) { pvObserver.observe(im); });
+
+  document.getElementById('pv-emote-search').addEventListener('input', function() {
+    var q = this.value.toLowerCase();
+    document.querySelectorAll('#pv-emote-grid .pv-emoji-pick').forEach(function(btn) {
+      btn.style.display = btn.dataset.emoji.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+
+  function closePvPicker() {
+    picker.style.display = 'none';
+    var s = document.getElementById('pv-emote-search'); if (s) { s.value = ''; document.querySelectorAll('#pv-emote-grid .pv-emoji-pick').forEach(function(b){b.style.display='';}); }
+  }
+
+  function applyReaction(postId, type, reacted, count) {
+    var isImg = !!_pvImageEmoteMap[type];
+    var updated = false;
+    document.querySelectorAll('.pv-reaction-btn[data-post-id="' + postId + '"][data-reaction="' + type + '"]').forEach(function(btn) {
+      btn.dataset.reacted = reacted ? 'true' : 'false';
+      btn.dataset.count = String(count);
+      btn.innerHTML = isImg ? '<img src="' + _pvImageEmoteMap[type] + '" class="pv-emote-img" alt="' + type + '"> ' + count : type + ' ' + count;
+      btn.classList.toggle('pv-reaction-active', reacted);
+      btn.style.display = count > 0 ? '' : 'none';
+      updated = true;
+    });
+    if (!updated && count > 0) {
+      var wrap = document.querySelector('.pv-reaction-wrap[data-post-id="' + postId + '"]');
+      if (wrap) {
+        var toggle = wrap.querySelector('.pv-react-toggle');
+        var nb = document.createElement('button');
+        nb.className = 'pv-reaction-btn' + (reacted ? ' pv-reaction-active' : '');
+        nb.dataset.postId = postId; nb.dataset.reaction = type;
+        nb.dataset.reacted = reacted ? 'true' : 'false'; nb.dataset.count = String(count);
+        nb.dataset.loggedIn = 'true'; nb.dataset.isImage = isImg ? 'true' : 'false';
+        nb.innerHTML = isImg ? '<img src="' + _pvImageEmoteMap[type] + '" class="pv-emote-img" alt="' + type + '"> ' + count : type + ' ' + count;
+        wrap.insertBefore(nb, toggle);
+      }
+    }
+  }
+
+  document.addEventListener('click', async function(e) {
+    // Vote button
+    var voteBtn = e.target.closest('.pv-btn');
+    if (voteBtn) {
+      if (voteBtn.disabled) return;
+      var loggedIn = voteBtn.dataset.loggedIn === 'true';
+      if (!loggedIn) { window.location.href = '/signin'; return; }
+      voteBtn.disabled = true;
+      var postId = voteBtn.dataset.postId;
+      var vote = parseInt(voteBtn.dataset.vote);
+      try {
+        var res = await fetch('/api/forum/posts/vote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: postId, vote }) });
+        if (res.status === 401) { window.location.href = '/signin'; return; }
+        if (!res.ok) return;
+        var data = await res.json();
+        document.querySelectorAll('.pv-btn[data-post-id="' + postId + '"]').forEach(function(b) {
+          var bv = parseInt(b.dataset.vote);
+          b.textContent = (bv === 1 ? '▲ ' : '▼ ') + (bv === 1 ? data.up : data.down);
+          b.classList.toggle('pv-up-active',   bv === 1  && data.vote === 1);
+          b.classList.toggle('pv-down-active', bv === -1 && data.vote === -1);
+        });
+      } finally { voteBtn.disabled = false; }
+      return;
+    }
+
+    // Inline reaction button
+    var rxBtn = e.target.closest('.pv-reaction-btn');
+    if (rxBtn) {
+      if (rxBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+      var postId = rxBtn.dataset.postId, type = rxBtn.dataset.reaction;
+      var reacted = rxBtn.dataset.reacted === 'true', count = parseInt(rxBtn.dataset.count) || 0;
+      applyReaction(postId, type, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+      fetch('/api/forum/posts/react', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: postId, reaction_type: type }) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { if (d) applyReaction(postId, type, d.reacted, d.count); })
+        .catch(function() { applyReaction(postId, type, reacted, count); });
+      return;
+    }
+
+    // React toggle (+)
+    var toggle = e.target.closest('.pv-react-toggle');
+    if (toggle) {
+      if (toggle.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
+      var postId = toggle.dataset.postId;
+      var isOpen = picker.style.display !== 'none' && picker.dataset.activePostId === postId;
+      closePvPicker();
+      if (!isOpen) {
+        picker.dataset.activePostId = postId;
+        picker.style.display = 'block';
+        requestAnimationFrame(function() {
+          var rect = toggle.getBoundingClientRect(), pRect = picker.getBoundingClientRect();
+          var top = rect.top - pRect.height - 8; if (top < 8) top = rect.bottom + 8;
+          var left = rect.left; if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
+          picker.style.top = top + 'px'; picker.style.left = left + 'px';
+        });
+      }
+      return;
+    }
+
+    // Pick emoji
+    var emojiBtn = e.target.closest('.pv-emoji-pick');
+    if (emojiBtn) {
+      var postId = picker.dataset.activePostId; if (!postId) return;
+      var emoji = emojiBtn.dataset.emoji;
+      var existing = document.querySelector('.pv-reaction-btn[data-post-id="' + postId + '"][data-reaction="' + emoji + '"]');
+      var reacted = existing ? existing.dataset.reacted === 'true' : false;
+      var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
+      applyReaction(postId, emoji, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
+      closePvPicker();
+      fetch('/api/forum/posts/react', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: postId, reaction_type: emoji }) })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { if (d) applyReaction(postId, emoji, d.reacted, d.count); })
+        .catch(function() { applyReaction(postId, emoji, reacted, count); });
+      return;
+    }
+
+    if (!e.target.closest('.pv-reaction-wrap') && !e.target.closest('#pv-emoji-picker')) closePvPicker();
+  });
+}
+</script>
+
 <style>
   .feed { min-width: 0; padding: 20px; max-width: 720px; }
   .back { display: inline-block; font-size: 13px; color: var(--text-tertiary); margin-bottom: 16px; }
@@ -338,6 +550,28 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   .post-body :global(div[data-youtube-video] iframe) { width: 100%; aspect-ratio: 16/9; border-radius: 10px; border: none; }
   .comment-body :global(.mention) { color: var(--accent); }
   .comment-body :global(.comment-emote), .post-body :global(.comment-emote) { height: 20px; vertical-align: middle; }
+
+  /* ── Vote + reaction bar ── */
+  .post-interact { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 18px 0 0; padding-top: 16px; border-top: 1px solid var(--border-subtle, var(--border)); }
+  .pv-btn { font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 20px; border: 1.5px solid var(--border); color: var(--text-tertiary); background: transparent; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+  .pv-btn:hover:not(.pv-up-active):not(.pv-down-active) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .pv-btn:disabled { opacity: 0.5; cursor: default; }
+  .pv-up-active   { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.08); }
+  .pv-down-active { border-color: #f87171; color: #f87171; background: rgba(248,113,113,.08); }
+  .pv-sep { width: 1px; height: 16px; background: var(--border); margin: 0 2px; flex-shrink: 0; }
+  .pv-reaction-wrap { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .pv-reaction-btn { font-size: 13px; font-weight: 600; padding: 5px 12px; border-radius: 20px; border: 1.5px solid var(--border); color: var(--text-tertiary); background: transparent; cursor: pointer; font-family: inherit; transition: all 0.15s; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+  .pv-reaction-btn:hover:not(.pv-reaction-active) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
+  .pv-reaction-active { border-color: var(--accent); color: var(--accent); background: rgba(96,80,200,.08); }
+  .pv-react-toggle { background: none; border: 1.5px solid var(--border); cursor: pointer; color: var(--text-secondary); font-size: 16px; font-weight: 700; padding: 3px 9px; border-radius: 6px; line-height: 1.4; font-family: inherit; transition: color 0.15s, background 0.15s, border-color 0.15s; }
+  .pv-react-toggle:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
+  .pv-emote-img { width: 18px; height: 18px; object-fit: contain; vertical-align: middle; }
+  #pv-emoji-picker { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; box-shadow: 0 4px 24px rgba(0,0,0,.2); max-height: 320px; overflow-y: auto; min-width: 260px; max-width: 320px; scrollbar-width: thin; }
+  .pv-emote-search { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-hover); color: var(--text-primary); font-size: 12px; outline: none; }
+  .pv-emoji-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+  .pv-emoji-pick { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; background: none; border: none; cursor: pointer; border-radius: 6px; transition: background 0.1s, transform 0.1s; padding: 2px; }
+  .pv-emoji-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
+  .pv-emote-picker-img { width: 28px; height: 28px; object-fit: contain; display: block; }
 
   .admin-bar { display: flex; gap: 8px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-subtle, var(--border)); flex-wrap: wrap; }
   .admin-bar button { background: var(--bg-hover); border: 1px solid var(--border); color: var(--text-secondary); border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
