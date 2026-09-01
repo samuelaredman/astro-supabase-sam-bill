@@ -19,6 +19,7 @@ export const GET: APIRoute = async () => {
   return new Response(
     JSON.stringify({
       latest_at: latest?.created_at ?? null,
+      ids: posts.map((p: any) => p.id),
       pinned: latestPinned
         ? { id: latestPinned.id, title: latestPinned.title }
         : null,

@@ -232,13 +232,12 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
       </a>
 
       <div class="sidebar-bottom">
-        <a href="/updates" class={`nav-item${activeNav === 'updates' ? ' active' : ''}`}>
-          <span class="nav-icon" style="position:relative">
+        <a href="/updates" id="updatesNavItem" class={`nav-item${activeNav === 'updates' ? ' active' : ''}`}>
+          <span class="nav-icon">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 7v4a1 1 0 0 0 1 1h2l4 3V3L6 6H4a1 1 0 0 0-1 1Z"/>
               <path d="M13 6.5a3 3 0 0 1 0 5"/>
             </svg>
-            <span id="updatesDot" style="display:none;position:absolute;top:-3px;right:-4px;width:8px;height:8px;border-radius:50%;background:var(--accent);border:1.5px solid var(--bg)"></span>
           </span>
           Updates
         </a>
@@ -535,39 +534,53 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
       .catch(function() {});
   })();
 
-  // Updates dot badge + pinned-post banner
-  // Checked once per session (sessionStorage) to avoid fetching on every page.
+  // Updates nav highlight + pinned-post banner.
+  // Tracks per-post reads in localStorage so the sidebar item stays purple
+  // until every post the user hasn't opened is marked seen.
   (function() {
-    var dot = document.getElementById('updatesDot');
-    var isUpdatesPage = window.location.pathname === '/updates' || window.location.pathname.startsWith('/updates/');
+    var navItem = document.getElementById('updatesNavItem');
+    var pathname = window.location.pathname;
+    var isListing = pathname === '/updates';
+    var postMatch = pathname.match(/^\/updates\/([^/]+)/);
+    var currentPostId = postMatch ? postMatch[1] : null;
+    var isUpdatesPage = isListing || !!currentPostId;
 
-    // If user is on the updates page, clear the badge and record visit
-    if (isUpdatesPage) {
-      try { localStorage.setItem('updates_last_seen', new Date().toISOString()); } catch(e) {}
-      if (dot) dot.style.display = 'none';
-      return;
+    function getSeenIds() {
+      try { return new Set(JSON.parse(localStorage.getItem('updates_seen_ids') || '[]')); } catch(e) { return new Set(); }
+    }
+    function saveSeenIds(set) {
+      try { localStorage.setItem('updates_seen_ids', JSON.stringify([...set])); } catch(e) {}
+    }
+    function markSeen(ids) {
+      var seen = getSeenIds();
+      ids.forEach(function(id) { seen.add(id); });
+      saveSeenIds(seen);
     }
 
-    // Only check once per session
     var cacheKey = 'updates_latest_cache';
     var cached = null;
-    try {
-      var raw = sessionStorage.getItem(cacheKey);
-      if (raw) cached = JSON.parse(raw);
-    } catch(e) {}
+    try { var raw = sessionStorage.getItem(cacheKey); if (raw) cached = JSON.parse(raw); } catch(e) {}
 
     function applyUpdatesUI(data) {
-      var lastSeen = null;
-      try { lastSeen = localStorage.getItem('updates_last_seen'); } catch(e) {}
+      var ids = data.ids || [];
 
-      // Dot badge — show if latest post is newer than last visit
-      if (dot && data.latest_at) {
-        var isNew = !lastSeen || new Date(data.latest_at) > new Date(lastSeen);
-        if (isNew) dot.style.display = 'block';
+      if (isListing) {
+        // Visiting the listing page — mark every returned post as seen
+        markSeen(ids);
+      } else if (currentPostId) {
+        // Visiting an individual post — mark just this one as seen
+        markSeen([currentPostId]);
+      }
+
+      // Highlight nav item if any post hasn't been seen yet
+      if (navItem && !isUpdatesPage) {
+        var seen = getSeenIds();
+        var hasUnread = ids.some(function(id) { return !seen.has(id); });
+        if (hasUnread) navItem.classList.add('updates-unread');
       }
 
       // Pinned-post banner — show on home page only, dismiss per post ID
-      if (data.pinned && window.location.pathname === '/') {
+      if (data.pinned && pathname === '/') {
         var dismissedKey = 'updates_dismissed_' + data.pinned.id;
         var dismissed = false;
         try { dismissed = !!localStorage.getItem(dismissedKey); } catch(e) {}
@@ -609,6 +622,14 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
 </html>
 
 <style is:global>
+  /* ── Updates nav highlight (unread posts) ── */
+  #updatesNavItem.updates-unread {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  #updatesNavItem.updates-unread svg { stroke: var(--accent); }
+
   /* ── Updates pinned-post banner ── */
   #updates-banner {
     position: fixed;
