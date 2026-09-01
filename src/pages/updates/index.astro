@@ -43,7 +43,8 @@ function fmtDate(s: string): string {
   return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 function excerpt(body: string, max = 220): string {
-  const clean = body.replace(/\s+/g, ' ').trim();
+  // Strip HTML tags before excerpting so image/video markup doesn't bleed in
+  const clean = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   return clean.length <= max ? clean : clean.slice(0, max).replace(/\s+\S*$/, '') + '…';
 }
 
@@ -67,15 +68,42 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     </div>
 
     {isAdmin && (
-      <form id="post-composer" class="composer">
-        <input type="text" id="post-title" name="title" placeholder="Post title" maxlength="200" required />
-        <textarea id="post-body" name="body" placeholder="Share an update, idea, or question…" rows="4" maxlength="20000" required></textarea>
+      <div class="composer" id="post-composer">
+        <input type="text" id="post-title" placeholder="Post title" maxlength="200" />
+
+        <div class="editor-toolbar" id="editor-toolbar">
+          <button type="button" data-action="bold" title="Bold"><strong>B</strong></button>
+          <button type="button" data-action="italic" title="Italic"><em>I</em></button>
+          <button type="button" data-action="h2" title="Heading 2">H2</button>
+          <button type="button" data-action="h3" title="Heading 3">H3</button>
+          <div class="toolbar-sep"></div>
+          <button type="button" data-action="bullet" title="Bullet list">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="5" y1="4" x2="14" y2="4"/><line x1="5" y1="8" x2="14" y2="8"/><line x1="5" y1="12" x2="14" y2="12"/><circle cx="2" cy="4" r="1.2" fill="currentColor" stroke="none"/><circle cx="2" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="2" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button type="button" data-action="ordered" title="Numbered list">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="4" x2="14" y2="4"/><line x1="6" y1="8" x2="14" y2="8"/><line x1="6" y1="12" x2="14" y2="12"/><text x="1" y="5.5" font-size="4.5" fill="currentColor" stroke="none" font-family="sans-serif">1.</text><text x="1" y="9.5" font-size="4.5" fill="currentColor" stroke="none" font-family="sans-serif">2.</text><text x="1" y="13.5" font-size="4.5" fill="currentColor" stroke="none" font-family="sans-serif">3.</text></svg>
+          </button>
+          <button type="button" data-action="blockquote" title="Blockquote">❝</button>
+          <div class="toolbar-sep"></div>
+          <button type="button" data-action="image" title="Insert image">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="14" height="12" rx="2"/><circle cx="5.5" cy="6" r="1.5"/><path d="M1 11l4-4 3 3 2-2 5 5"/></svg>
+            Image
+          </button>
+          <button type="button" data-action="youtube" title="Embed video">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="14" height="12" rx="2"/><path d="M6 5.5l5 2.5-5 2.5V5.5z" fill="currentColor" stroke="none"/></svg>
+            Video
+          </button>
+          <input type="file" id="image-file-input" accept="image/*" style="display:none" />
+        </div>
+
+        <div id="post-editor" class="editor-body"></div>
+
         <div class="composer-row">
           <label class="pin-label"><input type="checkbox" id="post-pinned" /> Pin to top</label>
-          <button type="submit" id="post-submit">Post update</button>
+          <button type="button" id="post-submit">Post update</button>
         </div>
         <div id="composer-error" class="composer-error"></div>
-      </form>
+      </div>
     )}
 
     {posts.length === 0 ? (
@@ -109,37 +137,121 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   </main>
 </Layout>
 
-<script is:inline>
-  (function () {
-    var form = document.getElementById('post-composer');
-    if (!form) return;
-    var errEl = document.getElementById('composer-error');
-    form.addEventListener('submit', function (e) {
+<script>
+  import { Editor } from '@tiptap/core';
+  import StarterKit from '@tiptap/starter-kit';
+  import TiptapImage from '@tiptap/extension-image';
+  import Youtube from '@tiptap/extension-youtube';
+  import Placeholder from '@tiptap/extension-placeholder';
+
+  const editorEl = document.getElementById('post-editor');
+  if (!editorEl) throw new Error('no editor');
+
+  const editor = new Editor({
+    element: editorEl,
+    extensions: [
+      StarterKit,
+      TiptapImage.configure({ allowBase64: false, inline: false }),
+      Youtube.configure({ controls: true }),
+      Placeholder.configure({ placeholder: 'Share an update, idea, or question…' }),
+    ],
+  });
+
+  // ── Image upload ─────────────────────────────────────────────────────────
+  async function uploadAndInsertImage(file: File) {
+    const fd = new FormData();
+    fd.append('image', file);
+    try {
+      const res = await fetch('/api/updates/upload-image', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (data.url) {
+        editor.chain().focus().setImage({ src: data.url }).run();
+      } else {
+        alert(data.error || 'Image upload failed.');
+      }
+    } catch {
+      alert('Image upload failed — please try again.');
+    }
+  }
+
+  // Intercept paste (screenshot paste from clipboard)
+  editorEl.addEventListener('paste', (e: ClipboardEvent) => {
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const img = items.find(i => i.type.startsWith('image/'));
+    if (img) {
       e.preventDefault();
-      var btn = document.getElementById('post-submit');
-      var title = document.getElementById('post-title').value.trim();
-      var body = document.getElementById('post-body').value.trim();
-      var pinned = document.getElementById('post-pinned').checked;
-      if (!title || !body) return;
-      btn.disabled = true;
-      errEl.textContent = '';
-      fetch('/api/forum/posts/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: title, body: body, pinned: pinned }),
-      })
-        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
-        .then(function (res) {
-          if (res.ok && res.d.post_id) {
-            window.location.href = '/updates/' + res.d.post_id;
-          } else {
-            errEl.textContent = (res.d && res.d.error) || 'Failed to post.';
-            btn.disabled = false;
-          }
-        })
-        .catch(function () { errEl.textContent = 'Network error. Try again.'; btn.disabled = false; });
-    });
-  })();
+      e.stopPropagation();
+      const file = img.getAsFile();
+      if (file) uploadAndInsertImage(file);
+    }
+  }, true);
+
+  // Intercept drop (drag image file onto editor)
+  editorEl.addEventListener('drop', (e: DragEvent) => {
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    const img = files.find(f => f.type.startsWith('image/'));
+    if (img) {
+      e.preventDefault();
+      uploadAndInsertImage(img);
+    }
+  });
+
+  // ── Toolbar ───────────────────────────────────────────────────────────────
+  document.getElementById('editor-toolbar')?.addEventListener('click', async (e) => {
+    const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+    if (!btn) return;
+    switch (btn.dataset.action) {
+      case 'bold':       editor.chain().focus().toggleBold().run(); break;
+      case 'italic':     editor.chain().focus().toggleItalic().run(); break;
+      case 'h2':         editor.chain().focus().toggleHeading({ level: 2 }).run(); break;
+      case 'h3':         editor.chain().focus().toggleHeading({ level: 3 }).run(); break;
+      case 'bullet':     editor.chain().focus().toggleBulletList().run(); break;
+      case 'ordered':    editor.chain().focus().toggleOrderedList().run(); break;
+      case 'blockquote': editor.chain().focus().toggleBlockquote().run(); break;
+      case 'image':      document.getElementById('image-file-input')?.click(); break;
+      case 'youtube': {
+        const url = prompt('Paste a YouTube or Vimeo URL:');
+        if (url) editor.chain().focus().setYoutubeVideo({ src: url }).run();
+        break;
+      }
+    }
+  });
+
+  document.getElementById('image-file-input')?.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (file) { uploadAndInsertImage(file); (e.target as HTMLInputElement).value = ''; }
+  });
+
+  // ── Submit ────────────────────────────────────────────────────────────────
+  document.getElementById('post-submit')?.addEventListener('click', async () => {
+    const title  = (document.getElementById('post-title') as HTMLInputElement).value.trim();
+    const body   = editor.getHTML();
+    const pinned = (document.getElementById('post-pinned') as HTMLInputElement).checked;
+    const errEl  = document.getElementById('composer-error')!;
+    const btn    = document.getElementById('post-submit') as HTMLButtonElement;
+
+    if (!title)        { errEl.textContent = 'Please add a title.'; return; }
+    if (editor.isEmpty){ errEl.textContent = 'Please write something.'; return; }
+
+    btn.disabled = true;
+    errEl.textContent = '';
+    try {
+      const res  = await fetch('/api/forum/posts/create', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, pinned }),
+      });
+      const data = await res.json();
+      if (res.ok && data.post_id) {
+        window.location.href = '/updates/' + data.post_id;
+      } else {
+        errEl.textContent = data.error || 'Failed to post.';
+        btn.disabled = false;
+      }
+    } catch {
+      errEl.textContent = 'Network error. Try again.';
+      btn.disabled = false;
+    }
+  });
 </script>
 
 <style>
@@ -152,11 +264,60 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     margin: 12px 20px 20px; padding: 16px; background: var(--bg-card);
     border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; gap: 10px;
   }
-  .composer input[type="text"], .composer textarea {
+  .composer input[type="text"] {
     width: 100%; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px;
-    padding: 10px 12px; color: var(--text-primary); font: inherit; font-size: 14px; resize: vertical;
+    padding: 10px 12px; color: var(--text-primary); font: inherit; font-size: 14px;
   }
-  .composer input:focus, .composer textarea:focus { outline: none; border-color: var(--accent); }
+  .composer input:focus { outline: none; border-color: var(--accent); }
+
+  /* ── Rich text editor ── */
+  .editor-toolbar {
+    display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+    background: var(--bg-hover); border: 1px solid var(--border);
+    border-radius: 10px 10px 0 0; padding: 6px 8px;
+    border-bottom: none;
+  }
+  .editor-toolbar button {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: none; border: none; border-radius: 6px;
+    color: var(--text-secondary); font: inherit; font-size: 13px;
+    padding: 4px 8px; cursor: pointer; transition: background 0.12s, color 0.12s;
+  }
+  .editor-toolbar button:hover { background: var(--bg-card); color: var(--text-primary); }
+  .editor-toolbar button.is-active { background: rgba(96,80,200,.12); color: var(--accent); }
+  .toolbar-sep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
+
+  .editor-body {
+    background: var(--bg-hover); border: 1px solid var(--border);
+    border-radius: 0 0 10px 10px; min-height: 160px; cursor: text;
+  }
+  .editor-body :global(.ProseMirror) {
+    outline: none; padding: 12px 14px; min-height: 160px;
+    font-size: 14px; line-height: 1.7; color: var(--text-primary);
+  }
+  .editor-body :global(.ProseMirror:focus) { border-color: var(--accent); }
+  .editor-body :global(.ProseMirror p.is-editor-empty:first-child::before) {
+    content: attr(data-placeholder); float: left; color: var(--text-tertiary);
+    pointer-events: none; height: 0;
+  }
+  .editor-body :global(.ProseMirror h2) { font-size: 20px; font-weight: 700; margin: 16px 0 8px; }
+  .editor-body :global(.ProseMirror h3) { font-size: 17px; font-weight: 600; margin: 14px 0 6px; }
+  .editor-body :global(.ProseMirror p)  { margin: 0 0 10px; }
+  .editor-body :global(.ProseMirror ul), .editor-body :global(.ProseMirror ol) { padding-left: 22px; margin: 0 0 10px; }
+  .editor-body :global(.ProseMirror li) { margin-bottom: 4px; }
+  .editor-body :global(.ProseMirror blockquote) {
+    border-left: 3px solid var(--accent); margin: 0 0 10px; padding: 4px 12px;
+    color: var(--text-secondary); font-style: italic;
+  }
+  .editor-body :global(.ProseMirror img) {
+    max-width: 100%; border-radius: 8px; display: block; margin: 10px 0;
+    cursor: grab; border: 2px solid transparent; transition: border-color 0.15s;
+  }
+  .editor-body :global(.ProseMirror img.ProseMirror-selectednode) { border-color: var(--accent); }
+  .editor-body :global(.ProseMirror div[data-youtube-video]) { margin: 10px 0; }
+  .editor-body :global(.ProseMirror div[data-youtube-video] iframe) {
+    width: 100%; aspect-ratio: 16/9; border-radius: 8px; border: none; display: block;
+  }
   .composer-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .pin-label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
   .composer button {
