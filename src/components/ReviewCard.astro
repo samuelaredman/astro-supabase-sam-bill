@@ -111,7 +111,7 @@ const showMenu = !isOwnProfile;
 
   {/* ── Card actions (bottom-right): share for everyone, edit/delete for owner only ── */}
   <div class="rc-owner-actions">
-    <ShareButton url={`/reviews/${review.id}`} label="Share review" variant="icon" />
+    <ShareButton url={`/reviews/${review.id}`} label="Share review" variant="icon" imageUrl={`/og/reviews/${review.id}.jpg`} />
     {isLoggedIn && isOwnProfile && (
       <>
         <button
@@ -250,18 +250,26 @@ const showMenu = !isOwnProfile;
     var ph = '<input type="text" id="rc-emote-search" class="rc-emote-search" placeholder="Search emotes..." autocomplete="off">';
     ph += '<div class="rc-emoji-grid rc-emote-grid" id="rc-emote-grid">';
     imageEmotes.forEach(function(emote) {
-      // Bandwidth: the src is withheld as data-src so the ~80 emotes (~11 MB)
-      // are NOT fetched on page load — the picker lives in a display:none
-      // container but browsers still eagerly load in-DOM <img src> there, and
-      // most visitors never open the picker. hydrateEmotePicker() promotes
-      // data-src → src the first time the picker is actually opened. (No
-      // loading="lazy" here: the picker grid scrolls internally, where lazy can
-      // leave emotes blank — once opened we want them all to load.)
+      // Bandwidth: src is withheld as data-src so the ~11 MB of emotes are NOT
+      // fetched on page load. An IntersectionObserver (root: picker) promotes
+      // data-src → src as images scroll into view, with an 80px preload margin.
+      // loading="lazy" doesn't work here because the picker scrolls internally.
       ph += '<button class="rc-emoji-pick rc-emote-pick" data-emoji="' + emote.key + '" title="' + emote.key + '"><img data-src="' + emote.path + '" class="rc-emote-picker-img" alt="' + emote.key + '"></button>';
     });
     ph += '</div>';
     picker.innerHTML = ph;
     document.body.appendChild(picker);
+
+    var rcEmoteObserver = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          var img = entry.target;
+          if (img.dataset.src) { img.src = img.dataset.src; img.removeAttribute('data-src'); }
+          rcEmoteObserver.unobserve(img);
+        }
+      });
+    }, { root: picker, rootMargin: '80px 0px', threshold: 0 });
+    picker.querySelectorAll('.rc-emote-picker-img[data-src]').forEach(function(im) { rcEmoteObserver.observe(im); });
 
     document.getElementById('rc-emote-search').addEventListener('input', function() {
       var q = this.value.toLowerCase();
@@ -273,19 +281,6 @@ const showMenu = !isOwnProfile;
 
   if (!window.__rcInit) {
     window.__rcInit = true;
-
-    // ── Lazily load emote images the first time the picker is opened ──────────
-    // Emote <img> are rendered with data-src (never fetched). This promotes
-    // them to real src once, so the ~11 MB of emotes cost nothing until a user
-    // actually opens the reaction picker.
-    function hydrateEmotePicker(picker) {
-      if (!picker || picker.dataset.hydrated === 'true') return;
-      picker.dataset.hydrated = 'true';
-      picker.querySelectorAll('.rc-emote-picker-img[data-src]').forEach(function(img) {
-        img.src = img.dataset.src;
-        img.removeAttribute('data-src');
-      });
-    }
 
     // ── Close all floating panels/dropdowns ──────────────────────────────────
     function closeAllRcPanels() {
@@ -395,7 +390,6 @@ const showMenu = !isOwnProfile;
         var isOpen = picker.style.display !== 'none' && picker.dataset.activeReviewId === reviewId;
         closeAllRcPanels();
         if (!isOpen) {
-          hydrateEmotePicker(picker);
           picker.dataset.activeReviewId  = reviewId;
           picker.dataset.activeLoggedIn  = loggedIn ? 'true' : 'false';
           picker.style.display = 'block';

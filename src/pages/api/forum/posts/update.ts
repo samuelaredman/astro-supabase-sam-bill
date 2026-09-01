@@ -19,7 +19,7 @@ export const POST: APIRoute = async (context) => {
   }
   if (body !== undefined) {
     if (!body?.trim()) return json({ error: "Body cannot be empty." }, 400);
-    if (body.trim().length > 20000) return json({ error: "Post must be 20000 characters or fewer." }, 400);
+    if (body.trim().length > 2000000) return json({ error: "Post body is too large." }, 400);
     patch.body = body.trim();
   }
   if (category !== undefined && typeof category === "string" && category.trim()) patch.category = category.trim();

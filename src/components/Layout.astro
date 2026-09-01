@@ -232,14 +232,24 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
       </a>
 
       <div class="sidebar-bottom">
-        <a href="/updates" class={`nav-item${activeNav === 'updates' ? ' active' : ''}`}>
-          <span class="nav-icon">
+        <a href="/updates" id="updatesNavItem" class={`nav-item${activeNav === 'updates' ? ' active' : ''}`}>
+          <span class="nav-icon" style="position:relative">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 7v4a1 1 0 0 0 1 1h2l4 3V3L6 6H4a1 1 0 0 0-1 1Z"/>
               <path d="M13 6.5a3 3 0 0 1 0 5"/>
             </svg>
+            <span class="notif-badge" id="updatesBadge" style="display:none"></span>
           </span>
           Updates
+        </a>
+
+        <a href="https://discord.gg/GpxYfbDgy" target="_blank" rel="noopener noreferrer" class="nav-item">
+          <span class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+            </svg>
+          </span>
+          Discord
         </a>
 
         <div class="nav-divider"></div>
@@ -524,12 +534,134 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
       })
       .catch(function() {});
   })();
+
+  // Updates nav highlight + pinned-post banner.
+  // Tracks per-post reads in localStorage so the sidebar item stays purple
+  // until every post the user hasn't opened is marked seen.
+  (function() {
+    var navItem = document.getElementById('updatesNavItem');
+    var pathname = window.location.pathname;
+    var isListing = pathname === '/updates';
+    var postMatch = pathname.match(/^\/updates\/([^/]+)/);
+    var currentPostId = postMatch ? postMatch[1] : null;
+    var isUpdatesPage = isListing || !!currentPostId;
+
+    function getSeenIds() {
+      try { return new Set(JSON.parse(localStorage.getItem('updates_seen_ids') || '[]')); } catch(e) { return new Set(); }
+    }
+    function saveSeenIds(set) {
+      try { localStorage.setItem('updates_seen_ids', JSON.stringify([...set])); } catch(e) {}
+    }
+    function markSeen(ids) {
+      var seen = getSeenIds();
+      ids.forEach(function(id) { seen.add(id); });
+      saveSeenIds(seen);
+    }
+
+    var cacheKey = 'updates_latest_cache';
+    var cached = null;
+    try { var raw = sessionStorage.getItem(cacheKey); if (raw) cached = JSON.parse(raw); } catch(e) {}
+
+    function applyUpdatesUI(data) {
+      var ids = data.ids || [];
+
+      if (isListing) {
+        // Visiting the listing page — mark every returned post as seen
+        markSeen(ids);
+      } else if (currentPostId) {
+        // Visiting an individual post — mark just this one as seen
+        markSeen([currentPostId]);
+      }
+
+      // Highlight nav item + show count if any post hasn't been seen yet
+      if (!isUpdatesPage) {
+        var seen = getSeenIds();
+        var unreadCount = ids.filter(function(id) { return !seen.has(id); }).length;
+        if (unreadCount > 0) {
+          if (navItem) navItem.classList.add('updates-unread');
+          var badge = document.getElementById('updatesBadge');
+          if (badge) {
+            badge.textContent = unreadCount > 9 ? '9+' : String(unreadCount);
+            badge.style.display = 'flex';
+          }
+        }
+      }
+
+      // Pinned-post banner — show on home page only, dismiss per post ID
+      if (data.pinned && pathname === '/') {
+        var dismissedKey = 'updates_dismissed_' + data.pinned.id;
+        var dismissed = false;
+        try { dismissed = !!localStorage.getItem(dismissedKey); } catch(e) {}
+        if (!dismissed) {
+          var banner = document.createElement('div');
+          banner.id = 'updates-banner';
+          banner.innerHTML =
+            '<span class="ub-icon">📌</span>' +
+            '<span class="ub-text">New from the team: <a class="ub-link" href="/updates/' + data.pinned.id + '">' + data.pinned.title.replace(/</g,'&lt;') + '</a></span>' +
+            '<button class="ub-dismiss" aria-label="Dismiss">×</button>';
+          document.body.appendChild(banner);
+          banner.querySelector('.ub-dismiss').addEventListener('click', function() {
+            try { localStorage.setItem(dismissedKey, '1'); } catch(e) {}
+            banner.style.opacity = '0';
+            setTimeout(function() { banner.remove(); }, 250);
+          });
+          banner.querySelector('.ub-link').addEventListener('click', function() {
+            try { localStorage.setItem(dismissedKey, '1'); } catch(e) {}
+          });
+        }
+      }
+    }
+
+    if (cached) {
+      applyUpdatesUI(cached);
+    } else {
+      fetch('/api/updates/latest')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          try { sessionStorage.setItem(cacheKey, JSON.stringify(data)); } catch(e) {}
+          applyUpdatesUI(data);
+        })
+        .catch(function() {});
+    }
+  })();
 </script>
 
 </body>
 </html>
 
 <style is:global>
+  /* ── Updates nav highlight (unread posts) ── */
+  #updatesNavItem.updates-unread {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  #updatesNavItem.updates-unread svg { stroke: var(--accent); }
+
+  /* ── Updates pinned-post banner ── */
+  #updates-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 300;
+    display: flex; align-items: center; gap: 10px;
+    background: var(--accent);
+    color: #fff;
+    padding: 10px 16px;
+    font-size: 13px; font-weight: 500;
+    transition: opacity 0.25s;
+  }
+  .ub-icon { font-size: 15px; flex-shrink: 0; }
+  .ub-text { flex: 1; min-width: 0; }
+  .ub-link { color: #fff; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+  .ub-link:hover { opacity: 0.85; }
+  .ub-dismiss {
+    background: rgba(255,255,255,0.2); border: none; border-radius: 50%;
+    color: #fff; width: 22px; height: 22px; font-size: 16px; line-height: 1;
+    cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  .ub-dismiss:hover { background: rgba(255,255,255,0.35); }
+
   /* ─── Mobile responsive: hide both sidebars, collapse grid ─────────────── */
   @media (max-width: 768px) {
     .layout .sidebar-left,

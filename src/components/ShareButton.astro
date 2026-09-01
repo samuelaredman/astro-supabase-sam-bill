@@ -202,46 +202,62 @@ const iconOnly = variant !== 'pill';
         imageOpt.textContent = 'Copying…';
         imageOpt.setAttribute('disabled', 'true');
 
-        fetch(absUrl)
-          .then(function (r) { return r.blob(); })
-          .then(function (blob) {
-            imageOpt.textContent = 'Copy Image';
-            imageOpt.removeAttribute('disabled');
+        // Convert fetched JPEG blob → PNG blob (clipboard only accepts PNG).
+        function toPngBlob(jpegBlob: Blob): Promise<Blob> {
+          return new Promise(function (resolve, reject) {
+            const objUrl = URL.createObjectURL(jpegBlob);
+            const img = new Image();
+            img.onload = function () {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth;
+              canvas.height = img.naturalHeight;
+              (canvas.getContext('2d') as CanvasRenderingContext2D).drawImage(img, 0, 0);
+              URL.revokeObjectURL(objUrl);
+              canvas.toBlob(function (png) {
+                if (png) resolve(png); else reject(new Error('canvas'));
+              }, 'image/png');
+            };
+            img.onerror = function () { URL.revokeObjectURL(objUrl); reject(new Error('load')); };
+            img.src = objUrl;
+          });
+        }
 
-            if ((window as any).ClipboardItem) {
-              // Chrome/Edge: convert JPEG → PNG for clipboard (only PNG is supported)
-              const objUrl = URL.createObjectURL(blob);
-              const img = new Image();
-              img.onload = function () {
-                const canvas = document.createElement('canvas');
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                (canvas.getContext('2d') as CanvasRenderingContext2D).drawImage(img, 0, 0);
-                URL.revokeObjectURL(objUrl);
-                canvas.toBlob(function (png) {
-                  if (!png) { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); return; }
-                  navigator.clipboard.write([(new (window as any).ClipboardItem({ 'image/png': png }))])
-                    .then(function () { showToast(btn, 'Image copied'); })
-                    .catch(function () { downloadBlob(blob, 'chekpoint.jpg'); showToast(btn, 'Image saved'); });
-                }, 'image/png');
-              };
-              img.onerror = function () {
-                URL.revokeObjectURL(objUrl);
-                downloadBlob(blob, 'chekpoint.jpg');
-                showToast(btn, 'Image saved');
-              };
-              img.src = objUrl;
-            } else {
-              // Firefox / Safari fallback: download the JPEG directly
+        if ((window as any).ClipboardItem) {
+          // Call clipboard.write() immediately within the user-gesture context.
+          // ClipboardItem accepts a Promise<Blob> — Chrome waits for it internally.
+          // Waiting for the fetch to finish first causes Chrome to reject the write
+          // because the gesture context expires during the async wait.
+          const pngPromise = fetch(absUrl).then(function (r) { return r.blob(); }).then(toPngBlob);
+          navigator.clipboard.write([(new (window as any).ClipboardItem({ 'image/png': pngPromise }))])
+            .then(function () {
+              imageOpt.textContent = 'Copy Image';
+              imageOpt.removeAttribute('disabled');
+              showToast(btn, 'Image copied');
+            })
+            .catch(function () {
+              // Clipboard blocked — fall back to downloading the PNG.
+              pngPromise
+                .then(function (png) { downloadBlob(png, 'chekpoint.png'); showToast(btn, 'Image saved'); })
+                .catch(function () { fetch(absUrl).then(function (r) { return r.blob(); }).then(function (b) { downloadBlob(b, 'chekpoint.jpg'); showToast(btn, 'Image saved'); }).catch(function () {}); });
+              imageOpt.textContent = 'Copy Image';
+              imageOpt.removeAttribute('disabled');
+            });
+        } else {
+          // Firefox / Safari: download the JPEG directly.
+          fetch(absUrl)
+            .then(function (r) { return r.blob(); })
+            .then(function (blob) {
+              imageOpt.textContent = 'Copy Image';
+              imageOpt.removeAttribute('disabled');
               downloadBlob(blob, 'chekpoint.jpg');
               showToast(btn, 'Image saved');
-            }
-          })
-          .catch(function () {
-            imageOpt.textContent = 'Copy Image';
-            imageOpt.removeAttribute('disabled');
-            window.open(absUrl, '_blank');
-          });
+            })
+            .catch(function () {
+              imageOpt.textContent = 'Copy Image';
+              imageOpt.removeAttribute('disabled');
+              window.open(absUrl, '_blank');
+            });
+        }
         return;
       }
 
