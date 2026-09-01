@@ -154,6 +154,100 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   import Youtube from '@tiptap/extension-youtube';
   import Placeholder from '@tiptap/extension-placeholder';
 
+  // ── Resizable image extension ─────────────────────────────────────────────
+  // Extends base Image with a `width` attribute (stored as inline style) and
+  // a drag-corner handle rendered via NodeView. No upload endpoint needed —
+  // images are compressed client-side and stored as base64 in the post body.
+  const ResizableImage = TiptapImage.extend({
+    addAttributes() {
+      return {
+        ...this.parent?.(),
+        width: {
+          default: null,
+          renderHTML: (attrs) =>
+            attrs.width ? { style: `width:${attrs.width};max-width:100%;height:auto` } : {},
+          parseHTML: (el) => {
+            const m = (el.getAttribute('style') || '').match(/width:\s*([^;]+)/);
+            return m ? m[1].trim() : null;
+          },
+        },
+      };
+    },
+
+    addNodeView() {
+      return ({ node, getPos, editor: ed }) => {
+        const wrap = document.createElement('span');
+        wrap.className = 'img-wrap';
+
+        const img = document.createElement('img');
+        img.src = node.attrs.src ?? '';
+        img.alt = node.attrs.alt ?? '';
+        img.style.cssText = 'display:block;max-width:100%;height:auto;border-radius:8px;';
+        if (node.attrs.width) img.style.width = node.attrs.width;
+
+        const handle = document.createElement('span');
+        handle.className = 'img-resize-handle';
+        handle.title = 'Drag to resize';
+
+        handle.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const x0 = e.clientX, w0 = img.offsetWidth;
+          const onMove = (ev: MouseEvent) => {
+            img.style.width = Math.max(60, w0 + ev.clientX - x0) + 'px';
+          };
+          const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            if (typeof getPos === 'function') {
+              ed.commands.updateAttributes('image', { width: img.style.width });
+            }
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        });
+
+        wrap.appendChild(img);
+        wrap.appendChild(handle);
+
+        return {
+          dom: wrap,
+          contentDOM: null,
+          update(n) {
+            if (n.type.name !== 'image') return false;
+            img.src = n.attrs.src ?? '';
+            img.alt = n.attrs.alt ?? '';
+            img.style.width = n.attrs.width ?? '';
+            return true;
+          },
+          destroy() {},
+        };
+      };
+    },
+  });
+
+  // ── Compress & insert ─────────────────────────────────────────────────────
+  // Resizes to ≤1200px on longest side, converts to JPEG (PNG preserved for
+  // transparency). Keeps images in the post body without a storage bucket.
+  async function compressAndInsert(file: File) {
+    const MAX = 1200;
+    let bmp: ImageBitmap;
+    try { bmp = await createImageBitmap(file); }
+    catch { alert('Could not read that image.'); return; }
+    let { width: w, height: h } = bmp;
+    if (w > MAX || h > MAX) {
+      if (w >= h) { h = Math.round(h * MAX / w); w = MAX; }
+      else        { w = Math.round(w * MAX / h); h = MAX; }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d')!.drawImage(bmp, 0, 0, w, h);
+    bmp.close();
+    const isPng = file.type === 'image/png';
+    const src = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.85);
+    editor.chain().focus().setImage({ src }).run();
+  }
+
   const editorEl = document.getElementById('post-editor');
   if (!editorEl) throw new Error('no editor');
 
@@ -161,53 +255,26 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     element: editorEl,
     extensions: [
       StarterKit,
-      TiptapImage.configure({ allowBase64: false, inline: false }),
+      ResizableImage.configure({ allowBase64: true, inline: false }),
       Youtube.configure({ controls: true }),
       Placeholder.configure({ placeholder: 'Share an update, idea, or question…' }),
     ],
   });
 
-  // ── Image upload ─────────────────────────────────────────────────────────
-  async function uploadAndInsertImage(file: File) {
-    const fd = new FormData();
-    fd.append('image', file);
-    try {
-      const res = await fetch('/api/updates/upload-image', { method: 'POST', body: fd });
-      const data = await res.json();
-      if (data.url) {
-        editor.chain().focus().setImage({ src: data.url }).run();
-      } else {
-        alert(data.error || 'Image upload failed.');
-      }
-    } catch {
-      alert('Image upload failed — please try again.');
-    }
-  }
-
-  // Intercept paste (screenshot paste from clipboard)
+  // Paste image from clipboard
   editorEl.addEventListener('paste', (e: ClipboardEvent) => {
-    const items = Array.from(e.clipboardData?.items ?? []);
-    const img = items.find(i => i.type.startsWith('image/'));
-    if (img) {
-      e.preventDefault();
-      e.stopPropagation();
-      const file = img.getAsFile();
-      if (file) uploadAndInsertImage(file);
-    }
+    const item = Array.from(e.clipboardData?.items ?? []).find(i => i.type.startsWith('image/'));
+    if (item) { e.preventDefault(); e.stopPropagation(); const f = item.getAsFile(); if (f) compressAndInsert(f); }
   }, true);
 
-  // Intercept drop (drag image file onto editor)
+  // Drop image file onto editor
   editorEl.addEventListener('drop', (e: DragEvent) => {
-    const files = Array.from(e.dataTransfer?.files ?? []);
-    const img = files.find(f => f.type.startsWith('image/'));
-    if (img) {
-      e.preventDefault();
-      uploadAndInsertImage(img);
-    }
+    const f = Array.from(e.dataTransfer?.files ?? []).find(f => f.type.startsWith('image/'));
+    if (f) { e.preventDefault(); compressAndInsert(f); }
   });
 
   // ── Toolbar ───────────────────────────────────────────────────────────────
-  document.getElementById('editor-toolbar')?.addEventListener('click', async (e) => {
+  document.getElementById('editor-toolbar')?.addEventListener('click', (e) => {
     const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
     if (!btn) return;
     switch (btn.dataset.action) {
@@ -229,7 +296,7 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 
   document.getElementById('image-file-input')?.addEventListener('change', (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
-    if (file) { uploadAndInsertImage(file); (e.target as HTMLInputElement).value = ''; }
+    if (file) { compressAndInsert(file); (e.target as HTMLInputElement).value = ''; }
   });
 
   // ── Submit ────────────────────────────────────────────────────────────────
@@ -240,13 +307,13 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     const errEl  = document.getElementById('composer-error')!;
     const btn    = document.getElementById('post-submit') as HTMLButtonElement;
 
-    if (!title)        { errEl.textContent = 'Please add a title.'; return; }
-    if (editor.isEmpty){ errEl.textContent = 'Please write something.'; return; }
+    if (!title)         { errEl.textContent = 'Please add a title.'; return; }
+    if (editor.isEmpty) { errEl.textContent = 'Please write something.'; return; }
 
     btn.disabled = true;
     errEl.textContent = '';
     try {
-      const res  = await fetch('/api/forum/posts/create', {
+      const res = await fetch('/api/forum/posts/create', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, body, pinned }),
       });
@@ -321,9 +388,18 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
   }
   .editor-body :global(.ProseMirror img) {
     max-width: 100%; border-radius: 8px; display: block; margin: 10px 0;
-    cursor: grab; border: 2px solid transparent; transition: border-color 0.15s;
   }
-  .editor-body :global(.ProseMirror img.ProseMirror-selectednode) { border-color: var(--accent); }
+  .editor-body :global(.img-wrap) {
+    display: block; position: relative; line-height: 0; margin: 10px 0;
+  }
+  .editor-body :global(.img-resize-handle) {
+    position: absolute; bottom: 4px; right: 4px;
+    width: 14px; height: 14px;
+    background: var(--accent); border-radius: 3px;
+    cursor: se-resize; opacity: 0; transition: opacity 0.15s;
+    box-shadow: 0 0 0 2px #fff;
+  }
+  .editor-body :global(.img-wrap:hover .img-resize-handle) { opacity: 1; }
   .editor-body :global(.ProseMirror div[data-youtube-video]) { margin: 10px 0; }
   .editor-body :global(.ProseMirror div[data-youtube-video] iframe) {
     width: 100%; aspect-ratio: 16/9; border-radius: 8px; border: none; display: block;
