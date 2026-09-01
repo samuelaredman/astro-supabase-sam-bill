@@ -72,13 +72,16 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0, removed: 0 });
   }
 
-  // Build lowercase→playtime map from Steam library
+  // Build lowercase→playtime and lowercase→appid maps from Steam library
   const steamByTitle = new Map<string, number>();
+  const appidByTitle  = new Map<string, number>();
   const originalCaseByTitle = new Map<string, string>();
   for (const g of steamGames) {
     if (g.name) {
-      steamByTitle.set(g.name.toLowerCase().trim(), g.playtime_forever);
-      originalCaseByTitle.set(g.name.toLowerCase().trim(), g.name);
+      const key = g.name.toLowerCase().trim();
+      steamByTitle.set(key, g.playtime_forever);
+      appidByTitle.set(key, g.appid);
+      originalCaseByTitle.set(key, g.name);
     }
   }
 
@@ -135,7 +138,9 @@ export const POST: APIRoute = async (context) => {
     if (seenGameIds.has(game.id)) continue;
     seenGameIds.add(game.id);
 
-    const playtime = steamByTitle.get(game.title.toLowerCase().trim()) ?? 0;
+    const key     = game.title.toLowerCase().trim();
+    const playtime = steamByTitle.get(key) ?? 0;
+    const appid    = appidByTitle.get(key) ?? null;
     const existing = existingByGameId.get(game.id);
 
     if (!existing) {
@@ -147,10 +152,11 @@ export const POST: APIRoute = async (context) => {
         status: 'owned',
         is_owned: true,
         steam_playtime_minutes: playtime,
+        steam_appid: appid,
       });
     } else {
-      // Already tracked — only update playtime
-      toUpdatePlaytime.push({ game_id: game.id, playtime });
+      // Already tracked — only update playtime and appid
+      toUpdatePlaytime.push({ game_id: game.id, playtime, appid });
     }
   }
 
@@ -163,10 +169,10 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  // Update playtime on existing rows one at a time (no bulk update in PostgREST without RPC)
-  for (const { game_id, playtime } of toUpdatePlaytime) {
+  // Update playtime + appid on existing rows
+  for (const { game_id, playtime, appid } of toUpdatePlaytime) {
     await db.from('user_game_status')
-      .update({ steam_playtime_minutes: playtime })
+      .update({ steam_playtime_minutes: playtime, ...(appid ? { steam_appid: appid } : {}) })
       .eq('profile_id', profile.id)
       .eq('game_id', game_id);
   }
