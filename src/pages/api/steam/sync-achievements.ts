@@ -20,12 +20,22 @@ export const POST: APIRoute = async (context) => {
 
   const { data: profileData } = await (db as any)
     .from('profiles')
-    .select('steam_id')
+    .select('steam_id, achievements_synced_at')
     .eq('id', profile.id)
     .single();
 
   if (!profileData?.steam_id) {
     return json({ error: 'No Steam account connected.' }, 400);
+  }
+
+  // 1-hour cooldown — achievement data changes slowly
+  const lastSync = (profileData as any).achievements_synced_at;
+  if (lastSync && body.cursor == null) {
+    const secondsSince = (Date.now() - new Date(lastSync).getTime()) / 1000;
+    if (secondsSince < 3600) {
+      const mins = Math.ceil((3600 - secondsSince) / 60);
+      return json({ error: `Please wait ${mins} minute${mins !== 1 ? 's' : ''} before syncing again.` }, 429);
+    }
   }
 
   const steamId    = profileData.steam_id as string;
@@ -136,6 +146,14 @@ export const POST: APIRoute = async (context) => {
   }
 
   const done = games.length < BATCH_SIZE;
+
+  // Stamp completion time on the final batch so the cooldown can kick in
+  if (done) {
+    await (db as any)
+      .from('profiles')
+      .update({ achievements_synced_at: new Date().toISOString() })
+      .eq('id', profile.id);
+  }
 
   return json({
     processed,
