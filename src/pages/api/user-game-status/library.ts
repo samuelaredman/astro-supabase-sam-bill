@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 import { getSupabaseAdmin, createSupabaseServerClientFromContext } from "../../../utils/database";
 import { json } from "../../../utils/api";
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 96;
 
 export const GET: APIRoute = async (context) => {
   const db = getSupabaseAdmin() as any;
