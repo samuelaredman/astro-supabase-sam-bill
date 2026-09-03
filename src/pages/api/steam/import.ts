@@ -7,9 +7,10 @@ const IN_CHUNK = 100;
 // Insert / RPC payload chunk — large enough to be efficient, small enough to
 // avoid body-size issues at Supabase's API gateway.
 const WRITE_CHUNK = 500;
-// Supabase's max-rows setting caps every response page at 1000 rows regardless
-// of the Range header value.
-const PAGE_SIZE = 1000;
+// match_steam_games returns at most one row per input title (ROW_NUMBER rn=1).
+// Chunking inputs keeps each RPC response well under Supabase's max-rows=1000
+// hard cap, which Range-header pagination cannot reliably override on RPC calls.
+const TITLE_CHUNK = 200;
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -99,27 +100,29 @@ export const POST: APIRoute = async (context) => {
   }
 
   // Match against our games table via DB function (case-insensitive).
-  // Paginate in PAGE_SIZE batches — Supabase's max-rows setting caps each
-  // response page at 1000 rows regardless of the Range header value.
+  // Chunk input titles so each RPC call handles at most TITLE_CHUNK titles.
+  // match_steam_games returns at most one row per input title, so each batch
+  // returns ≤ TITLE_CHUNK rows — safely under Supabase's max-rows=1000 cap.
+  // (Range-header pagination on RPC calls is unreliable when the function uses
+  //  SELECT DISTINCT without ORDER BY, and max-rows still caps the page size.)
   const steamTitles = Array.from(steamByTitle.keys());
   console.log(`[steam/import] Sending ${steamTitles.length} titles to match_steam_games`);
   console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
 
   const allMatchedGames: Array<{ id: string; title: string }> = [];
-  {
-    let from = 0;
-    while (true) {
-      const { data: page, error: matchError } = await (db as any)
-        .rpc('match_steam_games', { steam_titles: steamTitles })
-        .range(from, from + PAGE_SIZE - 1);
-      if (matchError) {
-        console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
-        return json({ error: 'Failed to match games.' }, 500);
+  const seenMatchedIds = new Set<string>();
+  for (const titleBatch of chunk(steamTitles, TITLE_CHUNK)) {
+    const { data: batchMatches, error: matchError } = await (db as any)
+      .rpc('match_steam_games', { steam_titles: titleBatch });
+    if (matchError) {
+      console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
+      return json({ error: 'Failed to match games.' }, 500);
+    }
+    for (const row of (batchMatches ?? []) as Array<{ id: string; title: string }>) {
+      if (!seenMatchedIds.has(row.id)) {
+        seenMatchedIds.add(row.id);
+        allMatchedGames.push(row);
       }
-      const rows: Array<{ id: string; title: string }> = page ?? [];
-      allMatchedGames.push(...rows);
-      if (rows.length < PAGE_SIZE) break;
-      from += PAGE_SIZE;
     }
   }
   const matches = allMatchedGames;
