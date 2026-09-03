@@ -1,7 +1,17 @@
 /**
- * One-time backfill: populates igdb_category, igdb_status, storyline,
- * and the new junction tables (themes, game_modes, franchises, collections)
- * for all games that already have an igdb_id.
+ * One-time backfill: populates igdb_category, igdb_status, storyline, the raw
+ * IGDB relationship columns (igdb_parent_game, igdb_version_parent,
+ * version_title), the junction tables (themes, game_modes, franchises,
+ * collections), the Steam appid mapping (game_steam_apps), and the typed
+ * game_relationships graph, for all games that already have an igdb_id.
+ *
+ * Relationship edges are written only between games already present in the DB,
+ * so run this TWICE for full cross-batch coverage: the second pass fills edges
+ * whose other endpoint was imported in a later batch on the first pass. It is
+ * fully idempotent (all upserts).
+ *
+ * Canonical resolution (games.canonical_game_id) is a SEPARATE, report-first
+ * step — see scripts/backfill-canonical.ts (Phase 3) — not done here.
  *
  * Run from project root:
  *   npx tsx scripts/backfill-game-metadata.ts
@@ -12,6 +22,11 @@
 
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
+import {
+  asIgdbId,
+  persistGameRelationshipsFromIgdb,
+  persistSteamAppsFromIgdb,
+} from '../src/utils/games';
 
 const IGDB_URL = 'https://api.igdb.com/v4';
 const BATCH_SIZE = 500;
@@ -146,6 +161,9 @@ async function main() {
 
     const igdbGames = await igdbFetch(`
       fields id, game_type, status, storyline,
+             parent_game, version_parent, version_title,
+             dlcs, expansions, standalone_expansions, expanded_games, remakes,
+             external_games.category, external_games.uid,
              themes.id, themes.name, themes.slug,
              game_modes.id, game_modes.name, game_modes.slug,
              franchises.id, franchises.name, franchises.slug,
@@ -171,6 +189,9 @@ async function main() {
           igdb_category: igdbData.game_type ?? null,
           igdb_status:   igdbData.status    ?? null,
           storyline:     igdbData.storyline ?? null,
+          igdb_parent_game:    asIgdbId(igdbData.parent_game),
+          igdb_version_parent: asIgdbId(igdbData.version_parent),
+          version_title:       igdbData.version_title ?? null,
         })
         .eq('id', game.id);
 
@@ -184,6 +205,14 @@ async function main() {
       upsertJunctionBatch(gameDataMap, 'franchises', 'franchises', 'game_franchises', 'franchise_id'),
       upsertJunctionBatch(gameDataMap, 'collections','collections','game_collections','collection_id'),
     ]);
+
+    // Steam appids + the typed relationship graph. Steam apps upsert independently
+    // per game; relationship edges are only written between games already present,
+    // so a second full pass (or later imports) completes cross-batch edges.
+    for (const [gameUuid, igdbData] of gameDataMap.entries()) {
+      await persistSteamAppsFromIgdb(db, gameUuid, igdbData);
+      await persistGameRelationshipsFromIgdb(db, gameUuid, igdbData);
+    }
 
     processed += batch.length;
     console.log(`done — ${processed}/${total}`);
