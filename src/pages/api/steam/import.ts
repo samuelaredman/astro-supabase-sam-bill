@@ -109,11 +109,17 @@ export const POST: APIRoute = async (context) => {
   console.log(`[steam/import] Sending ${steamTitles.length} titles to match_steam_games`);
   console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
 
+  // Fire all title batches in parallel — sequential calls were eating the
+  // entire Netlify 10s timeout before the INSERT step could run.
+  const matchBatchResults = await Promise.all(
+    chunk(steamTitles, TITLE_CHUNK).map(titleBatch =>
+      (db as any).rpc('match_steam_games', { steam_titles: titleBatch })
+    )
+  );
+
   const allMatchedGames: Array<{ id: string; title: string }> = [];
   const seenMatchedIds = new Set<string>();
-  for (const titleBatch of chunk(steamTitles, TITLE_CHUNK)) {
-    const { data: batchMatches, error: matchError } = await (db as any)
-      .rpc('match_steam_games', { steam_titles: titleBatch });
+  for (const { data: batchMatches, error: matchError } of matchBatchResults) {
     if (matchError) {
       console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
       return json({ error: 'Failed to match games.' }, 500);
@@ -148,12 +154,16 @@ export const POST: APIRoute = async (context) => {
   // then fail on INSERT with a unique-constraint violation.
   const matchedGameIds = matches.map(m => m.id);
   const existingByGameId = new Map<string, string>();
-  for (const ids of chunk(matchedGameIds, IN_CHUNK)) {
-    const { data: rows } = await (db as any)
-      .from('user_game_status')
-      .select('game_id, status')
-      .eq('profile_id', profile.id)
-      .in('game_id', ids);
+  const existingChunks = await Promise.all(
+    chunk(matchedGameIds, IN_CHUNK).map(ids =>
+      (db as any)
+        .from('user_game_status')
+        .select('game_id, status')
+        .eq('profile_id', profile.id)
+        .in('game_id', ids)
+    )
+  );
+  for (const { data: rows } of existingChunks) {
     for (const r of (rows ?? [])) existingByGameId.set(r.game_id, r.status);
   }
 
