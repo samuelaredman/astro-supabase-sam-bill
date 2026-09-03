@@ -89,7 +89,8 @@ export const POST: APIRoute = async (context) => {
   console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
 
   const { data: matchedGames, error: matchError } = await db
-    .rpc('match_steam_games', { steam_titles: steamTitles });
+    .rpc('match_steam_games', { steam_titles: steamTitles })
+    .range(0, 9999);
 
   if (matchError) {
     console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
@@ -119,7 +120,8 @@ export const POST: APIRoute = async (context) => {
     .from('user_game_status')
     .select('game_id, status')
     .eq('profile_id', profile.id)
-    .in('game_id', matchedGameIds);
+    .in('game_id', matchedGameIds)
+    .range(0, 9999);
 
   const existingByGameId = new Map<string, string>(
     (existingStatuses ?? []).map((r: any) => [r.game_id, r.status])
