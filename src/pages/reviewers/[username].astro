@@ -451,24 +451,43 @@ try {
   libSettingsRow = data;
 } catch (_) { /* columns not yet available, use defaults below */ }
 
-// Fetch library with is_hidden/is_owned; fall back to query without them if columns missing
+// Fetch library — paginate in 1000-row pages because Supabase's max-rows
+// setting caps any single response at 1000 regardless of the Range header.
 let libraryData: any[] | null = null;
 try {
-  const { data, error } = await db
-    .from('user_game_status')
-    .select('status, is_hidden, is_owned, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
-    .eq('profile_id', reviewer.id)
-    .order('updated_at', { ascending: false });
-  if (!error) {
-    libraryData = data;
-  } else {
-    const { data: fallback } = await db
+  const SELECT_FULL = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))';
+  const SELECT_FALLBACK = 'status, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))';
+  const PAGE = 1000;
+  const pages: any[] = [];
+  let from = 0;
+  let useFallback = false;
+  while (true) {
+    const { data: page, error } = await db
       .from('user_game_status')
-      .select('status, updated_at, steam_playtime_minutes, games(id, title, slug, cover_img_url, game_genres(genres(name, slug)))')
+      .select(SELECT_FULL)
       .eq('profile_id', reviewer.id)
-      .order('updated_at', { ascending: false });
-    libraryData = fallback;
+      .order('updated_at', { ascending: false })
+      .range(from, from + PAGE - 1);
+    if (error) { useFallback = true; break; }
+    if (page && page.length > 0) pages.push(...page);
+    if (!page || page.length < PAGE) break;
+    from += PAGE;
   }
+  if (useFallback) {
+    from = 0;
+    while (true) {
+      const { data: page } = await db
+        .from('user_game_status')
+        .select(SELECT_FALLBACK)
+        .eq('profile_id', reviewer.id)
+        .order('updated_at', { ascending: false })
+        .range(from, from + PAGE - 1);
+      if (page && page.length > 0) pages.push(...page);
+      if (!page || page.length < PAGE) break;
+      from += PAGE;
+    }
+  }
+  libraryData = pages;
 } catch (_) {
   libraryData = [];
 }
