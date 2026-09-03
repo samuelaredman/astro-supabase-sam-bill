@@ -1107,9 +1107,12 @@ const reviewerBreadcrumbJsonLd = {
     .lib-bulk-apply{background:var(--accent);color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
     .lib-bulk-delete{background:transparent;border:1px solid #f87171;color:#f87171;padding:6px 14px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
     .lib-bulk-delete:hover{background:#f87171;color:#fff}
+    .lib-select-all{background:transparent;border:1px solid var(--border);color:var(--text-secondary);padding:6px 14px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer}
+    .lib-select-all:hover{border-color:var(--accent);color:var(--accent)}
     .lib-edit-cancel{background:transparent;border:1px solid var(--border);color:var(--text-secondary);padding:6px 14px;border-radius:6px;font-size:12px;font-family:inherit;cursor:pointer;margin-left:auto}
     /* edit mode item */
     .lib-item.lib-edit-active{cursor:pointer}
+    .lib-edit-active{user-select:none}
     .lib-checkbox{position:absolute;top:5px;left:5px;width:18px;height:18px;border-radius:4px;background:rgba(0,0,0,.55);border:1.5px solid rgba(255,255,255,.45);display:flex;align-items:center;justify-content:center;z-index:2}
     .lib-checkbox.checked{background:var(--accent);border-color:var(--accent)}
     .lib-check-inner{width:9px;height:9px;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.5 5l2.5 2.5 4.5-4.5' stroke='white' stroke-width='1.8' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;opacity:0}
@@ -1841,6 +1844,7 @@ const reviewerBreadcrumbJsonLd = {
     {isOwnProfile && (
       <div id="libEditBar" style="display:none">
         <span id="libEditCount" class="lib-edit-count">0 selected</span>
+        <button class="lib-select-all" id="libSelectAllBtn" onclick="toggleLibSelectAll()">Select all</button>
         <select id="libBulkStatus" class="lib-sort" style="font-size:12px">
           <option value="">Change status…</option>
           <option value="playing">🎮 Playing</option>
@@ -1878,10 +1882,6 @@ const reviewerBreadcrumbJsonLd = {
       <label class="lib-check-item" id="libUnreviewedItem">
         <div class="lib-check-box"></div>
         <span>Unreviewed</span>
-      </label>
-      <label class="lib-check-item" id="libUnplayedItem">
-        <div class="lib-check-box"></div>
-        <span>Unplayed</span>
       </label>
       {isOwnProfile && (
         <label class="lib-check-item" id="libHiddenItem">
@@ -2994,10 +2994,14 @@ const reviewerBreadcrumbJsonLd = {
   var _libSort = 'alpha'
   var _libSearch = ''
   var _libEditMode = false
+  var _lastClickedIndex = -1
+  var _isDragging = false
+  var _dragSelecting = true
+  var _dragMoved = false
+  var _dragStartGid = null
   var _libSelected = new Set()
   var _filterReviewed = false
   var _filterUnreviewed = false
-  var _filterUnplayed = false
   var _filterHidden = false
 
   var STATUS_META = {
@@ -3020,17 +3024,18 @@ const reviewerBreadcrumbJsonLd = {
       }
       if (_libFilter !== 'all') {
         if (_libFilter === 'owned') {
-          // Owned is an independent flag, not tied to a single status
           if (!it.owned) return false
         } else if (_libFilter === 'completed') {
           if (it.status !== 'completed' && it.status !== 'hundred_percent') return false
+        } else if (_libFilter === 'unplayed') {
+          if (it.status === 'completed' || it.status === 'hundred_percent') return false
+          if (it.playtime > 0) return false
         } else {
           if (it.status !== _libFilter) return false
         }
       }
       if (_filterReviewed && !it.hasReview) return false
       if (_filterUnreviewed && it.hasReview) return false
-      if (_filterUnplayed && (it.playtime > 0 || it.hasReview)) return false
       if (q) {
         var inTitle = it.title.toLowerCase().includes(q)
         var inGenre = it.genres.some(function(g) { return g.toLowerCase().includes(q) })
@@ -3091,14 +3096,60 @@ const reviewerBreadcrumbJsonLd = {
         '</' + 'a>'
     }).join('')
 
-    // click handler
-    grid.querySelectorAll('.lib-item').forEach(function(el) {
+    // interaction handlers — mousedown toggles + starts drag, mouseover extends drag,
+    // click handles shift-range; regular toggle is done in mousedown to support drag
+    var visibleItems = items
+    grid.querySelectorAll('.lib-item').forEach(function(el, idx) {
+      el.addEventListener('mousedown', function(e) {
+        if (!_libEditMode || e.button !== 0 || e.shiftKey) return
+        e.preventDefault() // prevent text selection while dragging
+        _isDragging = true
+        _dragMoved = false
+        _dragStartGid = el.dataset.gameId
+        _dragSelecting = !_libSelected.has(_dragStartGid)
+        if (_dragSelecting) _libSelected.add(_dragStartGid)
+        else _libSelected.delete(_dragStartGid)
+        _lastClickedIndex = idx
+        var cbEl = el.querySelector('.lib-checkbox')
+        if (cbEl) cbEl.classList.toggle('checked', _libSelected.has(_dragStartGid))
+        _updateEditBar()
+      })
+
+      el.addEventListener('mouseover', function() {
+        if (!_libEditMode || !_isDragging) return
+        var gid = el.dataset.gameId
+        if (gid === _dragStartGid) return
+        var wasSel = _libSelected.has(gid)
+        if (_dragSelecting && !wasSel) {
+          _libSelected.add(gid)
+          _dragMoved = true
+          var cbEl = el.querySelector('.lib-checkbox')
+          if (cbEl) cbEl.classList.add('checked')
+          _updateEditBar()
+        } else if (!_dragSelecting && wasSel) {
+          _libSelected.delete(gid)
+          _dragMoved = true
+          var cbEl = el.querySelector('.lib-checkbox')
+          if (cbEl) cbEl.classList.remove('checked')
+          _updateEditBar()
+        }
+      })
+
       el.addEventListener('click', function(e) {
         if (!_libEditMode) return // normal navigation
         e.preventDefault()
-        var gid = el.dataset.gameId
-        if (_libSelected.has(gid)) _libSelected.delete(gid)
-        else _libSelected.add(gid)
+        if (_dragMoved) return // drag handled it; mouseup will re-render
+        if (e.shiftKey && _lastClickedIndex !== -1) {
+          var gid = el.dataset.gameId
+          var lo = Math.min(_lastClickedIndex, idx)
+          var hi = Math.max(_lastClickedIndex, idx)
+          var allSelected = visibleItems.slice(lo, hi + 1).every(function(it) { return _libSelected.has(it.gameId) })
+          for (var i = lo; i <= hi; i++) {
+            if (allSelected) _libSelected.delete(visibleItems[i].gameId)
+            else _libSelected.add(visibleItems[i].gameId)
+          }
+        }
+        // regular click toggle was handled in mousedown; just sync the grid
         _renderGrid()
         _updateEditBar()
       })
@@ -3111,8 +3162,12 @@ const reviewerBreadcrumbJsonLd = {
     var counts = {}
     _libItems.forEach(function(it) { counts[it.status] = (counts[it.status] || 0) + 1 })
     var ownedCount = _libItems.filter(function(it) { return it.owned }).length
+    var unplayedCount = _libItems.filter(function(it) {
+      return it.status !== 'completed' && it.status !== 'hundred_percent' && !(it.playtime > 0)
+    }).length
     var total = _libItems.length
     var pills = [{ key: 'all', label: 'All', count: total }]
+    if (unplayedCount) pills.push({ key: 'unplayed', label: '⬜ Unplayed', count: unplayedCount })
     var order = ['playing','completed','hundred_percent','want_to_play','owned','dropped']
     var hiddenTabsSet = new Set(_libIsOwn ? [] : (_libSettings.hiddenTabs || []))
     order.forEach(function(s) {
@@ -3141,14 +3196,34 @@ const reviewerBreadcrumbJsonLd = {
   function _updateEditBar() {
     var bar = document.getElementById('libEditBar')
     var countEl = document.getElementById('libEditCount')
+    var selectAllBtn = document.getElementById('libSelectAllBtn')
     if (!bar) return
     if (countEl) countEl.textContent = _libSelected.size + ' selected'
     bar.style.display = _libEditMode ? 'flex' : 'none'
+    if (selectAllBtn) {
+      var visible = _getVisible()
+      var allSelected = visible.length > 0 && visible.every(function(it) { return _libSelected.has(it.gameId) })
+      selectAllBtn.textContent = allSelected ? 'Deselect all' : 'Select all'
+    }
   }
+
+  function toggleLibSelectAll() {
+    var visible = _getVisible()
+    var allSelected = visible.length > 0 && visible.every(function(it) { return _libSelected.has(it.gameId) })
+    visible.forEach(function(it) {
+      if (allSelected) _libSelected.delete(it.gameId)
+      else _libSelected.add(it.gameId)
+    })
+    _lastClickedIndex = -1
+    _renderGrid()
+    _updateEditBar()
+  }
+  window.toggleLibSelectAll = toggleLibSelectAll
 
   function toggleLibEdit() {
     _libEditMode = !_libEditMode
     _libSelected.clear()
+    _lastClickedIndex = -1
     var btn = document.getElementById('libEditBtn')
     if (btn) btn.textContent = _libEditMode ? 'Cancel' : 'Edit library'
     _renderGrid()
@@ -3196,6 +3271,17 @@ const reviewerBreadcrumbJsonLd = {
   }
   window.applyBulkDelete = applyBulkDelete
 
+  // End drag on mouseup anywhere in the document
+  document.addEventListener('mouseup', function() {
+    if (!_isDragging) return
+    _isDragging = false
+    if (_dragMoved) {
+      _dragMoved = false
+      _renderGrid()
+      _updateEditBar()
+    }
+  })
+
   // Init library
   ;(function() {
     if (_libSettings.isPrivate) return  // private library: Astro shows the message above
@@ -3214,33 +3300,26 @@ const reviewerBreadcrumbJsonLd = {
     _renderFilterPills()
     _renderGrid()
 
-    // wire up reviewed / unreviewed / unplayed checkboxes
+    // wire up reviewed / unreviewed / hidden checkboxes
     var reviewedItem   = document.getElementById('libReviewedItem')
     var unreviewedItem = document.getElementById('libUnreviewedItem')
-    var unplayedItem   = document.getElementById('libUnplayedItem')
     var hiddenItem     = document.getElementById('libHiddenItem')
 
     function _syncCheckboxUI() {
       if (reviewedItem)   reviewedItem.classList.toggle('active', _filterReviewed)
       if (unreviewedItem) unreviewedItem.classList.toggle('active', _filterUnreviewed)
-      if (unplayedItem)   unplayedItem.classList.toggle('active', _filterUnplayed)
       if (hiddenItem)     hiddenItem.classList.toggle('active', _filterHidden)
       _renderGrid()
     }
 
     if (reviewedItem) reviewedItem.addEventListener('click', function() {
       _filterReviewed = !_filterReviewed
-      if (_filterReviewed) { _filterUnreviewed = false; _filterUnplayed = false }
+      if (_filterReviewed) _filterUnreviewed = false
       _syncCheckboxUI()
     })
     if (unreviewedItem) unreviewedItem.addEventListener('click', function() {
       _filterUnreviewed = !_filterUnreviewed
       if (_filterUnreviewed) _filterReviewed = false
-      _syncCheckboxUI()
-    })
-    if (unplayedItem) unplayedItem.addEventListener('click', function() {
-      _filterUnplayed = !_filterUnplayed
-      if (_filterUnplayed) _filterReviewed = false
       _syncCheckboxUI()
     })
     if (hiddenItem) hiddenItem.addEventListener('click', function() {

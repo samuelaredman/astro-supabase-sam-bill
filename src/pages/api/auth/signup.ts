@@ -50,6 +50,7 @@ export const POST: APIRoute = async (context) => {
   // bounces them to /signin even though their email was confirmed.
   const emailRedirectTo = new URL("/auth/confirm", context.site ?? context.url.origin).toString();
 
+
   const { error } = await supabase.auth.signUp({
     email,
     password,
