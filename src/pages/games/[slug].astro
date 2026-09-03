@@ -351,6 +351,28 @@ if (similarSlugs.length > 0) {
   }
 }
 
+// Unified "Recommended Games": user recs first (by count desc), padded with IGDB similar
+const userRecSlugs = new Set(relatedGames.map((r: any) => r.game?.slug).filter(Boolean))
+const userRecsDisplay = relatedGames.slice(0, 8)
+const igdbFillSlots = Math.max(0, 8 - userRecsDisplay.length)
+const recommendedGames: Array<{ slug: string | null; title: string; coverImgUrl: string | null; chekpointScore: number | null }> = [
+  ...userRecsDisplay.map((r: any) => ({
+    slug: r.game?.slug ?? null,
+    title: r.game?.title ?? '',
+    coverImgUrl: r.game?.cover_img_url ?? null,
+    chekpointScore: r.game?.id ? (gameAvgs[r.game.id] ?? null) : null,
+  })),
+  ...similarGames
+    .filter((g: any) => !userRecSlugs.has(g.slug))
+    .slice(0, igdbFillSlots)
+    .map((g: any) => ({
+      slug: g.slug ?? null,
+      title: g.name ?? '',
+      coverImgUrl: g.cover?.url ?? null,
+      chekpointScore: g.slug ? (similarGameScores[g.slug] ?? null) : null,
+    })),
+]
+
 const thisAvg = avgScore ? parseFloat(avgScore) : 0
 const allAvgs = Object.values(gameAvgs).sort((a, b) => b - a)
 const allTimeRank = allAvgs.findIndex(v => v <= thisAvg) + 1
@@ -857,6 +879,15 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
     }
     .rec-subtab.active .rec-subtab-count { border-color: var(--accent); color: var(--accent); background: rgba(96,80,200,.08); }
 
+    /* ── Rec search ── */
+    .rec-subtabs { align-items: center; gap: 10px; }
+    .rec-subtabs-pills { display: flex; gap: 4px; flex-shrink: 0; }
+    .rec-search-wrap { position: relative; width: 160px; flex-shrink: 0; }
+    .rec-search-input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px 6px 30px; font-size: 12px; font-family: inherit; color: var(--text-primary); outline: none; transition: border-color .15s; box-sizing: border-box; }
+    .rec-search-input:focus { border-color: var(--accent); }
+    .rec-search-input::placeholder { color: var(--text-tertiary); }
+    .rec-search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-tertiary); pointer-events: none; }
+
     /* ── Recommendation play-next grid ── */
     .rec-game-grid {
       display: grid;
@@ -1022,21 +1053,21 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
               </div>
             </div>
           )}
-          {similarGames.length > 0 && (
+          {recommendedGames.length > 0 && (
             <div class="section">
-              <div class="section-header"><span class="section-title">Similar games</span></div>
+              <div class="section-header"><span class="section-title">Recommended Games</span></div>
               <div class="similar-scroll">
-                {similarGames.map((g: any) => {
-                  const simAvg = g.slug ? similarGameScores[g.slug] : undefined
+                {recommendedGames.map((g) => {
+                  const coverUrl = g.coverImgUrl ? igdbImage(g.coverImgUrl, 't_cover_big') : null
                   return (
                     <a href={g.slug ? `/games/${g.slug}` : '#'} class="similar-card">
                       <div class="similar-cover">
-                        {g.cover?.url ? <img src={igdbImage(g.cover.url, 't_cover_big') ?? ''} alt={g.name} loading="lazy" /> : '🎮'}
-                        {simAvg != null && (
-                          <div class={`similar-score-badge ${scoreClass(simAvg)}`}>{simAvg.toFixed(1)}</div>
+                        {coverUrl ? <img src={coverUrl ?? ''} alt={g.title} loading="lazy" /> : '🎮'}
+                        {g.chekpointScore != null && (
+                          <div class={`similar-score-badge ${scoreClass(g.chekpointScore)}`}>{g.chekpointScore.toFixed(1)}</div>
                         )}
                       </div>
-                      <div class="similar-info"><div class="similar-title">{g.name}</div></div>
+                      <div class="similar-info"><div class="similar-title">{g.title}</div></div>
                     </a>
                   )
                 })}
@@ -1245,17 +1276,23 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
         <>
           {/* ── Sub-tab toolbar ── */}
           <div class="rec-subtabs">
-            <button class="rec-subtab active" onclick="switchRecView('games', this)">Games</button>
-            <button class="rec-subtab" onclick="switchRecView('posts', this)">Posts <span class="rec-subtab-count">{gameRecs.length}</span></button>
+            <div class="rec-subtabs-pills">
+              <button class="rec-subtab active" onclick="switchRecView('games', this)">Games</button>
+              <button class="rec-subtab" onclick="switchRecView('posts', this)">Posts <span class="rec-subtab-count">{gameRecs.length}</span></button>
+            </div>
+            <div class="rec-search-wrap">
+              <svg class="rec-search-icon" width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="9" r="6"/><path d="m15 15 4 4"/></svg>
+              <input type="search" id="recSearch" class="rec-search-input" placeholder="Filter by game…" oninput="filterRecs(this.value)" autocomplete="off" />
+            </div>
           </div>
 
           {/* ── Play-next game grid ── */}
           <div class="rec-subpanel" data-recview="games">
-            <div class="rec-game-grid">
+            <div class="rec-game-grid" id="recGamesList">
               {relatedGames.map(({ game: g, count }) => {
                 const cover = igdbImage(g.cover_img_url, 't_cover_big');
                 return (
-                  <a href={`/games/${g.slug}`} class="rec-game-tile">
+                  <a href={`/games/${g.slug}`} class="rec-game-tile" data-rec-game={g.title}>
                     <div class="rec-tile-cover">
                       {cover
                         ? <img src={cover} alt={g.title} loading="lazy" />
@@ -1268,30 +1305,40 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
                 );
               })}
             </div>
+            <div id="recGamesEmpty" style="display:none;padding:40px 0;text-align:center;color:var(--text-tertiary);font-size:14px">
+              No games found matching that search.
+            </div>
           </div>
 
           {/* ── Posts list ── */}
           <div class="rec-subpanel" data-recview="posts" style="display:none">
-            {gameRecs.map((rec: any) => (
-              <RecommendationFeedCard
-                id={rec.id}
-                sourceGame={rec.sourceGame}
-                targetGame={rec.targetGame}
-                body={rec.body}
-                containsSpoilers={rec.containsSpoilers}
-                ownerUsername={rec.ownerUsername}
-                ownerAvatar={rec.ownerAvatar}
-                createdAt={rec.createdAt}
-                upVotes={rec.upVotes}
-                downVotes={rec.downVotes}
-                myVote={rec.myVote}
-                commentCount={rec.commentCount}
-                reactions={rec.reactions}
-                isLoggedIn={isLoggedIn}
-                currentProfileId={currentProfileId}
-                profileId={rec.profileId}
-              />
-            ))}
+            <div id="recPostsList">
+              {gameRecs.map((rec: any) => (
+                <div data-rec-games={`${rec.sourceGame?.title ?? ''}|${rec.targetGame?.title ?? ''}`}>
+                  <RecommendationFeedCard
+                    id={rec.id}
+                    sourceGame={rec.sourceGame}
+                    targetGame={rec.targetGame}
+                    body={rec.body}
+                    containsSpoilers={rec.containsSpoilers}
+                    ownerUsername={rec.ownerUsername}
+                    ownerAvatar={rec.ownerAvatar}
+                    createdAt={rec.createdAt}
+                    upVotes={rec.upVotes}
+                    downVotes={rec.downVotes}
+                    myVote={rec.myVote}
+                    commentCount={rec.commentCount}
+                    reactions={rec.reactions}
+                    isLoggedIn={isLoggedIn}
+                    currentProfileId={currentProfileId}
+                    profileId={rec.profileId}
+                  />
+                </div>
+              ))}
+            </div>
+            <div id="recPostsEmpty" style="display:none;padding:40px 0;text-align:center;color:var(--text-tertiary);font-size:14px">
+              No recommendations found for that game.
+            </div>
           </div>
         </>
       )}
@@ -1346,6 +1393,30 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
       document.querySelectorAll('.rec-subpanel').forEach(function(p) {
         p.style.display = p.dataset.recview === view ? '' : 'none'
       })
+    }
+
+    window.filterRecs = function(q) {
+      var query = q.toLowerCase().trim()
+
+      var gameTiles = document.querySelectorAll('#recGamesList [data-rec-game]')
+      var gamesVisible = 0
+      gameTiles.forEach(function(el) {
+        var match = !query || el.getAttribute('data-rec-game').toLowerCase().includes(query)
+        el.style.display = match ? '' : 'none'
+        if (match) gamesVisible++
+      })
+      var gamesEmpty = document.getElementById('recGamesEmpty')
+      if (gamesEmpty) gamesEmpty.style.display = (gamesVisible === 0 && query) ? '' : 'none'
+
+      var postItems = document.querySelectorAll('#recPostsList > [data-rec-games]')
+      var postsVisible = 0
+      postItems.forEach(function(el) {
+        var match = !query || el.getAttribute('data-rec-games').toLowerCase().includes(query)
+        el.style.display = match ? '' : 'none'
+        if (match) postsVisible++
+      })
+      var postsEmpty = document.getElementById('recPostsEmpty')
+      if (postsEmpty) postsEmpty.style.display = (postsVisible === 0 && query) ? '' : 'none'
     }
 
     if (showCoverBlur) {

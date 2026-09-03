@@ -1,6 +1,22 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, type SupabaseAdmin } from "../../../utils/api";
 
+// PostgREST encodes .in() as URL query params — large arrays get silently
+// truncated. Keep each chunk well inside any gateway URL limit.
+const IN_CHUNK = 100;
+// Insert / RPC payload chunk — large enough to be efficient, small enough to
+// avoid body-size issues at Supabase's API gateway.
+const WRITE_CHUNK = 500;
+// Supabase's max-rows setting caps every response page at 1000 rows regardless
+// of the Range header value.
+const PAGE_SIZE = 1000;
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 // Fire-and-forget — logging a sync gap must never fail the actual sync.
 function logUnmatchedTitles(db: SupabaseAdmin, titles: string[]): void {
   if (titles.length === 0) return;
@@ -82,22 +98,31 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  // Match against our games table via DB function (case-insensitive)
+  // Match against our games table via DB function (case-insensitive).
+  // Paginate in PAGE_SIZE batches — Supabase's max-rows setting caps each
+  // response page at 1000 rows regardless of the Range header value.
   const steamTitles = Array.from(steamByTitle.keys());
-
   console.log(`[steam/import] Sending ${steamTitles.length} titles to match_steam_games`);
   console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
 
-  const { data: matchedGames, error: matchError } = await db
-    .rpc('match_steam_games', { steam_titles: steamTitles })
-    .range(0, 9999);
-
-  if (matchError) {
-    console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
-    return json({ error: 'Failed to match games.' }, 500);
+  const allMatchedGames: Array<{ id: string; title: string }> = [];
+  {
+    let from = 0;
+    while (true) {
+      const { data: page, error: matchError } = await (db as any)
+        .rpc('match_steam_games', { steam_titles: steamTitles })
+        .range(from, from + PAGE_SIZE - 1);
+      if (matchError) {
+        console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
+        return json({ error: 'Failed to match games.' }, 500);
+      }
+      const rows: Array<{ id: string; title: string }> = page ?? [];
+      allMatchedGames.push(...rows);
+      if (rows.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
+    }
   }
-
-  const matches: Array<{ id: string; title: string }> = matchedGames ?? [];
+  const matches = allMatchedGames;
 
   console.log(`[steam/import] match_steam_games returned ${matches.length} matches:`, matches.map(m => m.title));
 
@@ -114,21 +139,23 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: steamGames.length, total: steamGames.length });
   }
 
-  // Get this user's existing game statuses to avoid overwriting manual entries
+  // Get this user's existing game statuses to avoid overwriting manual entries.
+  // Chunk .in() to avoid URL truncation — large arrays get silently cut off by
+  // PostgREST's query-string encoding, causing games to appear non-existent and
+  // then fail on INSERT with a unique-constraint violation.
   const matchedGameIds = matches.map(m => m.id);
-  const { data: existingStatuses } = await db
-    .from('user_game_status')
-    .select('game_id, status')
-    .eq('profile_id', profile.id)
-    .in('game_id', matchedGameIds)
-    .range(0, 9999);
-
-  const existingByGameId = new Map<string, string>(
-    (existingStatuses ?? []).map((r: any) => [r.game_id, r.status])
-  );
+  const existingByGameId = new Map<string, string>();
+  for (const ids of chunk(matchedGameIds, IN_CHUNK)) {
+    const { data: rows } = await (db as any)
+      .from('user_game_status')
+      .select('game_id, status')
+      .eq('profile_id', profile.id)
+      .in('game_id', ids);
+    for (const r of (rows ?? [])) existingByGameId.set(r.game_id, r.status);
+  }
 
   const toInsert: any[] = [];
-  const toUpdatePlaytime: any[] = [];
+  const toUpdatePlaytime: Array<{ game_id: string; playtime: number }> = [];
   const seenGameIds = new Set<string>();
 
   for (const game of matches) {
@@ -156,28 +183,35 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  // Bulk insert new rows
-  if (toInsert.length > 0) {
-    const { error: insertError } = await db.from('user_game_status').insert(toInsert);
+  // Chunked INSERT — avoids large single-request body failures
+  for (const batch of chunk(toInsert, WRITE_CHUNK)) {
+    const { error: insertError } = await (db as any).from('user_game_status').insert(batch);
     if (insertError) {
       console.error('[steam/import] insert error:', JSON.stringify(insertError));
       return json({ error: 'Failed to save game statuses.' }, 500);
     }
   }
 
-  // Update playtime on existing rows one at a time (no bulk update in PostgREST without RPC)
-  for (const { game_id, playtime } of toUpdatePlaytime) {
-    await db.from('user_game_status')
-      .update({ steam_playtime_minutes: playtime })
-      .eq('profile_id', profile.id)
-      .eq('game_id', game_id);
+  // Bulk playtime update via RPC — replaces one-at-a-time loop that would
+  // timeout on large libraries (e.g. 2000 games × 1 HTTP call each = ~200s)
+  if (toUpdatePlaytime.length > 0) {
+    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime }) => ({ game_id, playtime }));
+    for (const batch of chunk(updatePayload, WRITE_CHUNK)) {
+      const { error: updateError } = await (db as any).rpc('bulk_update_steam_playtime', {
+        p_profile_id: profile.id,
+        p_updates: JSON.stringify(batch),
+      });
+      if (updateError) {
+        console.error('[steam/import] playtime update error (non-fatal):', JSON.stringify(updateError));
+      }
+    }
   }
 
   // If playedOnly, remove any existing 'owned' rows that were imported with 0 playtime
   // (steam_playtime_minutes = 0 means Steam-imported with no hours; NULL means manually added)
   let removed = 0;
   if (playedOnly) {
-    const { data: removed0, error: removeError } = await db
+    const { data: removed0, error: removeError } = await (db as any)
       .from('user_game_status')
       .delete()
       .eq('profile_id', profile.id)
