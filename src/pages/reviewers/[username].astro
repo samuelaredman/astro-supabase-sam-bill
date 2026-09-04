@@ -704,7 +704,6 @@ const showcaseJson = JSON.stringify(
 const showcaseAchievementsJson = JSON.stringify(
   Array.isArray((reviewer as any).showcase_achievements) ? (reviewer as any).showcase_achievements : []
 )
-const achNextCursorJson = JSON.stringify(achNextCursor ?? null)
 const achProfileId = reviewer.id
 const reviewScoreByGameId: Record<string, number> = {}
 const reviewHoursByGameId: Record<string, number> = {}
@@ -760,32 +759,17 @@ const { count: _achCount } = await adminDb
   .select('*', { count: 'exact', head: true })
   .eq('profile_id', reviewer.id);
 
+// Stats only — card data is fetched client-side on demand
 const hasAchievements = activeTab === 'achievements';
-const [achievementSummary, recentAchievementsRaw] = hasAchievements
-  ? await Promise.all([
-      adminDb.from('user_achievements')
-        .select('steam_appid, unlocked', { count: 'exact' })
-        .eq('profile_id', reviewer.id),
-      adminDb.from('user_achievements')
-        .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, games(title, slug)')
-        .eq('profile_id', reviewer.id)
-        .eq('unlocked', true)
-        .not('unlock_time', 'is', null)
-        .order('unlock_time', { ascending: false })
-        .limit(51), // +1 to detect whether more pages exist
-    ])
-  : [{ data: null, count: null }, { data: [] }];
-
-// Slice to 50 and derive cursor for the "Load more" button
-const _achRaw = (recentAchievementsRaw.data ?? []) as any[];
-const achHasMore = _achRaw.length > 50;
-const achFeedItems = achHasMore ? _achRaw.slice(0, 50) : _achRaw;
-const achNextCursor = achHasMore ? (achFeedItems[achFeedItems.length - 1]?.unlock_time ?? null) : null;
+const achievementSummary = hasAchievements
+  ? await adminDb.from('user_achievements')
+      .select('steam_appid, unlocked', { count: 'exact' })
+      .eq('profile_id', reviewer.id)
+  : { data: null, count: null };
 
 const totalAchievements = achievementSummary.count ?? 0;
 const unlockedAchievements = (achievementSummary.data ?? []).filter((a: any) => a.unlocked).length;
 
-// Per-game average completion rate — matches how Steam calculates it
 const _byGame = new Map<number, { total: number; unlocked: number }>();
 for (const a of (achievementSummary.data ?? []) as any[]) {
   const g = _byGame.get(a.steam_appid) ?? { total: 0, unlocked: 0 };
@@ -797,25 +781,6 @@ const _gamesWithAchs = [..._byGame.values()].filter(g => g.total > 0);
 const avgCompletion = _gamesWithAchs.length > 0
   ? _gamesWithAchs.reduce((sum, g) => sum + g.unlocked / g.total, 0) / _gamesWithAchs.length * 100
   : 0;
-
-// Group unlocked achievements by calendar date (most recent first)
-const now = new Date();
-const achByDate: Array<{ label: string; items: any[] }> = [];
-const achDateMap = new Map<string, any[]>();
-for (const a of achFeedItems) {
-  const d = new Date(a.unlock_time);
-  const isCurrentYear = d.getUTCFullYear() === now.getUTCFullYear();
-  const label = d.toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric',
-    ...(!isCurrentYear ? { year: 'numeric' } : {}),
-    timeZone: 'UTC',
-  }).toUpperCase();
-  if (!achDateMap.has(label)) {
-    achDateMap.set(label, []);
-    achByDate.push({ label, items: achDateMap.get(label)! });
-  }
-  achDateMap.get(label)!.push(a);
-}
 
 // Check if this reviewer has Steam connected (for showing sync button to owner)
 const hasSteam = !!(reviewer as any).steam_id;
@@ -2070,15 +2035,9 @@ const reviewerBreadcrumbJsonLd = {
               </div>
             </div>
 
-            {/* Filter bar */}
+            {/* Filter bar + grid — all rendered client-side */}
             <div class="ach-filter-bar">
-              <input
-                type="search"
-                id="achSearch"
-                class="ach-search"
-                placeholder="Search achievements or games…"
-                autocomplete="off"
-              />
+              <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements…" autocomplete="off" />
               <div class="ach-rarity-btns">
                 <button class="ach-rarity-btn active" data-rarity="all">All</button>
                 <button class="ach-rarity-btn" data-rarity="gold">Gold &lt;10%</button>
@@ -2087,73 +2046,15 @@ const reviewerBreadcrumbJsonLd = {
                 <button class="ach-rarity-btn" data-rarity="common">Common &gt;50%</button>
               </div>
               <select id="achDateFilter" class="ach-date-select">
-                <option value="all">All time</option>
+                <option value="0">All time</option>
                 <option value="7">Last 7 days</option>
                 <option value="30">Last 30 days</option>
                 <option value="180">Last 6 months</option>
                 <option value="365">Last year</option>
               </select>
             </div>
-
-            <div id="achNoResults" class="empty-state" style="display:none">
-              <div class="empty-title">No achievements match</div>
-              <p style="font-size:14px;color:var(--text-tertiary)">Try adjusting your search or filters.</p>
-            </div>
-
-            {/* Chronological feed — grouped by date, most recent first */}
-            {achByDate.length > 0 && (
-              <div class="ach-feed" id="achFeed" data-profile={reviewer.id}>
-                {achByDate.map(({ label, items }) => (
-                  <div class="ach-day">
-                    <div class="ach-day-date">{label}</div>
-                    <div class="ach-feed-grid">
-                      {items.map((a: any) => {
-                        const isRare = a.global_percent != null && a.global_percent < 10;
-                        const unlockDate = a.unlock_time
-                          ? new Date(a.unlock_time).toLocaleString('en-GB', {
-                              day: 'numeric', month: 'short', year: 'numeric',
-                              hour: '2-digit', minute: '2-digit', timeZone: 'UTC'
-                            })
-                          : null;
-                        return (
-                          <div class={`ach-feed-card${isRare ? ' ach-feed-card--rare' : ''}`}
-                               data-name={(a.display_name ?? a.api_name ?? '').toLowerCase()}
-                               data-game={(a.games?.title ?? '').toLowerCase()}
-                               data-pct={a.global_percent != null ? a.global_percent.toString() : '-1'}
-                               data-ts={a.unlock_time ? new Date(a.unlock_time).getTime().toString() : '0'}>
-                            <div class={`ach-feed-icon-wrap${isRare ? ' ach-feed-icon-wrap--rare' : ''}`}>
-                              {a.icon_url
-                                ? <img src={a.icon_url} alt={a.display_name ?? ''} class={`ach-feed-icon${isRare ? ' ach-feed-icon--rare' : ''}`} loading="lazy" />
-                                : <div class={`ach-feed-icon ach-feed-icon-ph${isRare ? ' ach-feed-icon--rare' : ''}`}>🏆</div>
-                              }
-                            </div>
-                            <div class="ach-feed-info">
-                              <div class="ach-feed-name">{a.display_name ?? a.api_name}</div>
-                              {a.description && <div class="ach-feed-desc">{a.description}</div>}
-                              <div class="ach-feed-game">{a.games?.title ?? `App ${a.steam_appid}`}</div>
-                              <div class="ach-feed-footer">
-                                {unlockDate && <span class="ach-feed-time">Unlocked on {unlockDate}</span>}
-                                {a.global_percent != null && (
-                                  <span class={`ach-feed-pct${isRare ? ' ach-feed-pct--rare' : ''}`}>
-                                    {a.global_percent.toFixed(1)}% of players
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {achNextCursor && (
-              <div style="text-align:center;margin-top:8px">
-                <button id="achLoadMore" class="ach-load-more-btn" onclick="loadMoreAchievements()">Load more</button>
-              </div>
-            )}
+            <div id="achGrid" class="ach-grid"><div class="ach-grid-loading">Loading…</div></div>
+            <div id="achPagination" class="ach-pagination"></div>
           </>
         )}
       </>
@@ -2467,7 +2368,7 @@ const reviewerBreadcrumbJsonLd = {
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, showcaseAchievementsJson, achNextCursorJson, achProfileId, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, showcaseAchievementsJson, achProfileId, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -3184,88 +3085,108 @@ const reviewerBreadcrumbJsonLd = {
     })
   }
 
-  // ── ACHIEVEMENT FEED PAGINATION ──
-  var _achCursor = JSON.parse(achNextCursorJson)
+  // ── ACHIEVEMENT GRID (client-rendered, API-paginated) ──
+  var _achPage = 1, _achQ = '', _achRarity = 'all', _achDays = 0, _achLoading = false
 
-  function loadMoreAchievements() {
-    if (!_achCursor) return
-    var btn = document.getElementById('achLoadMore')
-    if (btn) { btn.disabled = true; btn.textContent = 'Loading…' }
-    var url = '/api/steam/achievements-feed?profile_id=' + encodeURIComponent(achProfileId) + '&cursor=' + encodeURIComponent(_achCursor)
-    fetch(url)
+  function _achUrl(page) {
+    var u = '/api/steam/achievements-feed?profile_id=' + encodeURIComponent(achProfileId)
+    u += '&page=' + page
+    if (_achQ)       u += '&q='      + encodeURIComponent(_achQ)
+    if (_achRarity !== 'all') u += '&rarity=' + encodeURIComponent(_achRarity)
+    if (_achDays)    u += '&days='   + _achDays
+    return u
+  }
+
+  function _achFetch(page) {
+    if (_achLoading) return
+    _achLoading = true
+    _achPage = page
+    var grid = document.getElementById('achGrid')
+    var pag  = document.getElementById('achPagination')
+    if (grid) grid.innerHTML = '<div class="ach-grid-loading">Loading…</div>'
+    if (pag)  pag.innerHTML  = ''
+    fetch(_achUrl(page))
       .then(function(r) { return r.ok ? r.json() : Promise.reject() })
-      .then(function(data) {
-        _achCursor = data.nextCursor
-        _appendAchievements(data.achievements || [])
-        if (window._applyAchFilters) window._applyAchFilters()
-        if (!data.nextCursor) {
-          if (btn) btn.style.display = 'none'
-        } else {
-          if (btn) { btn.disabled = false; btn.textContent = 'Load more' }
-        }
-      })
-      .catch(function() { if (btn) { btn.disabled = false; btn.textContent = 'Failed — try again' } })
+      .then(function(d) { _achLoading = false; _achRenderGrid(d); _achRenderPagination(d) })
+      .catch(function() { _achLoading = false; if (grid) grid.innerHTML = '<div class="ach-grid-loading">Failed to load — try again.</div>' })
   }
 
-  function _achDateLabel(isoStr) {
-    var d = new Date(isoStr)
-    var isCurrentYear = d.getUTCFullYear() === new Date().getUTCFullYear()
-    var opts = { month: 'long', day: 'numeric', timeZone: 'UTC' }
-    if (!isCurrentYear) opts.year = 'numeric'
-    return d.toLocaleDateString('en-US', opts).toUpperCase()
-  }
-
-  function _appendAchievements(achievements) {
-    var feed = document.getElementById('achFeed')
-    if (!feed) return
-    achievements.forEach(function(a) {
-      var label = _achDateLabel(a.unlock_time)
-      var dayEl = feed.querySelector('.ach-day[data-label="' + label.replace(/"/g, '&quot;') + '"]')
-      if (!dayEl) {
-        dayEl = document.createElement('div')
-        dayEl.className = 'ach-day'
-        dayEl.dataset.label = label
-        var hdr = document.createElement('div'); hdr.className = 'ach-day-date'; hdr.textContent = label
-        var grid = document.createElement('div'); grid.className = 'ach-feed-grid'
-        dayEl.appendChild(hdr); dayEl.appendChild(grid)
-        feed.appendChild(dayEl)
-      }
-      var grid = dayEl.querySelector('.ach-feed-grid')
+  function _achRenderGrid(d) {
+    var grid = document.getElementById('achGrid')
+    if (!grid) return
+    if (!d.achievements || !d.achievements.length) {
+      grid.innerHTML = '<div class="ach-grid-empty"><div class="empty-title">No achievements match</div><p style="font-size:14px;color:var(--text-tertiary)">Try adjusting your search or filters.</p></div>'
+      return
+    }
+    grid.innerHTML = ''
+    d.achievements.forEach(function(a) {
       var isRare = a.global_percent != null && a.global_percent < 10
       var card = document.createElement('div')
-      card.className = 'ach-feed-card' + (isRare ? ' ach-feed-card--rare' : '')
-      card.dataset.name = (a.display_name || '').toLowerCase()
-      card.dataset.game = (a.games && a.games.title ? a.games.title : '').toLowerCase()
-      card.dataset.pct  = a.global_percent != null ? a.global_percent.toString() : '-1'
-      card.dataset.ts   = new Date(a.unlock_time).getTime().toString()
-      // icon wrap
-      var wrap = document.createElement('div')
-      wrap.className = 'ach-feed-icon-wrap' + (isRare ? ' ach-feed-icon-wrap--rare' : '')
+      card.className = 'ach-grid-card' + (isRare ? ' ach-grid-card--rare' : '')
+      card.title = (a.display_name || '') + (a.description ? '\n' + a.description : '')
+      // icon
+      var iw = document.createElement('div'); iw.className = 'ach-grid-icon-wrap' + (isRare ? ' ach-feed-icon-wrap--rare' : '')
       if (a.icon_url) {
         var img = document.createElement('img'); img.src = a.icon_url; img.alt = a.display_name || ''
-        img.className = 'ach-feed-icon' + (isRare ? ' ach-feed-icon--rare' : ''); img.loading = 'lazy'
-        wrap.appendChild(img)
+        img.className = 'ach-grid-icon' + (isRare ? ' ach-feed-icon--rare' : ''); img.loading = 'lazy'
+        iw.appendChild(img)
       } else {
-        var ph = document.createElement('div')
-        ph.className = 'ach-feed-icon ach-feed-icon-ph' + (isRare ? ' ach-feed-icon--rare' : '')
-        ph.textContent = '🏆'; wrap.appendChild(ph)
+        var ph = document.createElement('div'); ph.className = 'ach-grid-icon ach-grid-icon-ph'; ph.textContent = '🏆'; iw.appendChild(ph)
       }
-      card.appendChild(wrap)
-      // info
-      var info = document.createElement('div'); info.className = 'ach-feed-info'
-      var nm = document.createElement('div'); nm.className = 'ach-feed-name'; nm.textContent = a.display_name || a.api_name || ''; info.appendChild(nm)
-      if (a.description) { var desc = document.createElement('div'); desc.className = 'ach-feed-desc'; desc.textContent = a.description; info.appendChild(desc) }
-      var gm = document.createElement('div'); gm.className = 'ach-feed-game'; gm.textContent = a.games && a.games.title ? a.games.title : ('App ' + a.steam_appid); info.appendChild(gm)
-      var footer = document.createElement('div'); footer.className = 'ach-feed-footer'
-      var d2 = new Date(a.unlock_time)
-      var timeStr = d2.toLocaleString('en-GB', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'UTC' })
-      var timeEl = document.createElement('span'); timeEl.className = 'ach-feed-time'; timeEl.textContent = 'Unlocked on ' + timeStr; footer.appendChild(timeEl)
+      card.appendChild(iw)
+      // name
+      var nm = document.createElement('div'); nm.className = 'ach-grid-name'
+      nm.textContent = a.display_name || a.api_name || ''; card.appendChild(nm)
+      // game
+      var gm = document.createElement('div'); gm.className = 'ach-grid-game'
+      gm.textContent = a.games && a.games.title ? a.games.title : ('App ' + a.steam_appid); card.appendChild(gm)
+      // rarity
       if (a.global_percent != null) {
-        var pct = document.createElement('span'); pct.className = 'ach-feed-pct' + (isRare ? ' ach-feed-pct--rare' : ''); pct.textContent = a.global_percent.toFixed(1) + '% of players'; footer.appendChild(pct)
+        var pct = document.createElement('div'); pct.className = 'ach-grid-pct' + (isRare ? ' ach-grid-pct--rare' : '')
+        pct.textContent = a.global_percent.toFixed(1) + '%'; card.appendChild(pct)
       }
-      info.appendChild(footer); card.appendChild(info); grid.appendChild(card)
+      grid.appendChild(card)
     })
   }
+
+  function _achRenderPagination(d) {
+    var pag = document.getElementById('achPagination')
+    if (!pag || d.pages <= 1) return
+    pag.innerHTML = ''
+    var cur = d.page, total = d.pages
+    function mkBtn(label, pg, disabled) {
+      var b = document.createElement('button'); b.className = 'ach-pag-btn' + (pg === cur ? ' active' : '')
+      b.textContent = label; b.disabled = !!disabled
+      if (!disabled) b.onclick = function() { _achFetch(pg) }
+      return b
+    }
+    pag.appendChild(mkBtn('‹', cur - 1, cur === 1))
+    var start = Math.max(1, cur - 2), end = Math.min(total, cur + 2)
+    if (start > 1) { pag.appendChild(mkBtn('1', 1)); if (start > 2) { var sp = document.createElement('span'); sp.className = 'ach-pag-dots'; sp.textContent = '…'; pag.appendChild(sp) } }
+    for (var p = start; p <= end; p++) pag.appendChild(mkBtn(String(p), p))
+    if (end < total) { if (end < total - 1) { var sp2 = document.createElement('span'); sp2.className = 'ach-pag-dots'; sp2.textContent = '…'; pag.appendChild(sp2) } pag.appendChild(mkBtn(String(total), total)) }
+    pag.appendChild(mkBtn('›', cur + 1, cur === total))
+  }
+
+  // Wire filters — each change resets to page 1
+  ;(function() {
+    var searchEl = document.getElementById('achSearch')
+    var dateEl   = document.getElementById('achDateFilter')
+    var _t
+    if (searchEl) searchEl.addEventListener('input', function() {
+      clearTimeout(_t); _t = setTimeout(function() { _achQ = searchEl.value.trim(); _achFetch(1) }, 300)
+    })
+    document.querySelectorAll('.ach-rarity-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.ach-rarity-btn').forEach(function(b) { b.classList.remove('active') })
+        btn.classList.add('active'); _achRarity = btn.dataset.rarity; _achFetch(1)
+      })
+    })
+    if (dateEl) dateEl.addEventListener('change', function() { _achDays = parseInt(dateEl.value) || 0; _achFetch(1) })
+    // Auto-load when the tab first becomes visible
+    var grid = document.getElementById('achGrid')
+    if (grid) _achFetch(1)
+  })()
 
   // ── SCORE DIST MINI BARS ──
   var dist = JSON.parse(distJson)
@@ -4803,63 +4724,6 @@ async function createNewList(btn) {
   })();
 </script>
 
-{showAchievementsTab && (
-<script is:inline>
-(function () {
-  var searchEl  = document.getElementById('achSearch');
-  var dateEl    = document.getElementById('achDateFilter');
-  var noResults = document.getElementById('achNoResults');
-  var feed      = document.getElementById('achFeed');
-  if (!searchEl || !dateEl) return;
-
-  var activeRarity = 'all';
-
-  document.querySelectorAll('.ach-rarity-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      document.querySelectorAll('.ach-rarity-btn').forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      activeRarity = btn.dataset.rarity;
-      applyFilters();
-    });
-  });
-
-  searchEl.addEventListener('input', applyFilters);
-  dateEl.addEventListener('change', applyFilters);
-  window._applyAchFilters = applyFilters;
-
-  function applyFilters() {
-    var q      = searchEl.value.toLowerCase().trim();
-    var days   = parseInt(dateEl.value) || 0;
-    var cutoff = days ? Date.now() - days * 86400000 : 0;
-    var anyVisible = false;
-
-    document.querySelectorAll('.ach-day').forEach(function (day) {
-      var cards = day.querySelectorAll('.ach-feed-card');
-      var dayVisible = false;
-      cards.forEach(function (card) {
-        var pct = parseFloat(card.dataset.pct);
-        var ts  = parseInt(card.dataset.ts) || 0;
-        var matchSearch = !q || card.dataset.name.includes(q) || card.dataset.game.includes(q);
-        var matchRarity =
-          activeRarity === 'all'      ? true :
-          activeRarity === 'gold'     ? (pct >= 0 && pct < 10)   :
-          activeRarity === 'rare'     ? (pct >= 10 && pct < 25)  :
-          activeRarity === 'uncommon' ? (pct >= 25 && pct < 50)  :
-          activeRarity === 'common'   ? (pct >= 50)               : true;
-        var matchDate = !cutoff || ts >= cutoff;
-        var show = matchSearch && matchRarity && matchDate;
-        card.style.display = show ? '' : 'none';
-        if (show) { dayVisible = true; anyVisible = true; }
-      });
-      day.style.display = dayVisible ? '' : 'none';
-    });
-
-    if (noResults) noResults.style.display = anyVisible ? 'none' : '';
-    if (feed)      feed.style.display      = anyVisible ? ''     : 'none';
-  }
-})();
-</script>
-)}
 
 {isOwnProfile && hasSteam && (
 <script is:inline>
@@ -4939,89 +4803,60 @@ async function createNewList(btn) {
   .ach-summary-num  { font-size: 28px; font-weight: 700; color: var(--text-primary); line-height: 1; }
   .ach-summary-label { font-size: 12px; color: var(--text-tertiary); }
 
-  .ach-section { margin-bottom: 32px; }
-  .ach-section-title {
-    font-size: 13px; font-weight: 700; color: var(--text-tertiary);
-    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 14px;
-  }
-
+  /* ── Achievement compact icon grid ── */
   .ach-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px;
-  }
-  .ach-card {
-    display: flex; align-items: center; gap: 12px;
-    background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 10px; padding: 12px;
-    transition: border-color 0.15s;
-  }
-  .ach-card:hover { border-color: var(--accent); }
-  .ach-icon-wrap { position: relative; flex-shrink: 0; }
-  .ach-icon { width: 52px; height: 52px; border-radius: 8px; display: block; }
-  .ach-icon-fallback {
-    width: 52px; height: 52px; border-radius: 8px;
-    background: var(--bg-hover); display: flex; align-items: center;
-    justify-content: center; font-size: 22px;
-  }
-  .ach-rarity {
-    position: absolute; bottom: -4px; left: 50%; transform: translateX(-50%);
-    font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 4px;
-    white-space: nowrap; text-transform: uppercase; letter-spacing: 0.04em;
-  }
-  .ach-rarity-ultra { background: rgba(250,204,21,0.15); color: #eab308; }
-  .ach-rarity-rare  { background: rgba(99,102,241,0.15); color: var(--accent); }
-
-  .ach-info { min-width: 0; }
-  .ach-name { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ach-game-name { font-size: 11px; color: var(--text-tertiary); margin-bottom: 3px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ach-pct { font-size: 11px; color: var(--accent); font-weight: 600; }
-
-  .ach-game-list { display: flex; flex-direction: column; gap: 10px; }
-  .ach-game-row {
-    display: flex; align-items: center; gap: 14px;
-    background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 10px; padding: 10px 14px;
-  }
-  .ach-game-cover {
-    width: 36px; height: 48px; border-radius: 5px; object-fit: cover; flex-shrink: 0;
-  }
-  .ach-game-cover-fallback {
-    width: 36px; height: 48px; border-radius: 5px;
-    background: var(--bg-hover); display: flex; align-items: center;
-    justify-content: center; font-size: 16px; flex-shrink: 0;
-  }
-  .ach-game-info   { flex: 1; min-width: 0; }
-  .ach-game-title  { font-size: 13px; font-weight: 600; color: var(--text-primary);
-    margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ach-game-progress-wrap { display: flex; align-items: center; gap: 8px; }
-  .ach-game-progress-bar  {
-    flex: 1; height: 5px; border-radius: 4px; background: var(--bg-hover); overflow: hidden;
-  }
-  .ach-game-progress-fill { height: 100%; border-radius: 4px; background: var(--accent); }
-  .ach-game-progress-label { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
-  .ach-game-pct { font-size: 14px; font-weight: 700; color: var(--text-primary); flex-shrink: 0; width: 40px; text-align: right; }
-
-  /* ── Chronological achievement feed ── */
-  .ach-feed { margin-top: 8px; }
-  .ach-day { margin-bottom: 28px; }
-  .ach-day-date {
-    font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
-    color: var(--text-tertiary); border-bottom: 1px solid var(--border-subtle);
-    padding-bottom: 8px; margin-bottom: 12px;
-  }
-  .ach-feed-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 10px;
+    min-height: 80px;
   }
-  .ach-feed-card {
-    display: flex; gap: 12px; align-items: flex-start;
+  .ach-grid-card {
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
     background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 10px; padding: 12px;
+    border-radius: 10px; padding: 10px 8px;
+    text-align: center; cursor: default;
     transition: border-color .15s;
   }
-  .ach-feed-card:hover { border-color: rgba(96,80,200,.4); }
+  .ach-grid-card:hover { border-color: rgba(96,80,200,.35); }
+  .ach-grid-card--rare {
+    border-color: rgba(202,138,4,.5);
+    box-shadow: 0 0 10px rgba(202,138,4,.15);
+  }
+  .ach-grid-card--rare:hover { border-color: rgba(202,138,4,.85); box-shadow: 0 0 16px rgba(202,138,4,.28); }
+  .ach-grid-icon-wrap { position: relative; width: 52px; height: 52px; flex-shrink: 0; }
+  .ach-grid-icon {
+    width: 52px; height: 52px; border-radius: 8px;
+    object-fit: cover; display: block; flex-shrink: 0;
+  }
+  .ach-grid-icon-ph {
+    width: 52px; height: 52px; border-radius: 8px;
+    background: var(--tag-bg); display: flex; align-items: center;
+    justify-content: center; font-size: 22px;
+  }
+  .ach-grid-name {
+    font-size: 10px; font-weight: 600; color: var(--text-primary); line-height: 1.3;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; width: 100%;
+  }
+  .ach-grid-game { font-size: 9px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; }
+  .ach-grid-pct  { font-size: 9px; color: var(--text-tertiary); }
+  .ach-grid-pct--rare { color: #ca8a04; font-weight: 700; }
+  .ach-grid-loading { padding: 32px; text-align: center; color: var(--text-tertiary); font-size: 13px; grid-column: 1/-1; }
+  .ach-grid-empty   { padding: 32px 0; grid-column: 1/-1; }
+
+  /* ── Pagination ── */
+  .ach-pagination { display: flex; gap: 4px; justify-content: center; align-items: center; margin-top: 20px; flex-wrap: wrap; }
+  .ach-pag-btn {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 10px; font-size: 13px; font-weight: 500; color: var(--text-secondary);
+    font-family: inherit; cursor: pointer; min-width: 34px; transition: all .15s;
+  }
+  .ach-pag-btn:hover:not(:disabled):not(.active) { border-color: var(--accent); color: var(--text-primary); }
+  .ach-pag-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; cursor: default; }
+  .ach-pag-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .ach-pag-dots { color: var(--text-tertiary); font-size: 13px; padding: 0 2px; }
+
+  /* ── Shared icon styles (used by grid + showcase) ── */
   .ach-feed-icon {
     width: 52px; height: 52px; border-radius: 6px;
     flex-shrink: 0; object-fit: cover; display: block;
@@ -5030,30 +4865,7 @@ async function createNewList(btn) {
     background: var(--tag-bg); display: flex;
     align-items: center; justify-content: center; font-size: 22px;
   }
-  .ach-feed-info { min-width: 0; flex: 1; }
-  .ach-feed-name {
-    font-size: 13px; font-weight: 600; color: var(--text-primary);
-    margin-bottom: 3px; line-height: 1.3;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .ach-feed-desc {
-    font-size: 11px; color: var(--text-secondary); line-height: 1.4;
-    margin-bottom: 6px;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-  }
-  .ach-feed-game { font-size: 11px; color: var(--accent); font-weight: 500; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ach-feed-footer { display: flex; flex-direction: column; gap: 2px; }
-  .ach-feed-time { font-size: 11px; color: var(--text-tertiary); }
-  .ach-feed-pct  { font-size: 11px; color: var(--text-tertiary); }
   .ach-feed-pct--rare { color: #ca8a04; font-weight: 600; }
-
-  .ach-load-more-btn {
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: 20px;
-    padding: 8px 24px; font-size: 13px; font-weight: 600; color: var(--text-secondary);
-    font-family: inherit; cursor: pointer; transition: border-color .15s, color .15s;
-  }
-  .ach-load-more-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); }
-  .ach-load-more-btn:disabled { opacity: .5; cursor: not-allowed; }
 
   /* ── Achievement showcase (profile tab) ── */
   .ach-showcase-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 8px; }
