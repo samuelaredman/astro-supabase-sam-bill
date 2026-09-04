@@ -772,10 +772,10 @@ const { count: _achCount } = await adminDb
 
 const hasAchievements = activeTab === 'achievements';
 const _ACH_PER_PAGE = 50;
-const achPage   = hasAchievements ? Math.max(1, parseInt(Astro.url.searchParams.get('achpage') ?? '1') || 1) : 1;
-const achQ      = hasAchievements ? (Astro.url.searchParams.get('q') ?? '').trim() : '';
-const achRarity = hasAchievements ? (Astro.url.searchParams.get('rarity') ?? 'all') : 'all';
-const achDays   = hasAchievements ? (parseInt(Astro.url.searchParams.get('days') ?? '0') || 0) : 0;
+const achPage = hasAchievements ? Math.max(1, parseInt(Astro.url.searchParams.get('achpage') ?? '1') || 1) : 1;
+const achQ    = hasAchievements ? (Astro.url.searchParams.get('q') ?? '').trim() : '';
+const achSort = hasAchievements ? (Astro.url.searchParams.get('sort') ?? 'recent') : 'recent';
+const achDays = hasAchievements ? (parseInt(Astro.url.searchParams.get('days') ?? '0') || 0) : 0;
 
 const [achievementSummary, achievementsRaw] = hasAchievements
   ? await Promise.all([
@@ -788,14 +788,15 @@ const [achievementSummary, achievementsRaw] = hasAchievements
           .eq('profile_id', reviewer.id)
           .eq('unlocked', true)
           .not('unlock_time', 'is', null);
-        if (achQ)                      q = q.ilike('display_name', `%${achQ}%`);
-        if (achRarity === 'gold')      q = q.lt('global_percent', 10);
-        else if (achRarity === 'rare')      q = q.gte('global_percent', 10).lt('global_percent', 25);
-        else if (achRarity === 'uncommon') q = q.gte('global_percent', 25).lt('global_percent', 50);
-        else if (achRarity === 'common')   q = q.gte('global_percent', 50);
+        if (achQ)     q = q.ilike('display_name', `%${achQ}%`);
         if (achDays > 0) q = q.gte('unlock_time', new Date(Date.now() - achDays * 86400000).toISOString());
-        return q.order('unlock_time', { ascending: false })
-          .range((achPage - 1) * _ACH_PER_PAGE, achPage * _ACH_PER_PAGE - 1);
+        if (achSort === 'oldest')    q = q.order('unlock_time', { ascending: true });
+        else if (achSort === 'rarest')    q = q.order('global_percent', { ascending: true, nullsFirst: false });
+        else if (achSort === 'least-rare') q = q.order('global_percent', { ascending: false, nullsFirst: false });
+        else if (achSort === 'az')        q = q.order('display_name', { ascending: true, nullsFirst: false });
+        else if (achSort === 'za')        q = q.order('display_name', { ascending: false, nullsFirst: false });
+        else                              q = q.order('unlock_time', { ascending: false }); // recent (default)
+        return q.range((achPage - 1) * _ACH_PER_PAGE, achPage * _ACH_PER_PAGE - 1);
       })(),
     ])
   : [{ data: null, count: null }, { data: [], count: 0 }];
@@ -815,31 +816,36 @@ const avgCompletion = _gamesWithAchs.length > 0
   ? _gamesWithAchs.reduce((sum, g) => sum + g.unlocked / g.total, 0) / _gamesWithAchs.length * 100
   : 0;
 
-// Group unlocked achievements by calendar date for display
+// Group by date only for time-based sorts; otherwise use a single group
 const _achNow = new Date();
 const achByDate: Array<{ label: string; items: any[] }> = [];
-const achDateMap = new Map<string, any[]>();
-for (const a of (achievementsRaw.data ?? []) as any[]) {
-  const d = new Date(a.unlock_time);
-  const isCurrentYear = d.getUTCFullYear() === _achNow.getUTCFullYear();
-  const label = d.toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric',
-    ...(!isCurrentYear ? { year: 'numeric' } : {}),
-    timeZone: 'UTC',
-  }).toUpperCase();
-  if (!achDateMap.has(label)) { achDateMap.set(label, []); achByDate.push({ label, items: achDateMap.get(label)! }); }
-  achDateMap.get(label)!.push(a);
+const _achGroupByDate = achSort === 'recent' || achSort === 'oldest';
+if (_achGroupByDate) {
+  const achDateMap = new Map<string, any[]>();
+  for (const a of (achievementsRaw.data ?? []) as any[]) {
+    const d = new Date(a.unlock_time);
+    const isCurrentYear = d.getUTCFullYear() === _achNow.getUTCFullYear();
+    const label = d.toLocaleDateString('en-US', {
+      month: 'long', day: 'numeric',
+      ...(!isCurrentYear ? { year: 'numeric' } : {}),
+      timeZone: 'UTC',
+    }).toUpperCase();
+    if (!achDateMap.has(label)) { achDateMap.set(label, []); achByDate.push({ label, items: achDateMap.get(label)! }); }
+    achDateMap.get(label)!.push(a);
+  }
+} else {
+  if ((achievementsRaw.data ?? []).length > 0) achByDate.push({ label: '', items: achievementsRaw.data as any[] });
 }
 const achTotalFiltered = (achievementsRaw as any).count ?? 0;
 const achTotalPages = Math.max(1, Math.ceil(achTotalFiltered / _ACH_PER_PAGE));
 
-function achUrl(page: number, overrides: { q?: string; rarity?: string; days?: string } = {}) {
+function achUrl(page: number, overrides: { q?: string; sort?: string; days?: string } = {}) {
   const p = new URLSearchParams({ tab: 'achievements' });
   if (page > 1) p.set('achpage', String(page));
   const q = overrides.q !== undefined ? overrides.q : achQ;
   if (q) p.set('q', q);
-  const rarity = overrides.rarity !== undefined ? overrides.rarity : achRarity;
-  if (rarity && rarity !== 'all') p.set('rarity', rarity);
+  const sort = overrides.sort !== undefined ? overrides.sort : achSort;
+  if (sort && sort !== 'recent') p.set('sort', sort);
   const days = overrides.days !== undefined ? overrides.days : (achDays > 0 ? String(achDays) : '');
   if (days) p.set('days', days);
   return `/reviewers/${reviewer.username}?${p.toString()}`;
@@ -2112,17 +2118,18 @@ const reviewerBreadcrumbJsonLd = {
             {/* Filter bar — navigates via URL so filters + pagination are SSR */}
             <div class="ach-filter-bar">
               <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements…" autocomplete="off" value={achQ} />
-              <div class="ach-rarity-btns">
-                <button class={`ach-rarity-btn${achRarity === 'all' ? ' active' : ''}`} data-rarity="all">All</button>
-                <button class={`ach-rarity-btn${achRarity === 'gold' ? ' active' : ''}`} data-rarity="gold">Gold &lt;10%</button>
-                <button class={`ach-rarity-btn${achRarity === 'rare' ? ' active' : ''}`} data-rarity="rare">Rare 10–25%</button>
-                <button class={`ach-rarity-btn${achRarity === 'uncommon' ? ' active' : ''}`} data-rarity="uncommon">Uncommon 25–50%</button>
-                <button class={`ach-rarity-btn${achRarity === 'common' ? ' active' : ''}`} data-rarity="common">Common &gt;50%</button>
-              </div>
+              <select id="achSortSelect" class="ach-date-select">
+                <option value="recent"    selected={achSort === 'recent'}>Recent</option>
+                <option value="oldest"    selected={achSort === 'oldest'}>Oldest</option>
+                <option value="rarest"    selected={achSort === 'rarest'}>Rarity: Rarest first</option>
+                <option value="least-rare" selected={achSort === 'least-rare'}>Rarity: Common first</option>
+                <option value="az"        selected={achSort === 'az'}>A–Z</option>
+                <option value="za"        selected={achSort === 'za'}>Z–A</option>
+              </select>
               <select id="achDateFilter" class="ach-date-select">
-                <option value="0" selected={achDays === 0}>All time</option>
-                <option value="7" selected={achDays === 7}>Last 7 days</option>
-                <option value="30" selected={achDays === 30}>Last 30 days</option>
+                <option value="0"   selected={achDays === 0}>All time</option>
+                <option value="7"   selected={achDays === 7}>Last 7 days</option>
+                <option value="30"  selected={achDays === 30}>Last 30 days</option>
                 <option value="180" selected={achDays === 180}>Last 6 months</option>
                 <option value="365" selected={achDays === 365}>Last year</option>
               </select>
@@ -2133,7 +2140,7 @@ const reviewerBreadcrumbJsonLd = {
               <div class="ach-feed">
                 {achByDate.map(({ label, items }) => (
                   <div class="ach-day">
-                    <div class="ach-day-date">{label}</div>
+                    {label && <div class="ach-day-date">{label}</div>}
                     <div class="ach-feed-grid">
                       {items.map((a: any) => {
                         const isRare = a.global_percent != null && a.global_percent < 10;
@@ -3223,17 +3230,16 @@ const reviewerBreadcrumbJsonLd = {
   // ── ACHIEVEMENT FILTERS — navigate via URL so SSR handles pagination + rendering ──
   ;(function() {
     var searchEl = document.getElementById('achSearch')
+    var sortEl   = document.getElementById('achSortSelect')
     var dateEl   = document.getElementById('achDateFilter')
-    if (!searchEl && !dateEl) return
+    if (!searchEl && !sortEl && !dateEl) return
 
     function achNav(overrides) {
       var p = new URLSearchParams({ tab: 'achievements' })
       var q = overrides.q !== undefined ? overrides.q : (searchEl ? searchEl.value.trim() : '')
       if (q) p.set('q', q)
-      var rarity = overrides.rarity !== undefined ? overrides.rarity : ''
-      var activeBtn = document.querySelector('.ach-rarity-btn.active')
-      if (!rarity && activeBtn) rarity = activeBtn.dataset.rarity || 'all'
-      if (rarity && rarity !== 'all') p.set('rarity', rarity)
+      var sort = overrides.sort !== undefined ? overrides.sort : (sortEl ? sortEl.value : 'recent')
+      if (sort && sort !== 'recent') p.set('sort', sort)
       var days = overrides.days !== undefined ? overrides.days : (dateEl ? dateEl.value : '0')
       if (days && days !== '0') p.set('days', days)
       window.location.href = window.location.pathname + '?' + p.toString()
@@ -3243,9 +3249,7 @@ const reviewerBreadcrumbJsonLd = {
     if (searchEl) searchEl.addEventListener('input', function() {
       clearTimeout(_t); _t = setTimeout(function() { achNav({ q: searchEl.value.trim() }) }, 600)
     })
-    document.querySelectorAll('.ach-rarity-btn').forEach(function(btn) {
-      btn.addEventListener('click', function() { achNav({ rarity: btn.dataset.rarity }) })
-    })
+    if (sortEl) sortEl.addEventListener('change', function() { achNav({ sort: sortEl.value }) })
     if (dateEl) dateEl.addEventListener('change', function() { achNav({ days: dateEl.value }) })
   })()
 
