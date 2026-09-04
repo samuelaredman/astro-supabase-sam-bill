@@ -770,13 +770,35 @@ const { count: _achCount } = await adminDb
   .select('*', { count: 'exact', head: true })
   .eq('profile_id', reviewer.id);
 
-// Stats only — card data is fetched client-side on demand
 const hasAchievements = activeTab === 'achievements';
-const achievementSummary = hasAchievements
-  ? await adminDb.from('user_achievements')
-      .select('steam_appid, unlocked', { count: 'exact' })
-      .eq('profile_id', reviewer.id)
-  : { data: null, count: null };
+const _ACH_PER_PAGE = 50;
+const achPage   = hasAchievements ? Math.max(1, parseInt(Astro.url.searchParams.get('achpage') ?? '1') || 1) : 1;
+const achQ      = hasAchievements ? (Astro.url.searchParams.get('q') ?? '').trim() : '';
+const achRarity = hasAchievements ? (Astro.url.searchParams.get('rarity') ?? 'all') : 'all';
+const achDays   = hasAchievements ? (parseInt(Astro.url.searchParams.get('days') ?? '0') || 0) : 0;
+
+const [achievementSummary, achievementsRaw] = hasAchievements
+  ? await Promise.all([
+      adminDb.from('user_achievements')
+        .select('steam_appid, unlocked', { count: 'exact' })
+        .eq('profile_id', reviewer.id),
+      (() => {
+        let q = adminDb.from('user_achievements')
+          .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, games(title)', { count: 'exact' })
+          .eq('profile_id', reviewer.id)
+          .eq('unlocked', true)
+          .not('unlock_time', 'is', null);
+        if (achQ)                      q = q.ilike('display_name', `%${achQ}%`);
+        if (achRarity === 'gold')      q = q.lt('global_percent', 10);
+        else if (achRarity === 'rare')      q = q.gte('global_percent', 10).lt('global_percent', 25);
+        else if (achRarity === 'uncommon') q = q.gte('global_percent', 25).lt('global_percent', 50);
+        else if (achRarity === 'common')   q = q.gte('global_percent', 50);
+        if (achDays > 0) q = q.gte('unlock_time', new Date(Date.now() - achDays * 86400000).toISOString());
+        return q.order('unlock_time', { ascending: false })
+          .range((achPage - 1) * _ACH_PER_PAGE, achPage * _ACH_PER_PAGE - 1);
+      })(),
+    ])
+  : [{ data: null, count: null }, { data: [], count: 0 }];
 
 const totalAchievements = achievementSummary.count ?? 0;
 const unlockedAchievements = (achievementSummary.data ?? []).filter((a: any) => a.unlocked).length;
@@ -792,6 +814,47 @@ const _gamesWithAchs = [..._byGame.values()].filter(g => g.total > 0);
 const avgCompletion = _gamesWithAchs.length > 0
   ? _gamesWithAchs.reduce((sum, g) => sum + g.unlocked / g.total, 0) / _gamesWithAchs.length * 100
   : 0;
+
+// Group unlocked achievements by calendar date for display
+const _achNow = new Date();
+const achByDate: Array<{ label: string; items: any[] }> = [];
+const achDateMap = new Map<string, any[]>();
+for (const a of (achievementsRaw.data ?? []) as any[]) {
+  const d = new Date(a.unlock_time);
+  const isCurrentYear = d.getUTCFullYear() === _achNow.getUTCFullYear();
+  const label = d.toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric',
+    ...(!isCurrentYear ? { year: 'numeric' } : {}),
+    timeZone: 'UTC',
+  }).toUpperCase();
+  if (!achDateMap.has(label)) { achDateMap.set(label, []); achByDate.push({ label, items: achDateMap.get(label)! }); }
+  achDateMap.get(label)!.push(a);
+}
+const achTotalFiltered = (achievementsRaw as any).count ?? 0;
+const achTotalPages = Math.max(1, Math.ceil(achTotalFiltered / _ACH_PER_PAGE));
+
+function achUrl(page: number, overrides: { q?: string; rarity?: string; days?: string } = {}) {
+  const p = new URLSearchParams({ tab: 'achievements' });
+  if (page > 1) p.set('achpage', String(page));
+  const q = overrides.q !== undefined ? overrides.q : achQ;
+  if (q) p.set('q', q);
+  const rarity = overrides.rarity !== undefined ? overrides.rarity : achRarity;
+  if (rarity && rarity !== 'all') p.set('rarity', rarity);
+  const days = overrides.days !== undefined ? overrides.days : (achDays > 0 ? String(achDays) : '');
+  if (days) p.set('days', days);
+  return `/reviewers/${reviewer.username}?${p.toString()}`;
+}
+
+// Build the page-number list for SSR pagination (numbers + '…' gaps)
+const achPageItems: (number | string)[] = [];
+if (achTotalPages > 1) {
+  const _pages = Array.from({ length: achTotalPages }, (_, i) => i + 1)
+    .filter(p => p === 1 || p === achTotalPages || Math.abs(p - achPage) <= 2);
+  for (let i = 0; i < _pages.length; i++) {
+    if (i > 0 && _pages[i] - _pages[i - 1] > 1) achPageItems.push('…');
+    achPageItems.push(_pages[i]);
+  }
+}
 
 // Check if this reviewer has Steam connected (for showing sync button to owner)
 const hasSteam = !!(reviewer as any).steam_id;
@@ -2046,26 +2109,87 @@ const reviewerBreadcrumbJsonLd = {
               </div>
             </div>
 
-            {/* Filter bar + grid — all rendered client-side */}
+            {/* Filter bar — navigates via URL so filters + pagination are SSR */}
             <div class="ach-filter-bar">
-              <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements…" autocomplete="off" />
+              <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements…" autocomplete="off" value={achQ} />
               <div class="ach-rarity-btns">
-                <button class="ach-rarity-btn active" data-rarity="all">All</button>
-                <button class="ach-rarity-btn" data-rarity="gold">Gold &lt;10%</button>
-                <button class="ach-rarity-btn" data-rarity="rare">Rare 10–25%</button>
-                <button class="ach-rarity-btn" data-rarity="uncommon">Uncommon 25–50%</button>
-                <button class="ach-rarity-btn" data-rarity="common">Common &gt;50%</button>
+                <button class={`ach-rarity-btn${achRarity === 'all' ? ' active' : ''}`} data-rarity="all">All</button>
+                <button class={`ach-rarity-btn${achRarity === 'gold' ? ' active' : ''}`} data-rarity="gold">Gold &lt;10%</button>
+                <button class={`ach-rarity-btn${achRarity === 'rare' ? ' active' : ''}`} data-rarity="rare">Rare 10–25%</button>
+                <button class={`ach-rarity-btn${achRarity === 'uncommon' ? ' active' : ''}`} data-rarity="uncommon">Uncommon 25–50%</button>
+                <button class={`ach-rarity-btn${achRarity === 'common' ? ' active' : ''}`} data-rarity="common">Common &gt;50%</button>
               </div>
               <select id="achDateFilter" class="ach-date-select">
-                <option value="0">All time</option>
-                <option value="7">Last 7 days</option>
-                <option value="30">Last 30 days</option>
-                <option value="180">Last 6 months</option>
-                <option value="365">Last year</option>
+                <option value="0" selected={achDays === 0}>All time</option>
+                <option value="7" selected={achDays === 7}>Last 7 days</option>
+                <option value="30" selected={achDays === 30}>Last 30 days</option>
+                <option value="180" selected={achDays === 180}>Last 6 months</option>
+                <option value="365" selected={achDays === 365}>Last year</option>
               </select>
             </div>
-            <div id="achFeed" class="ach-feed"><div class="ach-feed-loading">Loading…</div></div>
-            <div id="achPagination" class="ach-pagination"></div>
+
+            {/* Chronological feed — grouped by date, SSR-rendered */}
+            {achByDate.length > 0 ? (
+              <div class="ach-feed">
+                {achByDate.map(({ label, items }) => (
+                  <div class="ach-day">
+                    <div class="ach-day-date">{label}</div>
+                    <div class="ach-feed-grid">
+                      {items.map((a: any) => {
+                        const isRare = a.global_percent != null && a.global_percent < 10;
+                        const unlockDate = a.unlock_time
+                          ? new Date(a.unlock_time).toLocaleString('en-GB', {
+                              day: 'numeric', month: 'short', year: 'numeric',
+                              hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
+                            })
+                          : null;
+                        return (
+                          <div class={`ach-feed-card${isRare ? ' ach-feed-card--rare' : ''}`}>
+                            <div class={`ach-feed-icon-wrap${isRare ? ' ach-feed-icon-wrap--rare' : ''}`}>
+                              {a.icon_url
+                                ? <img src={a.icon_url} alt={a.display_name ?? ''} class={`ach-feed-icon${isRare ? ' ach-feed-icon--rare' : ''}`} loading="lazy" />
+                                : <div class={`ach-feed-icon ach-feed-icon-ph${isRare ? ' ach-feed-icon--rare' : ''}`}>🏆</div>
+                              }
+                            </div>
+                            <div class="ach-feed-info">
+                              <div class="ach-feed-name">{a.display_name ?? a.api_name}</div>
+                              {a.description && <div class="ach-feed-desc">{a.description}</div>}
+                              <div class="ach-feed-game">{a.games?.title ?? `App ${a.steam_appid}`}</div>
+                              <div class="ach-feed-footer">
+                                {unlockDate && <span class="ach-feed-time">Unlocked on {unlockDate}</span>}
+                                {a.global_percent != null && (
+                                  <span class={`ach-feed-pct${isRare ? ' ach-feed-pct--rare' : ''}`}>
+                                    {a.global_percent.toFixed(1)}% of players
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div class="empty-state">
+                <div class="empty-title">No achievements match</div>
+                <p style="font-size:14px;color:var(--text-tertiary)">Try adjusting your search or filters.</p>
+              </div>
+            )}
+
+            {/* SSR pagination */}
+            {achTotalPages > 1 && (
+              <div class="ach-pagination">
+                {achPage > 1 && <a href={achUrl(achPage - 1)} class="ach-pag-btn">‹</a>}
+                {achPageItems.map(p =>
+                  p === '…'
+                    ? <span class="ach-pag-dots">…</span>
+                    : <a href={achUrl(p as number)} class={`ach-pag-btn${p === achPage ? ' active' : ''}`}>{p}</a>
+                )}
+                {achPage < achTotalPages && <a href={achUrl(achPage + 1)} class="ach-pag-btn">›</a>}
+              </div>
+            )}
           </>
         )}
       </>
@@ -3096,130 +3220,33 @@ const reviewerBreadcrumbJsonLd = {
     })
   }
 
-  // ── ACHIEVEMENT GRID (client-rendered, API-paginated) ──
-  var _achPage = 1, _achQ = '', _achRarity = 'all', _achDays = 0, _achLoading = false
-
-  function _achUrl(page) {
-    var u = '/api/steam/achievements-feed?profile_id=' + encodeURIComponent(achProfileId)
-    u += '&page=' + page
-    if (_achQ)       u += '&q='      + encodeURIComponent(_achQ)
-    if (_achRarity !== 'all') u += '&rarity=' + encodeURIComponent(_achRarity)
-    if (_achDays)    u += '&days='   + _achDays
-    return u
-  }
-
-  function _achFetch(page) {
-    if (_achLoading) return
-    _achLoading = true
-    _achPage = page
-    var feed = document.getElementById('achFeed')
-    var pag  = document.getElementById('achPagination')
-    if (feed) feed.innerHTML = '<div class="ach-feed-loading">Loading…</div>'
-    if (pag)  pag.innerHTML  = ''
-    fetch(_achUrl(page))
-      .then(function(r) { return r.ok ? r.json() : Promise.reject() })
-      .then(function(d) { _achLoading = false; _achRenderFeed(d); _achRenderPagination(d) })
-      .catch(function() { _achLoading = false; if (feed) feed.innerHTML = '<div class="ach-feed-loading">Failed to load — try again.</div>' })
-  }
-
-  function _achDateLabel(isoStr) {
-    var d = new Date(isoStr)
-    var isCurrentYear = d.getUTCFullYear() === new Date().getUTCFullYear()
-    var opts = { month: 'long', day: 'numeric', timeZone: 'UTC' }
-    if (!isCurrentYear) opts.year = 'numeric'
-    return d.toLocaleDateString('en-US', opts).toUpperCase()
-  }
-
-  function _achRenderFeed(d) {
-    var feed = document.getElementById('achFeed')
-    if (!feed) return
-    if (!d.achievements || !d.achievements.length) {
-      feed.innerHTML = '<div class="empty-state"><div class="empty-title">No achievements match</div><p style="font-size:14px;color:var(--text-tertiary)">Try adjusting your search or filters.</p></div>'
-      return
-    }
-    feed.innerHTML = ''
-    // Group by date
-    var byDate = new Map(), order = []
-    d.achievements.forEach(function(a) {
-      var lbl = _achDateLabel(a.unlock_time)
-      if (!byDate.has(lbl)) { byDate.set(lbl, []); order.push(lbl) }
-      byDate.get(lbl).push(a)
-    })
-    order.forEach(function(lbl) {
-      var day = document.createElement('div'); day.className = 'ach-day'
-      var hdr = document.createElement('div'); hdr.className = 'ach-day-date'; hdr.textContent = lbl; day.appendChild(hdr)
-      var grid = document.createElement('div'); grid.className = 'ach-feed-grid'
-      byDate.get(lbl).forEach(function(a) {
-        var isRare = a.global_percent != null && a.global_percent < 10
-        var card = document.createElement('div')
-        card.className = 'ach-feed-card' + (isRare ? ' ach-feed-card--rare' : '')
-        // icon wrap
-        var iw = document.createElement('div'); iw.className = 'ach-feed-icon-wrap' + (isRare ? ' ach-feed-icon-wrap--rare' : '')
-        if (a.icon_url) {
-          var img = document.createElement('img'); img.src = a.icon_url; img.alt = a.display_name || ''
-          img.className = 'ach-feed-icon' + (isRare ? ' ach-feed-icon--rare' : ''); img.loading = 'lazy'
-          iw.appendChild(img)
-        } else {
-          var ph = document.createElement('div'); ph.className = 'ach-feed-icon ach-feed-icon-ph' + (isRare ? ' ach-feed-icon--rare' : ''); ph.textContent = '🏆'; iw.appendChild(ph)
-        }
-        card.appendChild(iw)
-        // info
-        var info = document.createElement('div'); info.className = 'ach-feed-info'
-        var nm = document.createElement('div'); nm.className = 'ach-feed-name'; nm.textContent = a.display_name || a.api_name || ''; info.appendChild(nm)
-        if (a.description) { var desc = document.createElement('div'); desc.className = 'ach-feed-desc'; desc.textContent = a.description; info.appendChild(desc) }
-        var gm = document.createElement('div'); gm.className = 'ach-feed-game'; gm.textContent = a.games && a.games.title ? a.games.title : ('App ' + a.steam_appid); info.appendChild(gm)
-        var footer = document.createElement('div'); footer.className = 'ach-feed-footer'
-        if (a.unlock_time) {
-          var d2 = new Date(a.unlock_time)
-          var ts = d2.toLocaleString('en-GB', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'UTC' })
-          var tEl = document.createElement('span'); tEl.className = 'ach-feed-time'; tEl.textContent = 'Unlocked on ' + ts; footer.appendChild(tEl)
-        }
-        if (a.global_percent != null) {
-          var pct = document.createElement('span'); pct.className = 'ach-feed-pct' + (isRare ? ' ach-feed-pct--rare' : ''); pct.textContent = a.global_percent.toFixed(1) + '% of players'; footer.appendChild(pct)
-        }
-        info.appendChild(footer); card.appendChild(info); grid.appendChild(card)
-      })
-      day.appendChild(grid); feed.appendChild(day)
-    })
-  }
-
-  function _achRenderPagination(d) {
-    var pag = document.getElementById('achPagination')
-    if (!pag || d.pages <= 1) return
-    pag.innerHTML = ''
-    var cur = d.page, total = d.pages
-    function mkBtn(label, pg, disabled) {
-      var b = document.createElement('button'); b.className = 'ach-pag-btn' + (pg === cur ? ' active' : '')
-      b.textContent = label; b.disabled = !!disabled
-      if (!disabled) b.onclick = function() { _achFetch(pg) }
-      return b
-    }
-    pag.appendChild(mkBtn('‹', cur - 1, cur === 1))
-    var start = Math.max(1, cur - 2), end = Math.min(total, cur + 2)
-    if (start > 1) { pag.appendChild(mkBtn('1', 1)); if (start > 2) { var sp = document.createElement('span'); sp.className = 'ach-pag-dots'; sp.textContent = '…'; pag.appendChild(sp) } }
-    for (var p = start; p <= end; p++) pag.appendChild(mkBtn(String(p), p))
-    if (end < total) { if (end < total - 1) { var sp2 = document.createElement('span'); sp2.className = 'ach-pag-dots'; sp2.textContent = '…'; pag.appendChild(sp2) } pag.appendChild(mkBtn(String(total), total)) }
-    pag.appendChild(mkBtn('›', cur + 1, cur === total))
-  }
-
-  // Wire filters — each change resets to page 1
+  // ── ACHIEVEMENT FILTERS — navigate via URL so SSR handles pagination + rendering ──
   ;(function() {
     var searchEl = document.getElementById('achSearch')
     var dateEl   = document.getElementById('achDateFilter')
+    if (!searchEl && !dateEl) return
+
+    function achNav(overrides) {
+      var p = new URLSearchParams({ tab: 'achievements' })
+      var q = overrides.q !== undefined ? overrides.q : (searchEl ? searchEl.value.trim() : '')
+      if (q) p.set('q', q)
+      var rarity = overrides.rarity !== undefined ? overrides.rarity : ''
+      var activeBtn = document.querySelector('.ach-rarity-btn.active')
+      if (!rarity && activeBtn) rarity = activeBtn.dataset.rarity || 'all'
+      if (rarity && rarity !== 'all') p.set('rarity', rarity)
+      var days = overrides.days !== undefined ? overrides.days : (dateEl ? dateEl.value : '0')
+      if (days && days !== '0') p.set('days', days)
+      window.location.href = window.location.pathname + '?' + p.toString()
+    }
+
     var _t
     if (searchEl) searchEl.addEventListener('input', function() {
-      clearTimeout(_t); _t = setTimeout(function() { _achQ = searchEl.value.trim(); _achFetch(1) }, 300)
+      clearTimeout(_t); _t = setTimeout(function() { achNav({ q: searchEl.value.trim() }) }, 600)
     })
     document.querySelectorAll('.ach-rarity-btn').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        document.querySelectorAll('.ach-rarity-btn').forEach(function(b) { b.classList.remove('active') })
-        btn.classList.add('active'); _achRarity = btn.dataset.rarity; _achFetch(1)
-      })
+      btn.addEventListener('click', function() { achNav({ rarity: btn.dataset.rarity }) })
     })
-    if (dateEl) dateEl.addEventListener('change', function() { _achDays = parseInt(dateEl.value) || 0; _achFetch(1) })
-    // Auto-load when the tab first becomes visible
-    var feed = document.getElementById('achFeed')
-    if (feed) _achFetch(1)
+    if (dateEl) dateEl.addEventListener('change', function() { achNav({ days: dateEl.value }) })
   })()
 
   // ── SCORE DIST MINI BARS ──
