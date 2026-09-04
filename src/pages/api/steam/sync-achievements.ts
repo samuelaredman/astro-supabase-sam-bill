@@ -12,6 +12,17 @@ async function fetchJson(url: string): Promise<any> {
   return res.json().catch(() => null);
 }
 
+// Retries up to `retries` times with a short delay — used for GetSchemaForGame
+// which has a stricter rate limit than the player/global endpoints.
+async function fetchJsonWithRetry(url: string, retries = 2): Promise<any> {
+  for (let i = 0; i <= retries; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, 700 * i));
+    const result = await fetchJson(url);
+    if (result !== null) return result;
+  }
+  return null;
+}
+
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
@@ -82,7 +93,7 @@ export const POST: APIRoute = async (context) => {
     try {
       const [playerData, schemaData, globalData] = await Promise.all([
         fetchJson(`https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?appid=${appid}&key=${steamApiKey}&steamid=${steamId}&l=en`),
-        fetchJson(`https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?appid=${appid}&key=${steamApiKey}&l=en`),
+        fetchJsonWithRetry(`https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?appid=${appid}&key=${steamApiKey}&l=en`),
         fetchJson(`https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/?gameid=${appid}`),
       ]);
 
@@ -119,8 +130,8 @@ export const POST: APIRoute = async (context) => {
         // Only include icon URLs when schema data was available. Omitting them
         // means ON CONFLICT DO UPDATE skips those columns, preserving previously
         // valid icon URLs when GetSchemaForGame is rate-limited or fails.
-        if (schema.icon != null)     row.icon_url      = schema.icon;
-        if (schema.icongray != null) row.icon_gray_url = schema.icongray;
+        if (schema.icon)     row.icon_url      = schema.icon;
+        if (schema.icongray) row.icon_gray_url = schema.icongray;
         return row;
       });
 
