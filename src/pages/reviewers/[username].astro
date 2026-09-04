@@ -2043,9 +2043,39 @@ const reviewerBreadcrumbJsonLd = {
               </div>
             </div>
 
+            {/* Filter bar */}
+            <div class="ach-filter-bar">
+              <input
+                type="search"
+                id="achSearch"
+                class="ach-search"
+                placeholder="Search achievements or games…"
+                autocomplete="off"
+              />
+              <div class="ach-rarity-btns">
+                <button class="ach-rarity-btn active" data-rarity="all">All</button>
+                <button class="ach-rarity-btn" data-rarity="gold">Gold &lt;10%</button>
+                <button class="ach-rarity-btn" data-rarity="rare">Rare 10–25%</button>
+                <button class="ach-rarity-btn" data-rarity="uncommon">Uncommon 25–50%</button>
+                <button class="ach-rarity-btn" data-rarity="common">Common &gt;50%</button>
+              </div>
+              <select id="achDateFilter" class="ach-date-select">
+                <option value="all">All time</option>
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="180">Last 6 months</option>
+                <option value="365">Last year</option>
+              </select>
+            </div>
+
+            <div id="achNoResults" class="empty-state" style="display:none">
+              <div class="empty-title">No achievements match</div>
+              <p style="font-size:14px;color:var(--text-tertiary)">Try adjusting your search or filters.</p>
+            </div>
+
             {/* Chronological feed — grouped by date, most recent first */}
             {achByDate.length > 0 && (
-              <div class="ach-feed">
+              <div class="ach-feed" id="achFeed">
                 {achByDate.map(({ label, items }) => (
                   <div class="ach-day">
                     <div class="ach-day-date">{label}</div>
@@ -2059,7 +2089,11 @@ const reviewerBreadcrumbJsonLd = {
                             })
                           : null;
                         return (
-                          <div class={`ach-feed-card${isRare ? ' ach-feed-card--rare' : ''}`}>
+                          <div class={`ach-feed-card${isRare ? ' ach-feed-card--rare' : ''}`}
+                               data-name={(a.display_name ?? a.api_name ?? '').toLowerCase()}
+                               data-game={(a.games?.title ?? '').toLowerCase()}
+                               data-pct={a.global_percent != null ? a.global_percent.toString() : '-1'}
+                               data-ts={a.unlock_time ? new Date(a.unlock_time).getTime().toString() : '0'}>
                             <div class={`ach-feed-icon-wrap${isRare ? ' ach-feed-icon-wrap--rare' : ''}`}>
                               {a.icon_url
                                 ? <img src={a.icon_url} alt={a.display_name ?? ''} class={`ach-feed-icon${isRare ? ' ach-feed-icon--rare' : ''}`} loading="lazy" />
@@ -4486,6 +4520,63 @@ async function createNewList(btn) {
   })();
 </script>
 
+{showAchievementsTab && (
+<script is:inline>
+(function () {
+  var searchEl  = document.getElementById('achSearch');
+  var dateEl    = document.getElementById('achDateFilter');
+  var noResults = document.getElementById('achNoResults');
+  var feed      = document.getElementById('achFeed');
+  if (!searchEl || !dateEl) return;
+
+  var activeRarity = 'all';
+
+  document.querySelectorAll('.ach-rarity-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.ach-rarity-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      activeRarity = btn.dataset.rarity;
+      applyFilters();
+    });
+  });
+
+  searchEl.addEventListener('input', applyFilters);
+  dateEl.addEventListener('change', applyFilters);
+
+  function applyFilters() {
+    var q      = searchEl.value.toLowerCase().trim();
+    var days   = parseInt(dateEl.value) || 0;
+    var cutoff = days ? Date.now() - days * 86400000 : 0;
+    var anyVisible = false;
+
+    document.querySelectorAll('.ach-day').forEach(function (day) {
+      var cards = day.querySelectorAll('.ach-feed-card');
+      var dayVisible = false;
+      cards.forEach(function (card) {
+        var pct = parseFloat(card.dataset.pct);
+        var ts  = parseInt(card.dataset.ts) || 0;
+        var matchSearch = !q || card.dataset.name.includes(q) || card.dataset.game.includes(q);
+        var matchRarity =
+          activeRarity === 'all'      ? true :
+          activeRarity === 'gold'     ? (pct >= 0 && pct < 10)   :
+          activeRarity === 'rare'     ? (pct >= 10 && pct < 25)  :
+          activeRarity === 'uncommon' ? (pct >= 25 && pct < 50)  :
+          activeRarity === 'common'   ? (pct >= 50)               : true;
+        var matchDate = !cutoff || ts >= cutoff;
+        var show = matchSearch && matchRarity && matchDate;
+        card.style.display = show ? '' : 'none';
+        if (show) { dayVisible = true; anyVisible = true; }
+      });
+      day.style.display = dayVisible ? '' : 'none';
+    });
+
+    if (noResults) noResults.style.display = anyVisible ? 'none' : '';
+    if (feed)      feed.style.display      = anyVisible ? ''     : 'none';
+  }
+})();
+</script>
+)}
+
 {isOwnProfile && hasSteam && (
 <script is:inline>
 (function () {
@@ -4671,6 +4762,37 @@ async function createNewList(btn) {
   .ach-feed-time { font-size: 11px; color: var(--text-tertiary); }
   .ach-feed-pct  { font-size: 11px; color: var(--text-tertiary); }
   .ach-feed-pct--rare { color: #ca8a04; font-weight: 600; }
+
+  /* ── Achievement filters ── */
+  .ach-filter-bar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-bottom: 20px;
+  }
+  .ach-search {
+    flex: 1; min-width: 180px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 12px;
+    font-size: 13px; color: var(--text-primary); font-family: inherit;
+    outline: none;
+  }
+  .ach-search:focus { border-color: var(--accent); }
+  .ach-rarity-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+  .ach-rarity-btn {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 20px; padding: 5px 12px;
+    font-size: 12px; font-weight: 500; color: var(--text-secondary);
+    font-family: inherit; cursor: pointer; white-space: nowrap;
+    transition: all .15s;
+  }
+  .ach-rarity-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+  .ach-rarity-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .ach-date-select {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 10px;
+    font-size: 13px; color: var(--text-secondary); font-family: inherit;
+    cursor: pointer; outline: none;
+  }
+  .ach-date-select:focus { border-color: var(--accent); }
 
   /* Gold border + glow for < 10% rarity */
   .ach-feed-card--rare {
