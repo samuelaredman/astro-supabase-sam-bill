@@ -18,7 +18,7 @@ export const GET: APIRoute = async (context) => {
   const db = getSupabaseAdmin() as any;
   let query = db
     .from('user_achievements')
-    .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, games(title)', { count: 'exact' })
+    .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, steam_game_title, games(title)', { count: 'exact' })
     .eq('profile_id', profileId)
     .eq('unlocked', true)
     .not('unlock_time', 'is', null);

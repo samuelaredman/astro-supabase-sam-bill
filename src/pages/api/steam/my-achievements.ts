@@ -8,7 +8,7 @@ export const GET: APIRoute = async (context) => {
 
   const { data, error } = await (db as any)
     .from('user_achievements')
-    .select('api_name, steam_appid, display_name, description, icon_url, global_percent, games(title)')
+    .select('api_name, steam_appid, display_name, description, icon_url, global_percent, steam_game_title, games(title)')
     .eq('profile_id', profile.id)
     .eq('unlocked', true)
     .order('global_percent', { ascending: true, nullsFirst: false })
@@ -26,7 +26,7 @@ export const GET: APIRoute = async (context) => {
     description:   a.description,
     icon_url:      a.icon_url,
     global_percent: a.global_percent,
-    game_title:    a.games?.title ?? null,
+    game_title:    a.games?.title ?? a.steam_game_title ?? null,
   }));
 
   return json({ achievements });
