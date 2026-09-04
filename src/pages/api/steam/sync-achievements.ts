@@ -100,7 +100,7 @@ export const POST: APIRoute = async (context) => {
 
       const rows = playerAchs.map((pa: any) => {
         const schema = schemaByName.get(pa.apiname) ?? {};
-        return {
+        const row: Record<string, unknown> = {
           profile_id:       profile.id,
           game_id,
           steam_appid:      appid,
@@ -108,8 +108,6 @@ export const POST: APIRoute = async (context) => {
           api_name:         pa.apiname,
           display_name:     schema.displayName ?? pa.apiname,
           description:      schema.description ?? null,
-          icon_url:         schema.icon ?? null,
-          icon_gray_url:    schema.icongray ?? null,
           hidden:           schema.hidden === 1,
           unlocked:         pa.achieved === 1,
           unlock_time:      pa.achieved === 1 && pa.unlocktime
@@ -118,6 +116,12 @@ export const POST: APIRoute = async (context) => {
           global_percent:   globalByName.get(pa.apiname) ?? null,
           synced_at:        now,
         };
+        // Only include icon URLs when schema data was available. Omitting them
+        // means ON CONFLICT DO UPDATE skips those columns, preserving previously
+        // valid icon URLs when GetSchemaForGame is rate-limited or fails.
+        if (schema.icon != null)     row.icon_url      = schema.icon;
+        if (schema.icongray != null) row.icon_gray_url = schema.icongray;
+        return row;
       });
 
       if (rows.length === 0) continue;
