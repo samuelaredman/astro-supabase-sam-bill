@@ -130,8 +130,11 @@ export const POST: APIRoute = async (context) => {
         // Only include icon URLs when schema data was available. Omitting them
         // means ON CONFLICT DO UPDATE skips those columns, preserving previously
         // valid icon URLs when GetSchemaForGame is rate-limited or fails.
-        if (schema.icon)     row.icon_url      = schema.icon;
         if (schema.icongray) row.icon_gray_url = schema.icongray;
+        // Fall back to icongray when icon is missing — Steam's client does the
+        // same, so some achievements only have icongray set in the schema.
+        const iconUrl = schema.icon || schema.icongray;
+        if (iconUrl) row.icon_url = iconUrl;
         return row;
       });
 
