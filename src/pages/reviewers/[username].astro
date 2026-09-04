@@ -704,6 +704,8 @@ const showcaseJson = JSON.stringify(
 const showcaseAchievementsJson = JSON.stringify(
   Array.isArray((reviewer as any).showcase_achievements) ? (reviewer as any).showcase_achievements : []
 )
+const achNextCursorJson = JSON.stringify(achNextCursor ?? null)
+const achProfileId = reviewer.id
 const reviewScoreByGameId: Record<string, number> = {}
 const reviewHoursByGameId: Record<string, number> = {}
 for (const r of publishedReviews) {
@@ -770,9 +772,15 @@ const [achievementSummary, recentAchievementsRaw] = hasAchievements
         .eq('unlocked', true)
         .not('unlock_time', 'is', null)
         .order('unlock_time', { ascending: false })
-        .limit(1000),
+        .limit(51), // +1 to detect whether more pages exist
     ])
   : [{ data: null, count: null }, { data: [] }];
+
+// Slice to 50 and derive cursor for the "Load more" button
+const _achRaw = (recentAchievementsRaw.data ?? []) as any[];
+const achHasMore = _achRaw.length > 50;
+const achFeedItems = achHasMore ? _achRaw.slice(0, 50) : _achRaw;
+const achNextCursor = achHasMore ? (achFeedItems[achFeedItems.length - 1]?.unlock_time ?? null) : null;
 
 const totalAchievements = achievementSummary.count ?? 0;
 const unlockedAchievements = (achievementSummary.data ?? []).filter((a: any) => a.unlocked).length;
@@ -794,7 +802,7 @@ const avgCompletion = _gamesWithAchs.length > 0
 const now = new Date();
 const achByDate: Array<{ label: string; items: any[] }> = [];
 const achDateMap = new Map<string, any[]>();
-for (const a of (recentAchievementsRaw.data ?? []) as any[]) {
+for (const a of achFeedItems) {
   const d = new Date(a.unlock_time);
   const isCurrentYear = d.getUTCFullYear() === now.getUTCFullYear();
   const label = d.toLocaleDateString('en-US', {
@@ -2094,7 +2102,7 @@ const reviewerBreadcrumbJsonLd = {
 
             {/* Chronological feed — grouped by date, most recent first */}
             {achByDate.length > 0 && (
-              <div class="ach-feed" id="achFeed">
+              <div class="ach-feed" id="achFeed" data-profile={reviewer.id}>
                 {achByDate.map(({ label, items }) => (
                   <div class="ach-day">
                     <div class="ach-day-date">{label}</div>
@@ -2138,6 +2146,12 @@ const reviewerBreadcrumbJsonLd = {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {achNextCursor && (
+              <div style="text-align:center;margin-top:8px">
+                <button id="achLoadMore" class="ach-load-more-btn" onclick="loadMoreAchievements()">Load more</button>
               </div>
             )}
           </>
@@ -2453,7 +2467,7 @@ const reviewerBreadcrumbJsonLd = {
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, showcaseAchievementsJson, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, showcaseAchievementsJson, achNextCursorJson, achProfileId, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -3167,6 +3181,89 @@ const reviewerBreadcrumbJsonLd = {
         } catch(e) { showToast('Failed to save showcase','error') }
       }
       list.appendChild(item)
+    })
+  }
+
+  // ── ACHIEVEMENT FEED PAGINATION ──
+  var _achCursor = JSON.parse(achNextCursorJson)
+
+  function loadMoreAchievements() {
+    if (!_achCursor) return
+    var btn = document.getElementById('achLoadMore')
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…' }
+    var url = '/api/steam/achievements-feed?profile_id=' + encodeURIComponent(achProfileId) + '&cursor=' + encodeURIComponent(_achCursor)
+    fetch(url)
+      .then(function(r) { return r.ok ? r.json() : Promise.reject() })
+      .then(function(data) {
+        _achCursor = data.nextCursor
+        _appendAchievements(data.achievements || [])
+        if (window._applyAchFilters) window._applyAchFilters()
+        if (!data.nextCursor) {
+          if (btn) btn.style.display = 'none'
+        } else {
+          if (btn) { btn.disabled = false; btn.textContent = 'Load more' }
+        }
+      })
+      .catch(function() { if (btn) { btn.disabled = false; btn.textContent = 'Failed — try again' } })
+  }
+
+  function _achDateLabel(isoStr) {
+    var d = new Date(isoStr)
+    var isCurrentYear = d.getUTCFullYear() === new Date().getUTCFullYear()
+    var opts = { month: 'long', day: 'numeric', timeZone: 'UTC' }
+    if (!isCurrentYear) opts.year = 'numeric'
+    return d.toLocaleDateString('en-US', opts).toUpperCase()
+  }
+
+  function _appendAchievements(achievements) {
+    var feed = document.getElementById('achFeed')
+    if (!feed) return
+    achievements.forEach(function(a) {
+      var label = _achDateLabel(a.unlock_time)
+      var dayEl = feed.querySelector('.ach-day[data-label="' + label.replace(/"/g, '&quot;') + '"]')
+      if (!dayEl) {
+        dayEl = document.createElement('div')
+        dayEl.className = 'ach-day'
+        dayEl.dataset.label = label
+        var hdr = document.createElement('div'); hdr.className = 'ach-day-date'; hdr.textContent = label
+        var grid = document.createElement('div'); grid.className = 'ach-feed-grid'
+        dayEl.appendChild(hdr); dayEl.appendChild(grid)
+        feed.appendChild(dayEl)
+      }
+      var grid = dayEl.querySelector('.ach-feed-grid')
+      var isRare = a.global_percent != null && a.global_percent < 10
+      var card = document.createElement('div')
+      card.className = 'ach-feed-card' + (isRare ? ' ach-feed-card--rare' : '')
+      card.dataset.name = (a.display_name || '').toLowerCase()
+      card.dataset.game = (a.games && a.games.title ? a.games.title : '').toLowerCase()
+      card.dataset.pct  = a.global_percent != null ? a.global_percent.toString() : '-1'
+      card.dataset.ts   = new Date(a.unlock_time).getTime().toString()
+      // icon wrap
+      var wrap = document.createElement('div')
+      wrap.className = 'ach-feed-icon-wrap' + (isRare ? ' ach-feed-icon-wrap--rare' : '')
+      if (a.icon_url) {
+        var img = document.createElement('img'); img.src = a.icon_url; img.alt = a.display_name || ''
+        img.className = 'ach-feed-icon' + (isRare ? ' ach-feed-icon--rare' : ''); img.loading = 'lazy'
+        wrap.appendChild(img)
+      } else {
+        var ph = document.createElement('div')
+        ph.className = 'ach-feed-icon ach-feed-icon-ph' + (isRare ? ' ach-feed-icon--rare' : '')
+        ph.textContent = '🏆'; wrap.appendChild(ph)
+      }
+      card.appendChild(wrap)
+      // info
+      var info = document.createElement('div'); info.className = 'ach-feed-info'
+      var nm = document.createElement('div'); nm.className = 'ach-feed-name'; nm.textContent = a.display_name || a.api_name || ''; info.appendChild(nm)
+      if (a.description) { var desc = document.createElement('div'); desc.className = 'ach-feed-desc'; desc.textContent = a.description; info.appendChild(desc) }
+      var gm = document.createElement('div'); gm.className = 'ach-feed-game'; gm.textContent = a.games && a.games.title ? a.games.title : ('App ' + a.steam_appid); info.appendChild(gm)
+      var footer = document.createElement('div'); footer.className = 'ach-feed-footer'
+      var d2 = new Date(a.unlock_time)
+      var timeStr = d2.toLocaleString('en-GB', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'UTC' })
+      var timeEl = document.createElement('span'); timeEl.className = 'ach-feed-time'; timeEl.textContent = 'Unlocked on ' + timeStr; footer.appendChild(timeEl)
+      if (a.global_percent != null) {
+        var pct = document.createElement('span'); pct.className = 'ach-feed-pct' + (isRare ? ' ach-feed-pct--rare' : ''); pct.textContent = a.global_percent.toFixed(1) + '% of players'; footer.appendChild(pct)
+      }
+      info.appendChild(footer); card.appendChild(info); grid.appendChild(card)
     })
   }
 
@@ -4728,6 +4825,7 @@ async function createNewList(btn) {
 
   searchEl.addEventListener('input', applyFilters);
   dateEl.addEventListener('change', applyFilters);
+  window._applyAchFilters = applyFilters;
 
   function applyFilters() {
     var q      = searchEl.value.toLowerCase().trim();
@@ -4948,6 +5046,14 @@ async function createNewList(btn) {
   .ach-feed-time { font-size: 11px; color: var(--text-tertiary); }
   .ach-feed-pct  { font-size: 11px; color: var(--text-tertiary); }
   .ach-feed-pct--rare { color: #ca8a04; font-weight: 600; }
+
+  .ach-load-more-btn {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 20px;
+    padding: 8px 24px; font-size: 13px; font-weight: 600; color: var(--text-secondary);
+    font-family: inherit; cursor: pointer; transition: border-color .15s, color .15s;
+  }
+  .ach-load-more-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); }
+  .ach-load-more-btn:disabled { opacity: .5; cursor: not-allowed; }
 
   /* ── Achievement showcase (profile tab) ── */
   .ach-showcase-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 8px; }
