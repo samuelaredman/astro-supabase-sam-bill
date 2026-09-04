@@ -777,12 +777,11 @@ const achQ    = hasAchievements ? (Astro.url.searchParams.get('q') ?? '').trim()
 const achSort = hasAchievements ? (Astro.url.searchParams.get('sort') ?? 'recent') : 'recent';
 const achDays = hasAchievements ? (parseInt(Astro.url.searchParams.get('days') ?? '0') || 0) : 0;
 
-const [achievementSummary, achievementsRaw] = hasAchievements
+// Stats via DB aggregation — avoids fetching all rows client-side which
+// breaks for large libraries (500+ games × 50 achievements = 25k+ rows).
+const [achievementStatsResult, achievementsRaw] = hasAchievements
   ? await Promise.all([
-      adminDb.from('user_achievements')
-        .select('steam_appid, unlocked', { count: 'exact' })
-        .eq('profile_id', reviewer.id)
-        .limit(10000),
+      (adminDb as any).rpc('get_achievement_stats', { p_profile_id: reviewer.id }),
       (() => {
         let q = adminDb.from('user_achievements')
           .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, steam_game_title, games(title)', { count: 'exact' })
@@ -796,27 +795,17 @@ const [achievementSummary, achievementsRaw] = hasAchievements
         else if (achSort === 'least-rare') q = q.order('global_percent', { ascending: false, nullsFirst: false });
         else if (achSort === 'az')        q = q.order('display_name', { ascending: true, nullsFirst: false });
         else if (achSort === 'za')        q = q.order('display_name', { ascending: false, nullsFirst: false });
-        else                              q = q.order('unlock_time', { ascending: false }); // recent (default)
+        else                              q = q.order('unlock_time', { ascending: false });
         return q.range((achPage - 1) * _ACH_PER_PAGE, achPage * _ACH_PER_PAGE - 1);
       })(),
     ])
-  : [{ data: null, count: null }, { data: [], count: 0 }];
+  : [{ data: null }, { data: [], count: 0 }];
 
-const totalAchievements = achievementSummary.count ?? 0;
-const unlockedAchievements = (achievementSummary.data ?? []).filter((a: any) => a.unlocked).length;
-
-const _byGame = new Map<number, { total: number; unlocked: number }>();
-for (const a of (achievementSummary.data ?? []) as any[]) {
-  const g = _byGame.get(a.steam_appid) ?? { total: 0, unlocked: 0 };
-  g.total++;
-  if (a.unlocked) g.unlocked++;
-  _byGame.set(a.steam_appid, g);
-}
-const _gamesWithAchs = [..._byGame.values()].filter(g => g.total > 0);
-const avgCompletion = _gamesWithAchs.length > 0
-  ? _gamesWithAchs.reduce((sum, g) => sum + g.unlocked / g.total, 0) / _gamesWithAchs.length * 100
-  : 0;
-const perfectGames = _gamesWithAchs.filter(g => g.unlocked === g.total).length;
+const _achStats = (achievementStatsResult as any)?.data?.[0] ?? { unlocked_count: 0, perfect_games: 0, avg_completion: 0 };
+const totalAchievements   = Number(_achStats.unlocked_count ?? 0);
+const unlockedAchievements = totalAchievements;
+const avgCompletion        = Number(_achStats.avg_completion ?? 0);
+const perfectGames         = Number(_achStats.perfect_games ?? 0);
 
 // Group by date only for time-based sorts; otherwise use a single group
 const _achNow = new Date();
