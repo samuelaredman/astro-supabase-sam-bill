@@ -25,7 +25,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
   .select(`
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
     favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
-    steam_id, steam_username, steam_synced_at,
+    steam_id, steam_username, steam_synced_at, showcase_achievements,
     twitch_url, youtube_url, twitter_url, discord_url, website_url, accent_color,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
@@ -700,6 +700,9 @@ const statsJson = JSON.stringify({
 const isOwnProfileJson = JSON.stringify(isOwnProfile)
 const showcaseJson = JSON.stringify(
   Array.isArray(reviewer.showcase_games) ? reviewer.showcase_games : []
+)
+const showcaseAchievementsJson = JSON.stringify(
+  Array.isArray((reviewer as any).showcase_achievements) ? (reviewer as any).showcase_achievements : []
 )
 const reviewScoreByGameId: Record<string, number> = {}
 const reviewHoursByGameId: Record<string, number> = {}
@@ -1603,6 +1606,22 @@ const reviewerBreadcrumbJsonLd = {
           </div>
         </div>
 
+        <!-- ACHIEVEMENT SHOWCASE -->
+        <div class="card" id="achShowcaseCard">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>Achievement Showcase</span>
+            {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
+          </div>
+          <div class="ach-showcase-grid" id="achShowcaseGrid">
+            {[0,1,2,3,4].map(i => (
+              <div class="ach-showcase-empty" onclick={isOwnProfile ? `openAchPicker(${i})` : ''}>
+                <span style="font-size:20px;color:var(--text-tertiary)">+</span>
+                <span>Add</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
         <!-- SCORE DISTRIBUTION -->
         {publishedReviews.length > 0 && (
           <div class="card" style="margin-bottom:14px">
@@ -2406,12 +2425,35 @@ const reviewerBreadcrumbJsonLd = {
   </div>
 </div>
 
+<!-- ACHIEVEMENT PICKER MODAL -->
+<div class="modal-backdrop" id="achPickerModal" onclick="closeAchPickerOnBackdrop(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Add to achievement showcase</div>
+      <button class="modal-close" onclick="closeAchPicker()">×</button>
+    </div>
+    <div class="modal-search">
+      <input
+        type="text"
+        class="modal-search-input"
+        id="achPickerSearch"
+        placeholder="Search achievements or games…"
+        oninput="filterAchPicker(this.value)"
+        autocomplete="off"
+      />
+    </div>
+    <div class="modal-results ach-picker-list" id="achPickerList">
+      <div class="modal-empty">Loading…</div>
+    </div>
+  </div>
+</div>
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, showcaseAchievementsJson, libraryJson, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -2982,6 +3024,150 @@ const reviewerBreadcrumbJsonLd = {
     // own profile, empty showcase — render 3 empty slots
     currentShowcase = [null, null, null]
     renderShowcase(currentShowcase)
+  }
+
+  // ── ACHIEVEMENT SHOWCASE ──
+  var currentAchShowcase = JSON.parse(showcaseAchievementsJson)
+  var _allAchievements = null
+  var _achPickerSlot = 0
+
+  ;(function initAchShowcase() {
+    var padded = currentAchShowcase.slice()
+    while (padded.length < 5) padded.push(null)
+    currentAchShowcase = padded
+    if (currentAchShowcase.some(Boolean)) {
+      renderAchShowcase(currentAchShowcase)
+    } else if (!ownProfile) {
+      var card = document.getElementById('achShowcaseCard')
+      if (card) card.style.display = 'none'
+    } else {
+      renderAchShowcase(currentAchShowcase)
+    }
+  })()
+
+  function renderAchShowcase(showcase) {
+    var grid = document.getElementById('achShowcaseGrid')
+    if (!grid) return
+    grid.innerHTML = ''
+    showcase.forEach(function(ach, idx) {
+      if (ach) {
+        var isRare = ach.global_percent != null && ach.global_percent < 10
+        var wrap = document.createElement('div')
+        wrap.className = 'ach-showcase-slot'
+        var imgWrap = document.createElement('div')
+        imgWrap.className = 'ach-showcase-img-wrap'
+        if (ach.icon_url) {
+          var img = document.createElement('img')
+          img.src = ach.icon_url; img.alt = ach.display_name || ''
+          img.className = 'ach-showcase-img' + (isRare ? ' ach-showcase-img--rare' : '')
+          imgWrap.appendChild(img)
+        } else {
+          var ph = document.createElement('div')
+          ph.className = 'ach-showcase-img ach-showcase-img-ph' + (isRare ? ' ach-showcase-img--rare' : '')
+          ph.textContent = '🏆'
+          imgWrap.appendChild(ph)
+        }
+        if (ownProfile) {
+          var removeBtn = document.createElement('button')
+          removeBtn.className = 'ach-showcase-remove'
+          removeBtn.innerHTML = '×'
+          removeBtn.onclick = async function(e) {
+            e.stopPropagation(); e.preventDefault()
+            var sc = currentAchShowcase.slice()
+            sc[idx] = null
+            var toSave = sc.filter(Boolean)
+            try {
+              var r = await fetch('/api/profile/update', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ showcase_achievements: toSave }) })
+              if (!r.ok) throw new Error()
+              currentAchShowcase = sc; renderAchShowcase(sc); showToast('Showcase updated','success')
+            } catch(e) { showToast('Failed to save showcase','error') }
+          }
+          imgWrap.appendChild(removeBtn)
+          wrap.style.cursor = 'pointer'
+          wrap.onclick = function() { openAchPicker(idx) }
+        }
+        wrap.appendChild(imgWrap)
+        var name = document.createElement('div'); name.className = 'ach-showcase-name'
+        name.textContent = ach.display_name || ach.api_name || ''; wrap.appendChild(name)
+        var game = document.createElement('div'); game.className = 'ach-showcase-game'
+        game.textContent = ach.game_title || ''; wrap.appendChild(game)
+        grid.appendChild(wrap)
+      } else {
+        var empty = document.createElement('div'); empty.className = 'ach-showcase-empty'
+        if (ownProfile) {
+          empty.innerHTML = '<span style="font-size:20px;color:var(--text-tertiary)">+</span><span>Add</span>'
+          empty.onclick = function() { openAchPicker(idx) }
+        } else {
+          empty.style.visibility = 'hidden'
+        }
+        grid.appendChild(empty)
+      }
+    })
+  }
+
+  function openAchPicker(slot) {
+    _achPickerSlot = slot
+    var modal = document.getElementById('achPickerModal')
+    if (!modal) return
+    modal.classList.add('open')
+    document.getElementById('achPickerSearch').value = ''
+    if (_allAchievements) { renderAchPickerList(_allAchievements, ''); return }
+    document.getElementById('achPickerList').innerHTML = '<div class="modal-empty">Loading…</div>'
+    fetch('/api/steam/my-achievements').then(function(r) { return r.ok ? r.json() : Promise.reject() })
+      .then(function(data) {
+        _allAchievements = data.achievements || []
+        renderAchPickerList(_allAchievements, '')
+      })
+      .catch(function() {
+        document.getElementById('achPickerList').innerHTML = '<div class="modal-empty">Failed to load. Have you synced achievements?</div>'
+      })
+  }
+
+  function closeAchPicker() { var m = document.getElementById('achPickerModal'); if (m) m.classList.remove('open') }
+  function closeAchPickerOnBackdrop(e) { if (e.target === document.getElementById('achPickerModal')) closeAchPicker() }
+
+  function filterAchPicker(q) {
+    if (!_allAchievements) return
+    var lq = q.toLowerCase()
+    var filtered = !q ? _allAchievements : _allAchievements.filter(function(a) {
+      return (a.display_name||'').toLowerCase().includes(lq) || (a.game_title||'').toLowerCase().includes(lq)
+    })
+    renderAchPickerList(filtered, q)
+  }
+
+  function renderAchPickerList(achievements, q) {
+    var list = document.getElementById('achPickerList')
+    if (!list) return
+    if (!achievements.length) {
+      list.innerHTML = '<div class="modal-empty">' + (q ? 'No achievements match.' : 'No achievements synced yet.') + '</div>'; return
+    }
+    list.innerHTML = ''
+    achievements.slice(0, 300).forEach(function(ach) {
+      var isRare = ach.global_percent != null && ach.global_percent < 10
+      var item = document.createElement('div'); item.className = 'ach-picker-item'
+      var iconHtml = ach.icon_url
+        ? '<img src="' + ach.icon_url + '" class="ach-picker-item-icon" alt="" />'
+        : '<div class="ach-picker-item-icon-ph">🏆</div>'
+      var pctHtml = ach.global_percent != null
+        ? '<span class="ach-picker-item-pct' + (isRare ? ' ach-picker-item-pct--rare' : '') + '">' + ach.global_percent.toFixed(1) + '%</span>'
+        : ''
+      item.innerHTML = iconHtml +
+        '<div class="ach-picker-item-info">' +
+          '<div class="ach-picker-item-name">' + (ach.display_name || ach.api_name || '') + '</div>' +
+          '<div class="ach-picker-item-game">' + (ach.game_title || '') + '</div>' +
+        '</div>' + pctHtml
+      item.onclick = async function() {
+        var sc = currentAchShowcase.slice()
+        sc[_achPickerSlot] = { api_name: ach.api_name, steam_appid: ach.steam_appid, display_name: ach.display_name, description: ach.description, icon_url: ach.icon_url, global_percent: ach.global_percent, game_title: ach.game_title }
+        closeAchPicker()
+        try {
+          var r = await fetch('/api/profile/update', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ showcase_achievements: sc.filter(Boolean) }) })
+          if (!r.ok) throw new Error()
+          currentAchShowcase = sc; renderAchShowcase(sc); showToast('Showcase updated','success')
+        } catch(e) { showToast('Failed to save showcase','error') }
+      }
+      list.appendChild(item)
+    })
   }
 
   // ── SCORE DIST MINI BARS ──
@@ -4762,6 +4948,49 @@ async function createNewList(btn) {
   .ach-feed-time { font-size: 11px; color: var(--text-tertiary); }
   .ach-feed-pct  { font-size: 11px; color: var(--text-tertiary); }
   .ach-feed-pct--rare { color: #ca8a04; font-weight: 600; }
+
+  /* ── Achievement showcase (profile tab) ── */
+  .ach-showcase-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 8px; }
+  .ach-showcase-slot { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
+  .ach-showcase-img-wrap { position: relative; width: 100%; aspect-ratio: 1; }
+  .ach-showcase-img {
+    width: 100%; height: 100%; border-radius: 8px; object-fit: cover; display: block;
+    border: 1px solid var(--border); background: var(--tag-bg);
+  }
+  .ach-showcase-img-ph { display: flex; align-items: center; justify-content: center; font-size: 22px; }
+  .ach-showcase-img--rare { border-color: rgba(202,138,4,.6); box-shadow: 0 0 8px rgba(202,138,4,.35); }
+  .ach-showcase-name {
+    font-size: 10px; font-weight: 600; color: var(--text-primary); width: 100%;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3;
+  }
+  .ach-showcase-game { font-size: 9px; color: var(--text-tertiary); width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ach-showcase-remove {
+    position: absolute; top: 4px; right: 4px; width: 18px; height: 18px;
+    background: rgba(0,0,0,.72); border-radius: 50%; display: none;
+    align-items: center; justify-content: center; cursor: pointer;
+    color: #fff; font-size: 13px; border: none; font-family: inherit; padding: 0; line-height: 1;
+  }
+  .ach-showcase-slot:hover .ach-showcase-remove { display: flex; }
+  .ach-showcase-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    aspect-ratio: 1; border-radius: 8px; gap: 2px;
+    background: var(--tag-bg); border: 1px dashed var(--border);
+    cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .ach-showcase-empty:hover { border-color: var(--accent); background: var(--bg-hover); }
+  .ach-showcase-empty span:last-child { font-size: 9px; color: var(--text-tertiary); }
+
+  /* ── Achievement picker modal ── */
+  .ach-picker-list { max-height: 380px; overflow-y: auto; }
+  .ach-picker-item { display: flex; align-items: center; gap: 10px; padding: 8px 16px; cursor: pointer; transition: background .1s; }
+  .ach-picker-item:hover { background: var(--bg-hover); }
+  .ach-picker-item-icon { width: 40px; height: 40px; border-radius: 6px; flex-shrink: 0; object-fit: cover; display: block; }
+  .ach-picker-item-icon-ph { width: 40px; height: 40px; border-radius: 6px; flex-shrink: 0; background: var(--tag-bg); display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  .ach-picker-item-info { min-width: 0; flex: 1; }
+  .ach-picker-item-name { font-size: 13px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ach-picker-item-game { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ach-picker-item-pct { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
+  .ach-picker-item-pct--rare { color: #ca8a04; font-weight: 600; }
 
   /* ── Achievement filters ── */
   .ach-filter-bar {

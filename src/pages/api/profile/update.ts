@@ -9,7 +9,7 @@ export const POST: APIRoute = async (context) => {
 
   const body = await context.request.json();
   const urlFields = ['twitch_url', 'youtube_url', 'twitter_url', 'discord_url', 'website_url'];
-  const allowed = ['bio', 'favorite_game_id', 'showcase_games', ...urlFields, 'accent_color'];
+  const allowed = ['bio', 'favorite_game_id', 'showcase_games', 'showcase_achievements', ...urlFields, 'accent_color'];
   const update: Record<string, any> = {};
   for (const key of allowed) {
     if (key in body) update[key] = body[key];
