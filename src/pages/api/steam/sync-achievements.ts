@@ -6,12 +6,15 @@ import { requireAuth, json } from "../../../utils/api";
 // global) — what we avoid is firing 9-15 simultaneous calls across games.
 const BATCH_SIZE = 6;
 
-// Steam returns bare filenames (e.g. "abc123.jpg") for some games instead
-// of full URLs. Normalize them to the Steam CDN absolute URL using the appid.
+// Steam's GetSchemaForGame returns icon hashes that only reliably resolve on
+// shared.fastly.steamstatic.com/community_assets/. The old steamcdn-a.akamaihd.net
+// CDN is stale for many achievements. Always extract the filename and rewrite
+// to the new CDN regardless of what format the schema returns (full URL or bare hash).
 function steamIconUrl(icon: string | null | undefined, appid: number): string | null {
   if (!icon) return null;
-  if (icon.startsWith('http')) return icon;
-  return `https://steamcdn-a.akamaihd.net/steamcommunity/public/images/apps/${appid}/${icon}`;
+  const filename = icon.split('/').pop();
+  if (!filename) return null;
+  return `https://shared.fastly.steamstatic.com/community_assets/images/apps/${appid}/${filename}`;
 }
 
 async function fetchJson(url: string): Promise<any> {
