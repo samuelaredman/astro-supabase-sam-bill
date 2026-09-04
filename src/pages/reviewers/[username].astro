@@ -748,39 +748,42 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
 // ── Achievements ──
 const adminDb = getSupabaseAdmin() as any;
 const hasAchievements = activeTab === 'achievements';
-const [achievementSummary, rarestAchievements, achievementsByGame] = hasAchievements
+const [achievementSummary, recentAchievementsRaw] = hasAchievements
   ? await Promise.all([
       adminDb.from('user_achievements')
         .select('unlocked', { count: 'exact' })
         .eq('profile_id', reviewer.id),
       adminDb.from('user_achievements')
-        .select('api_name, display_name, description, icon_url, icon_gray_url, global_percent, unlock_time, steam_appid, game_id, games(title, slug, cover_img_url)')
+        .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, games(title, slug)')
         .eq('profile_id', reviewer.id)
         .eq('unlocked', true)
-        .not('global_percent', 'is', null)
-        .order('global_percent', { ascending: true })
-        .limit(20),
-      adminDb.from('user_achievements')
-        .select('steam_appid, unlocked, game_id, games(id, title, slug, cover_img_url)')
-        .eq('profile_id', reviewer.id),
+        .not('unlock_time', 'is', null)
+        .order('unlock_time', { ascending: false })
+        .limit(1000),
     ])
-  : [{ data: null, count: null }, { data: [] }, { data: [] }];
+  : [{ data: null, count: null }, { data: [] }];
 
 const totalAchievements = achievementSummary.count ?? 0;
 const unlockedAchievements = (achievementSummary.data ?? []).filter((a: any) => a.unlocked).length;
 
-// Group achievements by game for the per-game breakdown
-const gameBreakdownMap = new Map<number, { game: any; total: number; unlocked: number }>();
-for (const row of (achievementsByGame.data ?? []) as any[]) {
-  if (!gameBreakdownMap.has(row.steam_appid)) {
-    gameBreakdownMap.set(row.steam_appid, { game: row.games, total: 0, unlocked: 0 });
+// Group unlocked achievements by calendar date (most recent first)
+const now = new Date();
+const achByDate: Array<{ label: string; items: any[] }> = [];
+const achDateMap = new Map<string, any[]>();
+for (const a of (recentAchievementsRaw.data ?? []) as any[]) {
+  const d = new Date(a.unlock_time);
+  const isCurrentYear = d.getUTCFullYear() === now.getUTCFullYear();
+  const label = d.toLocaleDateString('en-US', {
+    month: 'long', day: 'numeric',
+    ...(!isCurrentYear ? { year: 'numeric' } : {}),
+    timeZone: 'UTC',
+  }).toUpperCase();
+  if (!achDateMap.has(label)) {
+    achDateMap.set(label, []);
+    achByDate.push({ label, items: achDateMap.get(label)! });
   }
-  const entry = gameBreakdownMap.get(row.steam_appid)!;
-  entry.total++;
-  if (row.unlocked) entry.unlocked++;
+  achDateMap.get(label)!.push(a);
 }
-const gameBreakdown = [...gameBreakdownMap.values()]
-  .sort((a, b) => (b.unlocked / b.total) - (a.unlocked / a.total));
 
 // Check if this reviewer has Steam connected (for showing sync button to owner)
 const hasSteam = !!(reviewer as any).steam_id;
@@ -2004,63 +2007,36 @@ const reviewerBreadcrumbJsonLd = {
               </div>
             </div>
 
-            {/* Rarest unlocked */}
-            {(rarestAchievements.data ?? []).length > 0 && (
-              <div class="ach-section">
-                <div class="ach-section-title">Rarest Unlocked</div>
-                <div class="ach-grid">
-                  {(rarestAchievements.data as any[]).map((a) => (
-                    <div class="ach-card" title={a.description ?? a.display_name}>
-                      <div class="ach-icon-wrap">
-                        {a.icon_url
-                          ? <img src={a.icon_url} alt={a.display_name} class="ach-icon" loading="lazy" />
-                          : <div class="ach-icon-fallback">🏆</div>
-                        }
-                        {a.global_percent != null && a.global_percent < 5 && (
-                          <span class="ach-rarity ach-rarity-ultra">Ultra Rare</span>
-                        )}
-                        {a.global_percent != null && a.global_percent >= 5 && a.global_percent < 15 && (
-                          <span class="ach-rarity ach-rarity-rare">Rare</span>
-                        )}
-                      </div>
-                      <div class="ach-info">
-                        <div class="ach-name">{a.display_name}</div>
-                        <div class="ach-game-name">{a.games?.title ?? `App ${a.steam_appid}`}</div>
-                        <div class="ach-pct">{a.global_percent != null ? `${a.global_percent.toFixed(1)}% of players` : ''}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Per-game breakdown */}
-            {gameBreakdown.length > 0 && (
-              <div class="ach-section">
-                <div class="ach-section-title">By Game</div>
-                <div class="ach-game-list">
-                  {gameBreakdown.map(({ game, total, unlocked: ul }) => {
-                    const pct = total > 0 ? (ul / total) * 100 : 0;
-                    return (
-                      <div class="ach-game-row">
-                        {game?.cover_img_url
-                          ? <img src={game.cover_img_url.replace(/t_[a-z0-9_]+/, 't_thumb')} alt={game?.title ?? ''} class="ach-game-cover" loading="lazy" />
-                          : <div class="ach-game-cover ach-game-cover-fallback">🎮</div>
-                        }
-                        <div class="ach-game-info">
-                          <div class="ach-game-title">{game?.title ?? 'Unknown Game'}</div>
-                          <div class="ach-game-progress-wrap">
-                            <div class="ach-game-progress-bar">
-                              <div class="ach-game-progress-fill" style={`width:${pct.toFixed(1)}%`}></div>
+            {/* Chronological feed — grouped by date, most recent first */}
+            {achByDate.length > 0 && (
+              <div class="ach-feed">
+                {achByDate.map(({ label, items }) => (
+                  <div class="ach-day">
+                    <div class="ach-day-date">{label}</div>
+                    <div class="ach-feed-grid">
+                      {items.map((a: any) => (
+                        <div class="ach-feed-card">
+                          {a.icon_url
+                            ? <img src={a.icon_url} alt={a.display_name ?? ''} class="ach-feed-icon" loading="lazy" />
+                            : <div class="ach-feed-icon ach-feed-icon-ph">🏆</div>
+                          }
+                          <div class="ach-feed-info">
+                            <div class="ach-feed-name">{a.display_name ?? a.api_name}</div>
+                            {a.description && <div class="ach-feed-desc">{a.description}</div>}
+                            <div class="ach-feed-meta">
+                              <span class="ach-feed-game">{a.games?.title ?? `App ${a.steam_appid}`}</span>
+                              {a.global_percent != null && (
+                                <span class={`ach-feed-rarity${a.global_percent < 5 ? ' ultra' : a.global_percent < 15 ? ' rare' : ''}`}>
+                                  {a.global_percent.toFixed(1)}%
+                                </span>
+                              )}
                             </div>
-                            <span class="ach-game-progress-label">{ul} / {total}</span>
                           </div>
                         </div>
-                        <div class="ach-game-pct">{pct.toFixed(0)}%</div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </>
@@ -4597,5 +4573,50 @@ async function createNewList(btn) {
   .ach-game-progress-fill { height: 100%; border-radius: 4px; background: var(--accent); }
   .ach-game-progress-label { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
   .ach-game-pct { font-size: 14px; font-weight: 700; color: var(--text-primary); flex-shrink: 0; width: 40px; text-align: right; }
+
+  /* ── Chronological achievement feed ── */
+  .ach-feed { margin-top: 8px; }
+  .ach-day { margin-bottom: 28px; }
+  .ach-day-date {
+    font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--text-tertiary); border-bottom: 1px solid var(--border-subtle);
+    padding-bottom: 8px; margin-bottom: 12px;
+  }
+  .ach-feed-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
+  }
+  .ach-feed-card {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px;
+    transition: border-color .15s;
+  }
+  .ach-feed-card:hover { border-color: rgba(96,80,200,.4); }
+  .ach-feed-icon {
+    width: 52px; height: 52px; border-radius: 6px;
+    flex-shrink: 0; object-fit: cover; display: block;
+  }
+  .ach-feed-icon-ph {
+    background: var(--tag-bg); display: flex;
+    align-items: center; justify-content: center; font-size: 22px;
+  }
+  .ach-feed-info { min-width: 0; flex: 1; }
+  .ach-feed-name {
+    font-size: 13px; font-weight: 600; color: var(--text-primary);
+    margin-bottom: 3px; line-height: 1.3;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ach-feed-desc {
+    font-size: 11px; color: var(--text-secondary); line-height: 1.4;
+    margin-bottom: 6px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .ach-feed-meta { display: flex; align-items: center; gap: 8px; }
+  .ach-feed-game { font-size: 11px; color: var(--accent); font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ach-feed-rarity { font-size: 10px; font-weight: 600; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; color: var(--text-tertiary); background: var(--tag-bg); }
+  .ach-feed-rarity.rare  { color: var(--accent); background: rgba(96,80,200,.12); }
+  .ach-feed-rarity.ultra { color: #eab308; background: rgba(234,179,8,.12); }
 </style>
 </Layout>
