@@ -759,7 +759,7 @@ const hasAchievements = activeTab === 'achievements';
 const [achievementSummary, recentAchievementsRaw] = hasAchievements
   ? await Promise.all([
       adminDb.from('user_achievements')
-        .select('unlocked', { count: 'exact' })
+        .select('steam_appid, unlocked', { count: 'exact' })
         .eq('profile_id', reviewer.id),
       adminDb.from('user_achievements')
         .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, games(title, slug)')
@@ -773,6 +773,19 @@ const [achievementSummary, recentAchievementsRaw] = hasAchievements
 
 const totalAchievements = achievementSummary.count ?? 0;
 const unlockedAchievements = (achievementSummary.data ?? []).filter((a: any) => a.unlocked).length;
+
+// Per-game average completion rate — matches how Steam calculates it
+const _byGame = new Map<number, { total: number; unlocked: number }>();
+for (const a of (achievementSummary.data ?? []) as any[]) {
+  const g = _byGame.get(a.steam_appid) ?? { total: 0, unlocked: 0 };
+  g.total++;
+  if (a.unlocked) g.unlocked++;
+  _byGame.set(a.steam_appid, g);
+}
+const _gamesWithAchs = [..._byGame.values()].filter(g => g.total > 0);
+const avgCompletion = _gamesWithAchs.length > 0
+  ? _gamesWithAchs.reduce((sum, g) => sum + g.unlocked / g.total, 0) / _gamesWithAchs.length * 100
+  : 0;
 
 // Group unlocked achievements by calendar date (most recent first)
 const now = new Date();
@@ -2025,8 +2038,8 @@ const reviewerBreadcrumbJsonLd = {
                 <span class="ach-summary-label">Total</span>
               </div>
               <div class="ach-summary-stat">
-                <span class="ach-summary-num">{totalAchievements > 0 ? ((unlockedAchievements / totalAchievements) * 100).toFixed(1) : '0'}%</span>
-                <span class="ach-summary-label">Completion</span>
+                <span class="ach-summary-num">{avgCompletion.toFixed(1)}%</span>
+                <span class="ach-summary-label">Avg Completion</span>
               </div>
             </div>
 
