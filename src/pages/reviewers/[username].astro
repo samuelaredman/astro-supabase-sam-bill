@@ -783,8 +783,11 @@ const [achievementStatsResult, achievementsRaw] = hasAchievements
   ? await Promise.all([
       (adminDb as any).rpc('get_achievement_stats', { p_profile_id: reviewer.id }),
       (() => {
+        // Only request count:exact when filters are active — without filters the
+        // total is already known from get_achievement_stats() at no extra cost.
+        const filtered = !!(achQ || achDays > 0);
         let q = adminDb.from('user_achievements')
-          .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, steam_game_title, games(title)', { count: 'exact' })
+          .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, steam_game_title, games(title)', filtered ? { count: 'exact' } : undefined)
           .eq('profile_id', reviewer.id)
           .eq('unlocked', true)
           .not('unlock_time', 'is', null);
@@ -827,7 +830,12 @@ if (_achGroupByDate) {
 } else {
   if ((achievementsRaw.data ?? []).length > 0) achByDate.push({ label: '', items: achievementsRaw.data as any[] });
 }
-const achTotalFiltered = (achievementsRaw as any).count ?? 0;
+// When no filters are active, the total is the full unlocked count from the
+// stats RPC (already fetched, no extra query). With filters, use the exact
+// count returned by the filtered feed query.
+const achTotalFiltered = (achQ || achDays > 0)
+  ? ((achievementsRaw as any).count ?? 0)
+  : unlockedAchievements;
 const achTotalPages = Math.max(1, Math.ceil(achTotalFiltered / _ACH_PER_PAGE));
 
 function achUrl(page: number, overrides: { q?: string; sort?: string; days?: string } = {}) {
