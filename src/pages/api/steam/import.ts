@@ -198,7 +198,7 @@ export const POST: APIRoute = async (context) => {
       });
     } else {
       // Already tracked — only update playtime and appid
-      toUpdatePlaytime.push({ game_id: game.id, playtime, appid });
+      toUpdatePlaytime.push({ game_id: game.id, playtime });
     }
   }
 
