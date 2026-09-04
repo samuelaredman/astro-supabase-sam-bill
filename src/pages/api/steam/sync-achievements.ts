@@ -41,9 +41,7 @@ export const POST: APIRoute = async (context) => {
   const steamApiKey = import.meta.env.STEAM_API_KEY;
   if (!steamApiKey) return json({ error: 'Steam API not configured.' }, 500);
 
-  // Fetch the user's full Steam library — this is the source of truth for
-  // which games to sync, replacing the old user_game_status approach that only
-  // covered games already imported into Chekpoint.
+  // Fetch the user's full Steam library as the sync source.
   const ownedData = await fetchJson(
     `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=1&include_played_free_games=1&format=json`
   );
@@ -54,7 +52,7 @@ export const POST: APIRoute = async (context) => {
     return json({ processed: 0, total: 0, done: true });
   }
 
-  // Sort by appid so the cursor is stable across calls, then slice the batch.
+  // Sort by appid so the cursor is stable, then take the next batch.
   const sorted = allOwned.sort((a, b) => a.appid - b.appid);
   const batch  = sorted.filter(g => g.appid > cursor).slice(0, BATCH_SIZE);
   const total  = allOwned.length;
@@ -63,8 +61,8 @@ export const POST: APIRoute = async (context) => {
     return json({ processed: total, total, nextCursor: null, done: true });
   }
 
-  // For games already imported into Chekpoint, look up the internal game_id
-  // so we can link achievements to the games table.
+  // For games already in Chekpoint, look up the internal game_id so we can
+  // link achievements to the games table.
   const batchAppids = batch.map(g => g.appid);
   const { data: statusRows } = await (db as any)
     .from('user_game_status')
@@ -74,8 +72,6 @@ export const POST: APIRoute = async (context) => {
   const gameIdByAppid = new Map<number, string>(
     (statusRows ?? []).map((r: any) => [r.steam_appid, r.game_id])
   );
-
-  let lastAppid = cursor;
 
   for (let i = 0; i < batch.length; i += CONCURRENCY) {
     const group = batch.slice(i, i + CONCURRENCY);
@@ -88,7 +84,7 @@ export const POST: APIRoute = async (context) => {
         ]);
 
         const playerAchs: any[] = playerData?.playerstats?.achievements ?? [];
-        if (playerAchs.length === 0) { lastAppid = appid; return; }
+        if (playerAchs.length === 0) return;
 
         const schemaAchs: any[] = schemaData?.game?.availableGameStats?.achievements ?? [];
         const globalAchs: any[] = globalData?.achievementpercentages?.achievements ?? [];
@@ -97,6 +93,7 @@ export const POST: APIRoute = async (context) => {
         const globalByName = new Map(globalAchs.map((a: any) => [a.name, a.percent]));
 
         const game_id = gameIdByAppid.get(appid) ?? null;
+        const now     = new Date().toISOString();
 
         const rows = playerAchs.map((pa: any) => {
           const schema = schemaByName.get(pa.apiname) ?? {};
@@ -116,33 +113,45 @@ export const POST: APIRoute = async (context) => {
               ? new Date(pa.unlocktime * 1000).toISOString()
               : null,
             global_percent:   globalByName.get(pa.apiname) ?? null,
-            synced_at:        new Date().toISOString(),
+            synced_at:        now,
           };
         });
 
-        if (rows.length === 0) { lastAppid = appid; return; }
+        if (rows.length === 0) return;
 
-        const { error: upsertErr } = await (db as any)
-          .from('user_achievements')
-          .upsert(rows, { onConflict: 'profile_id,steam_appid,api_name' });
+        // Split into unlocked and locked rows.
+        // Unlocked achievements are always upserted — they are definitive.
+        // Locked achievements use ignoreDuplicates so an existing unlocked=true
+        // row is NEVER overwritten to false by a transient bad API response.
+        const unlockedRows = rows.filter(r => r.unlocked);
+        const lockedRows   = rows.filter(r => !r.unlocked);
 
-        if (upsertErr) {
-          console.error(`[sync-achievements] upsert error appid=${appid}:`, JSON.stringify(upsertErr));
+        if (unlockedRows.length > 0) {
+          const { error } = await (db as any)
+            .from('user_achievements')
+            .upsert(unlockedRows, { onConflict: 'profile_id,steam_appid,api_name' });
+          if (error) console.error(`[sync-achievements] unlocked upsert appid=${appid}:`, JSON.stringify(error));
         }
 
-        lastAppid = appid;
+        if (lockedRows.length > 0) {
+          const { error } = await (db as any)
+            .from('user_achievements')
+            .upsert(lockedRows, { onConflict: 'profile_id,steam_appid,api_name', ignoreDuplicates: true });
+          if (error) console.error(`[sync-achievements] locked upsert appid=${appid}:`, JSON.stringify(error));
+        }
       } catch (e) {
         console.error(`[sync-achievements] error processing appid=${appid}:`, e);
-        lastAppid = appid;
       }
     }));
   }
 
-  const done = batch.length < BATCH_SIZE;
-
-  // Count how many games from the full library have been processed so far
-  // (appid <= lastAppid) for an accurate progress percentage.
+  // Use the max appid in the batch as the cursor — batch is sorted so this is
+  // always batch[last]. Avoids the race condition where concurrent promises
+  // writing to a shared lastAppid variable could produce a lower-than-max value,
+  // causing games to be re-processed on the next call.
+  const lastAppid      = batch[batch.length - 1].appid;
   const processedCount = sorted.filter(g => g.appid <= lastAppid).length;
+  const done           = batch.length < BATCH_SIZE;
 
   if (done) {
     await (db as any)
@@ -152,9 +161,9 @@ export const POST: APIRoute = async (context) => {
   }
 
   return json({
-    processed:   processedCount,
+    processed:  processedCount,
     total,
-    nextCursor:  done ? null : lastAppid,
+    nextCursor: done ? null : lastAppid,
     done,
   });
 };
