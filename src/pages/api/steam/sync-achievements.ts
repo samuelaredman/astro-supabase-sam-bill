@@ -6,6 +6,14 @@ import { requireAuth, json } from "../../../utils/api";
 // global) — what we avoid is firing 9-15 simultaneous calls across games.
 const BATCH_SIZE = 6;
 
+// Steam returns bare filenames (e.g. "abc123.jpg") for some games instead
+// of full URLs. Normalize them to the Steam CDN absolute URL using the appid.
+function steamIconUrl(icon: string | null | undefined, appid: number): string | null {
+  if (!icon) return null;
+  if (icon.startsWith('http')) return icon;
+  return `https://steamcdn-a.akamaihd.net/steamcommunity/public/images/apps/${appid}/${icon}`;
+}
+
 async function fetchJson(url: string): Promise<any> {
   const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) return null;
@@ -130,11 +138,10 @@ export const POST: APIRoute = async (context) => {
         // Only include icon URLs when schema data was available. Omitting them
         // means ON CONFLICT DO UPDATE skips those columns, preserving previously
         // valid icon URLs when GetSchemaForGame is rate-limited or fails.
-        if (schema.icongray) row.icon_gray_url = schema.icongray;
-        // Fall back to icongray when icon is missing — Steam's client does the
-        // same, so some achievements only have icongray set in the schema.
-        const iconUrl = schema.icon || schema.icongray;
-        if (iconUrl) row.icon_url = iconUrl;
+        const iconUrl     = steamIconUrl(schema.icon || schema.icongray, appid);
+        const iconGrayUrl = steamIconUrl(schema.icongray, appid);
+        if (iconUrl)     row.icon_url      = iconUrl;
+        if (iconGrayUrl) row.icon_gray_url = iconGrayUrl;
         return row;
       });
 
