@@ -122,9 +122,13 @@ export const POST: APIRoute = async (context) => {
 
       if (rows.length === 0) continue;
 
-      // Unlocked achievements: always upsert — definitive truth.
-      // Locked achievements: insert-only so a bad API response never
-      // overwrites an existing unlocked=true row.
+      // Unlocked achievements: full upsert including unlocked=true and unlock_time.
+      // Locked achievements: metadata-only upsert — omit unlocked + unlock_time so
+      // ON CONFLICT DO UPDATE only sets icon_url, display_name, etc. and never
+      // touches the unlocked field. This means:
+      //   - new rows get unlocked=false from the column DEFAULT
+      //   - existing unlocked=true rows are never downgraded
+      //   - existing rows with null icons get their icons repaired on every sync
       const unlockedRows = rows.filter(r => r.unlocked);
       const lockedRows   = rows.filter(r => !r.unlocked);
 
@@ -135,9 +139,11 @@ export const POST: APIRoute = async (context) => {
         if (error) console.error(`[sync-achievements] unlocked upsert appid=${appid}:`, JSON.stringify(error));
       }
       if (lockedRows.length > 0) {
+        // Strip unlocked + unlock_time — Supabase only SET columns present in the object
+        const lockedMeta = lockedRows.map(({ unlocked: _u, unlock_time: _t, ...rest }: any) => rest);
         const { error } = await (db as any)
           .from('user_achievements')
-          .upsert(lockedRows, { onConflict: 'profile_id,steam_appid,api_name', ignoreDuplicates: true });
+          .upsert(lockedMeta, { onConflict: 'profile_id,steam_appid,api_name' });
         if (error) console.error(`[sync-achievements] locked upsert appid=${appid}:`, JSON.stringify(error));
       }
     } catch (e) {
