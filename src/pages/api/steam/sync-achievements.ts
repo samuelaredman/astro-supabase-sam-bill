@@ -1,8 +1,8 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
 
-const BATCH_SIZE = 15;
-const CONCURRENCY = 5;
+const BATCH_SIZE = 10;
+const CONCURRENCY = 3;
 
 async function fetchJson(url: string): Promise<any> {
   const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
