@@ -444,28 +444,51 @@ if (!window.__pvInit) {
     }
   }
 
+  function paintPostVote(postId, my, up, down) {
+    document.querySelectorAll('.pv-btn[data-post-id="' + postId + '"]').forEach(function(b) {
+      var bv = parseInt(b.dataset.vote);
+      b.textContent = (bv === 1 ? '▲ ' : '▼ ') + (bv === 1 ? up : down);
+      b.classList.toggle('pv-up-active',   bv === 1  && my === 1);
+      b.classList.toggle('pv-down-active', bv === -1 && my === -1);
+    });
+  }
+
   document.addEventListener('click', async function(e) {
-    // Vote button
+    // Vote button — optimistic: repaint immediately, reconcile with the
+    // server's authoritative counts, revert on failure.
     var voteBtn = e.target.closest('.pv-btn');
     if (voteBtn) {
-      if (voteBtn.disabled) return;
       var loggedIn = voteBtn.dataset.loggedIn === 'true';
       if (!loggedIn) { window.location.href = '/signin'; return; }
-      voteBtn.disabled = true;
       var postId = voteBtn.dataset.postId;
       var vote = parseInt(voteBtn.dataset.vote);
-      try {
-        var res = await fetch('/api/forum/posts/vote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: postId, vote }) });
-        if (res.status === 401) { window.location.href = '/signin'; return; }
-        if (!res.ok) return;
-        var data = await res.json();
-        document.querySelectorAll('.pv-btn[data-post-id="' + postId + '"]').forEach(function(b) {
-          var bv = parseInt(b.dataset.vote);
-          b.textContent = (bv === 1 ? '▲ ' : '▼ ') + (bv === 1 ? data.up : data.down);
-          b.classList.toggle('pv-up-active',   bv === 1  && data.vote === 1);
-          b.classList.toggle('pv-down-active', bv === -1 && data.vote === -1);
-        });
-      } finally { voteBtn.disabled = false; }
+      var sel = '.pv-btn[data-post-id="' + postId + '"]';
+      var upBtn = document.querySelector(sel + '[data-vote="1"]');
+      var downBtn = document.querySelector(sel + '[data-vote="-1"]');
+      var num = function(el) { return el ? (parseInt((el.textContent.match(/\d+/) || ['0'])[0]) || 0) : 0; };
+      var prevUp = num(upBtn), prevDown = num(downBtn);
+      var prevMy = upBtn && upBtn.classList.contains('pv-up-active') ? 1
+                 : downBtn && downBtn.classList.contains('pv-down-active') ? -1 : 0;
+
+      var nextMy = prevMy === vote ? 0 : vote;
+      var up = prevUp, down = prevDown;
+      if (prevMy === 1) up = Math.max(0, up - 1);
+      if (prevMy === -1) down = Math.max(0, down - 1);
+      if (nextMy === 1) up += 1;
+      if (nextMy === -1) down += 1;
+      paintPostVote(postId, nextMy, up, down);
+
+      fetch('/api/forum/posts/vote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_id: postId, vote }) })
+        .then(function(res) {
+          if (res.status === 401) { window.location.href = '/signin'; return null; }
+          if (!res.ok) { paintPostVote(postId, prevMy, prevUp, prevDown); return null; }
+          return res.json();
+        })
+        .then(function(data) {
+          if (!data) return;
+          paintPostVote(postId, data.vote || 0, data.up, data.down);
+        })
+        .catch(function() { paintPostVote(postId, prevMy, prevUp, prevDown); });
       return;
     }
 

@@ -39,10 +39,12 @@ export const POST: APIRoute = async (context) => {
     newVote = vote;
   }
 
-  const [{ count: up }, { count: down }] = await Promise.all([
-    adb.from('forum_post_votes').select('*', { count: 'exact', head: true }).eq('post_id', post_id).eq('vote', 1),
-    adb.from('forum_post_votes').select('*', { count: 'exact', head: true }).eq('post_id', post_id).eq('vote', -1),
-  ]);
+  // One select of this post's votes instead of two count(*) scans.
+  const { data: voteRows } = await adb
+    .from('forum_post_votes').select('vote').eq('post_id', post_id);
+  const rows = voteRows ?? [];
+  const up = rows.filter((v: any) => v.vote === 1).length;
+  const down = rows.filter((v: any) => v.vote === -1).length;
 
-  return json({ vote: newVote, up: up ?? 0, down: down ?? 0 });
+  return json({ vote: newVote, up, down });
 };

@@ -1076,57 +1076,101 @@ const { data: moreReviews } = await (supabase as any)
       });
     }
 
-    // Review votes
+    // Review votes — optimistic: repaint immediately, reconcile with the server,
+    // revert on failure.
+    function paintReviewVote(reviewId, myVote, up, down) {
+      document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]').forEach(function (b) {
+        var bVote = parseInt(b.dataset.vote);
+        var count = bVote === 1 ? up : down;
+        b.dataset.count = count;
+        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
+        b.classList.toggle('active-up',   bVote === 1  && myVote === 1);
+        b.classList.toggle('active-down', bVote === -1 && myVote === -1);
+      });
+    }
     document.querySelectorAll('.vote-btn').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        if (btn.disabled) return;
-        btn.disabled = true;
-        try {
-          var reviewId = btn.dataset.reviewId;
-          var vote = parseInt(btn.dataset.vote);
-          var res = await fetch('/api/reviews/vote', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ review_id: reviewId, vote }),
-          });
-          if (res.status === 401) { window.location.href = '/signin'; return; }
-          if (!res.ok) return;
-          var data = await res.json();
-          document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]').forEach(function (b) {
-            var bVote = parseInt(b.dataset.vote);
-            b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (bVote === 1 ? data.up : data.down);
-            b.classList.toggle('active-up',   bVote === 1  && data.vote === 1);
-            b.classList.toggle('active-down', bVote === -1 && data.vote === -1);
-          });
-        } finally { btn.disabled = false; }
+      btn.addEventListener('click', function () {
+        var reviewId = btn.dataset.reviewId;
+        var vote = parseInt(btn.dataset.vote);
+        var upBtn   = document.querySelector('.vote-btn[data-review-id="' + reviewId + '"][data-vote="1"]');
+        var downBtn = document.querySelector('.vote-btn[data-review-id="' + reviewId + '"][data-vote="-1"]');
+        var prevUp   = upBtn   ? (parseInt(upBtn.dataset.count)   || 0) : 0;
+        var prevDown = downBtn ? (parseInt(downBtn.dataset.count) || 0) : 0;
+        var prevMy = upBtn && upBtn.classList.contains('active-up') ? 1
+                   : downBtn && downBtn.classList.contains('active-down') ? -1 : 0;
+
+        var nextMy = prevMy === vote ? 0 : vote;
+        var up = prevUp, down = prevDown;
+        if (prevMy === 1) up = Math.max(0, up - 1);
+        if (prevMy === -1) down = Math.max(0, down - 1);
+        if (nextMy === 1) up += 1;
+        if (nextMy === -1) down += 1;
+        paintReviewVote(reviewId, nextMy, up, down);
+
+        fetch('/api/reviews/vote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_id: reviewId, vote }),
+        }).then(function (res) {
+          if (res.status === 401) { window.location.href = '/signin'; return null; }
+          if (!res.ok) { paintReviewVote(reviewId, prevMy, prevUp, prevDown); return null; }
+          return res.json();
+        }).then(function (data) {
+          if (!data) return;
+          paintReviewVote(reviewId, data.vote || 0, data.up, data.down);
+        }).catch(function () {
+          paintReviewVote(reviewId, prevMy, prevUp, prevDown);
+        });
       });
     });
 
-    // Comment votes (delegated)
-    document.addEventListener('click', async function(e) {
+    // Comment votes (delegated) — optimistic: repaint immediately, reconcile
+    // with the server's authoritative counts, revert on failure.
+    function paintCommentVote(commentId, my, up, down) {
+      document.querySelectorAll('.cvote-btn[data-comment-id="' + commentId + '"]').forEach(function(b) {
+        var bVote = parseInt(b.dataset.vote);
+        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (bVote === 1 ? up : down);
+        b.classList.toggle('cvote-up',   bVote === 1  && my === 1);
+        b.classList.toggle('cvote-down', bVote === -1 && my === -1);
+      });
+    }
+    document.addEventListener('click', function(e) {
       var btn = e.target.closest('.cvote-btn');
       if (!btn) return;
       if (btn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
-      if (btn.disabled) return;
-      btn.disabled = true;
-      try {
-        var commentId = btn.dataset.commentId;
-        var vote = parseInt(btn.dataset.vote);
-        var res = await fetch('/api/comments/vote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ comment_id: commentId, vote }),
-        });
-        if (res.status === 401) { window.location.href = '/signin'; return; }
-        if (!res.ok) return;
-        var data = await res.json();
-        document.querySelectorAll('.cvote-btn[data-comment-id="' + commentId + '"]').forEach(function(b) {
-          var bVote = parseInt(b.dataset.vote);
-          b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (bVote === 1 ? data.up : data.down);
-          b.classList.toggle('cvote-up',   bVote === 1  && data.vote === 1);
-          b.classList.toggle('cvote-down', bVote === -1 && data.vote === -1);
-        });
-      } finally { btn.disabled = false; }
+
+      var commentId = btn.dataset.commentId;
+      var vote = parseInt(btn.dataset.vote);
+      var sel = '.cvote-btn[data-comment-id="' + commentId + '"]';
+      var upBtn = document.querySelector(sel + '[data-vote="1"]');
+      var downBtn = document.querySelector(sel + '[data-vote="-1"]');
+      var num = function(el) { return el ? (parseInt((el.textContent.match(/\d+/) || ['0'])[0]) || 0) : 0; };
+      var prevUp = num(upBtn), prevDown = num(downBtn);
+      var prevMy = upBtn && upBtn.classList.contains('cvote-up') ? 1
+                 : downBtn && downBtn.classList.contains('cvote-down') ? -1 : 0;
+
+      var nextMy = prevMy === vote ? 0 : vote;
+      var up = prevUp, down = prevDown;
+      if (prevMy === 1) up = Math.max(0, up - 1);
+      if (prevMy === -1) down = Math.max(0, down - 1);
+      if (nextMy === 1) up += 1;
+      if (nextMy === -1) down += 1;
+      paintCommentVote(commentId, nextMy, up, down);
+
+      fetch('/api/comments/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comment_id: commentId, vote }),
+      }).then(function(res) {
+        if (res.status === 401) { window.location.href = '/signin'; return null; }
+        if (!res.ok) { paintCommentVote(commentId, prevMy, prevUp, prevDown); return null; }
+        return res.json();
+      }).then(function(data) {
+        if (!data) return;
+        paintCommentVote(commentId, data.vote || 0, data.up, data.down);
+      }).catch(function() {
+        paintCommentVote(commentId, prevMy, prevUp, prevDown);
+      });
     });
 
     // ── Comment interactions (delegated) ────────────────────────────────────

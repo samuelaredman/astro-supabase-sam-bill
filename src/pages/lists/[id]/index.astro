@@ -1636,30 +1636,49 @@ if (saveBtn) {
   });
 }
 
-// ── List vote buttons ─────────────────────────────────────────────────────────
+// ── List vote buttons — optimistic: repaint immediately, reconcile with the
+//    server's authoritative counts, revert on failure. ─────────────────────────
+function paintListVote(my, up, down) {
+  var upBtn = document.getElementById('lvote-up');
+  var downBtn = document.getElementById('lvote-down');
+  if (upBtn) { upBtn.textContent = '▲ ' + up; upBtn.classList.toggle('lv-up', my === 1); }
+  if (downBtn) { downBtn.textContent = '▼ ' + down; downBtn.classList.toggle('lv-down', my === -1); }
+}
 document.querySelectorAll('.list-vote-btn:not(.list-save-btn)').forEach(function(btn) {
-  btn.addEventListener('click', async function() {
-    if (btn.disabled) return;
+  btn.addEventListener('click', function() {
     var loggedIn = btn.dataset.loggedIn === 'true';
     if (!loggedIn) { window.location.href = '/signin'; return; }
-    btn.disabled = true;
     var vote = parseInt(btn.dataset.vote);
-    try {
-      var res = await fetch('/api/lists/vote', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ list_id: listId, vote }),
-      });
-      if (res.status === 401) { window.location.href = '/signin'; return; }
-      if (!res.ok) return;
-      var data = await res.json();
-      var upBtn = document.getElementById('lvote-up');
-      var downBtn = document.getElementById('lvote-down');
-      if (upBtn) { upBtn.textContent = '▲ ' + data.up; upBtn.classList.toggle('lv-up', data.vote === 1); }
-      if (downBtn) { downBtn.textContent = '▼ ' + data.down; downBtn.classList.toggle('lv-down', data.vote === -1); }
-    } finally {
-      btn.disabled = false;
-    }
+
+    var upBtn = document.getElementById('lvote-up');
+    var downBtn = document.getElementById('lvote-down');
+    var num = function(el) { return el ? (parseInt((el.textContent.match(/\d+/) || ['0'])[0]) || 0) : 0; };
+    var prevUp = num(upBtn), prevDown = num(downBtn);
+    var prevMy = upBtn && upBtn.classList.contains('lv-up') ? 1
+               : downBtn && downBtn.classList.contains('lv-down') ? -1 : 0;
+
+    var nextMy = prevMy === vote ? 0 : vote;
+    var up = prevUp, down = prevDown;
+    if (prevMy === 1) up = Math.max(0, up - 1);
+    if (prevMy === -1) down = Math.max(0, down - 1);
+    if (nextMy === 1) up += 1;
+    if (nextMy === -1) down += 1;
+    paintListVote(nextMy, up, down);
+
+    fetch('/api/lists/vote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId, vote }),
+    }).then(function(res) {
+      if (res.status === 401) { window.location.href = '/signin'; return null; }
+      if (!res.ok) { paintListVote(prevMy, prevUp, prevDown); return null; }
+      return res.json();
+    }).then(function(data) {
+      if (!data) return;
+      paintListVote(data.vote || 0, data.up, data.down);
+    }).catch(function() {
+      paintListVote(prevMy, prevUp, prevDown);
+    });
   });
 });
 
