@@ -25,6 +25,19 @@ function steamIconUrl(icon: string | null | undefined, appid: number): string | 
   return `https://shared.fastly.steamstatic.com/community_assets/images/apps/${appid}/${filename}`;
 }
 
+// Steam's unlocktime is a unix-seconds int; 0 / missing means "unlocked but the
+// timestamp was never recorded" (common for pre-2010 unlocks). Guard against
+// garbage values that would make new Date().toISOString() throw.
+function unlockedAt(pa: any): string | null {
+  if (pa?.achieved !== 1) return null;
+  const t = Number(pa.unlocktime);
+  if (!Number.isFinite(t) || t <= 0) return null;
+  const ms = t * 1000;
+  if (ms > Date.now() + 86400000) return null; // implausible future date
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 async function fetchJson(url: string, timeoutMs = 8000): Promise<any> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
@@ -185,9 +198,14 @@ export const POST: APIRoute = async (context) => {
       playerHits++;
 
       // Schema + global percents — cached per app across all users.
-      let cached = schemaCache.get(appid);
+      const cached = schemaCache.get(appid);
       const stale =
         !cached || Date.now() - new Date(cached.fetched_at).getTime() > SCHEMA_TTL_MS;
+
+      // Start from whatever the cache has; overlay fresh data if we fetch it.
+      let schemaAchsArr: any[] = cached?.achievements ?? [];
+      let globalPercents: Record<string, number> = cached?.global_percents ?? {};
+
       if (stale) {
         const [schemaData, globalData] = await Promise.all([
           fetchJsonWithRetry(
@@ -200,27 +218,32 @@ export const POST: APIRoute = async (context) => {
             6000,
           ),
         ]);
-        const schemaAchs: any[] | null =
+        const freshSchema: any[] | null =
           schemaData?.game?.availableGameStats?.achievements ?? null;
-        const globalAchs: any[] | null =
+        const freshGlobal: any[] | null =
           globalData?.achievementpercentages?.achievements ?? null;
 
-        if (schemaAchs || globalAchs) {
-          const gp: Record<string, number> = {};
-          for (const g of globalAchs ?? []) gp[g.name] = g.percent;
-          cached = {
+        if (freshSchema && freshSchema.length > 0) schemaAchsArr = freshSchema;
+        if (freshGlobal && freshGlobal.length > 0) {
+          globalPercents = {};
+          for (const g of freshGlobal) globalPercents[g.name] = g.percent;
+        }
+
+        // Persist ONLY when we actually got the achievement schema. Caching an
+        // empty/failed fetch would suppress names + icons for the whole TTL;
+        // instead leave the row absent (or stale) so the next sync retries.
+        if (freshSchema && freshSchema.length > 0) {
+          const row = {
             steam_appid: appid,
-            achievements: schemaAchs ?? cached?.achievements ?? [],
-            global_percents: globalAchs ? gp : cached?.global_percents ?? {},
+            achievements: schemaAchsArr,
+            global_percents: globalPercents,
             fetched_at: new Date().toISOString(),
           };
-          schemaCache.set(appid, cached);
-          schemaUpserts.push(cached);
+          schemaCache.set(appid, row);
+          schemaUpserts.push(row);
         }
       }
 
-      const schemaAchsArr: any[] = cached?.achievements ?? [];
-      const globalPercents: Record<string, number> = cached?.global_percents ?? {};
       const schemaByName = new Map(schemaAchsArr.map((a: any) => [a.name, a]));
 
       const game_id = gameIdByAppid.get(appid) ?? null;
@@ -238,10 +261,7 @@ export const POST: APIRoute = async (context) => {
           description: schema.description ?? null,
           hidden: schema.hidden === 1,
           unlocked: pa.achieved === 1,
-          unlock_time:
-            pa.achieved === 1 && pa.unlocktime
-              ? new Date(pa.unlocktime * 1000).toISOString()
-              : null,
+          unlock_time: unlockedAt(pa),
           global_percent: globalPercents[pa.apiname] ?? null,
           synced_at: now,
         };
