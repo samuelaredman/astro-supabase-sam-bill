@@ -21,3 +21,9 @@ CREATE INDEX IF NOT EXISTS comment_votes_comment_id_idx
 -- keyed on following_id alone.
 CREATE INDEX IF NOT EXISTS follows_following_id_idx
   ON follows(following_id);
+
+-- forum_post_votes' only index is UNIQUE(profile_id, post_id); the vote
+-- endpoint and post page tally votes keyed on post_id alone.
+-- (list_votes and recommendation_votes already have a *_id index.)
+CREATE INDEX IF NOT EXISTS forum_post_votes_post_id_idx
+  ON forum_post_votes(post_id);

@@ -260,6 +260,26 @@ if (!window.__rfcPickerInit) {
 if (!window.__rfcInit) {
   window.__rfcInit = true;
 
+  function readRfcVote(recId) {
+    var sel = '.rfc-vote-btn[data-rec-id="' + recId + '"]';
+    var upBtn = document.querySelector(sel + '[data-vote="1"]');
+    var downBtn = document.querySelector(sel + '[data-vote="-1"]');
+    var num = function(el) { return el ? (parseInt((el.textContent.match(/\d+/) || ['0'])[0]) || 0) : 0; };
+    return {
+      up: num(upBtn), down: num(downBtn),
+      my: upBtn && upBtn.classList.contains('rfc-vote-active-up') ? 1
+        : downBtn && downBtn.classList.contains('rfc-vote-active-down') ? -1 : 0,
+    };
+  }
+  function paintRfcVote(recId, my, up, down) {
+    document.querySelectorAll('.rfc-vote-btn[data-rec-id="' + recId + '"]').forEach(function(b) {
+      var bVote = parseInt(b.dataset.vote);
+      b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (bVote === 1 ? up : down);
+      b.classList.toggle('rfc-vote-active-up',   bVote === 1  && my === 1);
+      b.classList.toggle('rfc-vote-active-down', bVote === -1 && my === -1);
+    });
+  }
+
   function closeRfcPanels() {
     var picker = document.getElementById('rfc-emoji-picker');
     if (picker) {
@@ -443,34 +463,38 @@ if (!window.__rfcInit) {
       return;
     }
 
-    // Vote button
+    // Vote button — optimistic: repaint immediately, reconcile with the
+    // server's authoritative counts, revert on failure.
     var voteBtn = e.target.closest('.rfc-vote-btn');
     if (voteBtn) {
-      if (voteBtn.disabled) return;
       var loggedIn = voteBtn.dataset.loggedIn === 'true';
       if (!loggedIn) { window.location.href = '/signin'; return; }
-      voteBtn.disabled = true;
       var recId = voteBtn.dataset.recId;
       var vote = parseInt(voteBtn.dataset.vote);
-      try {
-        var res = await fetch('/api/recommendations/vote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ recommendation_id: recId, vote }),
-        });
-        if (res.status === 401) { window.location.href = '/signin'; return; }
-        if (!res.ok) return;
-        var data = await res.json();
-        document.querySelectorAll('.rfc-vote-btn[data-rec-id="' + recId + '"]').forEach(function(b) {
-          var bVote = parseInt(b.dataset.vote);
-          var count = bVote === 1 ? data.up : data.down;
-          b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
-          b.classList.toggle('rfc-vote-active-up',   bVote === 1  && data.vote === 1);
-          b.classList.toggle('rfc-vote-active-down', bVote === -1 && data.vote === -1);
-        });
-      } finally {
-        voteBtn.disabled = false;
-      }
+      var prev = readRfcVote(recId);
+
+      var nextMy = prev.my === vote ? 0 : vote;
+      var up = prev.up, down = prev.down;
+      if (prev.my === 1) up = Math.max(0, up - 1);
+      if (prev.my === -1) down = Math.max(0, down - 1);
+      if (nextMy === 1) up += 1;
+      if (nextMy === -1) down += 1;
+      paintRfcVote(recId, nextMy, up, down);
+
+      fetch('/api/recommendations/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recommendation_id: recId, vote }),
+      }).then(function(res) {
+        if (res.status === 401) { window.location.href = '/signin'; return null; }
+        if (!res.ok) { paintRfcVote(recId, prev.my, prev.up, prev.down); return null; }
+        return res.json();
+      }).then(function(data) {
+        if (!data) return;
+        paintRfcVote(recId, data.vote || 0, data.up, data.down);
+      }).catch(function() {
+        paintRfcVote(recId, prev.my, prev.up, prev.down);
+      });
       return;
     }
 

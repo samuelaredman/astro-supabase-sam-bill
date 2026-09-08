@@ -49,42 +49,44 @@ export const POST: APIRoute = async (context) => {
     notifAction = 'insert';
   }
 
-  const [{ count: upCount }, { count: downCount }] = await Promise.all([
-    db.from('comment_votes').select('*', { count: 'exact', head: true }).eq('comment_id', comment_id).eq('vote', 1),
-    db.from('comment_votes').select('*', { count: 'exact', head: true }).eq('comment_id', comment_id).eq('vote', -1),
+  // One select of this comment's votes instead of two count(*) scans; the
+  // comment-author lookup runs in parallel since it doesn't depend on the counts.
+  const [votesRes, commentRes] = await Promise.all([
+    db.from('comment_votes').select('vote').eq('comment_id', comment_id),
+    notifAction !== 'none'
+      ? db.from('review_comments').select('profile_id, review_id').eq('id', comment_id).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
+  const voteRows = votesRes.data ?? [];
+  const upCount = voteRows.filter((v: { vote: number }) => v.vote === 1).length;
+  const downCount = voteRows.filter((v: { vote: number }) => v.vote === -1).length;
 
-  // Fire notification (non-blocking)
-  if (notifAction !== 'none') {
+  // Fire notification (non-fatal — must never fail the vote itself)
+  const comment = commentRes.data as { profile_id: string; review_id: string } | null;
+  if (notifAction !== 'none' && comment && comment.profile_id !== profile.id) {
     try {
-      const { data: comment } = await db
-        .from('review_comments').select('profile_id, review_id').eq('id', comment_id).single();
-      if (comment && comment.profile_id !== profile.id) {
-        const notifType = newVote === 1 ? 'comment_upvote' : 'comment_downvote';
-        const { data: existingNotif } = await db
-          .from('notifications')
-          .select('id')
-          .eq('profile_id', comment.profile_id)
-          .eq('actor_profile_id', profile.id)
-          .eq('comment_id', comment_id)
-          .in('type', ['comment_upvote', 'comment_downvote'])
-          .maybeSingle();
-        if (existingNotif) {
-          await db.from('notifications').update({ type: notifType, read: false }).eq('id', existingNotif.id);
-        } else {
-          await db.from('notifications').insert({
-            profile_id: comment.profile_id,
-            actor_profile_id: profile.id,
-            comment_id,
-            review_id: comment.review_id,
-            type: notifType,
-          });
-        }
+      const notifType = newVote === 1 ? 'comment_upvote' : 'comment_downvote';
+      const { data: updated } = await db
+        .from('notifications')
+        .update({ type: notifType, read: false })
+        .eq('profile_id', comment.profile_id)
+        .eq('actor_profile_id', profile.id)
+        .eq('comment_id', comment_id)
+        .in('type', ['comment_upvote', 'comment_downvote'])
+        .select('id');
+      if (!updated || updated.length === 0) {
+        await db.from('notifications').insert({
+          profile_id: comment.profile_id,
+          actor_profile_id: profile.id,
+          comment_id,
+          review_id: comment.review_id,
+          type: notifType,
+        });
       }
     } catch (e) {
       console.error('[comment vote] notification error (non-fatal):', e);
     }
   }
 
-  return json({ vote: newVote, up: upCount ?? 0, down: downCount ?? 0 });
+  return json({ vote: newVote, up: upCount, down: downCount });
 };

@@ -56,40 +56,42 @@ export const POST: APIRoute = async (context) => {
     notifAction = 'insert';
   }
 
-  const [{ count: upCount }, { count: downCount }] = await Promise.all([
-    (db as any).from('list_votes').select('*', { count: 'exact', head: true }).eq('list_id', list_id).eq('vote', 1),
-    (db as any).from('list_votes').select('*', { count: 'exact', head: true }).eq('list_id', list_id).eq('vote', -1),
+  // One select of this list's votes instead of two count(*) scans; the author
+  // lookup runs in parallel since it doesn't depend on the counts.
+  const [votesRes, listRes] = await Promise.all([
+    (db as any).from('list_votes').select('vote').eq('list_id', list_id),
+    notifAction !== 'none'
+      ? (db as any).from('lists').select('profile_id').eq('id', list_id).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
+  const voteRows = votesRes.data ?? [];
+  const upCount = voteRows.filter((v: any) => v.vote === 1).length;
+  const downCount = voteRows.filter((v: any) => v.vote === -1).length;
 
-  if (notifAction !== 'none') {
+  const list = listRes.data as { profile_id: string } | null;
+  if (notifAction !== 'none' && list && list.profile_id !== profile.id) {
     try {
-      const { data: list } = await (db as any)
-        .from('lists').select('profile_id').eq('id', list_id).single();
-      if (list && list.profile_id !== profile.id) {
-        const notifType = newVote === 1 ? 'list_upvote' : 'list_downvote';
-        const { data: existingNotif } = await (db as any)
-          .from('notifications')
-          .select('id')
-          .eq('profile_id', list.profile_id)
-          .eq('actor_profile_id', profile.id)
-          .eq('list_id', list_id)
-          .in('type', ['list_upvote', 'list_downvote'])
-          .maybeSingle();
-        if (existingNotif) {
-          await (db as any).from('notifications').update({ type: notifType, read: false }).eq('id', existingNotif.id);
-        } else {
-          await (db as any).from('notifications').insert({
-            profile_id: list.profile_id,
-            actor_profile_id: profile.id,
-            list_id,
-            type: notifType,
-          });
-        }
+      const notifType = newVote === 1 ? 'list_upvote' : 'list_downvote';
+      const { data: updated } = await (db as any)
+        .from('notifications')
+        .update({ type: notifType, read: false })
+        .eq('profile_id', list.profile_id)
+        .eq('actor_profile_id', profile.id)
+        .eq('list_id', list_id)
+        .in('type', ['list_upvote', 'list_downvote'])
+        .select('id');
+      if (!updated || updated.length === 0) {
+        await (db as any).from('notifications').insert({
+          profile_id: list.profile_id,
+          actor_profile_id: profile.id,
+          list_id,
+          type: notifType,
+        });
       }
     } catch (e) {
       console.error('[lists/vote] notification error (non-fatal):', e);
     }
   }
 
-  return json({ vote: newVote, up: upCount ?? 0, down: downCount ?? 0 });
+  return json({ vote: newVote, up: upCount, down: downCount });
 };
