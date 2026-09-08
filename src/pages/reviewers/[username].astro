@@ -51,10 +51,13 @@ if (reviewerError || !reviewer || !reviewer.is_active) {
 // Fetch showcase_achievements separately so a missing migration can't 404 the profile
 const { data: _showcaseAchData } = await (getSupabaseAdmin() as any)
   .from('profiles')
-  .select('showcase_achievements')
+  .select('showcase_achievements, achievements_sync_cursor')
   .eq('id', (reviewer as any).id)
   .maybeSingle();
 (reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
+// How far a previous (possibly interrupted) achievement sync got, so the owner's
+// Sync button resumes instead of restarting. 0 = no sync in progress.
+const achSyncCursor = Number((_showcaseAchData as any)?.achievements_sync_cursor ?? 0) || 0;
 
 const publishedReviews = (reviewer.reviews ?? [])
   .filter((r: any) => r.status === 'published')
@@ -2069,7 +2072,7 @@ const reviewerBreadcrumbJsonLd = {
           <div class="ach-sync-title">Steam Achievements</div>
           <div class="ach-sync-sub">Import your achievement progress from Steam</div>
         </div>
-        <button class="ach-sync-btn" id="achSyncBtn">Sync Achievements</button>
+        <button class="ach-sync-btn" id="achSyncBtn">{achSyncCursor > 0 ? 'Resume achievement sync' : 'Sync Achievements'}</button>
       </div>
     )}
 
@@ -5104,51 +5107,83 @@ async function createNewList(btn) {
 
 
 {isOwnProfile && hasSteam && (
-<script is:inline>
+<script is:inline define:vars={{ achSyncCursor }}>
 (function () {
   var btn = document.getElementById('achSyncBtn');
   if (!btn) return;
 
-  var cursor = 0;
+  // Resume from wherever the last (possibly interrupted) sync left off. The
+  // server also persists this, so a plain page reload continues too.
+  var cursor = Number(achSyncCursor) || 0;
   var total = 0;
-  var done = false;
+  var synced = 0;       // achievement rows written so far this run
+  var running = false;
 
-  async function runBatch() {
+  function pct(processed) {
+    if (!total) return '';
+    return ' ' + Math.min(99, Math.round((processed / total) * 100)) + '%';
+  }
+
+  async function runBatch(attempt) {
+    attempt = attempt || 0;
     btn.disabled = true;
-    btn.textContent = 'Syncing…';
+
+    var res, data;
     try {
-      var res = await fetch('/api/steam/sync-achievements', {
+      res = await fetch('/api/steam/sync-achievements', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cursor }),
+        body: JSON.stringify({ cursor: cursor }),
       });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      var data = await res.json();
-      total = data.total || total;
-      cursor = data.nextCursor || cursor;
-      done = data.done;
-
-      if (!done && data.nextCursor) {
-        btn.textContent = 'Syncing… ' + Math.round((data.processed / total) * 100) + '%';
-        runBatch();
-      } else {
-        if (total === 0) {
-          btn.textContent = 'No Steam games found — sync your library first';
-        } else {
-          btn.textContent = 'Done! Reload to see achievements';
-        }
-        btn.disabled = false;
-      }
+      data = await res.json().catch(function () { return {}; });
     } catch (e) {
-      btn.textContent = 'Sync failed — try again';
-      btn.disabled = false;
+      data = null;
     }
+
+    // Transient failure (network, Steam hiccup, rate limit, function timeout).
+    // Back off and retry the SAME cursor — progress is never lost.
+    if (!res || !res.ok || !data) {
+      var status = res ? res.status : 0;
+      // 429 here is our own "synced recently" cooldown — deterministic, don't retry.
+      var transient = !res || status === 0 || status >= 500;
+      if (transient && attempt < 5) {
+        var waitMs = Math.min(30000, 2000 * Math.pow(2, attempt));
+        btn.textContent = 'Steam is busy — retrying in ' + Math.round(waitMs / 1000) + 's…';
+        setTimeout(function () { runBatch(attempt + 1); }, waitMs);
+        return;
+      }
+      btn.textContent = (data && data.error)
+        ? data.error + ' — click to retry'
+        : 'Sync failed — click to retry';
+      btn.disabled = false;
+      running = false;
+      return;
+    }
+
+    total = data.total || total;
+    synced += data.syncedThisCall || 0;
+
+    if (!data.done && data.nextCursor != null) {
+      cursor = data.nextCursor;
+      btn.textContent = 'Syncing…' + pct(data.processed) + ' (' + synced.toLocaleString() + ' achievements)';
+      setTimeout(function () { runBatch(0); }, 300); // gentle pacing between batches
+      return;
+    }
+
+    // Done
+    cursor = 0;
+    running = false;
+    btn.textContent = total === 0
+      ? 'No Steam games found — sync your library first'
+      : 'Done! Reload to see achievements';
+    btn.disabled = false;
   }
 
   btn.addEventListener('click', function () {
-    cursor = 0;
-    done = false;
-    runBatch();
+    if (running) return;
+    running = true;
+    synced = 0;
+    runBatch(0);
   });
 })();
 </script>
