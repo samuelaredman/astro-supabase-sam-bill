@@ -36,4 +36,13 @@ describe("validateName", () => {
   it("rejects empty/whitespace-only input", () => {
     expect(validateName("   ").ok).toBe(false);
   });
+
+  it("enforces the character/length format", () => {
+    expect(validateName("ab").ok).toBe(false); // too short
+    expect(validateName("a".repeat(21)).ok).toBe(false); // too long
+    expect(validateName("has space").ok).toBe(false);
+    expect(validateName("dot.name").ok).toBe(false);
+    expect(validateName("dash-name").ok).toBe(false);
+    expect(validateName("ok_name_1").ok).toBe(true);
+  });
 });

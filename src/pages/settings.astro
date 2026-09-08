@@ -16,7 +16,7 @@ if (!user) return Astro.redirect('/signin');
 const db = getSupabaseAdmin() as any;
 const { data: profile } = await db
   .from('profiles')
-  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at')
+  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at, username_changed_at, username_locked')
   .eq('auth_user_id', user.id)
   .single();
 
@@ -30,6 +30,19 @@ const { data: adminRow } = await db
   .eq('profile_id', profile.id)
   .maybeSingle();
 const isSiteAdmin = !!adminRow;
+
+// Username-change availability (policy enforced server-side in
+// /api/profile/change-username — this is just for the button/copy state).
+const USERNAME_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
+const USERNAME_SETTLING_MS = 48 * 60 * 60 * 1000;
+const uChangedAt = profile.username_changed_at ? new Date(profile.username_changed_at).getTime() : null;
+const uInSettling = uChangedAt !== null && Date.now() - uChangedAt < USERNAME_SETTLING_MS;
+const uCooldownLeftMs = uChangedAt === null || uInSettling
+  ? 0
+  : Math.max(0, USERNAME_COOLDOWN_MS - (Date.now() - uChangedAt));
+const usernameLocked = !!profile.username_locked;
+const canChangeUsername = !usernameLocked && uCooldownLeftMs === 0;
+const usernameCooldownDaysLeft = Math.ceil(uCooldownLeftMs / (24 * 60 * 60 * 1000));
 
 function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
 ---
@@ -64,6 +77,38 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
         <a href={`/reviewers/${profile.username}`} class="settings-view-profile">
           View profile →
         </a>
+      </div>
+    </section>
+
+    <!-- Username -->
+    <section class="settings-section" id="username">
+      <div class="settings-section-label">Username</div>
+      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px">
+          <div class="settings-row-text">
+            <div class="settings-row-label">Change username</div>
+            <div class="settings-row-sub">
+              {usernameLocked
+                ? 'Username changes are disabled for this account. Contact support.'
+                : !canChangeUsername
+                  ? `You can change it again in ${usernameCooldownDaysLeft} day${usernameCooldownDaysLeft === 1 ? '' : 's'}.`
+                  : uInSettling
+                    ? 'You can still adjust it during the short window after your last change.'
+                    : 'You can change it once every 30 days. 3–20 letters, numbers or underscores.'}
+            </div>
+          </div>
+          <button type="button" class="settings-ghost-btn" id="unToggleBtn" onclick="toggleUnForm()" disabled={usernameLocked}>Change</button>
+        </div>
+        <div id="unForm" style="display:none;border-top:1px solid var(--border-subtle);padding-top:14px;flex-direction:column;gap:10px">
+          <input id="unNew" type="text" class="settings-input" placeholder="New username" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="20" value={profile.username} />
+          <div style="display:flex;align-items:center;gap:10px">
+            <button type="button" class="settings-save-btn" id="unSaveBtn" onclick="changeUsername()">Save username</button>
+            <span id="unMsg" style="font-size:12px"></span>
+          </div>
+          <div style="font-size:11px;color:var(--text-tertiary)">
+            Links to your old profile redirect automatically. Your previous name is reserved for you for 31 days.
+          </div>
+        </div>
       </div>
     </section>
 
@@ -702,6 +747,8 @@ declare global {
   interface Window {
     togglePwForm: () => void;
     changePassword: () => Promise<void>;
+    toggleUnForm: () => void;
+    changeUsername: () => Promise<void>;
     setPrivacy: (field: string, value: string, btn: HTMLElement) => Promise<void>;
     setSearchIndexable: (value: boolean, btn: HTMLElement) => Promise<void>;
     steamSync: () => Promise<void>;
@@ -842,6 +889,52 @@ async function changePassword() {
   }
 }
 window.changePassword = changePassword;
+
+function toggleUnForm() {
+  const form = document.getElementById('unForm');
+  const btn = document.getElementById('unToggleBtn');
+  if (!form || !btn) return;
+  const open = form.style.display === 'flex';
+  form.style.display = open ? 'none' : 'flex';
+  btn.textContent = open ? 'Change' : 'Cancel';
+}
+window.toggleUnForm = toggleUnForm;
+
+async function changeUsername() {
+  const el = document.getElementById('unNew') as HTMLInputElement | null;
+  const msg = document.getElementById('unMsg');
+  const btn = document.getElementById('unSaveBtn') as HTMLButtonElement | null;
+  if (!el || !msg || !btn) return;
+
+  const value = el.value.trim();
+  msg.textContent = '';
+  if (!/^[A-Za-z0-9_]{3,20}$/.test(value)) {
+    msg.textContent = '3–20 letters, numbers or underscores.';
+    (msg as HTMLElement).style.color = '#f87171';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/profile/change-username', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Something went wrong.');
+    msg.textContent = 'Username updated. Reloading…';
+    (msg as HTMLElement).style.color = 'var(--score-great)';
+    setTimeout(() => location.reload(), 1200);
+  } catch (e: any) {
+    msg.textContent = e.message ?? 'Something went wrong.';
+    (msg as HTMLElement).style.color = '#f87171';
+    btn.disabled = false;
+    btn.textContent = 'Save username';
+  }
+}
+window.changeUsername = changeUsername;
 
 async function steamSync() {
   const btn = document.getElementById('steamSyncBtn') as HTMLButtonElement | null;

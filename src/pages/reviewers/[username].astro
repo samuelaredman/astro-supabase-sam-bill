@@ -13,6 +13,7 @@ import ShareButton from '../../components/ShareButton.astro';
 import RecommendationFeedCard from '../../components/RecommendationFeedCard.astro';
 import RecommendationComposer from '../../components/RecommendationComposer.astro';
 import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed';
+import { resolveRenamedUsername } from '../../utils/usernameHistory';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
@@ -45,6 +46,12 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
 
 if (reviewerError || !reviewer || !reviewer.is_active) {
   if (reviewerError) console.error('[reviewers] query error:', JSON.stringify(reviewerError));
+  // Was this handle renamed away? Send stale links to the current one.
+  if (!reviewer) {
+    const current = await resolveRenamedUsername(username ?? '');
+    if (current)
+      return Astro.redirect(`/reviewers/${encodeURIComponent(current)}${Astro.url.search}`, 301);
+  }
   return Astro.redirect('/404');
 }
 
@@ -55,6 +62,31 @@ const { data: _showcaseAchData } = await (getSupabaseAdmin() as any)
   .eq('id', (reviewer as any).id)
   .maybeSingle();
 (reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
+
+// Steam-style alias list: previous usernames this profile changed away from in
+// the last 90 days. RLS blocks anon reads of username_history, so use admin.
+// The full trail stays in the DB for moderation; only a rolling window shows.
+const ALIAS_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+const { data: _aliasRows } = await (getSupabaseAdmin() as any)
+  .from('username_history')
+  .select('old_username, changed_at')
+  .eq('profile_id', (reviewer as any).id)
+  .gte('changed_at', new Date(Date.now() - ALIAS_WINDOW_MS).toISOString())
+  .order('changed_at', { ascending: false })
+  .limit(25);
+
+const previousUsernames: { name: string; changed_at: string }[] = [];
+{
+  // Dedupe by lowercased name (also drops case-only renames, which match the
+  // current handle) and keep only the most recent change for each.
+  const seen = new Set<string>([String(reviewer.username).toLowerCase()]);
+  for (const row of (_aliasRows ?? []) as any[]) {
+    const key = String(row.old_username ?? '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    previousUsernames.push({ name: row.old_username, changed_at: row.changed_at });
+  }
+}
 
 const publishedReviews = (reviewer.reviews ?? [])
   .filter((r: any) => r.status === 'published')
@@ -943,6 +975,54 @@ const reviewerBreadcrumbJsonLd = {
     .profile-info-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-top:62px;padding-bottom:20px}
     .profile-left{flex:1;min-width:0}
     .profile-username{font-family:'Cinzel',serif;font-size:28px;font-weight:600;letter-spacing:.04em;margin-bottom:6px}
+
+    /* Steam-style previous-username disclosure */
+    .profile-name-row{display:flex;align-items:center;gap:9px;margin-bottom:6px;flex-wrap:wrap}
+    .profile-name-row .profile-username{margin-bottom:0}
+    .alias-box{position:relative;display:inline-flex}
+    .alias-toggle{
+      list-style:none;cursor:pointer;
+      width:22px;height:22px;border-radius:6px;
+      border:1px solid var(--border);background:transparent;
+      display:inline-flex;align-items:center;justify-content:center;
+      transition:border-color .15s,background .15s;
+    }
+    .alias-toggle::-webkit-details-marker{display:none}
+    .alias-toggle::after{
+      content:"";display:block;
+      border-left:4px solid transparent;
+      border-right:4px solid transparent;
+      border-top:5px solid var(--text-tertiary);
+      transition:transform .18s ease,border-top-color .15s;
+    }
+    .alias-toggle:hover{border-color:var(--accent)}
+    .alias-toggle:hover::after{border-top-color:var(--accent)}
+    .alias-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .alias-box[open] .alias-toggle{border-color:var(--accent);background:var(--bg-hover)}
+    .alias-box[open] .alias-toggle::after{transform:rotate(180deg);border-top-color:var(--accent)}
+    .alias-panel{
+      position:absolute;top:calc(100% + 6px);left:0;z-index:30;
+      min-width:210px;max-width:min(280px,calc(100vw - 48px));
+      background:var(--bg-card);border:1px solid var(--border);
+      border-radius:10px;padding:8px;
+      box-shadow:0 10px 26px rgba(0,0,0,.28);
+    }
+    .alias-panel-title{
+      font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+      color:var(--text-tertiary);padding:4px 8px 6px;
+    }
+    .alias-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}
+    .alias-item{
+      display:flex;align-items:baseline;justify-content:space-between;gap:14px;
+      padding:6px 8px;border-radius:6px;
+    }
+    .alias-item:hover{background:var(--bg-hover)}
+    .alias-name{
+      font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;letter-spacing:0;
+      color:var(--text-primary);
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;
+    }
+    .alias-time{font-size:11px;color:var(--text-tertiary);white-space:nowrap;flex-shrink:0}
     .profile-bio-wrap{margin-bottom:10px;max-width:480px}
     .profile-follow-counts{display:flex;gap:20px;margin-top:12px}
     .profile-follow-stat{display:flex;align-items:baseline;gap:5px;text-decoration:none;transition:opacity .15s}
@@ -1398,9 +1478,27 @@ const reviewerBreadcrumbJsonLd = {
 
   <div class="profile-info-row">
     <div class="profile-left">
-      <h1 class="profile-username">
-        <span style="font-family:'DM Sans',sans-serif;font-weight:300;opacity:.6;font-size:.8em;letter-spacing:0">@</span>{reviewer.username}
-      </h1>
+      <div class="profile-name-row">
+        <h1 class="profile-username">
+          <span style="font-family:'DM Sans',sans-serif;font-weight:300;opacity:.6;font-size:.8em;letter-spacing:0">@</span>{reviewer.username}
+        </h1>
+        {previousUsernames.length > 0 && (
+          <details class="alias-box">
+            <summary class="alias-toggle" aria-label={`Previous usernames for @${reviewer.username}`}></summary>
+            <div class="alias-panel">
+              <div class="alias-panel-title">Also known as</div>
+              <ul class="alias-list">
+                {previousUsernames.map((a) => (
+                  <li class="alias-item">
+                    <span class="alias-name">@{a.name}</span>
+                    <span class="alias-time">{timeAgo(a.changed_at)} ago</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </details>
+        )}
+      </div>
 
       <div class="profile-bio-wrap">
         {isOwnProfile ? (
@@ -5064,6 +5162,21 @@ async function createNewList(btn) {
     btn.textContent = btn.dataset.label || '+ New list';
   }
 }
+</script>
+<script is:inline>
+  // Close the previous-usernames popover on outside click / Escape — native
+  // <details> doesn't do this on its own.
+  document.addEventListener('click', function (e) {
+    document.querySelectorAll('details.alias-box[open]').forEach(function (d) {
+      if (!d.contains(e.target)) d.removeAttribute('open');
+    });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape')
+      document.querySelectorAll('details.alias-box[open]').forEach(function (d) {
+        d.removeAttribute('open');
+      });
+  });
 </script>
 <ReportModal />
 <EditModal />

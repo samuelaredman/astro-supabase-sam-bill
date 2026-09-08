@@ -1,6 +1,7 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { validateName } from "../../../utils/moderation/nameRules";
+import { likeEscape } from "../../../utils/usernameHistory";
 
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
@@ -28,7 +29,7 @@ export const POST: APIRoute = async (context) => {
   const { data: existing } = await db
     .from("profiles")
     .select("id")
-    .ilike("username", username)
+    .ilike("username", likeEscape(username))
     .maybeSingle();
 
   if (existing) {
