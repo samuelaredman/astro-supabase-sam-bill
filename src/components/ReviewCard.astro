@@ -557,37 +557,66 @@ const showMenu = !isOwnProfile;
     });
 
     // ── Vote buttons ─────────────────────────────────────────────────────────
-    document.addEventListener('click', async function(e) {
+    // Paint the new vote state immediately, then reconcile with the server's
+    // authoritative counts. Reverts to the captured state if the request fails.
+    function readVoteState(reviewId) {
+      var upBtn   = document.querySelector('.vote-btn[data-review-id="' + reviewId + '"][data-vote="1"]');
+      var downBtn = document.querySelector('.vote-btn[data-review-id="' + reviewId + '"][data-vote="-1"]');
+      return {
+        up:     upBtn   ? (parseInt(upBtn.dataset.count)   || 0) : 0,
+        down:   downBtn ? (parseInt(downBtn.dataset.count) || 0) : 0,
+        myVote: upBtn && upBtn.classList.contains('active-up') ? 1
+              : downBtn && downBtn.classList.contains('active-down') ? -1 : 0,
+      };
+    }
+    function applyVoteState(reviewId, myVote, up, down) {
+      document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]').forEach(function(b) {
+        var bVote = parseInt(b.dataset.vote);
+        var count = bVote === 1 ? up : down;
+        b.dataset.count = count;
+        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
+        b.classList.toggle('active-up',   bVote === 1  && myVote === 1);
+        b.classList.toggle('active-down', bVote === -1 && myVote === -1);
+      });
+    }
+
+    document.addEventListener('click', function(e) {
       var btn = e.target.closest('.vote-btn');
       if (!btn) return;
-      if (btn.disabled) return;
-      btn.disabled = true;
-      try {
-        var reviewId = btn.dataset.reviewId;
-        var vote = parseInt(btn.dataset.vote);
-        var res = await fetch('/api/reviews/vote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ review_id: reviewId, vote }),
-        });
-        if (res.status === 401) { window.location.href = '/signin'; return; }
+
+      var reviewId = btn.dataset.reviewId;
+      var vote = parseInt(btn.dataset.vote);
+      var prev = readVoteState(reviewId);
+
+      // Optimistic: derive the next state from the current one.
+      var nextMyVote = prev.myVote === vote ? 0 : vote;
+      var up = prev.up, down = prev.down;
+      if (prev.myVote === 1) up = Math.max(0, up - 1);
+      if (prev.myVote === -1) down = Math.max(0, down - 1);
+      if (nextMyVote === 1) up += 1;
+      if (nextMyVote === -1) down += 1;
+      applyVoteState(reviewId, nextMyVote, up, down);
+
+      fetch('/api/reviews/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ review_id: reviewId, vote }),
+      }).then(function(res) {
+        if (res.status === 401) { window.location.href = '/signin'; return null; }
         if (!res.ok) {
-          var err = await res.json().catch(function() { return {}; });
-          console.error('[vote] API error:', res.status, err);
-          return;
+          return res.json().catch(function() { return {}; }).then(function(err) {
+            console.error('[vote] API error:', res.status, err);
+            applyVoteState(reviewId, prev.myVote, prev.up, prev.down);
+            return null;
+          });
         }
-        var data = await res.json();
-        document.querySelectorAll('.vote-btn[data-review-id="' + reviewId + '"]').forEach(function(b) {
-          var bVote = parseInt(b.dataset.vote);
-          var count = bVote === 1 ? data.up : data.down;
-          b.dataset.count = count;
-          b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
-          b.classList.toggle('active-up',   bVote === 1  && data.vote === 1);
-          b.classList.toggle('active-down', bVote === -1 && data.vote === -1);
-        });
-      } finally {
-        btn.disabled = false;
-      }
+        return res.json();
+      }).then(function(data) {
+        if (!data) return;
+        applyVoteState(reviewId, data.vote || 0, data.up, data.down);
+      }).catch(function() {
+        applyVoteState(reviewId, prev.myVote, prev.up, prev.down);
+      });
     });
   }
 </script>

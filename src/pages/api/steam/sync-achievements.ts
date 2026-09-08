@@ -75,6 +75,30 @@ async function upsertChunked(
   return null;
 }
 
+// api_name -> stored row (icon only) for one profile+game. Used to skip
+// re-writing locked achievement rows whose metadata hasn't changed. Paginated
+// because a single game can exceed PostgREST's 1000-row default cap.
+async function fetchStoredAchievements(
+  db: any,
+  profileId: string,
+  appid: number,
+): Promise<Map<string, { icon_url: string | null }>> {
+  const out = new Map<string, { icon_url: string | null }>();
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('user_achievements')
+      .select('api_name, icon_url')
+      .eq('profile_id', profileId)
+      .eq('steam_appid', appid)
+      .range(from, from + PAGE - 1);
+    if (error || !data || data.length === 0) break;
+    for (const r of data) out.set(r.api_name, { icon_url: r.icon_url ?? null });
+    if (data.length < PAGE) break;
+  }
+  return out;
+}
+
 export const POST: APIRoute = async (context) => {
   const startedAt = Date.now();
 
@@ -283,7 +307,8 @@ export const POST: APIRoute = async (context) => {
       // touches the unlocked field. This means:
       //   - new rows get unlocked=false from the column DEFAULT
       //   - existing unlocked=true rows are never downgraded
-      //   - existing rows with null icons get their icons repaired on every sync
+      //   - rows with a null icon get it repaired (see the locked-write filter
+      //     below and the full rewrite whenever a fresh schema is fetched)
       const unlockedRows = rows.filter((r) => r.unlocked);
       const lockedRows = rows.filter((r) => !r.unlocked);
 
@@ -293,11 +318,30 @@ export const POST: APIRoute = async (context) => {
         else rowsSynced += unlockedRows.length;
       }
       if (lockedRows.length > 0) {
-        // Strip unlocked + unlock_time — Supabase only SETs columns present in the object
-        const lockedMeta = lockedRows.map(({ unlocked: _u, unlock_time: _t, ...rest }: any) => rest);
-        const error = await upsertChunked(db, 'user_achievements', lockedMeta, 'profile_id,steam_appid,api_name');
-        if (error) console.error(`[sync-achievements] locked upsert appid=${appid}:`, JSON.stringify(error));
-        else rowsSynced += lockedRows.length;
+        // Re-writing every locked row on every pass churns tens of thousands of
+        // dead tuples for nothing: when the schema came from a warm cache, the
+        // metadata is byte-identical to what a prior sync already stored. When
+        // we fetched a fresh schema this pass (`stale`), write them all — that's
+        // the 30-day icon/percent refresh. Otherwise only write rows that are
+        // missing from the roster or missing an icon we can now supply.
+        let lockedToWrite = lockedRows;
+        if (!stale) {
+          const stored = await fetchStoredAchievements(db, profile.id, appid);
+          lockedToWrite = lockedRows.filter((r) => {
+            const ex = stored.get(r.api_name as string);
+            if (!ex) return true;                          // new roster row
+            if (!ex.icon_url && r.icon_url) return true;   // repair a missing icon
+            return false;
+          });
+        }
+
+        if (lockedToWrite.length > 0) {
+          // Strip unlocked + unlock_time — Supabase only SETs columns present in the object
+          const lockedMeta = lockedToWrite.map(({ unlocked: _u, unlock_time: _t, ...rest }: any) => rest);
+          const error = await upsertChunked(db, 'user_achievements', lockedMeta, 'profile_id,steam_appid,api_name');
+          if (error) console.error(`[sync-achievements] locked upsert appid=${appid}:`, JSON.stringify(error));
+          else rowsSynced += lockedToWrite.length;
+        }
       }
     } catch (e) {
       console.error(`[sync-achievements] error processing appid=${appid}:`, e);
