@@ -64,38 +64,91 @@ export const GET: APIRoute = async (context) => {
 
   // Query starts from the games table so ORDER BY title is native on the main
   // resource — PostgREST's embedded-resource column ordering is unreliable.
-  let q = db
-    .from('games')
-    .select(
-      'id, title, slug, cover_img_url, game_genres(genres(name, slug)), user_game_status!inner(status, is_hidden, is_owned, updated_at, steam_playtime_minutes)',
-      { count: 'exact' }
-    )
-    .eq('user_game_status.profile_id', profile.id);
+  // Factored out so the id-only "select all" path applies identical filters.
+  const buildQuery = (selectStr: string, opts?: any) => {
+    let qb = db
+      .from('games')
+      .select(selectStr, opts)
+      .eq('user_game_status.profile_id', profile.id);
 
-  // Visibility
-  if (showHidden && isOwn) {
-    q = q.eq('user_game_status.is_hidden', true);
-  } else {
-    q = q.eq('user_game_status.is_hidden', false);
-    if (!canSeeWantToPlay) q = q.neq('user_game_status.status', 'want_to_play');
-    if (!canSeeDropped)    q = q.neq('user_game_status.status', 'dropped');
+    // Visibility
+    if (showHidden && isOwn) {
+      qb = qb.eq('user_game_status.is_hidden', true);
+    } else {
+      qb = qb.eq('user_game_status.is_hidden', false);
+      if (!canSeeWantToPlay) qb = qb.neq('user_game_status.status', 'want_to_play');
+      if (!canSeeDropped)    qb = qb.neq('user_game_status.status', 'dropped');
+    }
+
+    // Status filter
+    if (filter === 'owned') {
+      qb = qb.eq('user_game_status.is_owned', true);
+    } else if (filter === 'completed') {
+      qb = qb.in('user_game_status.status', ['completed', 'hundred_percent']);
+    } else if (filter === 'unplayed') {
+      qb = qb
+        .not('user_game_status.status', 'in', '(completed,hundred_percent)')
+        .or('user_game_status.steam_playtime_minutes.is.null,user_game_status.steam_playtime_minutes.eq.0');
+    } else if (filter !== 'all') {
+      qb = qb.eq('user_game_status.status', filter);
+    }
+
+    // Search — title is now on the main table, plain ilike with no foreignTable needed
+    if (search) qb = qb.ilike('title', `%${search}%`);
+
+    return qb;
+  };
+
+  // "Select all" bulk-edit path — return every matching game id across all pages,
+  // paginating past the 1000-row PostgREST cap.
+  if (p.get('idsOnly') === 'true') {
+    const CHUNK = 1000;
+    const ids: string[] = [];
+    for (let start = 0; ; start += CHUNK) {
+      const { data: idRows, error: idErr } = await buildQuery(
+        'id, user_game_status!inner(profile_id)'
+      ).range(start, start + CHUNK - 1);
+      if (idErr) {
+        console.error('[library API] idsOnly error:', JSON.stringify(idErr));
+        return json({ error: 'Failed to load library' }, 500);
+      }
+      for (const r of idRows ?? []) ids.push((r as any).id);
+      if (!idRows || idRows.length < CHUNK) break;
+    }
+    return json({ ids });
   }
 
-  // Status filter
-  if (filter === 'owned') {
-    q = q.eq('user_game_status.is_owned', true);
-  } else if (filter === 'completed') {
-    q = q.in('user_game_status.status', ['completed', 'hundred_percent']);
-  } else if (filter === 'unplayed') {
-    q = q
-      .not('user_game_status.status', 'in', '(completed,hundred_percent)')
-      .or('user_game_status.steam_playtime_minutes.is.null,user_game_status.steam_playtime_minutes.eq.0');
-  } else if (filter !== 'all') {
-    q = q.eq('user_game_status.status', filter);
+  // A-Z jump bar — map each starting letter to the 1-based page it first appears
+  // on. Only meaningful for the alpha sort; other sorts get an empty map.
+  if (p.get('letterMap') === 'true') {
+    const letterMap: Record<string, number> = {};
+    if (sort === 'alpha') {
+      const CHUNK = 1000;
+      let idx = 0;
+      for (let start = 0; ; start += CHUNK) {
+        const { data: rows, error: lmErr } = await buildQuery('title, user_game_status!inner(profile_id)')
+          .order('title', { ascending: true })
+          .range(start, start + CHUNK - 1);
+        if (lmErr) {
+          console.error('[library API] letterMap error:', JSON.stringify(lmErr));
+          return json({ error: 'Failed to load library' }, 500);
+        }
+        for (const r of rows ?? []) {
+          const c = String((r as any).title ?? '').trim().charAt(0).toUpperCase();
+          const key = c >= 'A' && c <= 'Z' ? c : '#';
+          if (letterMap[key] === undefined) letterMap[key] = Math.floor(idx / PAGE_SIZE) + 1;
+          idx++;
+        }
+        if (!rows || rows.length < CHUNK) break;
+      }
+    }
+    return json({ letterMap });
   }
 
-  // Search — title is now on the main table, plain ilike with no foreignTable needed
-  if (search) q = q.ilike('title', `%${search}%`);
+  let q = buildQuery(
+    'id, title, slug, cover_img_url, game_genres(genres(name, slug)), user_game_status!inner(status, is_hidden, is_owned, updated_at, steam_playtime_minutes)',
+    { count: 'exact' }
+  );
 
   // Sort
   if (sort === 'hours') {

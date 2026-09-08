@@ -1170,11 +1170,12 @@ const reviewerBreadcrumbJsonLd = {
     .lib-pill.active{background:var(--accent);color:white;border-color:transparent}
 .lib-pill .pill-count{font-size:11px;opacity:.75;font-weight:600}
     .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:14px;padding:20px 0}
-    .lib-pag{display:flex;align-items:center;justify-content:center;gap:12px;padding:16px 0 4px}
-    .lib-pag-btn{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:6px 14px;font-size:13px;font-family:inherit;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s}
-    .lib-pag-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
-    .lib-pag-btn:disabled{opacity:.4;cursor:not-allowed}
-    .lib-pag-info{font-size:13px;color:var(--text-secondary)}
+    .lib-az{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;align-items:center;padding:4px 0}
+    .lib-az-btn{background:var(--bg-card);border:1px solid var(--border);border-radius:5px;min-width:26px;padding:4px 5px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text-secondary);cursor:pointer;transition:all .15s}
+    .lib-az-btn:hover:not(:disabled){border-color:var(--accent);color:var(--text-primary)}
+    .lib-az-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
+    .lib-az-btn:disabled{opacity:.3;cursor:default}
+    .lib-pag{display:flex;align-items:center;justify-content:center;gap:4px;flex-wrap:wrap;padding:16px 0 4px}
     .lib-item{display:block;text-decoration:none;position:relative}
     .lib-cover{width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15);position:relative}
     .lib-item:hover .lib-cover{transform:translateY(-3px);box-shadow:0 8px 20px rgba(0,0,0,.3)}
@@ -1983,7 +1984,8 @@ const reviewerBreadcrumbJsonLd = {
     {isOwnProfile && (
       <div id="libEditBar" style="display:none">
         <span id="libEditCount" class="lib-edit-count">0 selected</span>
-        <button class="lib-select-all" id="libSelectAllBtn" onclick="toggleLibSelectAll()">Select all</button>
+        <button class="lib-select-all" id="libSelectAllBtn" onclick="toggleLibSelectAll()">Select page</button>
+        <button class="lib-select-all" id="libSelectAllPagesBtn" onclick="selectAllLibPages()">Select all</button>
         <select id="libBulkStatus" class="lib-sort" style="font-size:12px">
           <option value="">Change status…</option>
           <option value="playing">🎮 Playing</option>
@@ -2029,6 +2031,7 @@ const reviewerBreadcrumbJsonLd = {
         </label>
       )}
     </div>
+    <div class="lib-az" id="libAzBar" style="display:none"></div>
     <div class="lib-grid" id="libGrid"></div>
     <div class="lib-pag" id="libPagination" style="display:none"></div>
 
@@ -3525,6 +3528,9 @@ const reviewerBreadcrumbJsonLd = {
   var _filterUnreviewed = false
   var _filterHidden = false
   var _LIB_PAGE_SIZE = 96
+  var _libLetterMap = null      // { A: pageNum, ... } for the current filter/sort
+  var _libLetterMapKey = ''     // cache key so we only refetch when filters change
+  var _libLetterLoading = false
 
   var STATUS_META = {
     playing:         { icon: '🎮', label: 'Playing',      dot: '#60a5fa' },
@@ -3573,6 +3579,7 @@ const reviewerBreadcrumbJsonLd = {
     }
     _renderGrid()
     _updateEditBar()
+    _loadLetterMap()
   }
 
   window.libGoPage = function(page) {
@@ -3581,6 +3588,76 @@ const reviewerBreadcrumbJsonLd = {
     fetchLibrary(page)
     var grid = document.getElementById('libGrid')
     if (grid) grid.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  // ── A-Z JUMP BAR ──
+  var _LIB_AZ_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z']
+
+  function _libLetterKey() {
+    return _libFilter + '|' + _libSort + '|' + (_filterHidden ? '1' : '0')
+  }
+
+  async function _loadLetterMap() {
+    // Bar only makes sense for the alpha sort with no active search
+    if (_libSort !== 'alpha' || _libSearch) {
+      _libLetterMap = null
+      _libLetterMapKey = ''
+      _renderAzBar()
+      return
+    }
+    var key = _libLetterKey()
+    if (key === _libLetterMapKey && _libLetterMap) { _renderAzBar(); return }
+    if (_libLetterLoading) return
+    _libLetterLoading = true
+    try {
+      var params = new URLSearchParams({
+        username: reviewerUsername,
+        letterMap: 'true',
+        filter: _libFilter,
+        sort: 'alpha',
+      })
+      if (_filterHidden) params.set('hidden', 'true')
+      var res = await fetch('/api/user-game-status/library?' + params.toString())
+      if (!res.ok) throw new Error('fetch failed')
+      var data = await res.json()
+      _libLetterMap = data.letterMap || {}
+      _libLetterMapKey = key
+    } catch(e) {
+      console.error('[library] letterMap error', e)
+      _libLetterMap = null
+      _libLetterMapKey = ''
+    } finally {
+      _libLetterLoading = false
+    }
+    _renderAzBar()
+  }
+
+  function _renderAzBar() {
+    var bar = document.getElementById('libAzBar')
+    if (!bar) return
+    // Pointless when everything fits on one page or when there's no map
+    if (!_libLetterMap || Object.keys(_libLetterMap).length === 0 || _libTotal <= _LIB_PAGE_SIZE) {
+      bar.style.display = 'none'
+      bar.innerHTML = ''
+      return
+    }
+    // Letters represented on the current page — highlighted as "you are here"
+    var here = {}
+    _libItems.forEach(function(it) {
+      var c = String(it.title || '').trim().charAt(0).toUpperCase()
+      here[(c >= 'A' && c <= 'Z') ? c : '#'] = true
+    })
+    bar.style.display = 'flex'
+    bar.innerHTML = _LIB_AZ_LETTERS.map(function(l) {
+      var pg = _libLetterMap[l]
+      if (!pg) return '<button class="lib-az-btn" disabled>' + l + '</button>'
+      return '<button class="lib-az-btn' + (here[l] ? ' active' : '') + '" onclick="libJumpLetter(\'' + l + '\')">' + l + '</button>'
+    }).join('')
+  }
+
+  window.libJumpLetter = function(l) {
+    var pg = _libLetterMap && _libLetterMap[l]
+    if (pg) window.libGoPage(pg)
   }
 
   function _getVisible() {
@@ -3601,15 +3678,30 @@ const reviewerBreadcrumbJsonLd = {
     if (!grid) return
     var items = _getVisible()
 
-    // Pagination controls
+    _renderAzBar()
+
+    // Pagination controls — numbered, matching the achievements tab style
     var totalPages = Math.ceil(_libTotal / _LIB_PAGE_SIZE)
     if (pag) {
-      if (_libTotal > _LIB_PAGE_SIZE) {
+      if (totalPages > 1) {
         pag.style.display = 'flex'
-        pag.innerHTML =
-          '<button class="lib-pag-btn"' + (_libPage <= 1 ? ' disabled' : '') + ' onclick="libGoPage(' + (_libPage - 1) + ')">← Prev</button>' +
-          '<span class="lib-pag-info">Page ' + _libPage + ' of ' + totalPages + ' <span style="color:var(--text-tertiary)">(' + _libTotal + ' games)</span></span>' +
-          '<button class="lib-pag-btn"' + (_libPage >= totalPages ? ' disabled' : '') + ' onclick="libGoPage(' + (_libPage + 1) + ')">Next →</button>'
+        var _nums = []
+        for (var _pn = 1; _pn <= totalPages; _pn++) {
+          if (_pn === 1 || _pn === totalPages || Math.abs(_pn - _libPage) <= 2) _nums.push(_pn)
+        }
+        var _html = ''
+        if (_libPage > 1)
+          _html += '<button class="ach-pag-btn" onclick="libGoPage(' + (_libPage - 1) + ')">‹</button>'
+        for (var _i = 0; _i < _nums.length; _i++) {
+          if (_i > 0 && _nums[_i] - _nums[_i - 1] > 1)
+            _html += '<span class="ach-pag-dots">…</span>'
+          _html += '<button class="ach-pag-btn' + (_nums[_i] === _libPage ? ' active' : '') + '"' +
+            (_nums[_i] === _libPage ? ' disabled' : '') +
+            ' onclick="libGoPage(' + _nums[_i] + ')">' + _nums[_i] + '</button>'
+        }
+        if (_libPage < totalPages)
+          _html += '<button class="ach-pag-btn" onclick="libGoPage(' + (_libPage + 1) + ')">›</button>'
+        pag.innerHTML = _html
       } else {
         pag.style.display = 'none'
       }
@@ -3757,6 +3849,42 @@ const reviewerBreadcrumbJsonLd = {
     _updateEditBar()
   }
   window.toggleLibSelectAll = toggleLibSelectAll
+
+  async function selectAllLibPages() {
+    var btn = document.getElementById('libSelectAllPagesBtn')
+    if (btn) { btn.disabled = true; btn.textContent = 'Selecting…' }
+    try {
+      var params = new URLSearchParams({
+        username: reviewerUsername,
+        filter: _libFilter,
+        sort: _libSort,
+        idsOnly: 'true',
+      })
+      if (_libSearch)    params.set('search', _libSearch)
+      if (_filterHidden) params.set('hidden', 'true')
+      var res = await fetch('/api/user-game-status/library?' + params.toString())
+      if (!res.ok) throw new Error('fetch failed')
+      var data = await res.json()
+      var ids = data.ids || []
+      if (_filterReviewed || _filterUnreviewed) {
+        ids = ids.filter(function(id) {
+          var has = id in _reviewScores
+          if (_filterReviewed   && !has) return false
+          if (_filterUnreviewed &&  has) return false
+          return true
+        })
+      }
+      ids.forEach(function(id) { _libSelected.add(id) })
+    } catch(e) {
+      console.error('[library] select-all error', e)
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Select all' }
+      _lastClickedIndex = -1
+      _renderGrid()
+      _updateEditBar()
+    }
+  }
+  window.selectAllLibPages = selectAllLibPages
 
   function toggleLibEdit() {
     _libEditMode = !_libEditMode
