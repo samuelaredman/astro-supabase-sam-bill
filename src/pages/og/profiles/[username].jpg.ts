@@ -2,12 +2,13 @@ import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { renderOgImage, fetchImageDataUri, fetchAndCropCover } from "../../../utils/og";
 import { buildProfileOgTree } from "../../../utils/ogProfile";
+import { resolveRenamedUsername } from "../../../utils/usernameHistory";
 
 export const prerender = false;
 
 const IMAGE_FETCH_TIMEOUT_MS = 4000;
 
-export const GET: APIRoute = async ({ params }) => {
+export const GET: APIRoute = async ({ params, url }) => {
   const { username } = params;
   if (!username) return new Response(null, { status: 404 });
 
@@ -18,6 +19,17 @@ export const GET: APIRoute = async ({ params }) => {
     .select("id, username, avatar_url, banner_url, banner_position, is_active")
     .eq("username", username)
     .maybeSingle();
+
+  // No live profile — follow a rename so cached embeds resolve to the new card.
+  if (!profile) {
+    const current = await resolveRenamedUsername(username);
+    if (current) {
+      return Response.redirect(
+        new URL(`/og/profiles/${encodeURIComponent(current)}.jpg`, url),
+        301
+      );
+    }
+  }
 
   // Deactivated (and any not-found) profiles never get a public preview image —
   // the requester here is an unauthenticated bot (Discord/Reddit's link-preview
