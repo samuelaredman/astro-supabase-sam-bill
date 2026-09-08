@@ -46,6 +46,22 @@ async function fetchJsonWithRetry(url: string, retries = 1, timeoutMs = 6000): P
   return null;
 }
 
+// Upsert in chunks — a single game can carry thousands of achievement rows
+// (asset-flip games), which risks request-size limits / very slow statements.
+async function upsertChunked(
+  db: any,
+  table: string,
+  rows: any[],
+  onConflict: string,
+  chunk = 500,
+): Promise<any> {
+  for (let i = 0; i < rows.length; i += chunk) {
+    const { error } = await db.from(table).upsert(rows.slice(i, i + chunk), { onConflict });
+    if (error) return error;
+  }
+  return null;
+}
+
 export const POST: APIRoute = async (context) => {
   const startedAt = Date.now();
 
@@ -137,6 +153,8 @@ export const POST: APIRoute = async (context) => {
   let lastProcessedAppid = cursor;
   let gamesProcessed = 0;
   let rowsSynced = 0;
+  let playerHits = 0;   // games where Steam returned achievement data
+  let playerNulls = 0;  // games where the player-achievements call failed outright
   const schemaUpserts: any[] = [];
 
   for (const { appid, name } of candidates) {
@@ -148,13 +166,23 @@ export const POST: APIRoute = async (context) => {
       const playerData = await fetchJson(
         `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?appid=${appid}&key=${steamApiKey}&steamid=${steamId}&l=en`,
       );
-      const playerAchs: any[] = playerData?.playerstats?.achievements ?? [];
+      if (playerData === null) playerNulls++; // 403 (privacy) or a transient failure
+
+      // Dedupe by apiname — Steam occasionally returns the same achievement twice
+      // in one game, which makes the whole ON CONFLICT upsert fail.
+      const seenApi = new Set<string>();
+      const playerAchs: any[] = (playerData?.playerstats?.achievements ?? []).filter((pa: any) => {
+        if (!pa?.apiname || seenApi.has(pa.apiname)) return false;
+        seenApi.add(pa.apiname);
+        return true;
+      });
 
       // Advance the cursor even for games with no achievements / private stats
       // so the next call never re-examines them.
       lastProcessedAppid = appid;
       gamesProcessed++;
       if (playerAchs.length === 0) continue;
+      playerHits++;
 
       // Schema + global percents — cached per app across all users.
       let cached = schemaCache.get(appid);
@@ -240,18 +268,14 @@ export const POST: APIRoute = async (context) => {
       const lockedRows = rows.filter((r) => !r.unlocked);
 
       if (unlockedRows.length > 0) {
-        const { error } = await (db as any)
-          .from('user_achievements')
-          .upsert(unlockedRows, { onConflict: 'profile_id,steam_appid,api_name' });
+        const error = await upsertChunked(db, 'user_achievements', unlockedRows, 'profile_id,steam_appid,api_name');
         if (error) console.error(`[sync-achievements] unlocked upsert appid=${appid}:`, JSON.stringify(error));
         else rowsSynced += unlockedRows.length;
       }
       if (lockedRows.length > 0) {
         // Strip unlocked + unlock_time — Supabase only SETs columns present in the object
         const lockedMeta = lockedRows.map(({ unlocked: _u, unlock_time: _t, ...rest }: any) => rest);
-        const { error } = await (db as any)
-          .from('user_achievements')
-          .upsert(lockedMeta, { onConflict: 'profile_id,steam_appid,api_name' });
+        const error = await upsertChunked(db, 'user_achievements', lockedMeta, 'profile_id,steam_appid,api_name');
         if (error) console.error(`[sync-achievements] locked upsert appid=${appid}:`, JSON.stringify(error));
         else rowsSynced += lockedRows.length;
       }
@@ -287,6 +311,10 @@ export const POST: APIRoute = async (context) => {
     processed: processedCount,
     total,
     syncedThisCall: rowsSynced,
+    // Per-call diagnostics — the client accumulates these to detect a profile
+    // whose "Game details" privacy is blocking every read.
+    hitAchievements: playerHits,
+    emptyResponses: playerNulls,
     nextCursor: done ? null : lastProcessedAppid,
     done,
   });
