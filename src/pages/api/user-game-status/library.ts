@@ -118,15 +118,15 @@ export const GET: APIRoute = async (context) => {
     return json({ ids });
   }
 
-  // A-Z jump bar — map each starting letter to the 1-based page it first appears
-  // on. Only meaningful for the alpha sort; other sorts get an empty map.
+  // A-Z jump bar — map each starting letter to the page + game id of its first
+  // entry. Only meaningful for the alpha sort; other sorts get an empty map.
   if (p.get('letterMap') === 'true') {
-    const letterMap: Record<string, number> = {};
+    const letterMap: Record<string, { page: number; gameId: string }> = {};
     if (sort === 'alpha') {
       const CHUNK = 1000;
       let idx = 0;
       for (let start = 0; ; start += CHUNK) {
-        const { data: rows, error: lmErr } = await buildQuery('title, user_game_status!inner(profile_id)')
+        const { data: rows, error: lmErr } = await buildQuery('id, title, user_game_status!inner(profile_id)')
           .order('title', { ascending: true })
           .range(start, start + CHUNK - 1);
         if (lmErr) {
@@ -136,7 +136,9 @@ export const GET: APIRoute = async (context) => {
         for (const r of rows ?? []) {
           const c = String((r as any).title ?? '').trim().charAt(0).toUpperCase();
           const key = c >= 'A' && c <= 'Z' ? c : '#';
-          if (letterMap[key] === undefined) letterMap[key] = Math.floor(idx / PAGE_SIZE) + 1;
+          if (letterMap[key] === undefined) {
+            letterMap[key] = { page: Math.floor(idx / PAGE_SIZE) + 1, gameId: (r as any).id };
+          }
           idx++;
         }
         if (!rows || rows.length < CHUNK) break;
