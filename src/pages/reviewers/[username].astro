@@ -3531,6 +3531,8 @@ const reviewerBreadcrumbJsonLd = {
   var _libLetterMap = null      // { A: pageNum, ... } for the current filter/sort
   var _libLetterMapKey = ''     // cache key so we only refetch when filters change
   var _libLetterLoading = false
+  var _libAllIds = null         // cached full id list from the last "Select all"
+  var _libAllIdsKey = ''        // filter/sort/search key those ids were fetched for
 
   var STATUS_META = {
     playing:         { icon: '🎮', label: 'Playing',      dot: '#60a5fa' },
@@ -3835,6 +3837,24 @@ const reviewerBreadcrumbJsonLd = {
       var allPageSel = visible.length > 0 && visible.every(function(it) { return _libSelected.has(it.gameId) })
       selectAllBtn.textContent = allPageSel ? 'Deselect page' : 'Select page'
     }
+    var pagesBtn = document.getElementById('libSelectAllPagesBtn')
+    if (pagesBtn && !pagesBtn.disabled) {
+      pagesBtn.textContent = _libAllSelected() ? 'Deselect all' : 'Select all'
+    }
+  }
+
+  // True when the full filtered id set is cached, still current, and all selected
+  function _libAllSelected() {
+    return !!_libAllIds
+      && _libAllIdsKey === _libSelKey()
+      && _libAllIds.length > 0
+      && _libAllIds.every(function(id) { return _libSelected.has(id) })
+  }
+
+  function _libSelKey() {
+    return _libFilter + '|' + _libSort + '|' + _libSearch + '|' +
+      (_filterHidden ? '1' : '0') + '|' +
+      (_filterReviewed ? 'r' : '') + (_filterUnreviewed ? 'u' : '')
   }
 
   function toggleLibSelectAll() {
@@ -3852,6 +3872,18 @@ const reviewerBreadcrumbJsonLd = {
 
   async function selectAllLibPages() {
     var btn = document.getElementById('libSelectAllPagesBtn')
+
+    // Second click — everything is selected, so this deselects it all
+    if (_libAllSelected()) {
+      _libAllIds.forEach(function(id) { _libSelected.delete(id) })
+      _libAllIds = null
+      _libAllIdsKey = ''
+      _lastClickedIndex = -1
+      _renderGrid()
+      _updateEditBar()
+      return
+    }
+
     if (btn) { btn.disabled = true; btn.textContent = 'Selecting…' }
     try {
       var params = new URLSearchParams({
@@ -3875,10 +3907,14 @@ const reviewerBreadcrumbJsonLd = {
         })
       }
       ids.forEach(function(id) { _libSelected.add(id) })
+      _libAllIds = ids
+      _libAllIdsKey = _libSelKey()
     } catch(e) {
       console.error('[library] select-all error', e)
+      _libAllIds = null
+      _libAllIdsKey = ''
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = 'Select all' }
+      if (btn) btn.disabled = false
       _lastClickedIndex = -1
       _renderGrid()
       _updateEditBar()
@@ -3889,6 +3925,8 @@ const reviewerBreadcrumbJsonLd = {
   function toggleLibEdit() {
     _libEditMode = !_libEditMode
     _libSelected.clear()
+    _libAllIds = null
+    _libAllIdsKey = ''
     _lastClickedIndex = -1
     var btn = document.getElementById('libEditBtn')
     if (btn) btn.textContent = _libEditMode ? 'Cancel' : 'Edit library'
@@ -3908,6 +3946,8 @@ const reviewerBreadcrumbJsonLd = {
     })
     if (res.ok) {
       _libSelected.clear()
+      _libAllIds = null
+      _libAllIdsKey = ''
       if (sel) sel.value = ''
       await fetchLibrary(_libPage)
       _renderFilterPills()
@@ -3926,6 +3966,8 @@ const reviewerBreadcrumbJsonLd = {
     if (res.ok) {
       _libCounts.all = Math.max(0, (_libCounts.all || 0) - ids.length)
       _libSelected.clear()
+      _libAllIds = null
+      _libAllIdsKey = ''
       await fetchLibrary(_libPage)
       _renderFilterPills()
       _updateEditBar()
