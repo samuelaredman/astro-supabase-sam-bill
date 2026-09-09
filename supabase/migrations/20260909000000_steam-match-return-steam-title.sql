@@ -11,7 +11,12 @@
 -- the playtime/appid lookup off the value Steam actually sent. `input_title` is
 -- already carried through the CTEs; this just projects it.
 
-CREATE OR REPLACE FUNCTION match_steam_games(steam_titles text[])
+-- Adding an OUT column changes the return row type, which CREATE OR REPLACE
+-- cannot do — drop first. Only steam/import.ts calls this, and it's redefined
+-- immediately below.
+DROP FUNCTION IF EXISTS match_steam_games(text[]);
+
+CREATE FUNCTION match_steam_games(steam_titles text[])
 RETURNS TABLE(id uuid, title text, steam_title text) AS $$
   WITH normalized_input AS (
     SELECT DISTINCT
