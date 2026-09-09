@@ -17,9 +17,6 @@ export const GET: APIRoute = async (context) => {
   const platform   = (p.get('platform') || '').trim();
   const dev        = (p.get('dev') || '').trim();
   const showHidden = p.get('hidden') === 'true';
-  // Only the Library "Detailed" view needs per-game achievement counts — skip the
-  // extra user_achievements scan for the default card grid.
-  const wantDetailed = p.get('detailed') === 'true';
 
   if (!username) return json({ error: 'username required' }, 400);
 
@@ -253,10 +250,12 @@ export const GET: APIRoute = async (context) => {
     };
   });
 
-  // Per-game achievement progress for the "Detailed" view. user_achievements is
-  // keyed on steam_appid, so only Steam-imported games with a synced achievement
-  // set get counts. One page is <=96 games; paginate past the 1000-row cap anyway.
-  if (wantDetailed) {
+  // Per-game achievement progress — drives the Detailed view's progress bar and
+  // the gold "100%" treatment in both views. user_achievements is keyed on
+  // steam_appid, so only Steam-imported games with a synced achievement set get
+  // counts. One page is <=96 games; the query is indexed on
+  // (profile_id, steam_appid) but paginate past the 1000-row cap anyway.
+  {
     const appids = [...new Set(
       items.map((i: any) => i.steamAppid).filter((x: any): x is number => typeof x === 'number')
     )];
