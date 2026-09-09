@@ -202,28 +202,82 @@ export const GET: APIRoute = async (context) => {
   // Note: no genre embed here — the client card/row markup never uses it, and
   // leaving it out keeps the genre *filter*'s inner-join (added in buildQuery)
   // the only game_genres embed, so there's no duplicate-embed ambiguity.
-  let q = buildQuery(
-    'id, title, slug, cover_img_url',
-    'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid',
-    { count: 'exact' }
-  );
-
-  // Sort — native ORDER BY on whichever table buildQuery pivoted onto.
-  if (ugsBase && sort === 'hours') {
-    q = q.order('steam_playtime_minutes', { ascending: false, nullsFirst: false });
-  } else if (ugsBase && sort === 'recent') {
-    q = q.order('updated_at', { ascending: false });
-  } else {
-    // games base: alpha (default) + review. review is reordered client-side.
-    q = q.order('title', { ascending: true });
-  }
-
+  const SEL_GAMES = 'id, title, slug, cover_img_url';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid';
   const from = (page - 1) * PAGE_SIZE;
-  const { data: rows, count: total, error } = await q.range(from, from + PAGE_SIZE - 1);
 
-  if (error) {
-    console.error('[library API] error:', JSON.stringify(error));
-    return json({ error: 'Failed to load library' }, 500);
+  let rows: any[] | null;
+  let total: number;
+
+  if (sort === 'completion') {
+    // Achievement completion % is an aggregate over user_achievements, not a
+    // column — so rank every matching game id here (highest % first), then
+    // fetch only this page's rows.
+    const { data: complRows, error: complErr } = await db.rpc('achievement_completion_by_appid', {
+      p_profile_id: profile.id,
+    });
+    if (complErr) {
+      console.error('[library API] completion rpc error:', JSON.stringify(complErr));
+      return json({ error: 'Failed to load library' }, 500);
+    }
+    const pctByAppid = new Map<number, number>(
+      (complRows ?? []).map((r: any) => [r.steam_appid as number, Number(r.pct)]),
+    );
+
+    const CHUNK = 1000;
+    const ranked: Array<{ id: string; title: string; pct: number }> = [];
+    for (let start = 0; ; start += CHUNK) {
+      const { data: idRows, error: idErr } = await buildQuery('id, title', 'steam_appid', undefined, 'games')
+        .order('id', { ascending: true })
+        .range(start, start + CHUNK - 1);
+      if (idErr) {
+        console.error('[library API] completion scan error:', JSON.stringify(idErr));
+        return json({ error: 'Failed to load library' }, 500);
+      }
+      for (const r of (idRows ?? []) as any[]) {
+        const ugs = Array.isArray(r.user_game_status) ? r.user_game_status[0] : r.user_game_status;
+        const appid: number | null = ugs?.steam_appid ?? null;
+        // Games with no synced achievements sink below 0%-completed ones.
+        const pct = appid != null && pctByAppid.has(appid) ? pctByAppid.get(appid)! : -1;
+        ranked.push({ id: r.id, title: r.title ?? '', pct });
+      }
+      if (!idRows || idRows.length < CHUNK) break;
+    }
+    ranked.sort((a, b) => b.pct - a.pct || a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+    total = ranked.length;
+
+    const pageIds = ranked.slice(from, from + PAGE_SIZE).map((x) => x.id);
+    if (pageIds.length === 0) {
+      rows = [];
+    } else {
+      const { data: pageRows, error: prErr } = await buildQuery(SEL_GAMES, SEL_UGS, undefined, 'games').in('id', pageIds);
+      if (prErr) {
+        console.error('[library API] completion page error:', JSON.stringify(prErr));
+        return json({ error: 'Failed to load library' }, 500);
+      }
+      const byId = new Map((pageRows ?? []).map((r: any) => [r.id, r]));
+      rows = pageIds.map((id) => byId.get(id)).filter(Boolean);
+    }
+  } else {
+    let q = buildQuery(SEL_GAMES, SEL_UGS, { count: 'exact' });
+
+    // Sort — native ORDER BY on whichever table buildQuery pivoted onto.
+    if (ugsBase && sort === 'hours') {
+      q = q.order('steam_playtime_minutes', { ascending: false, nullsFirst: false });
+    } else if (ugsBase && sort === 'recent') {
+      q = q.order('updated_at', { ascending: false });
+    } else {
+      // games base: alpha (default) + review. review is reordered client-side.
+      q = q.order('title', { ascending: true });
+    }
+
+    const res = await q.range(from, from + PAGE_SIZE - 1);
+    if (res.error) {
+      console.error('[library API] error:', JSON.stringify(res.error));
+      return json({ error: 'Failed to load library' }, 500);
+    }
+    rows = res.data;
+    total = res.count ?? 0;
   }
 
   const items = (rows ?? []).map((r: any) => {
