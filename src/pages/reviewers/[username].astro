@@ -551,6 +551,51 @@ const { data: reviewerRecsRaw } = await db
   .limit(100);
 const reviewerRecs = (reviewerRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
 
+// Shared filter/search metadata for the Recommendations tab — same Overview /
+// Detailed + single filter bar treatment as the Reviews tab. Genre / platform /
+// dev are the union across a rec's source and target games.
+const _recGameIds = [...new Set(
+  reviewerRecs.flatMap((r: any) => [r.sourceGame?.id, r.targetGame?.id]).filter(Boolean)
+)] as string[];
+const _recGenresByGame: Record<string, string[]> = {};
+const _recPlatformsByGame: Record<string, string[]> = {};
+const _recDevsByGame: Record<string, string[]> = {};
+if (_recGameIds.length > 0) {
+  const [{ data: _rgGenres }, { data: _rgPlatforms }, { data: _rgCompanies }] = await Promise.all([
+    (db as any).from('game_genres').select('game_id, genres(name)').in('game_id', _recGameIds),
+    (db as any).from('game_platforms').select('game_id, platforms(name)').in('game_id', _recGameIds),
+    (db as any).from('game_companies').select('game_id, developers(name)').eq('role', 'developer').in('game_id', _recGameIds),
+  ]);
+  for (const row of _rgGenres ?? []) {
+    if (row.genres?.name) { if (!_recGenresByGame[row.game_id]) _recGenresByGame[row.game_id] = []; _recGenresByGame[row.game_id].push(row.genres.name); }
+  }
+  for (const row of _rgPlatforms ?? []) {
+    if (row.platforms?.name) { if (!_recPlatformsByGame[row.game_id]) _recPlatformsByGame[row.game_id] = []; _recPlatformsByGame[row.game_id].push(row.platforms.name); }
+  }
+  for (const row of _rgCompanies ?? []) {
+    if (row.developers?.name) { if (!_recDevsByGame[row.game_id]) _recDevsByGame[row.game_id] = []; _recDevsByGame[row.game_id].push(row.developers.name); }
+  }
+}
+const recFilterItems = reviewerRecs.map((rec: any) => {
+  const gids = [rec.sourceGame?.id, rec.targetGame?.id].filter(Boolean) as string[];
+  const genres = [...new Set(gids.flatMap((id) => _recGenresByGame[id] ?? []))] as string[];
+  const platforms = [...new Set(gids.flatMap((id) => _recPlatformsByGame[id] ?? []))] as string[];
+  const devs = [...new Set(gids.flatMap((id) => _recDevsByGame[id] ?? []))] as string[];
+  return {
+    rec,
+    searchText: `${rec.sourceGame?.title ?? ''} ${rec.targetGame?.title ?? ''} ${rec.body ?? ''}`.trim(),
+    genres,
+    platforms,
+    devs,
+    date: rec.createdAt,
+    up: rec.upVotes,
+    down: rec.downVotes,
+  };
+});
+const recGenres = [...new Set(recFilterItems.flatMap((i: any) => i.genres))].sort() as string[];
+const recPlatforms = [...new Set(recFilterItems.flatMap((i: any) => i.platforms))].sort() as string[];
+const recDevs = [...new Set(recFilterItems.flatMap((i: any) => i.devs))].sort() as string[];
+
 // Fetch library settings with fallback in case migration hasn't run yet
 let libSettingsRow: any = null;
 try {
@@ -1271,6 +1316,7 @@ const reviewerBreadcrumbJsonLd = {
     .review-overview-card.rov-low{border-left-color:#f87171;background:rgba(248,113,113,.08)}
 
     .recs-overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px 14px;padding:20px 0}
+    .recs-overview-grid .rec-filter-item{min-width:0}
     .rec-overview-tile{display:block;text-decoration:none}
     .rot-covers{display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:8px}
     .rot-cover{width:56px;height:75px;border-radius:6px;overflow:hidden;background:var(--tag-bg);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 2px 8px rgba(0,0,0,.15);transition:transform .15s}
@@ -2034,18 +2080,6 @@ const reviewerBreadcrumbJsonLd = {
 
   <!-- ── RECOMMENDATIONS TAB — this reviewer's authored "if you liked A, try B" posts ── -->
   <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
-    <div class="prof-recs-head">
-      {reviewerRecs.length > 0 && (
-        <div class="prof-recs-sorts">
-          <button class="prof-rec-sort active" data-sort="all">All</button>
-          <button class="prof-rec-sort" data-sort="recent">Recent</button>
-          <button class="prof-rec-sort" data-sort="most_up">Most upvoted</button>
-          <button class="prof-rec-sort" data-sort="least_up">Least upvoted</button>
-          <button class="prof-rec-sort" data-sort="oldest">Oldest</button>
-        </div>
-      )}
-      {isOwnProfile && <button class="prof-rec-add" onclick="openRecComposer()">+ Add a recommendation</button>}
-    </div>
     {reviewerRecs.length === 0 ? (
       <div class="prof-recs-empty">
         <div class="prof-recs-empty-title">No recommendations yet</div>
@@ -2053,48 +2087,106 @@ const reviewerBreadcrumbJsonLd = {
         {isOwnProfile && <button class="prof-rec-add" onclick="openRecComposer()" style="margin-top:14px">+ Add a recommendation</button>}
       </div>
     ) : (
-      <div id="profRecsList" style="display:none">
-        {reviewerRecs.map((rec: any) => (
-          <div class="prof-rec-item" data-created={rec.createdAt} data-net={rec.upVotes - rec.downVotes}>
-            <RecommendationFeedCard
-              id={rec.id}
-              sourceGame={rec.sourceGame}
-              targetGame={rec.targetGame}
-              body={rec.body}
-              containsSpoilers={rec.containsSpoilers}
-              ownerUsername={rec.ownerUsername}
-              ownerAvatar={rec.ownerAvatar}
-              createdAt={rec.createdAt}
-              upVotes={rec.upVotes}
-              downVotes={rec.downVotes}
-              myVote={rec.myVote}
-              commentCount={rec.commentCount}
-              reactions={rec.reactions}
-              isLoggedIn={!!user}
-              currentProfileId={currentProfile?.id ?? null}
-              profileId={rec.profileId}
-            />
-          </div>
-        ))}
-      </div>
-      <div class="recs-overview-grid" id="profRecsOverviewList">
-        {[...reviewerRecs].sort((a: any, b: any) =>
-          (a.sourceGame?.title ?? '').localeCompare(b.sourceGame?.title ?? '')
-        ).map((rec: any) => {
-          const srcCover = igdbCover(rec.sourceGame?.cover_img_url, 't_cover_big')
-          const tgtCover = igdbCover(rec.targetGame?.cover_img_url, 't_cover_big')
-          return (
-            <a href={`/recommendations/${rec.id}`} class="rec-overview-tile">
-              <div class="rot-covers">
-                <div class="rot-cover">{srcCover ? <img src={srcCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
-                <span class="rot-arrow">→</span>
-                <div class="rot-cover">{tgtCover ? <img src={tgtCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+      <>
+        <div class="sort-tabs">
+          <button class="sort-tab rec-view-tab active" onclick="switchRecView('overview',this)">Overview</button>
+          <button class="sort-tab rec-view-tab" onclick="switchRecView('detailed',this)">Detailed</button>
+          {isOwnProfile && <button class="prof-rec-add" style="margin-left:auto" onclick="openRecComposer()">+ Add a recommendation</button>}
+        </div>
+
+        <div class="lf-bar">
+          <input class="lf-search" type="text" placeholder="Search recommendations…" oninput="searchRecs(this.value)" />
+          <select class="lf-select" onchange="setRecSort(this.value)">
+            <option value="recent">Recent</option>
+            <option value="oldest">Oldest</option>
+            <option value="most-upvoted">Most Upvoted</option>
+            <option value="most-downvoted">Most Downvoted</option>
+          </select>
+          {recGenres.length > 0 && (
+            <select class="lf-select" onchange="setRecFilter('genre',this.value,this)">
+              <option value="">All Genres</option>
+              {recGenres.map((g: string) => <option value={g}>{g}</option>)}
+            </select>
+          )}
+          {recPlatforms.length > 0 && (
+            <select class="lf-select" onchange="setRecFilter('platform',this.value,this)">
+              <option value="">All Platforms</option>
+              {recPlatforms.map((p: string) => <option value={p}>{p}</option>)}
+            </select>
+          )}
+          {recDevs.length > 0 && (
+            <select class="lf-select" onchange="setRecFilter('dev',this.value,this)">
+              <option value="">All Devs</option>
+              {recDevs.map((d: string) => <option value={d}>{d}</option>)}
+            </select>
+          )}
+        </div>
+
+        <div id="profRecsList" style="display:none">
+          {recFilterItems.map((it: any) => (
+            <div
+              class="rec-filter-item"
+              data-title={it.searchText}
+              data-genres={it.genres.join(',')}
+              data-devs={it.devs.join(',')}
+              data-platforms={it.platforms.join(',')}
+              data-date={it.date}
+              data-upvotes={it.up}
+              data-downvotes={it.down}
+            >
+              <RecommendationFeedCard
+                id={it.rec.id}
+                sourceGame={it.rec.sourceGame}
+                targetGame={it.rec.targetGame}
+                body={it.rec.body}
+                containsSpoilers={it.rec.containsSpoilers}
+                ownerUsername={it.rec.ownerUsername}
+                ownerAvatar={it.rec.ownerAvatar}
+                createdAt={it.rec.createdAt}
+                upVotes={it.rec.upVotes}
+                downVotes={it.rec.downVotes}
+                myVote={it.rec.myVote}
+                commentCount={it.rec.commentCount}
+                reactions={it.rec.reactions}
+                isLoggedIn={!!user}
+                currentProfileId={currentProfile?.id ?? null}
+                profileId={it.rec.profileId}
+              />
+            </div>
+          ))}
+        </div>
+        <div class="list-no-results" id="recs-dt-no-results" style="display:none">No recommendations match these filters.</div>
+
+        <div class="recs-overview-grid" id="profRecsOverviewList">
+          {recFilterItems.map((it: any) => {
+            const rec = it.rec
+            const srcCover = igdbCover(rec.sourceGame?.cover_img_url, 't_cover_big')
+            const tgtCover = igdbCover(rec.targetGame?.cover_img_url, 't_cover_big')
+            return (
+              <div
+                class="rec-filter-item"
+                data-title={it.searchText}
+                data-genres={it.genres.join(',')}
+                data-devs={it.devs.join(',')}
+                data-platforms={it.platforms.join(',')}
+                data-date={it.date}
+                data-upvotes={it.up}
+                data-downvotes={it.down}
+              >
+                <a href={`/recommendations/${rec.id}`} class="rec-overview-tile">
+                  <div class="rot-covers">
+                    <div class="rot-cover">{srcCover ? <img src={srcCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+                    <span class="rot-arrow">→</span>
+                    <div class="rot-cover">{tgtCover ? <img src={tgtCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+                  </div>
+                  <div class="rot-titles">{rec.sourceGame?.title ?? 'Unknown'} → {rec.targetGame?.title ?? 'Unknown'}</div>
+                </a>
               </div>
-              <div class="rot-titles">{rec.sourceGame?.title ?? 'Unknown'} → {rec.targetGame?.title ?? 'Unknown'}</div>
-            </a>
-          )
-        })}
-      </div>
+            )
+          })}
+        </div>
+        <div class="list-no-results" id="recs-ov-no-results" style="display:none">No recommendations match these filters.</div>
+      </>
     )}
   </div>
 
@@ -5341,11 +5433,6 @@ async function createNewList(btn) {
 {isOwnProfile && <RecommendationComposer />}
 
 <style is:global>
-  .prof-recs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-  .prof-recs-sorts { display: flex; gap: 6px; flex-wrap: wrap; }
-  .prof-rec-sort { padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; font-family: inherit; color: var(--text-secondary); background: var(--tag-bg); border: 1px solid var(--border); cursor: pointer; transition: all 0.15s; }
-  .prof-rec-sort:hover { color: var(--text-primary); background: var(--bg-hover); }
-  .prof-rec-sort.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
   .prof-rec-add { padding: 7px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; background: var(--accent); color: var(--accent-text); border: none; cursor: pointer; transition: opacity 0.15s; }
   .prof-rec-add:hover { opacity: 0.9; }
   .prof-recs-empty { text-align: center; padding: 48px 24px; }
@@ -5354,40 +5441,66 @@ async function createNewList(btn) {
 </style>
 
 <script is:inline>
+  // Recommendations tab: Overview / Detailed views + shared search & filters —
+  // same behaviour as the Reviews tab.
   (function () {
-    var list = document.getElementById('profRecsList');
-    var overview = document.getElementById('profRecsOverviewList');
-    if (!list) return;
-    var btns = document.querySelectorAll('.prof-rec-sort');
-    function sortBy(mode) {
-      if (mode === 'all') {
-        list.style.display = 'none';
-        if (overview) overview.style.display = '';
-        return;
-      }
-      list.style.display = '';
-      if (overview) overview.style.display = 'none';
-      var items = Array.prototype.slice.call(list.querySelectorAll('.prof-rec-item'));
-      items.sort(function (a, b) {
-        var ca = new Date(a.dataset.created).getTime();
-        var cb = new Date(b.dataset.created).getTime();
-        var na = parseInt(a.dataset.net, 10);
-        var nb = parseInt(b.dataset.net, 10);
-        if (mode === 'recent') return cb - ca;
-        if (mode === 'oldest') return ca - cb;
-        if (mode === 'most_up') return (nb - na) || (cb - ca);
-        if (mode === 'least_up') return (na - nb) || (cb - ca);
-        return 0;
+    if (!document.getElementById('profRecsOverviewList')) return;
+    var _recState = { view: 'overview', sort: 'recent', genre: '', platform: '', dev: '', search: '' };
+
+    function applyRecFilters() {
+      var grids = ['profRecsOverviewList', 'profRecsList'];
+      grids.forEach(function (gridId) {
+        var grid = document.getElementById(gridId);
+        if (!grid) return;
+        var isActive = (gridId === 'profRecsOverviewList') === (_recState.view === 'overview');
+        var items = Array.prototype.slice.call(grid.children).filter(function (el) {
+          return el.classList && el.classList.contains('rec-filter-item');
+        });
+
+        items.forEach(function (item) {
+          var show = true;
+          var s = _recState;
+          if (s.search && (item.dataset.title || '').toLowerCase().indexOf(s.search.toLowerCase()) === -1) show = false;
+          if (show && s.genre && (item.dataset.genres || '').split(',').indexOf(s.genre) === -1) show = false;
+          if (show && s.dev && (item.dataset.devs || '').split(',').indexOf(s.dev) === -1) show = false;
+          if (show && s.platform && (item.dataset.platforms || '').split(',').indexOf(s.platform) === -1) show = false;
+          item.style.display = show ? '' : 'none';
+        });
+
+        var visible = items.filter(function (i) { return i.style.display !== 'none'; });
+        visible.sort(function (a, b) {
+          var s = _recState.sort;
+          if (s === 'oldest') return new Date(a.dataset.date) - new Date(b.dataset.date);
+          if (s === 'most-upvoted') return parseInt(b.dataset.upvotes || '0') - parseInt(a.dataset.upvotes || '0');
+          if (s === 'most-downvoted') return parseInt(b.dataset.downvotes || '0') - parseInt(a.dataset.downvotes || '0');
+          return new Date(b.dataset.date) - new Date(a.dataset.date); // recent
+        });
+        visible.forEach(function (i) { grid.appendChild(i); });
+
+        var noRes = document.getElementById(gridId === 'profRecsOverviewList' ? 'recs-ov-no-results' : 'recs-dt-no-results');
+        if (noRes) noRes.style.display = (isActive && visible.length === 0) ? '' : 'none';
       });
-      items.forEach(function (it) { list.appendChild(it); });
     }
-    btns.forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        btns.forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        sortBy(btn.dataset.sort);
-      });
-    });
+
+    window.switchRecView = function (view, btn) {
+      document.querySelectorAll('.rec-view-tab').forEach(function (b) { b.classList.remove('active'); });
+      if (btn) btn.classList.add('active');
+      _recState.view = view;
+      var ov = document.getElementById('profRecsOverviewList');
+      var dt = document.getElementById('profRecsList');
+      if (ov) ov.style.display = view === 'overview' ? '' : 'none';
+      if (dt) dt.style.display = view === 'detailed' ? '' : 'none';
+      applyRecFilters();
+    };
+    window.setRecSort = function (v) { _recState.sort = v; applyRecFilters(); };
+    window.setRecFilter = function (type, value, sel) {
+      _recState[type] = value;
+      if (sel) sel.classList.toggle('has-value', !!value);
+      applyRecFilters();
+    };
+    window.searchRecs = function (v) { _recState.search = (v || '').trim(); applyRecFilters(); };
+
+    applyRecFilters();
   })();
 </script>
 
