@@ -111,14 +111,23 @@ export const POST: APIRoute = async (context) => {
       if (unmatchedSample.length < 15) unmatchedSample.push(row.game_title);
       continue;
     }
-    if (seenGame.has(match.gameId)) continue;
-    seenGame.add(match.gameId);
+
+    // Resolve a collapsed edition to its canonical main game so ownership lands there.
+    const { data: canon } = await db
+      .from("games")
+      .select("canonical_game_id")
+      .eq("id", match.gameId)
+      .maybeSingle();
+    const gameId = (canon?.canonical_game_id as string | null) ?? match.gameId;
+
+    if (seenGame.has(gameId)) continue;
+    seenGame.add(gameId);
 
     const { data: existing } = await db
       .from("user_game_status")
       .select("game_id")
       .eq("profile_id", profile.id)
-      .eq("game_id", match.gameId)
+      .eq("game_id", gameId)
       .maybeSingle();
     if (existing) {
       already++;
@@ -127,7 +136,7 @@ export const POST: APIRoute = async (context) => {
 
     const status = mapBackloggdStatus(row.backloggd_status);
     if (!status) continue;
-    toUpsert.push({ profile_id: profile.id, game_id: match.gameId, status, updated_at: new Date().toISOString() });
+    toUpsert.push({ profile_id: profile.id, game_id: gameId, status, updated_at: new Date().toISOString() });
   }
 
   if (toUpsert.length) {

@@ -113,13 +113,33 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: steamGames.length, total: steamGames.length });
   }
 
-  // Get this user's existing game statuses to avoid overwriting manual entries
+  // Resolve every matched row to its canonical main game — a collapsed edition
+  // (port/remaster/GOTY) records ownership on the game it belongs to, not itself.
   const matchedGameIds = matches.map(m => m.id);
+  const { data: canonRows } = await db
+    .from('games')
+    .select('id, canonical_game_id')
+    .in('id', matchedGameIds);
+  const canonicalOf = new Map<string, string>(
+    (canonRows ?? []).map((r: any) => [r.id, r.canonical_game_id ?? r.id])
+  );
+
+  // Sum playtime across all owned editions that collapse into the same main game
+  // (e.g. base Skyrim 100m + Special Edition 5000m → 5100m on Skyrim).
+  const playtimeByCanonical = new Map<string, number>();
+  for (const game of matches) {
+    const canonicalId = canonicalOf.get(game.id) ?? game.id;
+    const playtime = steamByTitle.get(game.title.toLowerCase().trim()) ?? 0;
+    playtimeByCanonical.set(canonicalId, (playtimeByCanonical.get(canonicalId) ?? 0) + playtime);
+  }
+
+  // Existing statuses keyed by the canonical game, so we don't overwrite manual entries
+  const canonicalIds = [...playtimeByCanonical.keys()];
   const { data: existingStatuses } = await db
     .from('user_game_status')
     .select('game_id, status')
     .eq('profile_id', profile.id)
-    .in('game_id', matchedGameIds);
+    .in('game_id', canonicalIds);
 
   const existingByGameId = new Map<string, string>(
     (existingStatuses ?? []).map((r: any) => [r.game_id, r.status])
@@ -127,30 +147,23 @@ export const POST: APIRoute = async (context) => {
 
   const toInsert: any[] = [];
   const toUpdatePlaytime: any[] = [];
-  const seenGameIds = new Set<string>();
 
-  for (const game of matches) {
-    // Deduplicate — match_steam_games can return the same game_id multiple times
-    // if several Steam titles match the same Chekpoint game (e.g. GOTY editions)
-    if (seenGameIds.has(game.id)) continue;
-    seenGameIds.add(game.id);
-
-    const playtime = steamByTitle.get(game.title.toLowerCase().trim()) ?? 0;
-    const existing = existingByGameId.get(game.id);
+  for (const [gameId, playtime] of playtimeByCanonical) {
+    const existing = existingByGameId.get(gameId);
 
     if (!existing) {
       // Skip 0-hour games when playedOnly is set
       if (playedOnly && playtime === 0) continue;
       toInsert.push({
         profile_id: profile.id,
-        game_id: game.id,
+        game_id: gameId,
         status: 'owned',
         is_owned: true,
         steam_playtime_minutes: playtime,
       });
     } else {
-      // Already tracked — only update playtime
-      toUpdatePlaytime.push({ game_id: game.id, playtime });
+      // Already tracked — only update playtime (summed across editions)
+      toUpdatePlaytime.push({ game_id: gameId, playtime });
     }
   }
 
