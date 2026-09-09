@@ -10,34 +10,34 @@
 
 CREATE OR REPLACE FUNCTION profile_vote_totals(p_profile_id uuid)
 RETURNS TABLE(upvotes int, downvotes int) LANGUAGE sql STABLE AS $$
-  WITH v AS (
-    SELECT cv.vote
-      FROM comment_votes cv
-      JOIN review_comments rc ON rc.id = cv.comment_id
-     WHERE rc.profile_id = p_profile_id
-    UNION ALL
-    SELECT lv.vote
-      FROM list_votes lv
-      JOIN lists l ON l.id = lv.list_id
-     WHERE l.profile_id = p_profile_id
-    UNION ALL
-    SELECT lcv.vote
-      FROM list_comment_votes lcv
-      JOIN list_comments lc ON lc.id = lcv.comment_id
-     WHERE lc.profile_id = p_profile_id
-    UNION ALL
-    SELECT rv.vote
-      FROM recommendation_votes rv
-      JOIN recommendations r ON r.id = rv.recommendation_id
-     WHERE r.profile_id = p_profile_id
-    UNION ALL
-    SELECT rcv.vote
-      FROM recommendation_comment_votes rcv
-      JOIN recommendation_comments rc2 ON rc2.id = rcv.comment_id
-     WHERE rc2.profile_id = p_profile_id
-  )
-  SELECT
-    count(*) FILTER (WHERE vote = 1)::int,
-    count(*) FILTER (WHERE vote = -1)::int
-  FROM v;
+WITH v AS (
+SELECT cv.vote
+  FROM comment_votes cv
+  JOIN review_comments rc ON rc.id = cv.comment_id
+  WHERE rc.profile_id = p_profile_id
+UNION ALL
+SELECT lv.vote
+  FROM list_votes lv
+  JOIN lists l ON l.id = lv.list_id
+  WHERE l.profile_id = p_profile_id
+UNION ALL
+SELECT lcv.vote
+  FROM list_comment_votes lcv
+  JOIN list_comments lc ON lc.id = lcv.comment_id
+  WHERE lc.profile_id = p_profile_id
+UNION ALL
+SELECT rv.vote
+  FROM recommendation_votes rv
+  JOIN recommendations r ON r.id = rv.recommendation_id
+  WHERE r.profile_id = p_profile_id
+UNION ALL
+SELECT rcv.vote
+  FROM recommendation_comment_votes rcv
+  JOIN recommendation_comments rc2 ON rc2.id = rcv.comment_id
+  WHERE rc2.profile_id = p_profile_id
+)
+SELECT
+count(*) FILTER (WHERE vote = 1)::int,
+count(*) FILTER (WHERE vote = -1)::int
+FROM v;
 $$;
