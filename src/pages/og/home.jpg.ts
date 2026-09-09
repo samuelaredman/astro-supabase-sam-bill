@@ -20,7 +20,7 @@ export const GET: APIRoute = async () => {
         .order("published_at", { ascending: false })
         .limit(60),
       db.from("reviews").select("*", { count: "exact", head: true }).eq("status", "published"),
-      db.from("games").select("*", { count: "exact", head: true }).or(GAME_CATEGORY_OR_FILTER),
+      db.from("games").select("*", { count: "exact", head: true }).is("canonical_game_id", null).or(GAME_CATEGORY_OR_FILTER),
       db.from("profiles").select("*", { count: "exact", head: true }),
     ]);
 
