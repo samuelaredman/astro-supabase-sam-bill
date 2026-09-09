@@ -665,35 +665,48 @@ if (!libraryIsPrivate) {
 
 // Distinct genre / platform / developer names across this reviewer's visible
 // library — powers the Library filter dropdowns, matching the Reviews / Lists /
-// Recs tabs. Queried from the small dimension tables (so the result is a few
-// dozen rows regardless of library size) with a filtered inner-join down to
-// user_game_status, keeping only dimensions that actually appear in the library.
+// Recs tabs. Queried FROM each game↔X junction with a two-level inner join down
+// to user_game_status (the same shape as genres/[slug].astro's indexability
+// probe), deduped in JS. One row per (game, value) pair, so paginate past the
+// 1000-row cap.
+async function libDimNames(
+  junction: string,
+  dimEmbed: string,
+  roleFilter?: string,
+): Promise<string[]> {
+  const CHUNK = 1000;
+  const key = dimEmbed.split('(')[0];
+  const names = new Set<string>();
+  for (let start = 0; ; start += CHUNK) {
+    let q = (db as any)
+      .from(junction)
+      .select(`${dimEmbed}, games!inner(user_game_status!inner(profile_id, is_hidden))`)
+      .eq('games.user_game_status.profile_id', reviewer.id)
+      .eq('games.user_game_status.is_hidden', false);
+    if (roleFilter) q = q.eq('role', roleFilter);
+    const { data, error } = await q.range(start, start + CHUNK - 1);
+    if (error) {
+      console.error(`[profile library] ${junction} filter-option query failed:`, JSON.stringify(error));
+      break;
+    }
+    for (const row of (data ?? []) as any[]) {
+      const n = row[key]?.name;
+      if (n) names.add(n);
+    }
+    if (!data || data.length < CHUNK) break;
+  }
+  return [...names].sort();
+}
+
 let libGenres: string[] = [];
 let libPlatforms: string[] = [];
 let libDevs: string[] = [];
 if (!libraryIsPrivate) {
-  try {
-    const [gRes, pRes, dRes] = await Promise.all([
-      (db as any).from('genres')
-        .select('name, game_genres!inner(games!inner(user_game_status!inner(profile_id, is_hidden)))')
-        .eq('game_genres.games.user_game_status.profile_id', reviewer.id)
-        .eq('game_genres.games.user_game_status.is_hidden', false),
-      (db as any).from('platforms')
-        .select('name, game_platforms!inner(games!inner(user_game_status!inner(profile_id, is_hidden)))')
-        .eq('game_platforms.games.user_game_status.profile_id', reviewer.id)
-        .eq('game_platforms.games.user_game_status.is_hidden', false),
-      (db as any).from('developers')
-        .select('name, game_companies!inner(role, games!inner(user_game_status!inner(profile_id, is_hidden)))')
-        .eq('game_companies.role', 'developer')
-        .eq('game_companies.games.user_game_status.profile_id', reviewer.id)
-        .eq('game_companies.games.user_game_status.is_hidden', false),
-    ]);
-    libGenres    = [...new Set((gRes.data ?? []).map((r: any) => r.name).filter(Boolean))].sort() as string[];
-    libPlatforms = [...new Set((pRes.data ?? []).map((r: any) => r.name).filter(Boolean))].sort() as string[];
-    libDevs      = [...new Set((dRes.data ?? []).map((r: any) => r.name).filter(Boolean))].sort() as string[];
-  } catch (e) {
-    console.error('[profile library] filter-option query failed:', e);
-  }
+  [libGenres, libPlatforms, libDevs] = await Promise.all([
+    libDimNames('game_genres', 'genres(name)'),
+    libDimNames('game_platforms', 'platforms(name)'),
+    libDimNames('game_companies', 'developers(name)', 'developer'),
+  ]);
 }
 
 // ── CHART DATA ──
@@ -2283,7 +2296,7 @@ const reviewerBreadcrumbJsonLd = {
           </select>
         )}
         {isOwnProfile && (
-          <button id="libGearBtn" class="lib-gear-btn" title="Library settings" onclick="toggleLibGear()">
+          <button id="libGearBtn" class="lib-gear-btn" title="Library settings" style="margin-left:auto" onclick="toggleLibGear()">
             <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="9" cy="9" r="2.5"/>
               <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
