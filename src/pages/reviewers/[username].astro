@@ -20,9 +20,10 @@ const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
 const activeTab = Astro.url.searchParams.get('tab') || 'profile'
 
-const { data: { user } } = await supabase.auth.getUser();
-
-const { data: reviewer, error: reviewerError } = await (supabase as any)
+// Wave 0 — the session check and the profile row don't depend on each other.
+const [{ data: { user } }, { data: reviewer, error: reviewerError }] = await Promise.all([
+  supabase.auth.getUser(),
+  (supabase as any)
   .from('profiles')
   .select(`
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
@@ -43,7 +44,8 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
     )
   `)
   .eq('username', username)
-  .single();
+  .single(),
+]);
 
 if (reviewerError || !reviewer || !reviewer.is_active) {
   if (reviewerError) console.error('[reviewers] query error:', JSON.stringify(reviewerError));
@@ -56,37 +58,113 @@ if (reviewerError || !reviewer || !reviewer.is_active) {
   return Astro.redirect('/404');
 }
 
-// Fetch showcase_achievements separately so a missing migration can't 404 the profile
-const { data: _showcaseAchData } = await (getSupabaseAdmin() as any)
-  .from('profiles')
-  .select('showcase_achievements')
-  .eq('id', (reviewer as any).id)
-  .maybeSingle();
-(reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
+const db = getSupabaseAdmin() as any;
 
-// Extra social-link URL columns, fetched separately for the same reason: if the
-// PostgREST schema cache hasn't picked up 20260908000004 yet, this degrades to
-// "no gamer links" instead of 404ing the profile (the main select above uses
-// .single() and redirects to /404 on any error).
-const _newSocialCols = ['steam_url', 'psn_url', 'xbox_url', 'instagram_url', 'tiktok_url', 'bluesky_url', 'retroachievements_url'];
-const { data: _newSocialData } = await (getSupabaseAdmin() as any)
-  .from('profiles')
-  .select(_newSocialCols.join(', '))
-  .eq('id', (reviewer as any).id)
-  .maybeSingle();
-for (const c of _newSocialCols) (reviewer as any)[c] = (_newSocialData as any)?.[c] ?? null;
+const publishedReviews = (reviewer.reviews ?? [])
+  .filter((r: any) => r.status === 'published')
+  .sort((a: any, b: any) =>
+    new Date(b.published_at ?? b.created_at).getTime() -
+    new Date(a.published_at ?? a.created_at).getTime()
+  );
+
+// Every game this reviewer has a published review for — drives the dev filter,
+// the community score delta and the chart data below.
+const _reviewGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))] as string[];
 
 // Steam-style alias list: previous usernames this profile changed away from in
 // the last 90 days. RLS blocks anon reads of username_history, so use admin.
 // The full trail stays in the DB for moderation; only a rolling window shows.
 const ALIAS_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
-const { data: _aliasRows } = await (getSupabaseAdmin() as any)
-  .from('username_history')
-  .select('old_username, changed_at')
-  .eq('profile_id', (reviewer as any).id)
-  .gte('changed_at', new Date(Date.now() - ALIAS_WINDOW_MS).toISOString())
-  .order('changed_at', { ascending: false })
-  .limit(25);
+const _newSocialCols = ['steam_url', 'psn_url', 'xbox_url', 'instagram_url', 'tiktok_url', 'bluesky_url', 'retroachievements_url'];
+
+// ── Wave 1 ──────────────────────────────────────────────────────────────────
+// Everything that only needs reviewer.id / user.id / the review list we already
+// have. These used to run as ~15 sequential round-trips; the page waited on the
+// sum of their latencies for data most visitors never scroll to.
+const [
+  { data: _showcaseAchData },
+  { data: _newSocialData },
+  { data: _aliasRows },
+  { data: reviewerComments },
+  { data: reviewerLists },
+  { data: reviewerListComments },
+  { data: reviewerRecsForVotes },
+  { data: reviewerRecComments },
+  { data: followersData },
+  { data: followingData },
+  { data: currentProfileRow },
+  { data: profileListsRaw },
+  { data: savedRaw },
+  { data: reviewerRecsRaw },
+  { data: libSettingsRow },
+  { data: communityScoresRaw },
+  { data: _revCompanyRows },
+] = await Promise.all([
+  // Split out from the main select so a not-yet-applied migration degrades one
+  // field instead of 404ing the whole profile (the select above uses .single()).
+  db.from('profiles').select('showcase_achievements').eq('id', reviewer.id).maybeSingle(),
+  db.from('profiles').select(_newSocialCols.join(', ')).eq('id', reviewer.id).maybeSingle(),
+  db.from('username_history')
+    .select('old_username, changed_at')
+    .eq('profile_id', reviewer.id)
+    .gte('changed_at', new Date(Date.now() - ALIAS_WINDOW_MS).toISOString())
+    .order('changed_at', { ascending: false })
+    .limit(25),
+  // Vote tallies received across every surface the reviewer posts on.
+  (supabase as any).from('review_comments').select('comment_votes(vote)').eq('profile_id', reviewer.id),
+  (supabase as any).from('lists').select('list_votes(vote)').eq('profile_id', reviewer.id),
+  (supabase as any).from('list_comments').select('list_comment_votes(vote)').eq('profile_id', reviewer.id),
+  (supabase as any).from('recommendations').select('recommendation_votes(vote)').eq('profile_id', reviewer.id),
+  (supabase as any).from('recommendation_comments').select('recommendation_comment_votes(vote)').eq('profile_id', reviewer.id),
+  // Follower / following rows — their .length is the count, so no separate
+  // count:exact queries, and `notify` on the follower side means the viewer's
+  // own follow/notify state falls out of this list too.
+  (supabase as any).from('follows')
+    .select('notify, follower:profiles!follower_id(id, username, avatar_url)')
+    .eq('following_id', reviewer.id),
+  (supabase as any).from('follows')
+    .select('following:profiles!following_id(id, username, avatar_url)')
+    .eq('follower_id', reviewer.id),
+  user
+    ? (supabase as any).from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).maybeSingle()
+    : Promise.resolve({ data: null }),
+  (supabase as any).from('lists')
+    .select('id, title, is_ranked, visibility, cover_image_url, updated_at')
+    .eq('profile_id', reviewer.id)
+    .order('updated_at', { ascending: false }),
+  (supabase as any).from('list_saves')
+    .select('list_id, is_hidden, lists(id, title, is_ranked, visibility, cover_image_url, updated_at, profiles(id, username, avatar_url))')
+    .eq('profile_id', reviewer.id)
+    .order('created_at', { ascending: false }),
+  db.from('recommendations')
+    .select(REC_SELECT)
+    .eq('profile_id', reviewer.id)
+    .eq('status', 'published')
+    .order('created_at', { ascending: false })
+    .limit(100),
+  db.from('profiles')
+    .select('library_visibility, library_show_hours, library_hidden_tabs')
+    .eq('id', reviewer.id)
+    .maybeSingle(),
+  // One pass over every community review of the games this reviewer covered —
+  // feeds both the score-delta stat and the chart averages (was two near
+  // identical scans).
+  _reviewGameIds.length > 0
+    ? (supabase as any).from('reviews')
+        .select('game_id, score, play_time_hours')
+        .in('game_id', _reviewGameIds)
+        .eq('status', 'published')
+    : Promise.resolve({ data: [] }),
+  _reviewGameIds.length > 0
+    ? (supabase as any).from('game_companies')
+        .select('game_id, developers(name)')
+        .eq('role', 'developer')
+        .in('game_id', _reviewGameIds)
+    : Promise.resolve({ data: [] }),
+]);
+
+(reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
+for (const c of _newSocialCols) (reviewer as any)[c] = (_newSocialData as any)?.[c] ?? null;
 
 const previousUsernames: { name: string; changed_at: string }[] = [];
 {
@@ -101,28 +179,12 @@ const previousUsernames: { name: string; changed_at: string }[] = [];
   }
 }
 
-const publishedReviews = (reviewer.reviews ?? [])
-  .filter((r: any) => r.status === 'published')
-  .sort((a: any, b: any) =>
-    new Date(b.published_at ?? b.created_at).getTime() -
-    new Date(a.published_at ?? a.created_at).getTime()
-  );
-
-// Developer names per reviewed game — for the Reviews tab dev filter. Mirrors
-// the list-metadata dev query below; game_companies/developers are long-standing.
-const _reviewGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))] as string[];
+// Developer names per reviewed game — for the Reviews tab dev filter.
 const _reviewDevsByGameId: Record<string, string[]> = {};
-if (_reviewGameIds.length > 0) {
-  const { data: _revCompanyRows } = await (supabase as any)
-    .from('game_companies')
-    .select('game_id, developers(name)')
-    .eq('role', 'developer')
-    .in('game_id', _reviewGameIds);
-  for (const row of _revCompanyRows ?? []) {
-    if (row.developers?.name) {
-      if (!_reviewDevsByGameId[row.game_id]) _reviewDevsByGameId[row.game_id] = [];
-      _reviewDevsByGameId[row.game_id].push(row.developers.name);
-    }
+for (const row of (_revCompanyRows ?? []) as any[]) {
+  if (row.developers?.name) {
+    if (!_reviewDevsByGameId[row.game_id]) _reviewDevsByGameId[row.game_id] = [];
+    _reviewDevsByGameId[row.game_id].push(row.developers.name);
   }
 }
 
@@ -169,19 +231,6 @@ for (const r of publishedReviews) {
   }
 }
 // Tally votes received on the reviewer's own comments (reviews, lists, recommendations)
-const [
-  { data: reviewerComments },
-  { data: reviewerLists },
-  { data: reviewerListComments },
-  { data: reviewerRecsForVotes },
-  { data: reviewerRecComments },
-] = await Promise.all([
-  (supabase as any).from('review_comments').select('comment_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('lists').select('list_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('list_comments').select('list_comment_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('recommendations').select('recommendation_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('recommendation_comments').select('recommendation_comment_votes(vote)').eq('profile_id', reviewer.id),
-])
 const voteBuckets = [
   ...(reviewerComments ?? []).map((c: any) => c.comment_votes),
   ...(reviewerLists ?? []).map((l: any) => l.list_votes),
@@ -200,58 +249,38 @@ const memberSince = reviewer.created_at
   ? new Date(reviewer.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
   : null;
 
-const { count: followerCount } = await (supabase as any)
-  .from('follows').select('*', { count: 'exact', head: true }).eq('following_id', reviewer.id);
-
-const { count: followingCount } = await (supabase as any)
-  .from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', reviewer.id);
-
-const { data: followersData } = await (supabase as any)
-  .from('follows')
-  .select('follower:profiles!follower_id(id, username, avatar_url)')
-  .eq('following_id', reviewer.id);
-
-const { data: followingData } = await (supabase as any)
-  .from('follows')
-  .select('following:profiles!following_id(id, username, avatar_url)')
-  .eq('follower_id', reviewer.id);
-
 const followersList: Array<{ id: string; username: string; avatar_url: string | null }> =
   (followersData ?? []).map((r: any) => r.follower).filter(Boolean);
 const followingList: Array<{ id: string; username: string; avatar_url: string | null }> =
   (followingData ?? []).map((r: any) => r.following).filter(Boolean);
+// The lists above are the counts — no separate count:exact round-trips.
+const followerCount = followersList.length;
+const followingCount = followingList.length;
 
-let currentProfile: any = null;
-let isFollowing = false;
-let isNotifying = false;
-let isOwnProfile = false;
+const currentProfile: any = currentProfileRow ?? null;
+const isOwnProfile = !!currentProfile && currentProfile.id === reviewer.id;
+
+// Viewer's follow state, read straight out of the follower list we already have.
+const _viewerFollowRow = currentProfile && !isOwnProfile
+  ? (followersData ?? []).find((r: any) => r.follower?.id === currentProfile.id)
+  : null;
+const isFollowing = !!_viewerFollowRow;
+const isNotifying = _viewerFollowRow?.notify ?? false;
+// "friends" privacy = mutual follow. The reverse direction is in followingList.
+const isMutualFollow = isFollowing
+  && followingList.some((p) => p.id === currentProfile.id);
+
 // How far a previous (possibly interrupted) achievement sync got, so the owner's
-// Sync button resumes instead of restarting. Own its own query so a not-yet-run
+// Sync button resumes instead of restarting. Its own query so a not-yet-run
 // migration can't take out anything else on the page.
 let achSyncCursor = 0;
-
-if (user) {
-  const { data: cp } = await (supabase as any)
-    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
-  currentProfile = cp;
-  if (currentProfile) {
-    isOwnProfile = currentProfile.id === reviewer.id;
-    if (isOwnProfile) {
-      const { data: _achCursorRow } = await (getSupabaseAdmin() as any)
-        .from('profiles')
-        .select('achievements_sync_cursor')
-        .eq('id', reviewer.id)
-        .maybeSingle();
-      achSyncCursor = Number((_achCursorRow as any)?.achievements_sync_cursor ?? 0) || 0;
-    }
-    if (!isOwnProfile) {
-      const { data: followRow } = await (supabase as any)
-        .from('follows').select('id, notify')
-        .eq('follower_id', currentProfile.id).eq('following_id', reviewer.id).maybeSingle();
-      isFollowing = !!followRow;
-      isNotifying = followRow?.notify ?? false;
-    }
-  }
+if (isOwnProfile) {
+  const { data: _achCursorRow } = await db
+    .from('profiles')
+    .select('achievements_sync_cursor')
+    .eq('id', reviewer.id)
+    .maybeSingle();
+  achSyncCursor = Number((_achCursorRow as any)?.achievements_sync_cursor ?? 0) || 0;
 }
 
 // Contextual nudge: prompt logged-in users who have content but haven't opted
@@ -261,13 +290,7 @@ if (user) {
 // here, not at /profile), so the nudge belongs here rather than there.
 const showSearchNudge = isOwnProfile && !reviewer.search_indexable && publishedReviews.length > 0;
 
-// ── LISTS ──
-const { data: profileListsRaw } = await (supabase as any)
-  .from('lists')
-  .select('id, title, is_ranked, visibility, cover_image_url, updated_at')
-  .eq('profile_id', reviewer.id)
-  .order('updated_at', { ascending: false });
-
+// ── LISTS ── (rows came from wave 1)
 const profileListIds = (profileListsRaw ?? []).map((l: any) => l.id);
 
 const [{ data: coverEntriesRaw }, { data: allEntriesRaw }] = profileListIds.length > 0
@@ -319,13 +342,7 @@ let savedLists: any[] = []
 const savedGameIdsByListId: Record<string, string[]> = {};
 const savedYearsByListId: Record<string, number[]> = {};
 {
-  const { data: savedRaw } = await (supabase as any)
-    .from('list_saves')
-    .select('list_id, is_hidden, lists(id, title, is_ranked, visibility, cover_image_url, updated_at, profiles(id, username, avatar_url))')
-    .eq('profile_id', reviewer.id)
-    .order('created_at', { ascending: false })
-
-  // Owners see all saves; others only see non-hidden ones
+  // Owners see all saves; others only see non-hidden ones (rows from wave 1)
   const rawSavedLists = (savedRaw ?? [])
     .filter((s: any) => s.lists && (isOwnProfile || !s.is_hidden))
     .map((s: any) => ({ ...s.lists, isHidden: s.is_hidden ?? false }))
@@ -490,66 +507,46 @@ for (let i = 11; i >= 0; i--) {
 const recommendedCount = publishedReviews.filter((r: any) => r.score >= 7).length
 const recommendedRate = publishedReviews.length > 0 ? Math.round((recommendedCount / publishedReviews.length) * 100) : 0
 
-// score delta vs community — fetch avg score for each reviewed game
-const reviewedGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))]
-let scoreDelta: number | null = null
-if (reviewedGameIds.length > 0) {
-  const { data: communityScores } = await (supabase as any)
-    .from('reviews')
-    .select('game_id, score')
-    .in('game_id', reviewedGameIds)
-    .eq('status', 'published')
+// Community averages per reviewed game, from the single wave-1 scan. Used for
+// the score-delta stat here and reused by the chart data further down.
+const gameAvgMap: Record<string, number> = {}
+const gameAvgHoursMap: Record<string, number> = {}
+{
+  const scoresByGame: Record<string, number[]> = {}
+  const hoursByGame: Record<string, number[]> = {}
+  for (const row of (communityScoresRaw ?? []) as any[]) {
+    ;(scoresByGame[row.game_id] ||= []).push(row.score)
+    if (row.play_time_hours != null && row.play_time_hours > 0) {
+      ;(hoursByGame[row.game_id] ||= []).push(row.play_time_hours)
+    }
+  }
+  for (const [gid, scores] of Object.entries(scoresByGame)) {
+    gameAvgMap[gid] = scores.reduce((a, b) => a + b, 0) / scores.length
+  }
+  for (const [gid, hours] of Object.entries(hoursByGame)) {
+    gameAvgHoursMap[gid] = hours.reduce((a, b) => a + b, 0) / hours.length
+  }
+}
 
-  if (communityScores && communityScores.length > 0) {
-    // build game avg map
-    const gameScoreMap: Record<string, number[]> = {}
-    for (const row of communityScores) {
-      if (!gameScoreMap[row.game_id]) gameScoreMap[row.game_id] = []
-      gameScoreMap[row.game_id].push(row.score)
-    }
-    const gameAvgMap: Record<string, number> = {}
-    for (const [gid, scores] of Object.entries(gameScoreMap)) {
-      gameAvgMap[gid] = (scores as number[]).reduce((a, b) => a + b, 0) / (scores as number[]).length
-    }
-    // compute delta per review
-    const deltas: number[] = []
-    for (const r of publishedReviews) {
-      const gid = (r as any).games?.id
-      if (gid && gameAvgMap[gid] !== undefined) {
-        deltas.push((r as any).score - gameAvgMap[gid])
-      }
-    }
-    if (deltas.length > 0) {
-      scoreDelta = Math.round((deltas.reduce((a, b) => a + b, 0) / deltas.length) * 10) / 10
-    }
+let scoreDelta: number | null = null
+{
+  const deltas: number[] = []
+  for (const r of publishedReviews) {
+    const gid = (r as any).games?.id
+    if (gid && gameAvgMap[gid] !== undefined) deltas.push((r as any).score - gameAvgMap[gid])
+  }
+  if (deltas.length > 0) {
+    scoreDelta = Math.round((deltas.reduce((a, b) => a + b, 0) / deltas.length) * 10) / 10
   }
 }
 
 const recentGames = publishedReviews.slice(0, 6).map((r: any) => r.games).filter(Boolean)
 
 // ── LIBRARY (user_game_status) ──
-// Check mutual follow so we can apply 'friends' privacy level
-let isMutualFollow = false;
-if (currentProfile && !isOwnProfile) {
-  const [{ data: fwd }, { data: rev }] = await Promise.all([
-    (supabase as any).from('follows').select('id')
-      .eq('follower_id', currentProfile.id).eq('following_id', reviewer.id).maybeSingle(),
-    (supabase as any).from('follows').select('id')
-      .eq('follower_id', reviewer.id).eq('following_id', currentProfile.id).maybeSingle(),
-  ]);
-  isMutualFollow = !!(fwd && rev);
-}
+// isMutualFollow is derived above from the follower/following lists.
 
-const db = getSupabaseAdmin() as any;
-
-// This reviewer's authored recommendations (rendered most-recent-first; re-sortable client-side)
-const { data: reviewerRecsRaw } = await db
-  .from('recommendations')
-  .select(REC_SELECT)
-  .eq('profile_id', reviewer.id)
-  .eq('status', 'published')
-  .order('created_at', { ascending: false })
-  .limit(100);
+// This reviewer's authored recommendations (rows from wave 1; rendered
+// most-recent-first, re-sortable client-side)
 const reviewerRecs = (reviewerRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
 
 // Shared filter/search metadata for the Recommendations tab — same Overview /
@@ -598,29 +595,10 @@ const recGenres = [...new Set(recFilterItems.flatMap((i: any) => i.genres))].sor
 const recPlatforms = [...new Set(recFilterItems.flatMap((i: any) => i.platforms))].sort() as string[];
 const recDevs = [...new Set(recFilterItems.flatMap((i: any) => i.devs))].sort() as string[];
 
-// Fetch library settings with fallback in case migration hasn't run yet
-let libSettingsRow: any = null;
-try {
-  const { data } = await db
-    .from('profiles')
-    .select('library_visibility, library_show_hours, library_hidden_tabs')
-    .eq('id', reviewer.id)
-    .maybeSingle();
-  libSettingsRow = data;
-} catch (_) { /* columns not yet available, use defaults below */ }
-
 // Library data is fetched client-side via /api/user-game-status/library (paginated).
 // Only lightweight COUNT queries run server-side for filter pill totals.
 
-// Which games has this reviewer published a review for?
-const { data: reviewedRows } = await db
-  .from('reviews')
-  .select('game_id')
-  .eq('profile_id', reviewer.id)
-  .eq('status', 'published');
-const reviewedGameIdsSet: Set<string> = new Set((reviewedRows ?? []).map((r: any) => r.game_id));
-
-// Library settings from profile (with defaults for old rows or pre-migration)
+// Library settings from profile (wave 1; defaults for old rows or pre-migration)
 const libraryVisibility: string = libSettingsRow?.library_visibility ?? 'public'
 const libraryShowHours: boolean = libSettingsRow?.library_show_hours ?? true
 const libraryHiddenTabs: string[] = libSettingsRow?.library_hidden_tabs ?? []
@@ -633,35 +611,6 @@ const canSeeWantToPlay = isOwnProfile
 const canSeeDropped = isOwnProfile
   || !(reviewer.dropped_privacy === 'private'
        || (reviewer.dropped_privacy === 'friends' && !isMutualFollow));
-
-// Parallel COUNT queries — lightweight, no game data loaded.
-const libCounts = { all: 0, playing: 0, want_to_play: 0, owned: 0, completed: 0, hundred_percent: 0, dropped: 0, unplayed: 0, hidden: 0 };
-if (!libraryIsPrivate) {
-  const base = () => (db as any)
-    .from('user_game_status')
-    .select('*', { count: 'exact', head: true })
-    .eq('profile_id', reviewer.id);
-  const results = await Promise.all([
-    base().eq('is_hidden', false),
-    base().eq('status', 'playing').eq('is_hidden', false),
-    canSeeWantToPlay ? base().eq('status', 'want_to_play').eq('is_hidden', false) : Promise.resolve({ count: 0 }),
-    base().eq('is_owned', true).eq('is_hidden', false),
-    base().in('status', ['completed', 'hundred_percent']).eq('is_hidden', false),
-    base().eq('status', 'hundred_percent').eq('is_hidden', false),
-    canSeeDropped ? base().eq('status', 'dropped').eq('is_hidden', false) : Promise.resolve({ count: 0 }),
-    isOwnProfile ? base().eq('is_hidden', true) : Promise.resolve({ count: 0 }),
-    base().eq('is_hidden', false).not('status', 'in', '(completed,hundred_percent)').or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0'),
-  ]);
-  libCounts.all            = results[0].count ?? 0;
-  libCounts.playing        = results[1].count ?? 0;
-  libCounts.want_to_play   = results[2].count ?? 0;
-  libCounts.owned          = results[3].count ?? 0;
-  libCounts.completed      = results[4].count ?? 0;
-  libCounts.hundred_percent = results[5].count ?? 0;
-  libCounts.dropped        = results[6].count ?? 0;
-  libCounts.hidden         = results[7].count ?? 0;
-  libCounts.unplayed       = results[8].count ?? 0;
-}
 
 // Distinct genre / platform / developer names across this reviewer's visible
 // library — powers the Library filter dropdowns, matching the Reviews / Lists /
@@ -698,43 +647,53 @@ async function libDimNames(
   return [...names].sort();
 }
 
+// Filter-pill counts and filter-dropdown options — one wave, not two.
+const libCounts = { all: 0, playing: 0, want_to_play: 0, owned: 0, completed: 0, hundred_percent: 0, dropped: 0, unplayed: 0, hidden: 0 };
 let libGenres: string[] = [];
 let libPlatforms: string[] = [];
 let libDevs: string[] = [];
 if (!libraryIsPrivate) {
-  [libGenres, libPlatforms, libDevs] = await Promise.all([
-    libDimNames('game_genres', 'genres(name)'),
-    libDimNames('game_platforms', 'platforms(name)'),
-    libDimNames('game_companies', 'developers(name)', 'developer'),
+  const base = () => (db as any)
+    .from('user_game_status')
+    .select('*', { count: 'exact', head: true })
+    .eq('profile_id', reviewer.id);
+  const [counts, dims] = await Promise.all([
+    Promise.all([
+      base().eq('is_hidden', false),
+      base().eq('status', 'playing').eq('is_hidden', false),
+      canSeeWantToPlay ? base().eq('status', 'want_to_play').eq('is_hidden', false) : Promise.resolve({ count: 0 }),
+      base().eq('is_owned', true).eq('is_hidden', false),
+      base().in('status', ['completed', 'hundred_percent']).eq('is_hidden', false),
+      base().eq('status', 'hundred_percent').eq('is_hidden', false),
+      canSeeDropped ? base().eq('status', 'dropped').eq('is_hidden', false) : Promise.resolve({ count: 0 }),
+      isOwnProfile ? base().eq('is_hidden', true) : Promise.resolve({ count: 0 }),
+      base().eq('is_hidden', false).not('status', 'in', '(completed,hundred_percent)').or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0'),
+    ]),
+    Promise.all([
+      libDimNames('game_genres', 'genres(name)'),
+      libDimNames('game_platforms', 'platforms(name)'),
+      libDimNames('game_companies', 'developers(name)', 'developer'),
+    ]),
   ]);
+  libCounts.all            = counts[0].count ?? 0;
+  libCounts.playing        = counts[1].count ?? 0;
+  libCounts.want_to_play   = counts[2].count ?? 0;
+  libCounts.owned          = counts[3].count ?? 0;
+  libCounts.completed      = counts[4].count ?? 0;
+  libCounts.hundred_percent = counts[5].count ?? 0;
+  libCounts.dropped        = counts[6].count ?? 0;
+  libCounts.hidden         = counts[7].count ?? 0;
+  libCounts.unplayed       = counts[8].count ?? 0;
+  [libGenres, libPlatforms, libDevs] = dims;
 }
 
 // ── CHART DATA ──
-// We reuse communityScores fetched above — build gameAvgMap here for chart use too
-const _reviewedGameIds2 = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))]
-const _gameAvgMap2: Record<string, number> = {}
+// Reuses the single community-score scan from wave 1 (this used to re-run a
+// near-identical query for the charts).
+const _gameAvgMap2 = gameAvgMap
 const _gameAvgHoursMap2: Record<string, number> = {}
-if (_reviewedGameIds2.length > 0) {
-  const { data: _cs2 } = await (supabase as any)
-    .from('reviews').select('game_id, score, play_time_hours').in('game_id', _reviewedGameIds2).eq('status', 'published')
-  if (_cs2) {
-    const _m: Record<string, number[]> = {}
-    const _mh: Record<string, number[]> = {}
-    for (const row of _cs2) {
-      if (!_m[row.game_id]) _m[row.game_id] = []
-      _m[row.game_id].push(row.score)
-      if (row.play_time_hours != null && row.play_time_hours > 0) {
-        if (!_mh[row.game_id]) _mh[row.game_id] = []
-        _mh[row.game_id].push(row.play_time_hours)
-      }
-    }
-    for (const [gid, sc] of Object.entries(_m)) {
-      _gameAvgMap2[gid] = (sc as number[]).reduce((a,b)=>a+b,0) / (sc as number[]).length
-    }
-    for (const [gid, hrs] of Object.entries(_mh)) {
-      _gameAvgHoursMap2[gid] = Math.round((hrs as number[]).reduce((a,b)=>a+b,0) / (hrs as number[]).length)
-    }
-  }
+for (const [gid, avg] of Object.entries(gameAvgHoursMap)) {
+  _gameAvgHoursMap2[gid] = Math.round(avg)
 }
 
 // 1. Games & Hours by Genre
@@ -925,15 +884,13 @@ if (!user) {
 Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
 
 // ── Achievements ──
-const adminDb = getSupabaseAdmin() as any;
-
 // Does this profile have any synced achievements? Only needed to decide whether
 // to show the tab, and only when steam_id / ownership haven't already decided it.
 // An existence check (LIMIT 1) — never `count: 'exact'`, which scans every row
 // and is brutal on a large library (500 games × 50 achievements = 25k+ rows).
 let _achHasRows = false;
 if (!(reviewer as any).steam_id && !isOwnProfile) {
-  const { data: _achProbe } = await adminDb
+  const { data: _achProbe } = await db
     .from('user_achievements')
     .select('id')
     .eq('profile_id', reviewer.id)
