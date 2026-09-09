@@ -14,6 +14,9 @@ export const GET: APIRoute = async (context) => {
   const sort       = p.get('sort')   || 'alpha';
   const search     = (p.get('search') || '').trim();
   const showHidden = p.get('hidden') === 'true';
+  // Only the Library "Detailed" view needs per-game achievement counts — skip the
+  // extra user_achievements scan for the default card grid.
+  const wantDetailed = p.get('detailed') === 'true';
 
   if (!username) return json({ error: 'username required' }, 400);
 
@@ -148,7 +151,7 @@ export const GET: APIRoute = async (context) => {
   }
 
   let q = buildQuery(
-    'id, title, slug, cover_img_url, game_genres(genres(name, slug)), user_game_status!inner(status, is_hidden, is_owned, updated_at, steam_playtime_minutes)',
+    'id, title, slug, cover_img_url, game_genres(genres(name, slug)), user_game_status!inner(status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid)',
     { count: 'exact' }
   );
 
@@ -182,9 +185,48 @@ export const GET: APIRoute = async (context) => {
       isHidden:  ugs?.is_hidden ?? false,
       updatedAt: ugs?.updated_at ?? '',
       playtime:  ugs?.steam_playtime_minutes ?? null,
+      steamAppid: ugs?.steam_appid ?? null,
       genres:    (r.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean),
     };
   });
+
+  // Per-game achievement progress for the "Detailed" view. user_achievements is
+  // keyed on steam_appid, so only Steam-imported games with a synced achievement
+  // set get counts. One page is <=96 games; paginate past the 1000-row cap anyway.
+  if (wantDetailed) {
+    const appids = [...new Set(
+      items.map((i: any) => i.steamAppid).filter((x: any): x is number => typeof x === 'number')
+    )];
+    const counts = new Map<number, { unlocked: number; total: number }>();
+    if (appids.length > 0) {
+      const CHUNK = 1000;
+      for (let start = 0; ; start += CHUNK) {
+        const { data: achRows, error: achErr } = await db
+          .from('user_achievements')
+          .select('steam_appid, unlocked')
+          .eq('profile_id', profile.id)
+          .in('steam_appid', appids)
+          .range(start, start + CHUNK - 1);
+        if (achErr) {
+          console.error('[library API] achievement counts error:', JSON.stringify(achErr));
+          break;
+        }
+        for (const row of achRows ?? []) {
+          const appid = (row as any).steam_appid as number;
+          const cur = counts.get(appid) ?? { unlocked: 0, total: 0 };
+          cur.total++;
+          if ((row as any).unlocked) cur.unlocked++;
+          counts.set(appid, cur);
+        }
+        if (!achRows || achRows.length < CHUNK) break;
+      }
+    }
+    for (const it of items as any[]) {
+      const c = it.steamAppid != null ? counts.get(it.steamAppid) : null;
+      it.achUnlocked = c ? c.unlocked : null;
+      it.achTotal = c ? c.total : null;
+    }
+  }
 
   return json({ items, total: total ?? 0, page, pageSize: PAGE_SIZE, hasMore: items.length === PAGE_SIZE });
 };
