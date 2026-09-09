@@ -120,14 +120,17 @@ export const POST: APIRoute = async (context) => {
     )
   );
 
-  const allMatchedGames: Array<{ id: string; title: string }> = [];
+  // steam_title is the input value Steam sent that matched this game — use it
+  // (not our title, which can differ after normalization) to look up playtime
+  // and appid below.
+  const allMatchedGames: Array<{ id: string; title: string; steam_title: string }> = [];
   const seenMatchedIds = new Set<string>();
   for (const { data: batchMatches, error: matchError } of matchBatchResults) {
     if (matchError) {
       console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
       return json({ error: 'Failed to match games.' }, 500);
     }
-    for (const row of (batchMatches ?? []) as Array<{ id: string; title: string }>) {
+    for (const row of (batchMatches ?? []) as Array<{ id: string; title: string; steam_title: string }>) {
       if (!seenMatchedIds.has(row.id)) {
         seenMatchedIds.add(row.id);
         allMatchedGames.push(row);
@@ -139,7 +142,7 @@ export const POST: APIRoute = async (context) => {
   console.log(`[steam/import] match_steam_games returned ${matches.length} matches:`, matches.map(m => m.title));
 
   if (matches.length > 0) {
-    const matchedTitlesSet = new Set(matches.map(m => m.title.toLowerCase().trim()));
+    const matchedTitlesSet = new Set(matches.map(m => (m.steam_title ?? m.title).toLowerCase().trim()));
     const unmatched = steamTitles.filter(t => !matchedTitlesSet.has(t));
     console.log(`[steam/import] Unmatched Steam titles (${unmatched.length}):`, unmatched);
     logUnmatchedTitles(db, unmatched.map(t => originalCaseByTitle.get(t) ?? t));
@@ -171,7 +174,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   const toInsert: any[] = [];
-  const toUpdatePlaytime: Array<{ game_id: string; playtime: number }> = [];
+  const toUpdatePlaytime: Array<{ game_id: string; playtime: number; appid: number | null }> = [];
   const seenGameIds = new Set<string>();
 
   for (const game of matches) {
@@ -180,7 +183,8 @@ export const POST: APIRoute = async (context) => {
     if (seenGameIds.has(game.id)) continue;
     seenGameIds.add(game.id);
 
-    const key     = game.title.toLowerCase().trim();
+    // Key off the Steam-sent title, not ours — they diverge after normalization.
+    const key      = (game.steam_title ?? game.title).toLowerCase().trim();
     const playtime = steamByTitle.get(key) ?? 0;
     const appid    = appidByTitle.get(key) ?? null;
     const existing = existingByGameId.get(game.id);
@@ -197,8 +201,9 @@ export const POST: APIRoute = async (context) => {
         steam_appid: appid,
       });
     } else {
-      // Already tracked — only update playtime and appid
-      toUpdatePlaytime.push({ game_id: game.id, playtime });
+      // Already tracked (e.g. auto-added when the user reviewed it) — refresh
+      // playtime AND steam_appid without touching their chosen status.
+      toUpdatePlaytime.push({ game_id: game.id, playtime, appid });
     }
   }
 
@@ -214,7 +219,7 @@ export const POST: APIRoute = async (context) => {
   // Bulk playtime update via RPC — replaces one-at-a-time loop that would
   // timeout on large libraries (e.g. 2000 games × 1 HTTP call each = ~200s)
   if (toUpdatePlaytime.length > 0) {
-    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime }) => ({ game_id, playtime }));
+    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime, appid }) => ({ game_id, playtime, appid }));
     for (const batch of chunk(updatePayload, WRITE_CHUNK)) {
       const { error: updateError } = await (db as any).rpc('bulk_update_steam_playtime', {
         p_profile_id: profile.id,
