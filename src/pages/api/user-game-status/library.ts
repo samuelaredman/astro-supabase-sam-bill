@@ -13,6 +13,9 @@ export const GET: APIRoute = async (context) => {
   const filter     = p.get('filter') || 'all';
   const sort       = p.get('sort')   || 'alpha';
   const search     = (p.get('search') || '').trim();
+  const genre      = (p.get('genre') || '').trim();
+  const platform   = (p.get('platform') || '').trim();
+  const dev        = (p.get('dev') || '').trim();
   const showHidden = p.get('hidden') === 'true';
   // Only the Library "Detailed" view needs per-game achievement counts — skip the
   // extra user_achievements scan for the default card grid.
@@ -65,39 +68,84 @@ export const GET: APIRoute = async (context) => {
     (profile.dropped_privacy === 'friends' && !isMutualFollow)
   );
 
-  // Query starts from the games table so ORDER BY title is native on the main
-  // resource — PostgREST's embedded-resource column ordering is unreliable.
-  // Factored out so the id-only "select all" path applies identical filters.
-  const buildQuery = (selectStr: string, opts?: any) => {
-    let qb = db
-      .from('games')
-      .select(selectStr, opts)
-      .eq('user_game_status.profile_id', profile.id);
+  // A top-level PostgREST query cannot ORDER BY an *embedded* resource's column
+  // (it only sorts rows within the embed), so we pivot the query onto whichever
+  // table actually owns the sort column:
+  //   alpha / review  → FROM games            (native ORDER BY games.title)
+  //   hours / recent  → FROM user_game_status (native ORDER BY its own columns)
+  // `review` ("has review first") has no column to sort on here — the caller
+  // owns the review map — so it rides the games/title path and is reordered
+  // client-side.
+  const ugsBase = sort === 'hours' || sort === 'recent';
+
+  // Factored out so the id-only "select all" and letter-map paths apply
+  // identical filters. `base` overrides the pivot for paths where order is
+  // irrelevant and the games table is simpler to read from.
+  const buildQuery = (
+    gamesSelect: string,
+    ugsSelect: string,
+    opts?: any,
+    base: 'games' | 'ugs' = ugsBase ? 'ugs' : 'games',
+  ) => {
+    // Filter-only inner joins through the game↔dimension junctions — appended to
+    // the select purely so the matching .eq() below can drop non-matching games
+    // (the client never reads these back). Dimension names are all UNIQUE and
+    // match the dropdown values built in the page frontmatter.
+    const dimJoins: string[] = [];
+    if (genre)    dimJoins.push('game_genres!inner(genres!inner(name))');
+    if (platform) dimJoins.push('game_platforms!inner(platforms!inner(name))');
+    if (dev)      dimJoins.push('game_companies!inner(role,developers!inner(name))');
+    const gamesSel = dimJoins.length ? `${gamesSelect}, ${dimJoins.join(', ')}` : gamesSelect;
+
+    let qb =
+      base === 'ugs'
+        ? db
+            .from('user_game_status')
+            .select(`${ugsSelect}, games!inner(${gamesSel})`, opts)
+            .eq('profile_id', profile.id)
+        : db
+            .from('games')
+            .select(`${gamesSel}, user_game_status!inner(${ugsSelect})`, opts)
+            .eq('user_game_status.profile_id', profile.id);
+
+    // Column reference: bare on the ugs base, prefixed when embedded.
+    const c = (col: string) => (base === 'ugs' ? col : `user_game_status.${col}`);
+    // Same, for filters that live on the games side of a ugs-base query.
+    const g = (path: string) => (base === 'ugs' ? `games.${path}` : path);
+
+    // Genre / platform / developer filters (dimension name, via the junctions).
+    if (genre)    qb = qb.eq(g('game_genres.genres.name'), genre);
+    if (platform) qb = qb.eq(g('game_platforms.platforms.name'), platform);
+    if (dev) {
+      qb = qb.eq(g('game_companies.role'), 'developer');
+      qb = qb.eq(g('game_companies.developers.name'), dev);
+    }
 
     // Visibility
     if (showHidden && isOwn) {
-      qb = qb.eq('user_game_status.is_hidden', true);
+      qb = qb.eq(c('is_hidden'), true);
     } else {
-      qb = qb.eq('user_game_status.is_hidden', false);
-      if (!canSeeWantToPlay) qb = qb.neq('user_game_status.status', 'want_to_play');
-      if (!canSeeDropped)    qb = qb.neq('user_game_status.status', 'dropped');
+      qb = qb.eq(c('is_hidden'), false);
+      if (!canSeeWantToPlay) qb = qb.neq(c('status'), 'want_to_play');
+      if (!canSeeDropped)    qb = qb.neq(c('status'), 'dropped');
     }
 
     // Status filter
     if (filter === 'owned') {
-      qb = qb.eq('user_game_status.is_owned', true);
+      qb = qb.eq(c('is_owned'), true);
     } else if (filter === 'completed') {
-      qb = qb.in('user_game_status.status', ['completed', 'hundred_percent']);
+      qb = qb.in(c('status'), ['completed', 'hundred_percent']);
     } else if (filter === 'unplayed') {
-      qb = qb
-        .not('user_game_status.status', 'in', '(completed,hundred_percent)')
-        .or('user_game_status.steam_playtime_minutes.is.null,user_game_status.steam_playtime_minutes.eq.0');
+      qb = qb.not(c('status'), 'in', '(completed,hundred_percent)');
+      qb = base === 'ugs'
+        ? qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0')
+        : qb.or('user_game_status.steam_playtime_minutes.is.null,user_game_status.steam_playtime_minutes.eq.0');
     } else if (filter !== 'all') {
-      qb = qb.eq('user_game_status.status', filter);
+      qb = qb.eq(c('status'), filter);
     }
 
-    // Search — title is now on the main table, plain ilike with no foreignTable needed
-    if (search) qb = qb.ilike('title', `%${search}%`);
+    // Search on the game title
+    if (search) qb = qb.ilike(base === 'ugs' ? 'games.title' : 'title', `%${search}%`);
 
     return qb;
   };
@@ -109,7 +157,7 @@ export const GET: APIRoute = async (context) => {
     const ids: string[] = [];
     for (let start = 0; ; start += CHUNK) {
       const { data: idRows, error: idErr } = await buildQuery(
-        'id, user_game_status!inner(profile_id)'
+        'id', 'profile_id', undefined, 'games'
       ).range(start, start + CHUNK - 1);
       if (idErr) {
         console.error('[library API] idsOnly error:', JSON.stringify(idErr));
@@ -129,7 +177,7 @@ export const GET: APIRoute = async (context) => {
       const CHUNK = 1000;
       let idx = 0;
       for (let start = 0; ; start += CHUNK) {
-        const { data: rows, error: lmErr } = await buildQuery('id, title, user_game_status!inner(profile_id)')
+        const { data: rows, error: lmErr } = await buildQuery('id, title', 'profile_id', undefined, 'games')
           .order('title', { ascending: true })
           .range(start, start + CHUNK - 1);
         if (lmErr) {
@@ -150,18 +198,22 @@ export const GET: APIRoute = async (context) => {
     return json({ letterMap });
   }
 
+  // Note: no genre embed here — the client card/row markup never uses it, and
+  // leaving it out keeps the genre *filter*'s inner-join (added in buildQuery)
+  // the only game_genres embed, so there's no duplicate-embed ambiguity.
   let q = buildQuery(
-    'id, title, slug, cover_img_url, game_genres(genres(name, slug)), user_game_status!inner(status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid)',
+    'id, title, slug, cover_img_url',
+    'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid',
     { count: 'exact' }
   );
 
-  // Sort
-  if (sort === 'hours') {
-    q = q.order('steam_playtime_minutes', { foreignTable: 'user_game_status', ascending: false, nullsFirst: false });
-  } else if (sort === 'recent') {
-    q = q.order('updated_at', { foreignTable: 'user_game_status', ascending: false });
+  // Sort — native ORDER BY on whichever table buildQuery pivoted onto.
+  if (ugsBase && sort === 'hours') {
+    q = q.order('steam_playtime_minutes', { ascending: false, nullsFirst: false });
+  } else if (ugsBase && sort === 'recent') {
+    q = q.order('updated_at', { ascending: false });
   } else {
-    // alpha (default) — ORDER BY title on the games table, guaranteed to work
+    // games base: alpha (default) + review. review is reordered client-side.
     q = q.order('title', { ascending: true });
   }
 
@@ -174,19 +226,26 @@ export const GET: APIRoute = async (context) => {
   }
 
   const items = (rows ?? []).map((r: any) => {
-    const ugs = Array.isArray(r.user_game_status) ? r.user_game_status[0] : r.user_game_status;
+    // buildQuery pivots the base table by sort, so a row is either a games row
+    // with an embedded user_game_status, or a user_game_status row with an
+    // embedded games. Normalise both to { g, ugs }.
+    const g = r.games
+      ? (Array.isArray(r.games) ? r.games[0] : r.games)
+      : r;
+    const ugs = r.games
+      ? r
+      : (Array.isArray(r.user_game_status) ? r.user_game_status[0] : r.user_game_status);
     return {
-      gameId:    r.id ?? '',
-      title:     r.title ?? '',
-      slug:      r.slug ?? '',
-      cover:     r.cover_img_url ?? null,
+      gameId:    g?.id ?? '',
+      title:     g?.title ?? '',
+      slug:      g?.slug ?? '',
+      cover:     g?.cover_img_url ?? null,
       status:    ugs?.status ?? '',
       owned:     ugs?.is_owned ?? false,
       isHidden:  ugs?.is_hidden ?? false,
       updatedAt: ugs?.updated_at ?? '',
       playtime:  ugs?.steam_playtime_minutes ?? null,
       steamAppid: ugs?.steam_appid ?? null,
-      genres:    (r.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean),
     };
   });
 

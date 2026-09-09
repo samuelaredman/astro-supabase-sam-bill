@@ -138,6 +138,7 @@ const reviewFilterItems = publishedReviews.map((r: any) => {
   return {
     review: r,
     searchText: `${r.games?.title ?? ''} ${r.title ?? ''}`.trim(),
+    sortTitle: r.games?.title ?? '',
     genres,
     devs,
     platform: r.played_on?.name ?? '',
@@ -584,6 +585,7 @@ const recFilterItems = reviewerRecs.map((rec: any) => {
   return {
     rec,
     searchText: `${rec.sourceGame?.title ?? ''} ${rec.targetGame?.title ?? ''} ${rec.body ?? ''}`.trim(),
+    sortTitle: rec.sourceGame?.title ?? rec.targetGame?.title ?? '',
     genres,
     platforms,
     devs,
@@ -659,6 +661,39 @@ if (!libraryIsPrivate) {
   libCounts.dropped        = results[6].count ?? 0;
   libCounts.hidden         = results[7].count ?? 0;
   libCounts.unplayed       = results[8].count ?? 0;
+}
+
+// Distinct genre / platform / developer names across this reviewer's visible
+// library — powers the Library filter dropdowns, matching the Reviews / Lists /
+// Recs tabs. Queried from the small dimension tables (so the result is a few
+// dozen rows regardless of library size) with a filtered inner-join down to
+// user_game_status, keeping only dimensions that actually appear in the library.
+let libGenres: string[] = [];
+let libPlatforms: string[] = [];
+let libDevs: string[] = [];
+if (!libraryIsPrivate) {
+  try {
+    const [gRes, pRes, dRes] = await Promise.all([
+      (db as any).from('genres')
+        .select('name, game_genres!inner(games!inner(user_game_status!inner(profile_id, is_hidden)))')
+        .eq('game_genres.games.user_game_status.profile_id', reviewer.id)
+        .eq('game_genres.games.user_game_status.is_hidden', false),
+      (db as any).from('platforms')
+        .select('name, game_platforms!inner(games!inner(user_game_status!inner(profile_id, is_hidden)))')
+        .eq('game_platforms.games.user_game_status.profile_id', reviewer.id)
+        .eq('game_platforms.games.user_game_status.is_hidden', false),
+      (db as any).from('developers')
+        .select('name, game_companies!inner(role, games!inner(user_game_status!inner(profile_id, is_hidden)))')
+        .eq('game_companies.role', 'developer')
+        .eq('game_companies.games.user_game_status.profile_id', reviewer.id)
+        .eq('game_companies.games.user_game_status.is_hidden', false),
+    ]);
+    libGenres    = [...new Set((gRes.data ?? []).map((r: any) => r.name).filter(Boolean))].sort() as string[];
+    libPlatforms = [...new Set((pRes.data ?? []).map((r: any) => r.name).filter(Boolean))].sort() as string[];
+    libDevs      = [...new Set((dRes.data ?? []).map((r: any) => r.name).filter(Boolean))].sort() as string[];
+  } catch (e) {
+    console.error('[profile library] filter-option query failed:', e);
+  }
 }
 
 // ── CHART DATA ──
@@ -855,6 +890,9 @@ for (const r of publishedReviews) {
 const countsJson      = JSON.stringify(libCounts)
 const reviewScoresJson = JSON.stringify(reviewScoreByGameId)
 const reviewHoursJson  = JSON.stringify(reviewHoursByGameId)
+const libGenresJson    = JSON.stringify(libGenres)
+const libPlatformsJson = JSON.stringify(libPlatforms)
+const libDevsJson      = JSON.stringify(libDevs)
 const libraryIsOwn = JSON.stringify(isOwnProfile)
 const librarySettingsJson = JSON.stringify({
   visibility: libraryVisibility,
@@ -1368,9 +1406,25 @@ const reviewerBreadcrumbJsonLd = {
 
     /* LIBRARY */
     .lib-filter-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}
-    .lib-pill{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:6px 14px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:5px}
+    .lib-pill{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:6px 14px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:6px}
     .lib-pill.active{background:var(--accent);color:white;border-color:transparent}
-.lib-pill .pill-count{font-size:11px;opacity:.75;font-weight:600}
+    .lib-pill .pill-count{font-size:11px;opacity:.75;font-weight:600}
+    /* One hue per status (matches the Detailed-view dots), shared by the filter
+       pills and the row status pills via a --st-c custom property. */
+    .status-playing{--st-c:#60a5fa}
+    .status-completed{--st-c:#22c55e}
+    .status-hundred_percent{--st-c:#fbbf24}
+    .status-want_to_play{--st-c:#fb923c}
+    .status-owned{--st-c:#94a3b8}
+    .status-dropped{--st-c:#f87171}
+    .status-unplayed{--st-c:#a78bfa}
+    /* Coloured filter pill: --st-c tints the resting pill and fills its leading
+       dot; the selected pill deepens the wash and gains a ring rather than a
+       solid fill, so the label stays on --text-primary in both themes. */
+    .lib-pill[data-status]{background:color-mix(in srgb,var(--st-c) 12%,transparent);border-color:color-mix(in srgb,var(--st-c) 42%,transparent);color:var(--text-primary)}
+    .lib-pill[data-status]::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--st-c);flex-shrink:0}
+    .lib-pill[data-status]:hover{background:color-mix(in srgb,var(--st-c) 20%,transparent)}
+    .lib-pill[data-status].active{background:color-mix(in srgb,var(--st-c) 30%,transparent);border-color:var(--st-c);color:var(--text-primary);box-shadow:inset 0 0 0 1px var(--st-c)}
     .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:14px;padding:20px 0}
     .lib-az{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;align-items:center;padding:4px 0}
     .lib-az-btn{background:var(--bg-card);border:1px solid var(--border);border-radius:5px;min-width:26px;padding:4px 5px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text-secondary);cursor:pointer;transition:all .15s}
@@ -1460,7 +1514,8 @@ const reviewerBreadcrumbJsonLd = {
     .lib-dt-title{font-size:15px;font-weight:700;color:var(--text-primary);text-decoration:none;line-height:1.2}
     .lib-dt-title:hover{color:var(--accent)}
     .lib-dt-status{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--text-secondary);background:var(--tag-bg);border:1px solid var(--border);border-radius:20px;padding:2px 9px;white-space:nowrap}
-    .lib-dt-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+    .lib-dt-status.status-playing,.lib-dt-status.status-completed,.lib-dt-status.status-hundred_percent,.lib-dt-status.status-want_to_play,.lib-dt-status.status-owned,.lib-dt-status.status-dropped{color:var(--text-primary);background:color-mix(in srgb,var(--st-c) 13%,transparent);border-color:color-mix(in srgb,var(--st-c) 40%,transparent)}
+    .lib-dt-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;background:var(--st-c,var(--text-tertiary))}
     .lib-dt-score{position:static;bottom:auto;right:auto;min-width:24px;height:22px;font-size:12px;flex-shrink:0}
     .lib-dt-meta{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--text-tertiary)}
     .lib-dt-mi{display:inline-flex;align-items:center;gap:6px}
@@ -2033,6 +2088,7 @@ const reviewerBreadcrumbJsonLd = {
       <div class="lf-bar">
         <input class="lf-search" type="text" placeholder="Search reviews…" oninput="searchReviews(this.value)" />
         <select class="lf-select" onchange="setReviewSort(this.value)">
+          <option value="az" selected>A–Z</option>
           <option value="recent">Recent</option>
           <option value="oldest">Oldest</option>
           <option value="highest">Highest Rated</option>
@@ -2065,6 +2121,7 @@ const reviewerBreadcrumbJsonLd = {
           <div
             class="rev-filter-item"
             data-title={it.searchText}
+            data-sort-title={it.sortTitle}
             data-genres={it.genres.join(',')}
             data-devs={it.devs.join(',')}
             data-platform={it.platform}
@@ -2094,6 +2151,7 @@ const reviewerBreadcrumbJsonLd = {
             <div
               class="rev-filter-item"
               data-title={it.searchText}
+              data-sort-title={it.sortTitle}
               data-genres={it.genres.join(',')}
               data-devs={it.devs.join(',')}
               data-platform={it.platform}
@@ -2138,6 +2196,7 @@ const reviewerBreadcrumbJsonLd = {
         <div class="lf-bar">
           <input class="lf-search" type="text" placeholder="Search recommendations…" oninput="searchRecs(this.value)" />
           <select class="lf-select" onchange="setRecSort(this.value)">
+            <option value="az" selected>A–Z</option>
             <option value="recent">Recent</option>
             <option value="oldest">Oldest</option>
             <option value="most-upvoted">Most Upvoted</option>
@@ -2168,6 +2227,7 @@ const reviewerBreadcrumbJsonLd = {
             <div
               class="rec-filter-item"
               data-title={it.searchText}
+              data-sort-title={it.sortTitle}
               data-genres={it.genres.join(',')}
               data-devs={it.devs.join(',')}
               data-platforms={it.platforms.join(',')}
@@ -2207,6 +2267,7 @@ const reviewerBreadcrumbJsonLd = {
               <div
                 class="rec-filter-item"
                 data-title={it.searchText}
+                data-sort-title={it.sortTitle}
                 data-genres={it.genres.join(',')}
                 data-devs={it.devs.join(',')}
                 data-platforms={it.platforms.join(',')}
@@ -2281,14 +2342,32 @@ const reviewerBreadcrumbJsonLd = {
         )}
       </div>
       <div id="profileSyncStatus" class="steam-sync-status" style="display:none"></div>
-      <div class="lib-controls-row">
-        <input id="libSearch" class="lib-search" type="search" placeholder="Search by title or genre…" autocomplete="off" />
-        <select id="libSort" class="lib-sort">
+      <div class="lib-controls-row lf-bar">
+        <input id="libSearch" class="lf-search" type="search" placeholder="Search library…" autocomplete="off" />
+        <select id="libSort" class="lf-select">
           <option value="alpha">A – Z</option>
           <option value="recent">Recently added</option>
           <option value="review">Has review first</option>
           <option value="hours">Most hours played</option>
         </select>
+        {libGenres.length > 0 && (
+          <select id="libGenre" class="lf-select" onchange="setLibDimFilter('genre',this.value,this)">
+            <option value="">All Genres</option>
+            {libGenres.map((g: string) => <option value={g}>{g}</option>)}
+          </select>
+        )}
+        {libPlatforms.length > 0 && (
+          <select id="libPlatform" class="lf-select" onchange="setLibDimFilter('platform',this.value,this)">
+            <option value="">All Platforms</option>
+            {libPlatforms.map((pl: string) => <option value={pl}>{pl}</option>)}
+          </select>
+        )}
+        {libDevs.length > 0 && (
+          <select id="libDev" class="lf-select" onchange="setLibDimFilter('dev',this.value,this)">
+            <option value="">All Devs</option>
+            {libDevs.map((d: string) => <option value={d}>{d}</option>)}
+          </select>
+        )}
         {isOwnProfile && (
           <button id="libGearBtn" class="lib-gear-btn" title="Library settings" onclick="toggleLibGear()">
             <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -2871,7 +2950,7 @@ const reviewerBreadcrumbJsonLd = {
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, countsJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, countsJson, reviewScoresJson, reviewHoursJson, libGenresJson, libPlatformsJson, libDevsJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -3722,7 +3801,7 @@ const reviewerBreadcrumbJsonLd = {
   }
 
   // ── REVIEWS TAB: Overview / Detailed views + shared search & filters ──
-  var _reviewState = { view: 'overview', sort: 'recent', genre: '', platform: '', dev: '', search: '' }
+  var _reviewState = { view: 'overview', sort: 'az', genre: '', platform: '', dev: '', search: '' }
 
   function applyReviewFilters() {
     var grids = ['reviewsOverviewList', 'reviewsList']
@@ -3747,6 +3826,7 @@ const reviewerBreadcrumbJsonLd = {
       var visible = items.filter(function(i) { return i.style.display !== 'none' })
       visible.sort(function(a, b) {
         var s = _reviewState.sort
+        if (s === 'az') return (a.dataset.sortTitle || '').localeCompare(b.dataset.sortTitle || '', undefined, { sensitivity: 'base' })
         if (s === 'oldest') return new Date(a.dataset.date) - new Date(b.dataset.date)
         if (s === 'highest') return parseFloat(b.dataset.score) - parseFloat(a.dataset.score)
         if (s === 'lowest') return parseFloat(a.dataset.score) - parseFloat(b.dataset.score)
@@ -3927,6 +4007,9 @@ const reviewerBreadcrumbJsonLd = {
   var _libFilter = 'all'
   var _libSort = 'alpha'
   var _libSearch = ''
+  var _libGenre = ''
+  var _libPlatform = ''
+  var _libDev = ''
   var _libView = 'overview'   // 'overview' (card grid) | 'detailed' (row list)
   var _libEditMode = false
   var _lastClickedIndex = -1
@@ -3945,11 +4028,12 @@ const reviewerBreadcrumbJsonLd = {
   var _libAllIds = null         // cached full id list from the last "Select all"
   var _libAllIdsKey = ''        // filter/sort/search key those ids were fetched for
 
+  // dot hues mirror the .status-<key> CSS custom properties (--st-c).
   var STATUS_META = {
     playing:         { icon: '🎮', label: 'Playing',      dot: '#60a5fa' },
-    completed:       { icon: '✓',  label: 'Completed',    dot: '#4ade80' },
+    completed:       { icon: '✓',  label: 'Completed',    dot: '#22c55e' },
     hundred_percent: { icon: '💯', label: '100%',         dot: '#fbbf24' },
-    want_to_play:    { icon: '🔖', label: 'Want to Play', dot: '#f59e0b' },
+    want_to_play:    { icon: '🔖', label: 'Want to Play', dot: '#fb923c' },
     owned:           { icon: '📦', label: 'Owned',        dot: '#94a3b8' },
     dropped:         { icon: '✗',  label: 'Dropped',      dot: '#f87171' },
   }
@@ -3994,7 +4078,7 @@ const reviewerBreadcrumbJsonLd = {
       : null
     var meta = STATUS_META[it.status]
     var statusPill = meta
-      ? '<span class="lib-dt-status"><span class="lib-dt-dot" style="background:' + meta.dot + '"></span>' + meta.label + '</span>'
+      ? '<span class="lib-dt-status status-' + it.status + '"><span class="lib-dt-dot"></span>' + meta.label + '</span>'
       : ''
     var score = ''
     if (it.hasReview && it.reviewScore != null) {
@@ -4046,6 +4130,9 @@ const reviewerBreadcrumbJsonLd = {
       sort: _libSort,
     })
     if (_libSearch)    params.set('search', _libSearch)
+    if (_libGenre)     params.set('genre', _libGenre)
+    if (_libPlatform)  params.set('platform', _libPlatform)
+    if (_libDev)       params.set('dev', _libDev)
     if (_filterHidden) params.set('hidden', 'true')
     if (_libView === 'detailed') params.set('detailed', 'true')
     try {
@@ -4078,7 +4165,8 @@ const reviewerBreadcrumbJsonLd = {
   var _LIB_AZ_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z']
 
   function _libLetterKey() {
-    return _libFilter + '|' + _libSort + '|' + (_filterHidden ? '1' : '0')
+    return _libFilter + '|' + _libSort + '|' + (_filterHidden ? '1' : '0') +
+      '|' + _libGenre + '|' + _libPlatform + '|' + _libDev
   }
 
   async function _loadLetterMap() {
@@ -4100,6 +4188,9 @@ const reviewerBreadcrumbJsonLd = {
         filter: _libFilter,
         sort: 'alpha',
       })
+      if (_libGenre)     params.set('genre', _libGenre)
+      if (_libPlatform)  params.set('platform', _libPlatform)
+      if (_libDev)       params.set('dev', _libDev)
       if (_filterHidden) params.set('hidden', 'true')
       var res = await fetch('/api/user-game-status/library?' + params.toString())
       if (!res.ok) throw new Error('fetch failed')
@@ -4149,13 +4240,26 @@ const reviewerBreadcrumbJsonLd = {
   window.libJumpLetter = libJumpLetter
 
   function _getVisible() {
-    // Server handles filter/sort/search; only apply client-side reviewed/unreviewed here
-    if (!_filterReviewed && !_filterUnreviewed) return _libItems
-    return _libItems.filter(function(it) {
-      if (_filterReviewed   && !it.hasReview) return false
-      if (_filterUnreviewed &&  it.hasReview) return false
-      return true
-    })
+    // Server handles status filter / search / (alpha·hours·recent) sort. The
+    // reviewed/unreviewed chips and the "Has review first" sort both depend on
+    // the review map, which only the page has — apply them here, on the page.
+    var items = _libItems
+    if (_filterReviewed || _filterUnreviewed) {
+      items = items.filter(function(it) {
+        if (_filterReviewed   && !it.hasReview) return false
+        if (_filterUnreviewed &&  it.hasReview) return false
+        return true
+      })
+    }
+    if (_libSort === 'review') {
+      // Server returned this page in title order; float reviewed games to the
+      // top, each group kept alphabetical.
+      items = items.slice().sort(function(a, b) {
+        if (!a.hasReview !== !b.hasReview) return a.hasReview ? -1 : 1
+        return String(a.title || '').localeCompare(String(b.title || ''), undefined, { sensitivity: 'base' })
+      })
+    }
+    return items
   }
 
   function _renderGrid() {
@@ -4298,18 +4402,20 @@ const reviewerBreadcrumbJsonLd = {
     if (!row) return
     var c = _libCounts
     var pills = [{ key: 'all', label: 'All', count: c.all }]
-    if (c.unplayed) pills.push({ key: 'unplayed', label: '⬜ Unplayed', count: c.unplayed })
+    if (c.unplayed) pills.push({ key: 'unplayed', label: 'Unplayed', count: c.unplayed, status: true })
     var order = ['playing','completed','hundred_percent','want_to_play','owned','dropped']
     var hiddenTabsSet = new Set(_libIsOwn ? [] : (_libSettings.hiddenTabs || []))
     order.forEach(function(s) {
       var count = s === 'owned' ? c.owned : (c[s] || 0)
       if (!count) return
       if (!_libIsOwn && hiddenTabsSet.has(s)) return
-      pills.push({ key: s, label: (STATUS_META[s]?.icon || '') + ' ' + STATUS_META[s]?.label, count: count })
+      // Colour comes from .lib-pill--<key> + the leading dot, so no emoji here.
+      pills.push({ key: s, label: STATUS_META[s]?.label || s, count: count, status: true })
     })
     var pillsHtml = pills.map(function(p) {
       var isActive = _libFilter === p.key
-      return '<button class="lib-pill' + (isActive ? ' active' : '') + '" data-filter="' + p.key + '">' +
+      return '<button class="lib-pill' + (p.status ? ' status-' + p.key : '') + (isActive ? ' active' : '') + '"' +
+        ' data-filter="' + p.key + '"' + (p.status ? ' data-status="' + p.key + '"' : '') + '>' +
         p.label + ' <span class="pill-count">' + p.count + '</span></button>'
     }).join('')
     row.innerHTML = pillsHtml
@@ -4351,6 +4457,7 @@ const reviewerBreadcrumbJsonLd = {
 
   function _libSelKey() {
     return _libFilter + '|' + _libSort + '|' + _libSearch + '|' +
+      _libGenre + '|' + _libPlatform + '|' + _libDev + '|' +
       (_filterHidden ? '1' : '0') + '|' +
       (_filterReviewed ? 'r' : '') + (_filterUnreviewed ? 'u' : '')
   }
@@ -4391,6 +4498,9 @@ const reviewerBreadcrumbJsonLd = {
         idsOnly: 'true',
       })
       if (_libSearch)    params.set('search', _libSearch)
+      if (_libGenre)     params.set('genre', _libGenre)
+      if (_libPlatform)  params.set('platform', _libPlatform)
+      if (_libDev)       params.set('dev', _libDev)
       if (_filterHidden) params.set('hidden', 'true')
       var res = await fetch('/api/user-game-status/library?' + params.toString())
       if (!res.ok) throw new Error('fetch failed')
@@ -4516,6 +4626,16 @@ const reviewerBreadcrumbJsonLd = {
     if (sort) sort.addEventListener('change', function() { _libSort = sort.value; fetchLibrary(1) })
     _renderFilterPills()
     fetchLibrary(1)
+
+    // Genre / Platform / Dev dropdowns — server-side filters, same as the
+    // Reviews / Lists / Recs tabs. Re-fetch page 1 on change.
+    window.setLibDimFilter = function(type, value, sel) {
+      if (type === 'genre')         _libGenre = value
+      else if (type === 'platform') _libPlatform = value
+      else if (type === 'dev')      _libDev = value
+      if (sel) sel.classList.toggle('has-value', !!value)
+      fetchLibrary(1)
+    }
 
     var reviewedItem   = document.getElementById('libReviewedItem')
     var unreviewedItem = document.getElementById('libUnreviewedItem')
@@ -5588,7 +5708,7 @@ async function createNewList(btn) {
   // same behaviour as the Reviews tab.
   (function () {
     if (!document.getElementById('profRecsOverviewList')) return;
-    var _recState = { view: 'overview', sort: 'recent', genre: '', platform: '', dev: '', search: '' };
+    var _recState = { view: 'overview', sort: 'az', genre: '', platform: '', dev: '', search: '' };
 
     function applyRecFilters() {
       var grids = ['profRecsOverviewList', 'profRecsList'];
@@ -5613,6 +5733,7 @@ async function createNewList(btn) {
         var visible = items.filter(function (i) { return i.style.display !== 'none'; });
         visible.sort(function (a, b) {
           var s = _recState.sort;
+          if (s === 'az') return (a.dataset.sortTitle || '').localeCompare(b.dataset.sortTitle || '', undefined, { sensitivity: 'base' });
           if (s === 'oldest') return new Date(a.dataset.date) - new Date(b.dataset.date);
           if (s === 'most-upvoted') return parseInt(b.dataset.upvotes || '0') - parseInt(a.dataset.upvotes || '0');
           if (s === 'most-downvoted') return parseInt(b.dataset.downvotes || '0') - parseInt(a.dataset.downvotes || '0');
