@@ -108,6 +108,24 @@ const publishedReviews = (reviewer.reviews ?? [])
     new Date(a.published_at ?? a.created_at).getTime()
   );
 
+// Developer names per reviewed game — for the Reviews tab dev filter. Mirrors
+// the list-metadata dev query below; game_companies/developers are long-standing.
+const _reviewGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))] as string[];
+const _reviewDevsByGameId: Record<string, string[]> = {};
+if (_reviewGameIds.length > 0) {
+  const { data: _revCompanyRows } = await (supabase as any)
+    .from('game_companies')
+    .select('game_id, developers(name)')
+    .eq('role', 'developer')
+    .in('game_id', _reviewGameIds);
+  for (const row of _revCompanyRows ?? []) {
+    if (row.developers?.name) {
+      if (!_reviewDevsByGameId[row.game_id]) _reviewDevsByGameId[row.game_id] = [];
+      _reviewDevsByGameId[row.game_id].push(row.developers.name);
+    }
+  }
+}
+
 // Shared filter/search metadata for the Reviews tab. Both the Overview (card
 // grid) and Detailed (full ReviewCards) views render from this same list and
 // are filtered client-side by the one filter bar underneath the view pills.
@@ -115,11 +133,13 @@ const reviewFilterItems = publishedReviews.map((r: any) => {
   const genres = [...new Set(
     (r.games?.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean)
   )] as string[];
+  const devs = [...new Set(_reviewDevsByGameId[r.games?.id] ?? [])] as string[];
   const votes = getVoteCounts(r.review_votes);
   return {
     review: r,
     searchText: `${r.games?.title ?? ''} ${r.title ?? ''}`.trim(),
     genres,
+    devs,
     platform: r.played_on?.name ?? '',
     score: r.score,
     date: r.published_at ?? r.created_at,
@@ -129,6 +149,7 @@ const reviewFilterItems = publishedReviews.map((r: any) => {
 });
 const reviewGenres = [...new Set(reviewFilterItems.flatMap((i: any) => i.genres))].sort() as string[];
 const reviewPlatforms = [...new Set(reviewFilterItems.map((i: any) => i.platform).filter(Boolean))].sort() as string[];
+const reviewDevs = [...new Set(reviewFilterItems.flatMap((i: any) => i.devs))].sort() as string[];
 
 const avgScore = publishedReviews.length > 0
   ? (publishedReviews.reduce((sum: number, r: any) => sum + r.score, 0) / publishedReviews.length).toFixed(1)
@@ -1280,10 +1301,10 @@ const reviewerBreadcrumbJsonLd = {
     .list-settings-btn{background:none;border:1px solid var(--border);border-radius:8px;padding:4px 9px;font-size:12px;color:var(--text-secondary);cursor:pointer;font-family:inherit;transition:all .15s}
     .list-settings-btn:hover,.list-settings-btn.active{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
     /* filter bar */
-    .lf-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
-    .lf-search{background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;outline:none;min-width:140px;max-width:200px}
+    .lf-bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+    .lf-search{background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;outline:none;flex:1 1 130px;min-width:104px;max-width:190px}
     .lf-search:focus{border-color:var(--accent)}
-    .lf-select{background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;padding:5px 28px 5px 10px;font-size:12px;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
+    .lf-select{width:112px;flex:0 0 auto;background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;padding:5px 19px 5px 9px;font-size:12px;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center}
     .lf-select:focus{border-color:var(--accent)}
     .lf-select.has-value{border-color:var(--accent);color:var(--accent)}
     .lf-checkbox{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap}
@@ -1944,6 +1965,12 @@ const reviewerBreadcrumbJsonLd = {
             {reviewPlatforms.map((p: string) => <option value={p}>{p}</option>)}
           </select>
         )}
+        {reviewDevs.length > 0 && (
+          <select class="lf-select" onchange="setReviewFilter('dev',this.value,this)">
+            <option value="">All Devs</option>
+            {reviewDevs.map((d: string) => <option value={d}>{d}</option>)}
+          </select>
+        )}
       </div>
 
       <div id="reviewsList" style="display:none">
@@ -1952,6 +1979,7 @@ const reviewerBreadcrumbJsonLd = {
             class="rev-filter-item"
             data-title={it.searchText}
             data-genres={it.genres.join(',')}
+            data-devs={it.devs.join(',')}
             data-platform={it.platform}
             data-score={it.score}
             data-date={it.date}
@@ -1980,6 +2008,7 @@ const reviewerBreadcrumbJsonLd = {
               class="rev-filter-item"
               data-title={it.searchText}
               data-genres={it.genres.join(',')}
+              data-devs={it.devs.join(',')}
               data-platform={it.platform}
               data-score={it.score}
               data-date={it.date}
@@ -3557,7 +3586,7 @@ const reviewerBreadcrumbJsonLd = {
   }
 
   // ── REVIEWS TAB: Overview / Detailed views + shared search & filters ──
-  var _reviewState = { view: 'overview', sort: 'recent', genre: '', platform: '', search: '' }
+  var _reviewState = { view: 'overview', sort: 'recent', genre: '', platform: '', dev: '', search: '' }
 
   function applyReviewFilters() {
     var grids = ['reviewsOverviewList', 'reviewsList']
@@ -3574,6 +3603,7 @@ const reviewerBreadcrumbJsonLd = {
         var s = _reviewState
         if (s.search && (item.dataset.title || '').toLowerCase().indexOf(s.search.toLowerCase()) === -1) show = false
         if (show && s.genre && (item.dataset.genres || '').split(',').indexOf(s.genre) === -1) show = false
+        if (show && s.dev && (item.dataset.devs || '').split(',').indexOf(s.dev) === -1) show = false
         if (show && s.platform && (item.dataset.platform || '') !== s.platform) show = false
         item.style.display = show ? '' : 'none'
       })
