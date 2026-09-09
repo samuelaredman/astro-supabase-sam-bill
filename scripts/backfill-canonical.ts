@@ -18,6 +18,10 @@
  *   npx tsx scripts/backfill-canonical.ts            # report only
  *   npx tsx scripts/backfill-canonical.ts --apply    # write canonical_game_id
  *
+ * By default only hard IGDB links (version_parent, parent_game) drive collapses.
+ * The lowest-confidence exact-title fallback is OFF unless you pass
+ * --with-title-fallback (it's a guess when IGDB gives no parent link).
+ *
  * Requires SUPABASE_DATABASE_URL, SUPABASE_SERVICE_ROLE_KEY in .env.
  */
 
@@ -32,6 +36,11 @@ import {
 } from '../src/utils/games';
 
 const APPLY = process.argv.includes('--apply');
+// Exact-title fallback (collapse a port/bundle with no IGDB parent link into the
+// earliest same-title node) is the lowest-confidence signal — a guess, not a hard
+// IGDB link. OFF by default so the safe pass does only parent_game/version_parent
+// collapses; pass --with-title-fallback to re-enable it.
+const INCLUDE_TITLE_FALLBACK = process.argv.includes('--with-title-fallback');
 const PAGE_SIZE = 1000;
 
 const db = createClient(
@@ -73,7 +82,8 @@ async function fetchAllGames(): Promise<GameRow[]> {
 const catName = (c: number | null) => (c == null ? 'null' : GAME_CATEGORIES[c] ?? `#${c}`);
 
 async function main() {
-  console.log(`Canonical resolution — ${APPLY ? 'APPLY (writing)' : 'REPORT ONLY (no writes)'}\n`);
+  console.log(`Canonical resolution — ${APPLY ? 'APPLY (writing)' : 'REPORT ONLY (no writes)'}`);
+  console.log(`Signals: parent_game + version_parent${INCLUDE_TITLE_FALLBACK ? ' + exact-title fallback' : ' (title fallback OFF — hard IGDB links only)'}\n`);
 
   const games = await fetchAllGames();
   console.log(`Loaded ${games.length} games.\n`);
@@ -115,8 +125,8 @@ async function main() {
       }
     }
 
-    // (b) exact-title cluster fallback (identical title across platform rows)
-    if (!picked) {
+    // (b) exact-title cluster fallback (identical title across platform rows) — opt-in only
+    if (INCLUDE_TITLE_FALLBACK && !picked) {
       const cluster = clustersByTitle.get(normalizeClusterTitle(g.title)) ?? [];
       if (cluster.length > 1) {
         const canonicalId = chooseClusterCanonical(cluster);
