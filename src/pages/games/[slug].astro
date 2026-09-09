@@ -359,6 +359,42 @@ if (similarSlugs.length > 0) {
   }
 }
 
+// ── Children: collapsed editions/versions + related franchise content ──
+// Rendered below "Similar games" in the same card style.
+const { data: editionsRaw } = await (supabase as any)
+  .from('games')
+  .select('id, title, slug, cover_img_url, date_released')
+  .eq('canonical_game_id', game.id)
+  .order('date_released', { ascending: true })
+const editions = editionsRaw ?? []
+
+const { data: relRows } = await (supabase as any)
+  .from('game_relationships')
+  .select('to_game_id, relation_type')
+  .eq('from_game_id', game.id)
+const relTypeById = new Map<string, string>((relRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
+const relIds = [...relTypeById.keys()]
+let relatedChildren: any[] = []
+if (relIds.length > 0) {
+  const { data: relGames } = await (supabase as any)
+    .from('games')
+    .select('id, title, slug, cover_img_url, date_released')
+    .in('id', relIds)
+    .is('canonical_game_id', null)   // only related nodes that are themselves canonical
+  relatedChildren = (relGames ?? []).map((g: any) => ({ ...g, relation_type: relTypeById.get(g.id) }))
+}
+
+// Avg score per child that has reviews, for the score badge (matches Similar games).
+const childIds = [...editions.map((e: any) => e.id), ...relatedChildren.map((r: any) => r.id)]
+const childScores: Record<string, number> = {}
+if (childIds.length > 0) {
+  const { data: childReviewRows } = await (supabase as any)
+    .from('reviews').select('game_id, score').in('game_id', childIds).eq('status', 'published')
+  const acc: Record<string, number[]> = {}
+  for (const row of childReviewRows ?? []) (acc[row.game_id] ??= []).push(row.score)
+  for (const [id, arr] of Object.entries(acc)) childScores[id] = arr.reduce((a, b) => a + b, 0) / arr.length
+}
+
 const thisAvg = avgScore ? parseFloat(avgScore) : 0
 const allAvgs = Object.values(gameAvgs).sort((a, b) => b - a)
 const allTimeRank = allAvgs.findIndex(v => v <= thisAvg) + 1
@@ -1045,6 +1081,52 @@ Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-
                         )}
                       </div>
                       <div class="similar-info"><div class="similar-title">{g.name}</div></div>
+                    </a>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {editions.length > 0 && (
+            <div class="section">
+              <div class="section-header"><span class="section-title">Editions & versions</span></div>
+              <div class="similar-scroll">
+                {editions.map((g: any) => {
+                  const cover = igdbImage(g.cover_img_url, 't_cover_big')
+                  const sc = childScores[g.id]
+                  return (
+                    <a href={`/games/${g.slug}`} class="similar-card">
+                      <div class="similar-cover">
+                        {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
+                        {sc != null && (
+                          <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
+                        )}
+                      </div>
+                      <div class="similar-info"><div class="similar-title">{g.title}</div></div>
+                    </a>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {relatedChildren.length > 0 && (
+            <div class="section">
+              <div class="section-header"><span class="section-title">Related games</span></div>
+              <div class="similar-scroll">
+                {relatedChildren.map((g: any) => {
+                  const cover = igdbImage(g.cover_img_url, 't_cover_big')
+                  const sc = childScores[g.id]
+                  return (
+                    <a href={`/games/${g.slug}`} class="similar-card">
+                      <div class="similar-cover">
+                        {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
+                        {sc != null && (
+                          <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
+                        )}
+                      </div>
+                      <div class="similar-info"><div class="similar-title">{g.title}</div></div>
                     </a>
                   )
                 })}
