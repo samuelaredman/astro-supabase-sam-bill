@@ -221,9 +221,14 @@ export const POST: APIRoute = async (context) => {
   if (toUpdatePlaytime.length > 0) {
     const updatePayload = toUpdatePlaytime.map(({ game_id, playtime, appid }) => ({ game_id, playtime, appid }));
     for (const batch of chunk(updatePayload, WRITE_CHUNK)) {
+      // Pass the array itself — a jsonb param. JSON.stringify(batch) arrives as a
+      // jsonb *string* scalar, so jsonb_array_elements() inside the function
+      // errors out ("cannot extract elements from a scalar") and every
+      // already-tracked game (e.g. one added by reviewing it) silently kept its
+      // old NULL steam_appid / playtime.
       const { error: updateError } = await (db as any).rpc('bulk_update_steam_playtime', {
         p_profile_id: profile.id,
-        p_updates: JSON.stringify(batch),
+        p_updates: batch,
       });
       if (updateError) {
         console.error('[steam/import] playtime update error (non-fatal):', JSON.stringify(updateError));
