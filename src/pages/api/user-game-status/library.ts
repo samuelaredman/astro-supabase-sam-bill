@@ -136,10 +136,14 @@ export const GET: APIRoute = async (context) => {
     } else if (filter === 'completed') {
       qb = qb.in(c('status'), ['completed', 'hundred_percent']);
     } else if (filter === 'unplayed') {
+      // "no playtime and not finished". The playtime OR must be phrased as a
+      // filter *on* the embedded resource (`user_game_status.or=(…)`), not a
+      // top-level `or=(user_game_status.…)` — the latter is not a valid
+      // PostgREST filter and 500s the request, so the pill loaded nothing.
       qb = qb.not(c('status'), 'in', '(completed,hundred_percent)');
       qb = base === 'ugs'
         ? qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0')
-        : qb.or('user_game_status.steam_playtime_minutes.is.null,user_game_status.steam_playtime_minutes.eq.0');
+        : qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0', { referencedTable: 'user_game_status' });
     } else if (filter !== 'all') {
       qb = qb.eq(c('status'), filter);
     }
