@@ -14,6 +14,7 @@ import RecommendationFeedCard from '../../components/RecommendationFeedCard.astr
 import RecommendationComposer from '../../components/RecommendationComposer.astro';
 import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed';
 import { resolveRenamedUsername } from '../../utils/usernameHistory';
+import { SOCIAL_PLATFORMS, SOCIAL_ICON_SVG, SOCIAL_LABELS, SOCIAL_COLORS, SOCIAL_KEYS } from '../../utils/socialLinks';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
@@ -27,7 +28,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
     favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
     steam_id, steam_username, steam_synced_at,
-    twitch_url, youtube_url, twitter_url, discord_url, website_url, accent_color,
+    twitch_url, youtube_url, twitter_url, discord_url, accent_color,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
     ),
@@ -63,6 +64,18 @@ const { data: _showcaseAchData } = await (getSupabaseAdmin() as any)
   .maybeSingle();
 (reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
 
+// Extra social-link URL columns, fetched separately for the same reason: if the
+// PostgREST schema cache hasn't picked up 20260908000004 yet, this degrades to
+// "no gamer links" instead of 404ing the profile (the main select above uses
+// .single() and redirects to /404 on any error).
+const _newSocialCols = ['steam_url', 'psn_url', 'xbox_url', 'instagram_url', 'tiktok_url', 'bluesky_url', 'retroachievements_url'];
+const { data: _newSocialData } = await (getSupabaseAdmin() as any)
+  .from('profiles')
+  .select(_newSocialCols.join(', '))
+  .eq('id', (reviewer as any).id)
+  .maybeSingle();
+for (const c of _newSocialCols) (reviewer as any)[c] = (_newSocialData as any)?.[c] ?? null;
+
 // Steam-style alias list: previous usernames this profile changed away from in
 // the last 90 days. RLS blocks anon reads of username_history, so use admin.
 // The full trail stays in the DB for moderation; only a rolling window shows.
@@ -94,6 +107,50 @@ const publishedReviews = (reviewer.reviews ?? [])
     new Date(b.published_at ?? b.created_at).getTime() -
     new Date(a.published_at ?? a.created_at).getTime()
   );
+
+// Developer names per reviewed game — for the Reviews tab dev filter. Mirrors
+// the list-metadata dev query below; game_companies/developers are long-standing.
+const _reviewGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))] as string[];
+const _reviewDevsByGameId: Record<string, string[]> = {};
+if (_reviewGameIds.length > 0) {
+  const { data: _revCompanyRows } = await (supabase as any)
+    .from('game_companies')
+    .select('game_id, developers(name)')
+    .eq('role', 'developer')
+    .in('game_id', _reviewGameIds);
+  for (const row of _revCompanyRows ?? []) {
+    if (row.developers?.name) {
+      if (!_reviewDevsByGameId[row.game_id]) _reviewDevsByGameId[row.game_id] = [];
+      _reviewDevsByGameId[row.game_id].push(row.developers.name);
+    }
+  }
+}
+
+// Shared filter/search metadata for the Reviews tab. Both the Overview (card
+// grid) and Detailed (full ReviewCards) views render from this same list and
+// are filtered client-side by the one filter bar underneath the view pills.
+const reviewFilterItems = publishedReviews.map((r: any) => {
+  const genres = [...new Set(
+    (r.games?.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean)
+  )] as string[];
+  const devs = [...new Set(_reviewDevsByGameId[r.games?.id] ?? [])] as string[];
+  const votes = getVoteCounts(r.review_votes);
+  return {
+    review: r,
+    searchText: `${r.games?.title ?? ''} ${r.title ?? ''}`.trim(),
+    sortTitle: r.games?.title ?? '',
+    genres,
+    devs,
+    platform: r.played_on?.name ?? '',
+    score: r.score,
+    date: r.published_at ?? r.created_at,
+    up: votes.up,
+    down: votes.down,
+  };
+});
+const reviewGenres = [...new Set(reviewFilterItems.flatMap((i: any) => i.genres))].sort() as string[];
+const reviewPlatforms = [...new Set(reviewFilterItems.map((i: any) => i.platform).filter(Boolean))].sort() as string[];
+const reviewDevs = [...new Set(reviewFilterItems.flatMap((i: any) => i.devs))].sort() as string[];
 
 const avgScore = publishedReviews.length > 0
   ? (publishedReviews.reduce((sum: number, r: any) => sum + r.score, 0) / publishedReviews.length).toFixed(1)
@@ -495,6 +552,52 @@ const { data: reviewerRecsRaw } = await db
   .limit(100);
 const reviewerRecs = (reviewerRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
 
+// Shared filter/search metadata for the Recommendations tab — same Overview /
+// Detailed + single filter bar treatment as the Reviews tab. Genre / platform /
+// dev are the union across a rec's source and target games.
+const _recGameIds = [...new Set(
+  reviewerRecs.flatMap((r: any) => [r.sourceGame?.id, r.targetGame?.id]).filter(Boolean)
+)] as string[];
+const _recGenresByGame: Record<string, string[]> = {};
+const _recPlatformsByGame: Record<string, string[]> = {};
+const _recDevsByGame: Record<string, string[]> = {};
+if (_recGameIds.length > 0) {
+  const [{ data: _rgGenres }, { data: _rgPlatforms }, { data: _rgCompanies }] = await Promise.all([
+    (db as any).from('game_genres').select('game_id, genres(name)').in('game_id', _recGameIds),
+    (db as any).from('game_platforms').select('game_id, platforms(name)').in('game_id', _recGameIds),
+    (db as any).from('game_companies').select('game_id, developers(name)').eq('role', 'developer').in('game_id', _recGameIds),
+  ]);
+  for (const row of _rgGenres ?? []) {
+    if (row.genres?.name) { if (!_recGenresByGame[row.game_id]) _recGenresByGame[row.game_id] = []; _recGenresByGame[row.game_id].push(row.genres.name); }
+  }
+  for (const row of _rgPlatforms ?? []) {
+    if (row.platforms?.name) { if (!_recPlatformsByGame[row.game_id]) _recPlatformsByGame[row.game_id] = []; _recPlatformsByGame[row.game_id].push(row.platforms.name); }
+  }
+  for (const row of _rgCompanies ?? []) {
+    if (row.developers?.name) { if (!_recDevsByGame[row.game_id]) _recDevsByGame[row.game_id] = []; _recDevsByGame[row.game_id].push(row.developers.name); }
+  }
+}
+const recFilterItems = reviewerRecs.map((rec: any) => {
+  const gids = [rec.sourceGame?.id, rec.targetGame?.id].filter(Boolean) as string[];
+  const genres = [...new Set(gids.flatMap((id) => _recGenresByGame[id] ?? []))] as string[];
+  const platforms = [...new Set(gids.flatMap((id) => _recPlatformsByGame[id] ?? []))] as string[];
+  const devs = [...new Set(gids.flatMap((id) => _recDevsByGame[id] ?? []))] as string[];
+  return {
+    rec,
+    searchText: `${rec.sourceGame?.title ?? ''} ${rec.targetGame?.title ?? ''} ${rec.body ?? ''}`.trim(),
+    sortTitle: rec.sourceGame?.title ?? rec.targetGame?.title ?? '',
+    genres,
+    platforms,
+    devs,
+    date: rec.createdAt,
+    up: rec.upVotes,
+    down: rec.downVotes,
+  };
+});
+const recGenres = [...new Set(recFilterItems.flatMap((i: any) => i.genres))].sort() as string[];
+const recPlatforms = [...new Set(recFilterItems.flatMap((i: any) => i.platforms))].sort() as string[];
+const recDevs = [...new Set(recFilterItems.flatMap((i: any) => i.devs))].sort() as string[];
+
 // Fetch library settings with fallback in case migration hasn't run yet
 let libSettingsRow: any = null;
 try {
@@ -558,6 +661,52 @@ if (!libraryIsPrivate) {
   libCounts.dropped        = results[6].count ?? 0;
   libCounts.hidden         = results[7].count ?? 0;
   libCounts.unplayed       = results[8].count ?? 0;
+}
+
+// Distinct genre / platform / developer names across this reviewer's visible
+// library — powers the Library filter dropdowns, matching the Reviews / Lists /
+// Recs tabs. Queried FROM each game↔X junction with a two-level inner join down
+// to user_game_status (the same shape as genres/[slug].astro's indexability
+// probe), deduped in JS. One row per (game, value) pair, so paginate past the
+// 1000-row cap.
+async function libDimNames(
+  junction: string,
+  dimEmbed: string,
+  roleFilter?: string,
+): Promise<string[]> {
+  const CHUNK = 1000;
+  const key = dimEmbed.split('(')[0];
+  const names = new Set<string>();
+  for (let start = 0; ; start += CHUNK) {
+    let q = (db as any)
+      .from(junction)
+      .select(`${dimEmbed}, games!inner(user_game_status!inner(profile_id, is_hidden))`)
+      .eq('games.user_game_status.profile_id', reviewer.id)
+      .eq('games.user_game_status.is_hidden', false);
+    if (roleFilter) q = q.eq('role', roleFilter);
+    const { data, error } = await q.range(start, start + CHUNK - 1);
+    if (error) {
+      console.error(`[profile library] ${junction} filter-option query failed:`, JSON.stringify(error));
+      break;
+    }
+    for (const row of (data ?? []) as any[]) {
+      const n = row[key]?.name;
+      if (n) names.add(n);
+    }
+    if (!data || data.length < CHUNK) break;
+  }
+  return [...names].sort();
+}
+
+let libGenres: string[] = [];
+let libPlatforms: string[] = [];
+let libDevs: string[] = [];
+if (!libraryIsPrivate) {
+  [libGenres, libPlatforms, libDevs] = await Promise.all([
+    libDimNames('game_genres', 'genres(name)'),
+    libDimNames('game_platforms', 'platforms(name)'),
+    libDimNames('game_companies', 'developers(name)', 'developer'),
+  ]);
 }
 
 // ── CHART DATA ──
@@ -666,31 +815,16 @@ const accentStyle = reviewer.accent_color && /^#[0-9a-f]{6}$/i.test(reviewer.acc
   ? `--accent:${reviewer.accent_color}`
   : undefined
 
-const SOCIAL_PLATFORMS = [
-  { key: 'twitch_url', label: 'Twitch' },
-  { key: 'youtube_url', label: 'YouTube' },
-  { key: 'twitter_url', label: 'Twitter/X' },
-  { key: 'discord_url', label: 'Discord' },
-  { key: 'website_url', label: 'Website' },
-] as const
 const socialLinks = SOCIAL_PLATFORMS
-  .map(p => ({ ...p, url: reviewer[p.key] as string | null }))
+  .map(p => ({ ...p, url: (reviewer as any)[p.key] as string | null }))
   .filter(p => !!p.url)
 
-// Small generic, self-drawn glyphs (not exact trademarked logos) matching the
-// site's existing inline-SVG stroke-icon convention. Always paired with a text
-// label in the pill, so icon fidelity doesn't need to carry meaning alone.
-const SOCIAL_ICON_SVG: Record<string, string> = {
-  twitch_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h11v8l-3 3h-3l-2 2v-2H3V2z"/><path d="M8 5v3M11 5v3"/></svg>',
-  youtube_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="3.5" width="13" height="9" rx="2.5"/><path d="M6.5 6l4 2-4 2V6z" fill="currentColor" stroke="none"/></svg>',
-  twitter_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 2.5l11 11M13.5 2.5l-11 11"/></svg>',
-  discord_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="12" height="7" rx="3.5"/><path d="M5.5 8.5v.01M10.5 8.5v.01" stroke-width="2"/></svg>',
-  website_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 2c0 0-3 2-3 6s3 6 3 6M8 2c0 0 3 2 3 6s-3 6-3 6M2 8h12"/></svg>',
-}
 const hasAccentColor = !!accentStyle
 const initialAccentColorValue = hasAccentColor ? (reviewer.accent_color as string) : '#6050c8'
 const socialIconsJson = JSON.stringify(SOCIAL_ICON_SVG)
-const socialLabelsJson = JSON.stringify(Object.fromEntries(SOCIAL_PLATFORMS.map(p => [p.key, p.label])))
+const socialLabelsJson = JSON.stringify(SOCIAL_LABELS)
+const socialColorsJson = JSON.stringify(SOCIAL_COLORS)
+const socialKeysJson = JSON.stringify(SOCIAL_KEYS)
 
 // Per-game scatter + hot takes
 const perGameData = publishedReviews
@@ -769,6 +903,9 @@ for (const r of publishedReviews) {
 const countsJson      = JSON.stringify(libCounts)
 const reviewScoresJson = JSON.stringify(reviewScoreByGameId)
 const reviewHoursJson  = JSON.stringify(reviewHoursByGameId)
+const libGenresJson    = JSON.stringify(libGenres)
+const libPlatformsJson = JSON.stringify(libPlatforms)
+const libDevsJson      = JSON.stringify(libDevs)
 const libraryIsOwn = JSON.stringify(isOwnProfile)
 const librarySettingsJson = JSON.stringify({
   visibility: libraryVisibility,
@@ -804,96 +941,10 @@ if (!(reviewer as any).steam_id && !isOwnProfile) {
   _achHasRows = (_achProbe?.length ?? 0) > 0;
 }
 
-const hasAchievements = activeTab === 'achievements';
-const _ACH_PER_PAGE = 50;
-const achPage = hasAchievements ? Math.max(1, parseInt(Astro.url.searchParams.get('achpage') ?? '1') || 1) : 1;
-const achQ    = hasAchievements ? (Astro.url.searchParams.get('q') ?? '').trim() : '';
-const achSort = hasAchievements ? (Astro.url.searchParams.get('sort') ?? 'recent') : 'recent';
-const achDays = hasAchievements ? (parseInt(Astro.url.searchParams.get('days') ?? '0') || 0) : 0;
-
-// Stats via DB aggregation — avoids fetching all rows client-side which
-// breaks for large libraries (500+ games × 50 achievements = 25k+ rows).
-const [achievementStatsResult, achievementsRaw] = hasAchievements
-  ? await Promise.all([
-      (adminDb as any).rpc('get_achievement_stats', { p_profile_id: reviewer.id }),
-      (() => {
-        // Only request count:exact when filters are active — without filters the
-        // total is already known from get_achievement_stats() at no extra cost.
-        const filtered = !!(achQ || achDays > 0);
-        let q = adminDb.from('user_achievements')
-          .select('display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, steam_game_title, games(title)', filtered ? { count: 'exact' } : undefined)
-          .eq('profile_id', reviewer.id)
-          .eq('unlocked', true)
-          .not('unlock_time', 'is', null);
-        if (achQ)     q = q.ilike('display_name', `%${achQ}%`);
-        if (achDays > 0) q = q.gte('unlock_time', new Date(Date.now() - achDays * 86400000).toISOString());
-        if (achSort === 'oldest')    q = q.order('unlock_time', { ascending: true });
-        else if (achSort === 'rarest')    q = q.order('global_percent', { ascending: true, nullsFirst: false });
-        else if (achSort === 'least-rare') q = q.order('global_percent', { ascending: false, nullsFirst: false });
-        else if (achSort === 'az')        q = q.order('display_name', { ascending: true, nullsFirst: false });
-        else if (achSort === 'za')        q = q.order('display_name', { ascending: false, nullsFirst: false });
-        else                              q = q.order('unlock_time', { ascending: false });
-        return q.range((achPage - 1) * _ACH_PER_PAGE, achPage * _ACH_PER_PAGE - 1);
-      })(),
-    ])
-  : [{ data: null }, { data: [], count: 0 }];
-
-const _achStats = (achievementStatsResult as any)?.data?.[0] ?? { unlocked_count: 0, perfect_games: 0, avg_completion: 0 };
-const totalAchievements   = Number(_achStats.unlocked_count ?? 0);
-const unlockedAchievements = totalAchievements;
-const avgCompletion        = Number(_achStats.avg_completion ?? 0);
-const perfectGames         = Number(_achStats.perfect_games ?? 0);
-
-// Group by date only for time-based sorts; otherwise use a single group
-const _achNow = new Date();
-const achByDate: Array<{ label: string; items: any[] }> = [];
-const _achGroupByDate = achSort === 'recent' || achSort === 'oldest';
-if (_achGroupByDate) {
-  const achDateMap = new Map<string, any[]>();
-  for (const a of (achievementsRaw.data ?? []) as any[]) {
-    const d = new Date(a.unlock_time);
-    const isCurrentYear = d.getUTCFullYear() === _achNow.getUTCFullYear();
-    const label = d.toLocaleDateString('en-US', {
-      month: 'long', day: 'numeric',
-      ...(!isCurrentYear ? { year: 'numeric' } : {}),
-      timeZone: 'UTC',
-    }).toUpperCase();
-    if (!achDateMap.has(label)) { achDateMap.set(label, []); achByDate.push({ label, items: achDateMap.get(label)! }); }
-    achDateMap.get(label)!.push(a);
-  }
-} else {
-  if ((achievementsRaw.data ?? []).length > 0) achByDate.push({ label: '', items: achievementsRaw.data as any[] });
-}
-// When no filters are active, the total is the full unlocked count from the
-// stats RPC (already fetched, no extra query). With filters, use the exact
-// count returned by the filtered feed query.
-const achTotalFiltered = (achQ || achDays > 0)
-  ? ((achievementsRaw as any).count ?? 0)
-  : unlockedAchievements;
-const achTotalPages = Math.max(1, Math.ceil(achTotalFiltered / _ACH_PER_PAGE));
-
-function achUrl(page: number, overrides: { q?: string; sort?: string; days?: string } = {}) {
-  const p = new URLSearchParams({ tab: 'achievements' });
-  if (page > 1) p.set('achpage', String(page));
-  const q = overrides.q !== undefined ? overrides.q : achQ;
-  if (q) p.set('q', q);
-  const sort = overrides.sort !== undefined ? overrides.sort : achSort;
-  if (sort && sort !== 'recent') p.set('sort', sort);
-  const days = overrides.days !== undefined ? overrides.days : (achDays > 0 ? String(achDays) : '');
-  if (days) p.set('days', days);
-  return `/reviewers/${reviewer.username}?${p.toString()}`;
-}
-
-// Build the page-number list for SSR pagination (numbers + '…' gaps)
-const achPageItems: (number | string)[] = [];
-if (achTotalPages > 1) {
-  const _pages = Array.from({ length: achTotalPages }, (_, i) => i + 1)
-    .filter(p => p === 1 || p === achTotalPages || Math.abs(p - achPage) <= 2);
-  for (let i = 0; i < _pages.length; i++) {
-    if (i > 0 && _pages[i] - _pages[i - 1] > 1) achPageItems.push('…');
-    achPageItems.push(_pages[i]);
-  }
-}
+// The Achievements feed (stats + paginated cards) is fetched client-side from
+// /api/user-achievements/feed on tab open — see the "ACHIEVEMENTS FEED" script.
+// Keeping it off the SSR path is what makes switching to this tab instant
+// instead of a full page navigation that also re-runs get_achievement_stats().
 
 // Check if this reviewer has Steam connected (for showing sync button to owner)
 const hasSteam = !!(reviewer as any).steam_id;
@@ -1039,13 +1090,25 @@ const reviewerBreadcrumbJsonLd = {
     .bio-empty{font-size:14px;color:var(--text-tertiary);font-style:italic;cursor:text;padding:4px 6px;border-radius:6px;transition:background .15s;display:inline-block}
     .bio-empty:hover{background:var(--tag-bg);color:var(--text-secondary)}
 
-    /* SOCIAL LINKS */
-    .social-links-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-    .social-link-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:16px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-tertiary);font-size:12px;font-weight:500;text-decoration:none;transition:all .15s}
-    .social-link-pill:hover{border-color:var(--accent);color:var(--accent)}
-    .social-link-pill svg{flex-shrink:0}
-    .social-links-edit{flex-direction:column;gap:6px;max-width:480px;margin-bottom:10px}
-    .social-edit-row{display:flex;align-items:center;gap:8px}
+    /* SOCIAL LINKS — icon-only brand tiles */
+    .social-links-row{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px}
+    .social-tile{
+      --brand:var(--text-tertiary);
+      display:inline-flex;align-items:center;justify-content:center;
+      width:30px;height:30px;border-radius:8px;flex-shrink:0;
+      background:var(--brand);color:#fff;text-decoration:none;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);
+      transition:transform .12s ease,box-shadow .12s ease,filter .12s ease;
+    }
+    .social-tile svg{width:15px;height:15px;display:block}
+    a.social-tile:hover{transform:translateY(-2px);filter:brightness(1.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18),0 4px 12px rgba(0,0,0,.22)}
+    a.social-tile:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .social-tile-static{cursor:default}
+    .social-links-edit{display:flex;flex-direction:column;gap:12px;max-width:660px;margin-bottom:10px}
+    .social-edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 16px}
+    .social-edit-row{display:flex;align-items:center;gap:10px;min-width:0}
+    .social-edit-row .social-edit-input{min-width:0}
+    @media(max-width:560px){ .social-edit-grid{grid-template-columns:1fr} }
     .social-edit-label{font-size:11px;font-weight:600;color:var(--text-tertiary);width:70px;flex-shrink:0}
     .social-edit-input{flex:1;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text-primary);background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:6px 10px;outline:none;transition:border-color .15s}
     .social-edit-input:focus{border-color:var(--accent)}
@@ -1188,6 +1251,8 @@ const reviewerBreadcrumbJsonLd = {
     /* OVERVIEW GRID — condensed "All" view for reviews + recommendations. 2-3 per row instead of
        one full-width row, so there's no dead space next to a short title. */
     .reviews-overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;padding:16px 0}
+    .reviews-overview-grid .rev-filter-item{display:flex;min-width:0}
+    .reviews-overview-grid .rev-filter-item > .review-overview-card{flex:1;min-width:0}
     .review-overview-card{display:flex;align-items:center;gap:10px;padding:7px 10px 7px 9px;border-radius:9px;text-decoration:none;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--border);transition:transform .15s,box-shadow .15s}
     .review-overview-card:hover{transform:translateY(-2px);box-shadow:0 4px 14px rgba(0,0,0,.12)}
     .rov-cover{width:32px;height:43px;border-radius:5px;object-fit:cover;background:var(--tag-bg);flex-shrink:0;display:block}
@@ -1216,6 +1281,7 @@ const reviewerBreadcrumbJsonLd = {
     .review-overview-card.rov-low{border-left-color:#f87171;background:rgba(248,113,113,.08)}
 
     .recs-overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px 14px;padding:20px 0}
+    .recs-overview-grid .rec-filter-item{min-width:0}
     .rec-overview-tile{display:block;text-decoration:none}
     .rot-covers{display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:8px}
     .rot-cover{width:56px;height:75px;border-radius:6px;overflow:hidden;background:var(--tag-bg);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 2px 8px rgba(0,0,0,.15);transition:transform .15s}
@@ -1229,8 +1295,10 @@ const reviewerBreadcrumbJsonLd = {
     .empty-title{font-family:'DM Serif Display',serif;font-size:20px;color:var(--text-secondary);margin-bottom:8px}
     .empty-state-tab{padding:60px 0;text-align:center;color:var(--text-tertiary)}
     .lists-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;padding:4px 0}
-    .btn-create-list{display:inline-flex;align-items:center;gap:6px;padding:9px 22px;border-radius:22px;background:var(--accent);color:#fff;font-size:13px;font-weight:500;font-family:inherit;text-decoration:none;border:none;cursor:pointer;transition:opacity .15s}
-    .btn-create-list:hover{opacity:.85}
+    /* Shared "+ create" button for the Reviews / Lists / Recommendations tabs —
+       sits at the right end of each tab's pill row (and in its empty state). */
+    .tab-add-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 16px;border-radius:20px;background:var(--accent);color:var(--accent-text);font-size:13px;font-weight:500;font-family:inherit;text-decoration:none;border:none;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+    .tab-add-btn:hover{opacity:.88}
     .saved-list-wrap{position:relative}
     .saved-hide-btn{position:absolute;top:6px;right:6px;z-index:3;background:rgba(0,0,0,.55);border:none;border-radius:6px;padding:3px 6px;font-size:13px;line-height:1;cursor:pointer;opacity:0;transition:opacity .15s}
     .saved-list-wrap:hover .saved-hide-btn{opacity:1}
@@ -1246,10 +1314,10 @@ const reviewerBreadcrumbJsonLd = {
     .list-settings-btn{background:none;border:1px solid var(--border);border-radius:8px;padding:4px 9px;font-size:12px;color:var(--text-secondary);cursor:pointer;font-family:inherit;transition:all .15s}
     .list-settings-btn:hover,.list-settings-btn.active{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
     /* filter bar */
-    .lf-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
-    .lf-search{background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;outline:none;min-width:140px;max-width:200px}
+    .lf-bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+    .lf-search{background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;font-family:inherit;outline:none;flex:1 1 130px;min-width:104px;max-width:190px}
     .lf-search:focus{border-color:var(--accent)}
-    .lf-select{background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;padding:5px 28px 5px 10px;font-size:12px;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
+    .lf-select{width:112px;flex:0 0 auto;background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;padding:5px 19px 5px 9px;font-size:12px;font-family:inherit;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center}
     .lf-select:focus{border-color:var(--accent)}
     .lf-select.has-value{border-color:var(--accent);color:var(--accent)}
     .lf-checkbox{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap}
@@ -1265,9 +1333,25 @@ const reviewerBreadcrumbJsonLd = {
 
     /* LIBRARY */
     .lib-filter-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px}
-    .lib-pill{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:6px 14px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:5px}
+    .lib-pill{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:20px;padding:6px 14px;font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:6px}
     .lib-pill.active{background:var(--accent);color:white;border-color:transparent}
-.lib-pill .pill-count{font-size:11px;opacity:.75;font-weight:600}
+    .lib-pill .pill-count{font-size:11px;opacity:.75;font-weight:600}
+    /* One hue per status (matches the Detailed-view dots), shared by the filter
+       pills and the row status pills via a --st-c custom property. */
+    .status-playing{--st-c:#60a5fa}
+    .status-completed{--st-c:#22c55e}
+    .status-hundred_percent{--st-c:#fbbf24}
+    .status-want_to_play{--st-c:#fb923c}
+    .status-owned{--st-c:#94a3b8}
+    .status-dropped{--st-c:#f87171}
+    .status-unplayed{--st-c:#a78bfa}
+    /* Coloured filter pill: --st-c tints the resting pill and fills its leading
+       dot; the selected pill deepens the wash and gains a ring rather than a
+       solid fill, so the label stays on --text-primary in both themes. */
+    .lib-pill[data-status]{background:color-mix(in srgb,var(--st-c) 12%,transparent);border-color:color-mix(in srgb,var(--st-c) 42%,transparent);color:var(--text-primary)}
+    .lib-pill[data-status]::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--st-c);flex-shrink:0}
+    .lib-pill[data-status]:hover{background:color-mix(in srgb,var(--st-c) 20%,transparent)}
+    .lib-pill[data-status].active{background:color-mix(in srgb,var(--st-c) 30%,transparent);border-color:var(--st-c);color:var(--text-primary);box-shadow:inset 0 0 0 1px var(--st-c)}
     .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:14px;padding:20px 0}
     .lib-az{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;align-items:center;padding:4px 0}
     .lib-az-btn{background:var(--bg-card);border:1px solid var(--border);border-radius:5px;min-width:26px;padding:4px 5px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text-secondary);cursor:pointer;transition:all .15s}
@@ -1346,6 +1430,34 @@ const reviewerBreadcrumbJsonLd = {
     /* hidden indicator on card */
     .lib-hidden-badge{position:absolute;top:5px;right:5px;font-size:12px;z-index:2;opacity:.8;line-height:1}
     .lib-item-hidden{opacity:.7}
+    /* library — detailed view */
+    .lib-dt-list{display:flex;flex-direction:column;padding:8px 0}
+    .lib-dt-row{display:flex;gap:18px;padding:18px 6px;border-bottom:1px solid var(--border-subtle)}
+    .lib-dt-row:last-child{border-bottom:none}
+    .lib-dt-cover{flex-shrink:0;width:58px;height:77px;border-radius:6px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;text-decoration:none}
+    .lib-dt-cover img{width:100%;height:100%;object-fit:cover;display:block}
+    /* 100% achievement completion — gold ring + glow (both library views) */
+    .lib-cover-perfect{border:2px solid #fbbf24;box-shadow:0 0 12px 1px rgba(251,191,36,.55)}
+    .lib-item:hover .lib-cover.lib-cover-perfect{box-shadow:0 8px 20px rgba(0,0,0,.3),0 0 14px 2px rgba(251,191,36,.75)}
+    .lib-dt-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:11px;justify-content:center}
+    .lib-dt-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .lib-dt-title{font-size:15px;font-weight:700;color:var(--text-primary);text-decoration:none;line-height:1.2}
+    .lib-dt-title:hover{color:var(--accent)}
+    .lib-dt-status{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--text-secondary);background:var(--tag-bg);border:1px solid var(--border);border-radius:20px;padding:2px 9px;white-space:nowrap}
+    .lib-dt-status.status-playing,.lib-dt-status.status-completed,.lib-dt-status.status-hundred_percent,.lib-dt-status.status-want_to_play,.lib-dt-status.status-owned,.lib-dt-status.status-dropped{color:var(--text-primary);background:color-mix(in srgb,var(--st-c) 13%,transparent);border-color:color-mix(in srgb,var(--st-c) 40%,transparent)}
+    .lib-dt-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;background:var(--st-c,var(--text-tertiary))}
+    .lib-dt-score{position:static;bottom:auto;right:auto;min-width:24px;height:22px;font-size:12px;flex-shrink:0}
+    .lib-dt-meta{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--text-tertiary)}
+    .lib-dt-mi{display:inline-flex;align-items:center;gap:6px}
+    .lib-dt-mi svg{opacity:.8;flex-shrink:0}
+    .lib-dt-plat{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#1b2838;flex-shrink:0}
+    .lib-dt-plat svg{opacity:1}
+    .lib-dt-sep{opacity:.35}
+    .lib-dt-bar-wrap{display:flex;align-items:center;gap:14px;width:100%}
+    .lib-dt-bar{flex:1;height:6px;border-radius:3px;background:var(--tag-bg);overflow:hidden}
+    .lib-dt-bar-fill{height:100%;border-radius:3px;background:var(--accent);transition:width .2s}
+    .lib-dt-bar-fill.full{background:var(--score-great,#4ade80)}
+    .lib-dt-pct{font-size:11px;font-weight:600;color:var(--text-secondary);flex-shrink:0;min-width:34px;text-align:right}
     /* gear panel tabs */
     .lib-gear-tabs{display:flex;gap:4px;margin:-16px -16px 16px;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--bg-hover);border-radius:11px 11px 0 0}
     .lib-gear-tab{background:none;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;color:var(--text-tertiary);transition:all .15s}
@@ -1414,11 +1526,24 @@ const reviewerBreadcrumbJsonLd = {
     .steam-cta-btn:hover{opacity:.88}
     /* Steam sync bar — shown when Steam is already connected */
     .steam-sync-bar{display:flex;align-items:center;gap:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px 16px;margin-bottom:4px;font-size:13px}
-    .steam-sync-status{font-size:12px;color:var(--text-tertiary);text-align:right;min-height:18px;margin-bottom:16px}
-    .steam-sync-info{display:flex;align-items:center;gap:6px;color:var(--text-secondary);flex:1}
+    .steam-sync-status{font-size:12px;color:var(--text-tertiary);text-align:right;min-height:18px;margin-bottom:12px}
+    .steam-sync-info{display:flex;align-items:center;gap:6px;color:var(--text-secondary);flex:1;min-width:0}
     .steam-sync-btn{background:transparent;border:1px solid var(--border);color:var(--text-secondary);padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer}
     .steam-sync-btn:hover{border-color:var(--accent);color:var(--accent)}
     .steam-sync-btn:disabled{opacity:.5;cursor:default}
+    /* Library: Overview/Detailed pills on one line with the compact sync bar */
+    .lib-view-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+    .lib-view-row .sort-tabs{margin-bottom:0}
+    .steam-sync-bar--compact{gap:8px;padding:5px 10px;margin:0;font-size:11.5px}
+    .steam-sync-bar--compact .steam-sync-info{flex:0 1 auto}
+    .steam-sync-bar--compact .steam-sync-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .steam-sync-bar--compact .steam-sync-when{color:var(--text-tertiary);white-space:nowrap}
+    .steam-sync-bar--compact .steam-sync-btn{padding:4px 10px;font-size:11px}
+    .steam-sync-played{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-tertiary);cursor:pointer;white-space:nowrap}
+    .steam-sync-played input{accent-color:var(--accent)}
+    @media(max-width:560px){
+      .lib-view-row .steam-sync-bar--compact{width:100%;justify-content:space-between}
+    }
 
     @media(max-width:600px){
       .profile-username{font-size:22px}
@@ -1522,9 +1647,17 @@ const reviewerBreadcrumbJsonLd = {
 
       <div class="social-links-row" id="socialLinksRow" style={socialLinks.length === 0 ? 'display:none' : ''}>
         {socialLinks.map(link => (
-          <a href={link.url ?? '#'} target="_blank" rel="noopener" class="social-link-pill" data-social-key={link.key}>
-            <Fragment set:html={SOCIAL_ICON_SVG[link.key]} />
-            <span>{link.label}</span>
+          <a
+            href={link.url ?? '#'}
+            target="_blank"
+            rel="noopener nofollow"
+            class="social-tile"
+            style={`--brand:${link.color}`}
+            data-social-key={link.key}
+            title={link.label}
+            aria-label={link.label}
+          >
+            <Fragment set:html={link.icon} />
           </a>
         ))}
       </div>
@@ -1542,20 +1675,25 @@ const reviewerBreadcrumbJsonLd = {
 
       {isOwnProfile && (
         <div class="social-links-edit" id="socialLinksEdit" style="display:none">
-          {SOCIAL_PLATFORMS.map(p => (
-            <div class="social-edit-row">
-              <label class="social-edit-label" for={`social-${p.key}`}>{p.label}</label>
-              <input
-                type="text"
-                class="social-edit-input"
-                id={`social-${p.key}`}
-                data-social-key={p.key}
-                placeholder="https://…"
-                value={(reviewer[p.key] as string | null) ?? ''}
-              />
-            </div>
-          ))}
-          <div class="social-edit-row">
+          <div class="social-edit-grid">
+            {SOCIAL_PLATFORMS.map(p => (
+              <div class="social-edit-row">
+                <span class="social-tile social-tile-static" style={`--brand:${p.color}`} title={p.label} aria-hidden="true">
+                  <Fragment set:html={p.icon} />
+                </span>
+                <input
+                  type="text"
+                  class="social-edit-input"
+                  id={`social-${p.key}`}
+                  data-social-key={p.key}
+                  placeholder={p.placeholder}
+                  aria-label={p.label}
+                  value={((reviewer as any)[p.key] as string | null) ?? ''}
+                />
+              </div>
+            ))}
+          </div>
+          <div class="social-edit-row social-edit-accent">
             <label class="social-edit-label" for="accentColorInput">Accent color</label>
             <input
               type="color"
@@ -1867,152 +2005,240 @@ const reviewerBreadcrumbJsonLd = {
     <div class="empty-state">
       <div class="empty-title">No reviews yet</div>
       <p style="font-size:14px;color:var(--text-tertiary)">@{reviewer.username} hasn't posted any reviews.</p>
+      {isOwnProfile && <a class="tab-add-btn" href="/?compose=review" style="margin-top:14px">+ Write a review</a>}
     </div>
   ) : (
     <>
       <div class="sort-tabs">
-        <button class="sort-tab active" onclick="sortReviews('all',this)">All</button>
-        <button class="sort-tab" onclick="sortReviews('recent',this)">Recent</button>
-        <button class="sort-tab" onclick="sortReviews('highest',this)">Highest</button>
-        <button class="sort-tab" onclick="sortReviews('lowest',this)">Lowest</button>
-        <button class="sort-tab" onclick="sortReviews('most_upvoted',this)">Most upvoted</button>
-        <button class="sort-tab" onclick="sortReviews('most_downvoted',this)">Most downvoted</button>
+        <button class="sort-tab review-view-tab active" onclick="switchReviewView('overview',this)">Overview</button>
+        <button class="sort-tab review-view-tab" onclick="switchReviewView('detailed',this)">Detailed</button>
+        {isOwnProfile && <a class="tab-add-btn" style="margin-left:auto" href="/?compose=review">+ Write a review</a>}
       </div>
+
+      <div class="lf-bar">
+        <input class="lf-search" type="text" placeholder="Search reviews…" oninput="searchReviews(this.value)" />
+        <select class="lf-select" onchange="setReviewSort(this.value)">
+          <option value="az" selected>A–Z</option>
+          <option value="recent">Recent</option>
+          <option value="oldest">Oldest</option>
+          <option value="highest">Highest Rated</option>
+          <option value="lowest">Lowest Rated</option>
+          <option value="most-upvoted">Most Upvoted</option>
+          <option value="most-downvoted">Most Downvoted</option>
+        </select>
+        {reviewGenres.length > 0 && (
+          <select class="lf-select" onchange="setReviewFilter('genre',this.value,this)">
+            <option value="">All Genres</option>
+            {reviewGenres.map((g: string) => <option value={g}>{g}</option>)}
+          </select>
+        )}
+        {reviewPlatforms.length > 0 && (
+          <select class="lf-select" onchange="setReviewFilter('platform',this.value,this)">
+            <option value="">All Platforms</option>
+            {reviewPlatforms.map((p: string) => <option value={p}>{p}</option>)}
+          </select>
+        )}
+        {reviewDevs.length > 0 && (
+          <select class="lf-select" onchange="setReviewFilter('dev',this.value,this)">
+            <option value="">All Devs</option>
+            {reviewDevs.map((d: string) => <option value={d}>{d}</option>)}
+          </select>
+        )}
+      </div>
+
       <div id="reviewsList" style="display:none">
-        {publishedReviews.map((review: any) => (
-          <ReviewCard
-            review={review}
-            isLoggedIn={!!user}
-            isOwnProfile={isOwnProfile}
-            showGame={true}
-            showReviewer={false}
-            currentProfileId={currentProfile?.id ?? null}
-          />
+        {reviewFilterItems.map((it: any) => (
+          <div
+            class="rev-filter-item"
+            data-title={it.searchText}
+            data-sort-title={it.sortTitle}
+            data-genres={it.genres.join(',')}
+            data-devs={it.devs.join(',')}
+            data-platform={it.platform}
+            data-score={it.score}
+            data-date={it.date}
+            data-upvotes={it.up}
+            data-downvotes={it.down}
+          >
+            <ReviewCard
+              review={it.review}
+              isLoggedIn={!!user}
+              isOwnProfile={isOwnProfile}
+              showGame={true}
+              showReviewer={false}
+              currentProfileId={currentProfile?.id ?? null}
+            />
+          </div>
         ))}
       </div>
+      <div class="list-no-results" id="reviews-dt-no-results" style="display:none">No reviews match these filters.</div>
+
       <div class="reviews-overview-grid" id="reviewsOverviewList">
-        {[...publishedReviews].sort((a: any, b: any) =>
-          (a.games?.title ?? '').localeCompare(b.games?.title ?? '')
-        ).map((review: any) => {
+        {reviewFilterItems.map((it: any) => {
+          const review = it.review
           const cover = igdbCover(review.games?.cover_img_url, 't_thumb')
           return (
-            <a href={`/reviews/${review.id}`} class={`review-overview-card rov-${scoreClass(review.score).replace('score-', '')}`}>
-              {cover ? <img class="rov-cover" src={cover} alt="" loading="lazy" /> : <div class="rov-cover" />}
-              <div class="rov-body">
-                <span class="rov-title">{review.games?.title ?? 'Unknown game'}</span>
-                <span class="rov-date">{timeAgo(review.published_at ?? review.created_at)}</span>
-              </div>
-              <span class="rov-score">{review.score}</span>
-            </a>
+            <div
+              class="rev-filter-item"
+              data-title={it.searchText}
+              data-sort-title={it.sortTitle}
+              data-genres={it.genres.join(',')}
+              data-devs={it.devs.join(',')}
+              data-platform={it.platform}
+              data-score={it.score}
+              data-date={it.date}
+              data-upvotes={it.up}
+              data-downvotes={it.down}
+            >
+              <a href={`/reviews/${review.id}`} class={`review-overview-card rov-${scoreClass(review.score).replace('score-', '')}`}>
+                {cover ? <img class="rov-cover" src={cover} alt="" loading="lazy" /> : <div class="rov-cover" />}
+                <div class="rov-body">
+                  <span class="rov-title">{review.games?.title ?? 'Unknown game'}</span>
+                  <span class="rov-date">{timeAgo(review.published_at ?? review.created_at)}</span>
+                </div>
+                <span class="rov-score">{review.score}</span>
+              </a>
+            </div>
           )
         })}
       </div>
+      <div class="list-no-results" id="reviews-ov-no-results" style="display:none">No reviews match these filters.</div>
     </>
   )}
 </div>
 
   <!-- ── RECOMMENDATIONS TAB — this reviewer's authored "if you liked A, try B" posts ── -->
   <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
-    <div class="prof-recs-head">
-      {reviewerRecs.length > 0 && (
-        <div class="prof-recs-sorts">
-          <button class="prof-rec-sort active" data-sort="all">All</button>
-          <button class="prof-rec-sort" data-sort="recent">Recent</button>
-          <button class="prof-rec-sort" data-sort="most_up">Most upvoted</button>
-          <button class="prof-rec-sort" data-sort="least_up">Least upvoted</button>
-          <button class="prof-rec-sort" data-sort="oldest">Oldest</button>
-        </div>
-      )}
-      {isOwnProfile && <button class="prof-rec-add" onclick="openRecComposer()">+ Add a recommendation</button>}
-    </div>
     {reviewerRecs.length === 0 ? (
       <div class="prof-recs-empty">
         <div class="prof-recs-empty-title">No recommendations yet</div>
         <p>{isOwnProfile ? "Share a “if you liked X, you’ll like Y” pairing and it’ll show up here and in the feed." : `${reviewer.username} hasn’t recommended any games yet.`}</p>
-        {isOwnProfile && <button class="prof-rec-add" onclick="openRecComposer()" style="margin-top:14px">+ Add a recommendation</button>}
+        {isOwnProfile && <button class="tab-add-btn" onclick="openRecComposer()" style="margin-top:14px">+ Add a recommendation</button>}
       </div>
     ) : (
-      <div id="profRecsList" style="display:none">
-        {reviewerRecs.map((rec: any) => (
-          <div class="prof-rec-item" data-created={rec.createdAt} data-net={rec.upVotes - rec.downVotes}>
-            <RecommendationFeedCard
-              id={rec.id}
-              sourceGame={rec.sourceGame}
-              targetGame={rec.targetGame}
-              body={rec.body}
-              containsSpoilers={rec.containsSpoilers}
-              ownerUsername={rec.ownerUsername}
-              ownerAvatar={rec.ownerAvatar}
-              createdAt={rec.createdAt}
-              upVotes={rec.upVotes}
-              downVotes={rec.downVotes}
-              myVote={rec.myVote}
-              commentCount={rec.commentCount}
-              reactions={rec.reactions}
-              isLoggedIn={!!user}
-              currentProfileId={currentProfile?.id ?? null}
-              profileId={rec.profileId}
-            />
-          </div>
-        ))}
-      </div>
-      <div class="recs-overview-grid" id="profRecsOverviewList">
-        {[...reviewerRecs].sort((a: any, b: any) =>
-          (a.sourceGame?.title ?? '').localeCompare(b.sourceGame?.title ?? '')
-        ).map((rec: any) => {
-          const srcCover = igdbCover(rec.sourceGame?.cover_img_url, 't_cover_big')
-          const tgtCover = igdbCover(rec.targetGame?.cover_img_url, 't_cover_big')
-          return (
-            <a href={`/recommendations/${rec.id}`} class="rec-overview-tile">
-              <div class="rot-covers">
-                <div class="rot-cover">{srcCover ? <img src={srcCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
-                <span class="rot-arrow">→</span>
-                <div class="rot-cover">{tgtCover ? <img src={tgtCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+      <>
+        <div class="sort-tabs">
+          <button class="sort-tab rec-view-tab active" onclick="switchRecView('overview',this)">Overview</button>
+          <button class="sort-tab rec-view-tab" onclick="switchRecView('detailed',this)">Detailed</button>
+          {isOwnProfile && <button class="tab-add-btn" style="margin-left:auto" onclick="openRecComposer()">+ Add a recommendation</button>}
+        </div>
+
+        <div class="lf-bar">
+          <input class="lf-search" type="text" placeholder="Search recommendations…" oninput="searchRecs(this.value)" />
+          <select class="lf-select" onchange="setRecSort(this.value)">
+            <option value="az" selected>A–Z</option>
+            <option value="recent">Recent</option>
+            <option value="oldest">Oldest</option>
+            <option value="most-upvoted">Most Upvoted</option>
+            <option value="most-downvoted">Most Downvoted</option>
+          </select>
+          {recGenres.length > 0 && (
+            <select class="lf-select" onchange="setRecFilter('genre',this.value,this)">
+              <option value="">All Genres</option>
+              {recGenres.map((g: string) => <option value={g}>{g}</option>)}
+            </select>
+          )}
+          {recPlatforms.length > 0 && (
+            <select class="lf-select" onchange="setRecFilter('platform',this.value,this)">
+              <option value="">All Platforms</option>
+              {recPlatforms.map((p: string) => <option value={p}>{p}</option>)}
+            </select>
+          )}
+          {recDevs.length > 0 && (
+            <select class="lf-select" onchange="setRecFilter('dev',this.value,this)">
+              <option value="">All Devs</option>
+              {recDevs.map((d: string) => <option value={d}>{d}</option>)}
+            </select>
+          )}
+        </div>
+
+        <div id="profRecsList" style="display:none">
+          {recFilterItems.map((it: any) => (
+            <div
+              class="rec-filter-item"
+              data-title={it.searchText}
+              data-sort-title={it.sortTitle}
+              data-genres={it.genres.join(',')}
+              data-devs={it.devs.join(',')}
+              data-platforms={it.platforms.join(',')}
+              data-date={it.date}
+              data-upvotes={it.up}
+              data-downvotes={it.down}
+            >
+              <RecommendationFeedCard
+                id={it.rec.id}
+                sourceGame={it.rec.sourceGame}
+                targetGame={it.rec.targetGame}
+                body={it.rec.body}
+                containsSpoilers={it.rec.containsSpoilers}
+                ownerUsername={it.rec.ownerUsername}
+                ownerAvatar={it.rec.ownerAvatar}
+                createdAt={it.rec.createdAt}
+                upVotes={it.rec.upVotes}
+                downVotes={it.rec.downVotes}
+                myVote={it.rec.myVote}
+                commentCount={it.rec.commentCount}
+                reactions={it.rec.reactions}
+                isLoggedIn={!!user}
+                currentProfileId={currentProfile?.id ?? null}
+                profileId={it.rec.profileId}
+              />
+            </div>
+          ))}
+        </div>
+        <div class="list-no-results" id="recs-dt-no-results" style="display:none">No recommendations match these filters.</div>
+
+        <div class="recs-overview-grid" id="profRecsOverviewList">
+          {recFilterItems.map((it: any) => {
+            const rec = it.rec
+            const srcCover = igdbCover(rec.sourceGame?.cover_img_url, 't_cover_big')
+            const tgtCover = igdbCover(rec.targetGame?.cover_img_url, 't_cover_big')
+            return (
+              <div
+                class="rec-filter-item"
+                data-title={it.searchText}
+                data-sort-title={it.sortTitle}
+                data-genres={it.genres.join(',')}
+                data-devs={it.devs.join(',')}
+                data-platforms={it.platforms.join(',')}
+                data-date={it.date}
+                data-upvotes={it.up}
+                data-downvotes={it.down}
+              >
+                <a href={`/recommendations/${rec.id}`} class="rec-overview-tile">
+                  <div class="rot-covers">
+                    <div class="rot-cover">{srcCover ? <img src={srcCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+                    <span class="rot-arrow">→</span>
+                    <div class="rot-cover">{tgtCover ? <img src={tgtCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
+                  </div>
+                  <div class="rot-titles">{rec.sourceGame?.title ?? 'Unknown'} → {rec.targetGame?.title ?? 'Unknown'}</div>
+                </a>
               </div>
-              <div class="rot-titles">{rec.sourceGame?.title ?? 'Unknown'} → {rec.targetGame?.title ?? 'Unknown'}</div>
-            </a>
-          )
-        })}
-      </div>
+            )
+          })}
+        </div>
+        <div class="list-no-results" id="recs-ov-no-results" style="display:none">No recommendations match these filters.</div>
+      </>
     )}
   </div>
 
   <!-- ── LIBRARY TAB ── -->
   <div class={`tab-panel ${activeTab === 'library' ? 'active' : ''}`} data-tab="library">
 
-    {/* Steam CTA / sync bar */}
-    {isOwnProfile && (
-      <>
-        {!reviewer.steam_id ? (
-          <div class="steam-cta">
-            <div class="steam-cta-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
-            </div>
-            <div class="steam-cta-body">
-              <div class="steam-cta-title">Import your Steam library</div>
-              <div class="steam-cta-desc">Connect Steam to automatically add your owned games and playtime.</div>
-            </div>
-            <a href={`/api/auth/steam-connect?from=${encodeURIComponent(`/reviewers/${reviewer.username}?tab=library`)}`} class="steam-cta-btn">Connect Steam</a>
-          </div>
-        ) : (
-          <div class="steam-sync-bar">
-            <span class="steam-sync-info">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="color:#60a5fa;flex-shrink:0"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
-              {reviewer.steam_username ? `Connected as ${reviewer.steam_username}` : 'Steam connected'}
-              {reviewer.steam_synced_at && (
-                <span style="color:var(--text-tertiary)"> · Last synced {timeAgo(reviewer.steam_synced_at)}</span>
-              )}
-            </span>
-            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-tertiary);cursor:pointer;white-space:nowrap">
-              <input type="checkbox" id="profilePlayedOnly" style="accent-color:var(--accent)">
-              Played only
-            </label>
-            <button class="steam-sync-btn" id="profileSyncBtn" data-username={reviewer.username} onclick="profileSteamSync()">Sync now</button>
-          </div>
-        )}
-      </>
+    {/* Steam CTA — only while not yet connected. The compact "connected" sync bar
+        lives on the Overview/Detailed row inside #libControls below. */}
+    {isOwnProfile && !reviewer.steam_id && (
+      <div class="steam-cta">
+        <div class="steam-cta-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
+        </div>
+        <div class="steam-cta-body">
+          <div class="steam-cta-title">Import your Steam library</div>
+          <div class="steam-cta-desc">Connect Steam to automatically add your owned games and playtime.</div>
+        </div>
+        <a href={`/api/auth/steam-connect?from=${encodeURIComponent(`/reviewers/${reviewer.username}?tab=library`)}`} class="steam-cta-btn">Connect Steam</a>
+      </div>
     )}
-    <div id="profileSyncStatus" class="steam-sync-status" style="display:none"></div>
 
     {libraryIsPrivate && (
       <div class="empty-state" style="margin-top:16px">
@@ -2023,16 +2249,58 @@ const reviewerBreadcrumbJsonLd = {
 
     {/* Library controls — search, sort, edit (rendered by JS from libraryJson) */}
     <div id="libControls" style="display:none">
-      <div class="lib-controls-row">
-        <input id="libSearch" class="lib-search" type="search" placeholder="Search by title or genre…" autocomplete="off" />
-        <select id="libSort" class="lib-sort">
+      <div class="lib-view-row">
+        <div class="sort-tabs" id="libViewTabs">
+          <button class="sort-tab lib-view-tab active" onclick="switchLibView('overview',this)">Overview</button>
+          <button class="sort-tab lib-view-tab" onclick="switchLibView('detailed',this)">Detailed</button>
+        </div>
+        {isOwnProfile && reviewer.steam_id && (
+          <div class="steam-sync-bar steam-sync-bar--compact">
+            <span class="steam-sync-info">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="color:#60a5fa;flex-shrink:0"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
+              <span class="steam-sync-label">{reviewer.steam_username ? `Connected as ${reviewer.steam_username}` : 'Steam connected'}</span>
+              {reviewer.steam_synced_at && (
+                <span class="steam-sync-when"> · {timeAgo(reviewer.steam_synced_at)}</span>
+              )}
+            </span>
+            <label class="steam-sync-played">
+              <input type="checkbox" id="profilePlayedOnly" />
+              Played only
+            </label>
+            <button class="steam-sync-btn" id="profileSyncBtn" data-username={reviewer.username} onclick="profileSteamSync()">Sync now</button>
+          </div>
+        )}
+      </div>
+      <div id="profileSyncStatus" class="steam-sync-status" style="display:none"></div>
+      <div class="lib-controls-row lf-bar">
+        <input id="libSearch" class="lf-search" type="search" placeholder="Search library…" autocomplete="off" />
+        <select id="libSort" class="lf-select">
           <option value="alpha">A – Z</option>
           <option value="recent">Recently added</option>
           <option value="review">Has review first</option>
           <option value="hours">Most hours played</option>
+          <option value="completion">Completion %</option>
         </select>
+        {libGenres.length > 0 && (
+          <select id="libGenre" class="lf-select" onchange="setLibDimFilter('genre',this.value,this)">
+            <option value="">All Genres</option>
+            {libGenres.map((g: string) => <option value={g}>{g}</option>)}
+          </select>
+        )}
+        {libPlatforms.length > 0 && (
+          <select id="libPlatform" class="lf-select" onchange="setLibDimFilter('platform',this.value,this)">
+            <option value="">All Platforms</option>
+            {libPlatforms.map((pl: string) => <option value={pl}>{pl}</option>)}
+          </select>
+        )}
+        {libDevs.length > 0 && (
+          <select id="libDev" class="lf-select" onchange="setLibDimFilter('dev',this.value,this)">
+            <option value="">All Devs</option>
+            {libDevs.map((d: string) => <option value={d}>{d}</option>)}
+          </select>
+        )}
         {isOwnProfile && (
-          <button id="libGearBtn" class="lib-gear-btn" title="Library settings" onclick="toggleLibGear()">
+          <button id="libGearBtn" class="lib-gear-btn" title="Library settings" style="margin-left:auto" onclick="toggleLibGear()">
             <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="9" cy="9" r="2.5"/>
               <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
@@ -2150,6 +2418,7 @@ const reviewerBreadcrumbJsonLd = {
     </div>
     <div class="lib-az" id="libAzBar" style="display:none"></div>
     <div class="lib-grid" id="libGrid"></div>
+    <div class="lib-dt-list" id="libGridDetailed" style="display:none"></div>
     <div class="lib-pag" id="libPagination" style="display:none"></div>
 
   </div>
@@ -2190,124 +2459,63 @@ const reviewerBreadcrumbJsonLd = {
       </div>
     )}
 
-    {/* Data is only rendered on a full load with ?tab=achievements.
-        After syncing the JS prompts a reload, so the feed shows correctly. */}
-    {activeTab === 'achievements' && (
-      <>
-        {totalAchievements === 0 && hasSteam && (
-          <div class="empty-state">
-            <div class="empty-title">No achievements synced yet</div>
-            <p style="font-size:14px;color:var(--text-tertiary)">
-              {isOwnProfile
-                ? 'Click "Sync Achievements" above to import your Steam achievement progress.'
-                : `@${reviewer.username} hasn't synced their achievements yet.`}
-            </p>
+    {/* Feed is fetched client-side from /api/user-achievements/feed the first
+        time this tab is opened (see the ACHIEVEMENTS FEED script). Everything
+        below is a static shell the script fills in. Skipped for an owner with
+        no Steam linked — the "Connect your Steam account" card above covers it. */}
+    {!(isOwnProfile && !hasSteam) && (
+      <div id="achContent" data-username={reviewer.username}>
+        <div class="ach-summary" id="achSummary" style="display:none">
+          <div class="ach-summary-stat">
+            <span class="ach-summary-num" id="achStatUnlocked">0</span>
+            <span class="ach-summary-label">Unlocked</span>
           </div>
-        )}
+          <div class="ach-summary-stat">
+            <span class="ach-summary-num" id="achStatAvg">0%</span>
+            <span class="ach-summary-label">Avg Completion</span>
+          </div>
+          <div class="ach-summary-stat">
+            <span class="ach-summary-num" id="achStatPerfect">0</span>
+            <span class="ach-summary-label">Perfect Games</span>
+          </div>
+        </div>
 
-        {totalAchievements > 0 && (
-          <>
-            {/* Summary bar */}
-            <div class="ach-summary">
-              <div class="ach-summary-stat">
-                <span class="ach-summary-num">{unlockedAchievements.toLocaleString()}</span>
-                <span class="ach-summary-label">Unlocked</span>
-              </div>
-              <div class="ach-summary-stat">
-                <span class="ach-summary-num">{avgCompletion.toFixed(1)}%</span>
-                <span class="ach-summary-label">Avg Completion</span>
-              </div>
-              <div class="ach-summary-stat">
-                <span class="ach-summary-num">{perfectGames.toLocaleString()}</span>
-                <span class="ach-summary-label">Perfect Games</span>
-              </div>
-            </div>
+        <div class="ach-filter-bar" id="achFilterBar" style="display:none">
+          <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements…" autocomplete="off" />
+          <select id="achSortSelect" class="ach-date-select">
+            <option value="recent">Recent</option>
+            <option value="oldest">Oldest</option>
+            <option value="rarest">Rarity: Rarest first</option>
+            <option value="least-rare">Rarity: Common first</option>
+            <option value="az">A–Z</option>
+            <option value="za">Z–A</option>
+          </select>
+          <select id="achDateFilter" class="ach-date-select">
+            <option value="0">All time</option>
+            <option value="7">Last 7 days</option>
+            <option value="30">Last 30 days</option>
+            <option value="180">Last 6 months</option>
+            <option value="365">Last year</option>
+          </select>
+        </div>
 
-            {/* Filter bar — navigates via URL so filters + pagination are SSR */}
-            <div class="ach-filter-bar">
-              <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements…" autocomplete="off" value={achQ} />
-              <select id="achSortSelect" class="ach-date-select">
-                <option value="recent"    selected={achSort === 'recent'}>Recent</option>
-                <option value="oldest"    selected={achSort === 'oldest'}>Oldest</option>
-                <option value="rarest"    selected={achSort === 'rarest'}>Rarity: Rarest first</option>
-                <option value="least-rare" selected={achSort === 'least-rare'}>Rarity: Common first</option>
-                <option value="az"        selected={achSort === 'az'}>A–Z</option>
-                <option value="za"        selected={achSort === 'za'}>Z–A</option>
-              </select>
-              <select id="achDateFilter" class="ach-date-select">
-                <option value="0"   selected={achDays === 0}>All time</option>
-                <option value="7"   selected={achDays === 7}>Last 7 days</option>
-                <option value="30"  selected={achDays === 30}>Last 30 days</option>
-                <option value="180" selected={achDays === 180}>Last 6 months</option>
-                <option value="365" selected={achDays === 365}>Last year</option>
-              </select>
-            </div>
+        <div class="ach-feed" id="achFeed"></div>
 
-            {/* Chronological feed — grouped by date, SSR-rendered */}
-            {achByDate.length > 0 ? (
-              <div class="ach-feed">
-                {achByDate.map(({ label, items }) => (
-                  <div class="ach-day">
-                    {label && <div class="ach-day-date">{label}</div>}
-                    <div class="ach-feed-grid">
-                      {items.map((a: any) => {
-                        const isRare = a.global_percent != null && a.global_percent < 10;
-                        const unlockDate = a.unlock_time
-                          ? new Date(a.unlock_time).toLocaleString('en-GB', {
-                              day: 'numeric', month: 'short', year: 'numeric',
-                              hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
-                            })
-                          : null;
-                        return (
-                          <div class={`ach-feed-card${isRare ? ' ach-feed-card--rare' : ''}`}>
-                            <div class={`ach-feed-icon-wrap${isRare ? ' ach-feed-icon-wrap--rare' : ''}`}>
-                              {a.icon_url
-                                ? <img src={a.icon_url} alt={a.display_name ?? ''} class={`ach-feed-icon${isRare ? ' ach-feed-icon--rare' : ''}`} loading="lazy" />
-                                : <div class={`ach-feed-icon ach-feed-icon-ph${isRare ? ' ach-feed-icon--rare' : ''}`}>🏆</div>
-                              }
-                            </div>
-                            <div class="ach-feed-info">
-                              <div class="ach-feed-name">{a.display_name ?? a.api_name}</div>
-                              {a.description && <div class="ach-feed-desc">{a.description}</div>}
-                              <div class="ach-feed-game">{a.games?.title ?? a.steam_game_title ?? `App ${a.steam_appid}`}</div>
-                              <div class="ach-feed-footer">
-                                {unlockDate && <span class="ach-feed-time">Unlocked on {unlockDate}</span>}
-                                {a.global_percent != null && (
-                                  <span class={`ach-feed-pct${isRare ? ' ach-feed-pct--rare' : ''}`}>
-                                    {a.global_percent.toFixed(1)}% of players
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div class="empty-state">
-                <div class="empty-title">No achievements match</div>
-                <p style="font-size:14px;color:var(--text-tertiary)">Try adjusting your search or filters.</p>
-              </div>
-            )}
+        <div class="empty-state" id="achEmptyNone" style="display:none">
+          <div class="empty-title">No achievements synced yet</div>
+          <p style="font-size:14px;color:var(--text-tertiary)">
+            {isOwnProfile
+              ? 'Click "Sync Achievements" above to import your Steam achievement progress.'
+              : `@${reviewer.username} hasn't synced their achievements yet.`}
+          </p>
+        </div>
+        <div class="empty-state" id="achEmptyMatch" style="display:none">
+          <div class="empty-title">No achievements match</div>
+          <p style="font-size:14px;color:var(--text-tertiary)">Try adjusting your search or filters.</p>
+        </div>
 
-            {/* SSR pagination */}
-            {achTotalPages > 1 && (
-              <div class="ach-pagination">
-                {achPage > 1 && <a href={achUrl(achPage - 1)} class="ach-pag-btn">‹</a>}
-                {achPageItems.map(p =>
-                  p === '…'
-                    ? <span class="ach-pag-dots">…</span>
-                    : <a href={achUrl(p as number)} class={`ach-pag-btn${p === achPage ? ' active' : ''}`}>{p}</a>
-                )}
-                {achPage < achTotalPages && <a href={achUrl(achPage + 1)} class="ach-pag-btn">›</a>}
-              </div>
-            )}
-          </>
-        )}
-      </>
+        <div class="ach-pagination" id="achPagination" style="display:none"></div>
+      </div>
     )}
   </div>
   )}
@@ -2366,6 +2574,9 @@ const reviewerBreadcrumbJsonLd = {
         <button class="sort-tab list-filter-tab" onclick="switchListsSection('saved', this)">
           Saved {savedLists.length > 0 && <span style="opacity:.6">({savedLists.length})</span>}
         </button>
+        {isOwnProfile && profileLists.length > 0 && (
+          <button class="tab-add-btn" style="margin-left:auto" onclick="createNewList(this)">+ New list</button>
+        )}
       </div>
     )}
 
@@ -2375,7 +2586,7 @@ const reviewerBreadcrumbJsonLd = {
         <div class="empty-state-tab">
           <div class="empty-title">{isOwnProfile ? "You haven't created any lists yet" : `@${reviewer.username} hasn't created any lists yet`}</div>
           {isOwnProfile && (
-            <button class="btn-create-list" onclick="createNewList(this)">+ Create your first list</button>
+            <button class="tab-add-btn" onclick="createNewList(this)">+ Create your first list</button>
           )}
         </div>
       ) : (
@@ -2453,11 +2664,6 @@ const reviewerBreadcrumbJsonLd = {
             ))}
           </div>
           <div class="list-no-results" id="my-no-results" style="display:none">No lists match these filters.</div>
-          {isOwnProfile && (
-            <div style="margin-top: 20px">
-              <button class="btn-create-list" onclick="createNewList(this)">+ New list</button>
-            </div>
-          )}
         </>
       )}
     </div>
@@ -2614,7 +2820,7 @@ const reviewerBreadcrumbJsonLd = {
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, countsJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, countsJson, reviewScoresJson, reviewHoursJson, libGenresJson, libPlatformsJson, libDevsJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -2637,9 +2843,10 @@ const reviewerBreadcrumbJsonLd = {
   var _origAccentValue = ''
   var _origAccentCleared = false
   var _hasCustomAccent = hasAccentColor
-  var SOCIAL_KEYS = ['twitch_url', 'youtube_url', 'twitter_url', 'discord_url', 'website_url']
+  var SOCIAL_KEYS = JSON.parse(socialKeysJson)
   var SOCIAL_ICONS = JSON.parse(socialIconsJson)
   var SOCIAL_LABELS = JSON.parse(socialLabelsJson)
+  var SOCIAL_COLORS = JSON.parse(socialColorsJson)
 
   function defaultAccentColor() {
     return document.documentElement.getAttribute('data-theme') === 'light' ? '#4a3a8a' : '#6050c8'
@@ -2820,7 +3027,7 @@ const reviewerBreadcrumbJsonLd = {
           SOCIAL_KEYS.forEach(function(key) {
             var val = payload[key]
             if (!val) return
-            pills += '<a href="' + escAttr(val) + '" target="_blank" rel="noopener" class="social-link-pill" data-social-key="' + key + '">' + SOCIAL_ICONS[key] + '<span>' + SOCIAL_LABELS[key] + '</span></a>'
+            pills += '<a href="' + escAttr(val) + '" target="_blank" rel="noopener nofollow" class="social-tile" style="--brand:' + escAttr(SOCIAL_COLORS[key] || '') + '" data-social-key="' + key + '" title="' + escAttr(SOCIAL_LABELS[key]) + '" aria-label="' + escAttr(SOCIAL_LABELS[key]) + '">' + SOCIAL_ICONS[key] + '</a>'
           })
           socialRow.innerHTML = pills
           socialRow.style.display = pills ? '' : 'none'
@@ -3378,30 +3585,197 @@ const reviewerBreadcrumbJsonLd = {
     if (gameEl)   gameEl.addEventListener('change', filterAchPicker)
   })()
 
-  // ── ACHIEVEMENT FILTERS — navigate via URL so SSR handles pagination + rendering ──
+  // ── ACHIEVEMENTS FEED — fetched from /api/user-achievements/feed on tab open,
+  //    so switching to this tab is instant instead of a full page navigation. ──
   ;(function() {
-    var searchEl = document.getElementById('achSearch')
-    var sortEl   = document.getElementById('achSortSelect')
-    var dateEl   = document.getElementById('achDateFilter')
-    if (!searchEl && !sortEl && !dateEl) return
+    var content = document.getElementById('achContent')
+    if (!content) return   // owner with no Steam linked, or tab not shown
+    var feedEl    = document.getElementById('achFeed')
+    var summaryEl = document.getElementById('achSummary')
+    var filterEl  = document.getElementById('achFilterBar')
+    var emptyNone = document.getElementById('achEmptyNone')
+    var emptyMatch = document.getElementById('achEmptyMatch')
+    var pagEl     = document.getElementById('achPagination')
+    var searchEl  = document.getElementById('achSearch')
+    var sortEl    = document.getElementById('achSortSelect')
+    var dateEl    = document.getElementById('achDateFilter')
+    var username  = content.dataset.username
 
-    function achNav(overrides) {
-      var p = new URLSearchParams({ tab: 'achievements' })
-      var q = overrides.q !== undefined ? overrides.q : (searchEl ? searchEl.value.trim() : '')
-      if (q) p.set('q', q)
-      var sort = overrides.sort !== undefined ? overrides.sort : (sortEl ? sortEl.value : 'recent')
-      if (sort && sort !== 'recent') p.set('sort', sort)
-      var days = overrides.days !== undefined ? overrides.days : (dateEl ? dateEl.value : '0')
-      if (days && days !== '0') p.set('days', days)
-      window.location.href = window.location.pathname + '?' + p.toString()
+    var PER = 50
+    var _st = { page: 1, q: '', sort: 'recent', days: 0 }
+    var _built = false
+    var _loading = false
+    var _hasAny = true             // set from stats.unlocked on the first response
+    var _cache = {}                 // page-key -> response
+    var _totalByFilter = {}         // filter-key -> total (carried across pages)
+    var _nowYear = new Date().getUTCFullYear()
+
+    function _pageKey()   { return _st.page + '|' + _st.q + '|' + _st.sort + '|' + _st.days }
+    function _filterKey() { return _st.q + '|' + _st.sort + '|' + _st.days }
+
+    function _esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"]/g, function(ch) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]
+      })
+    }
+
+    function _dayLabel(iso) {
+      var d = new Date(iso)
+      var opts = { month: 'long', day: 'numeric', timeZone: 'UTC' }
+      if (d.getUTCFullYear() !== _nowYear) opts.year = 'numeric'
+      return d.toLocaleDateString('en-US', opts).toUpperCase()
+    }
+
+    function _unlockLabel(iso) {
+      if (!iso) return null
+      return new Date(iso).toLocaleString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'UTC',
+      })
+    }
+
+    function _cardHtml(a) {
+      var rare = a.global_percent != null && a.global_percent < 10
+      var icon = a.icon_url
+        ? '<img src="' + _esc(a.icon_url) + '" alt="' + _esc(a.display_name || '') + '" class="ach-feed-icon' + (rare ? ' ach-feed-icon--rare' : '') + '" loading="lazy"/>'
+        : '<div class="ach-feed-icon ach-feed-icon-ph' + (rare ? ' ach-feed-icon--rare' : '') + '">🏆</div>'
+      var when = _unlockLabel(a.unlock_time)
+      var pct = a.global_percent != null
+        ? '<span class="ach-feed-pct' + (rare ? ' ach-feed-pct--rare' : '') + '">' + a.global_percent.toFixed(1) + '% of players</span>'
+        : ''
+      return '<div class="ach-feed-card' + (rare ? ' ach-feed-card--rare' : '') + '">' +
+          '<div class="ach-feed-icon-wrap' + (rare ? ' ach-feed-icon-wrap--rare' : '') + '">' + icon + '</div>' +
+          '<div class="ach-feed-info">' +
+            '<div class="ach-feed-name">' + _esc(a.display_name || a.api_name) + '</div>' +
+            (a.description ? '<div class="ach-feed-desc">' + _esc(a.description) + '</div>' : '') +
+            '<div class="ach-feed-game">' + _esc(a.game_title || ('App ' + a.steam_appid)) + '</div>' +
+            '<div class="ach-feed-footer">' +
+              (when ? '<span class="ach-feed-time">Unlocked on ' + _esc(when) + '</span>' : '') +
+              pct +
+            '</div>' +
+          '</div>' +
+        '</div>'
+    }
+
+    function _renderPagination(totalPages) {
+      if (totalPages <= 1) { pagEl.style.display = 'none'; pagEl.innerHTML = ''; return }
+      var cur = _st.page
+      var nums = []
+      for (var i = 1; i <= totalPages; i++) {
+        if (i === 1 || i === totalPages || Math.abs(i - cur) <= 2) nums.push(i)
+      }
+      var h = ''
+      if (cur > 1) h += '<button class="ach-pag-btn" onclick="achGoPage(' + (cur - 1) + ')">‹</button>'
+      for (var j = 0; j < nums.length; j++) {
+        if (j > 0 && nums[j] - nums[j - 1] > 1) h += '<span class="ach-pag-dots">…</span>'
+        h += '<button class="ach-pag-btn' + (nums[j] === cur ? ' active' : '') + '"' +
+          (nums[j] === cur ? ' disabled' : '') + ' onclick="achGoPage(' + nums[j] + ')">' + nums[j] + '</button>'
+      }
+      if (cur < totalPages) h += '<button class="ach-pag-btn" onclick="achGoPage(' + (cur + 1) + ')">›</button>'
+      pagEl.innerHTML = h
+      pagEl.style.display = 'flex'
+    }
+
+    function _render(data) {
+      if (data.stats) {
+        document.getElementById('achStatUnlocked').textContent = data.stats.unlocked.toLocaleString()
+        document.getElementById('achStatAvg').textContent = data.stats.avgCompletion.toFixed(1) + '%'
+        document.getElementById('achStatPerfect').textContent = data.stats.perfectGames.toLocaleString()
+        _hasAny = data.stats.unlocked > 0
+      }
+      if (data.total != null) _totalByFilter[_filterKey()] = data.total
+      var total = _totalByFilter[_filterKey()]
+      if (total == null) total = (data.items || []).length
+      var totalPages = Math.max(1, Math.ceil(total / PER))
+
+      // Nothing synced at all — one-time state, no filter bar.
+      if (!_hasAny) {
+        summaryEl.style.display = 'none'
+        filterEl.style.display = 'none'
+        feedEl.innerHTML = ''
+        emptyMatch.style.display = 'none'
+        emptyNone.style.display = ''
+        pagEl.style.display = 'none'
+        return
+      }
+      emptyNone.style.display = 'none'
+      summaryEl.style.display = 'flex'
+      filterEl.style.display = 'flex'
+
+      var items = data.items || []
+      if (items.length === 0) {
+        feedEl.innerHTML = ''
+        emptyMatch.style.display = ''
+        pagEl.style.display = 'none'
+        return
+      }
+      emptyMatch.style.display = 'none'
+
+      var groupByDate = _st.sort === 'recent' || _st.sort === 'oldest'
+      var html
+      if (groupByDate) {
+        var groups = []
+        var map = {}
+        items.forEach(function(a) {
+          var label = _dayLabel(a.unlock_time)
+          if (!(label in map)) { map[label] = []; groups.push({ label: label, items: map[label] }) }
+          map[label].push(a)
+        })
+        html = groups.map(function(g) {
+          return '<div class="ach-day"><div class="ach-day-date">' + _esc(g.label) + '</div>' +
+            '<div class="ach-feed-grid">' + g.items.map(_cardHtml).join('') + '</div></div>'
+        }).join('')
+      } else {
+        html = '<div class="ach-day"><div class="ach-feed-grid">' + items.map(_cardHtml).join('') + '</div></div>'
+      }
+      feedEl.innerHTML = html
+      _renderPagination(totalPages)
+    }
+
+    function fetchAch(opts) {
+      opts = opts || {}
+      var k = _pageKey()
+      if (!opts.force && _cache[k]) { _render(_cache[k]); return }
+      if (_loading) return
+      _loading = true
+      if (opts.quiet !== true) feedEl.innerHTML = '<div class="ach-feed-loading">Loading achievements…</div>'
+      var params = new URLSearchParams({ username: username, page: String(_st.page) })
+      if (_st.q) params.set('q', _st.q)
+      if (_st.sort !== 'recent') params.set('sort', _st.sort)
+      if (_st.days) params.set('days', String(_st.days))
+      fetch('/api/user-achievements/feed?' + params.toString())
+        .then(function(r) { return r.ok ? r.json() : Promise.reject(r) })
+        .then(function(d) { _cache[k] = d; _render(d) })
+        .catch(function(e) {
+          console.error('[ach] feed fetch failed', e)
+          feedEl.innerHTML = '<div class="ach-feed-loading">Couldn’t load achievements — try again.</div>'
+        })
+        .finally(function() { _loading = false })
+    }
+
+    // Called by the tab switcher the first time Achievements is opened, and on
+    // direct load of ?tab=achievements.
+    window.__achEnsure = function() { if (!_built) { _built = true; fetchAch() } }
+    // Called after a sync completes — blow away the cache and reload page 1.
+    window.__achReload = function() {
+      _cache = {}; _totalByFilter = {}; _built = true; _st.page = 1
+      fetchAch({ force: true })
+    }
+    window.achGoPage = function(n) {
+      _st.page = n
+      fetchAch()
+      content.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
 
     var _t
     if (searchEl) searchEl.addEventListener('input', function() {
-      clearTimeout(_t); _t = setTimeout(function() { achNav({ q: searchEl.value.trim() }) }, 600)
+      clearTimeout(_t)
+      _t = setTimeout(function() { _st.q = searchEl.value.trim(); _st.page = 1; fetchAch() }, 400)
     })
-    if (sortEl) sortEl.addEventListener('change', function() { achNav({ sort: sortEl.value }) })
-    if (dateEl) dateEl.addEventListener('change', function() { achNav({ days: dateEl.value }) })
+    if (sortEl) sortEl.addEventListener('change', function() { _st.sort = sortEl.value; _st.page = 1; fetchAch() })
+    if (dateEl) dateEl.addEventListener('change', function() { _st.days = parseInt(dateEl.value) || 0; _st.page = 1; fetchAch() })
+
+    if (activeTab === 'achievements') window.__achEnsure()
   })()
 
   // ── SCORE DIST MINI BARS ──
@@ -3463,31 +3837,67 @@ const reviewerBreadcrumbJsonLd = {
     }, 50)
   }
 
-  // ── SORT REVIEWS ──
-  function sortReviews(type, btn) {
-  document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active') })
-  btn.classList.add('active')
-  var list = document.getElementById('reviewsList')
-  var overview = document.getElementById('reviewsOverviewList')
-  if (type === 'all') {
-    if (list) list.style.display = 'none'
-    if (overview) overview.style.display = ''
-    return
+  // ── REVIEWS TAB: Overview / Detailed views + shared search & filters ──
+  var _reviewState = { view: 'overview', sort: 'az', genre: '', platform: '', dev: '', search: '' }
+
+  function applyReviewFilters() {
+    var grids = ['reviewsOverviewList', 'reviewsList']
+    grids.forEach(function(gridId) {
+      var grid = document.getElementById(gridId)
+      if (!grid) return
+      var isActive = (gridId === 'reviewsOverviewList') === (_reviewState.view === 'overview')
+      var items = Array.from(grid.children).filter(function(el) {
+        return el.classList && el.classList.contains('rev-filter-item')
+      })
+
+      items.forEach(function(item) {
+        var show = true
+        var s = _reviewState
+        if (s.search && (item.dataset.title || '').toLowerCase().indexOf(s.search.toLowerCase()) === -1) show = false
+        if (show && s.genre && (item.dataset.genres || '').split(',').indexOf(s.genre) === -1) show = false
+        if (show && s.dev && (item.dataset.devs || '').split(',').indexOf(s.dev) === -1) show = false
+        if (show && s.platform && (item.dataset.platform || '') !== s.platform) show = false
+        item.style.display = show ? '' : 'none'
+      })
+
+      var visible = items.filter(function(i) { return i.style.display !== 'none' })
+      visible.sort(function(a, b) {
+        var s = _reviewState.sort
+        if (s === 'az') return (a.dataset.sortTitle || '').localeCompare(b.dataset.sortTitle || '', undefined, { sensitivity: 'base' })
+        if (s === 'oldest') return new Date(a.dataset.date) - new Date(b.dataset.date)
+        if (s === 'highest') return parseFloat(b.dataset.score) - parseFloat(a.dataset.score)
+        if (s === 'lowest') return parseFloat(a.dataset.score) - parseFloat(b.dataset.score)
+        if (s === 'most-upvoted') return parseInt(b.dataset.upvotes || '0') - parseInt(a.dataset.upvotes || '0')
+        if (s === 'most-downvoted') return parseInt(b.dataset.downvotes || '0') - parseInt(a.dataset.downvotes || '0')
+        return new Date(b.dataset.date) - new Date(a.dataset.date) // recent
+      })
+      visible.forEach(function(i) { grid.appendChild(i) })
+
+      var noRes = document.getElementById(gridId === 'reviewsOverviewList' ? 'reviews-ov-no-results' : 'reviews-dt-no-results')
+      if (noRes) noRes.style.display = (isActive && visible.length === 0) ? '' : 'none'
+    })
   }
-  if (list) list.style.display = ''
-  if (overview) overview.style.display = 'none'
-  if (!list) return
-  var cards = Array.from(list.querySelectorAll('.rc'))
-  cards.sort(function(a, b) {
-    if (type === 'highest') return parseFloat(b.dataset.score) - parseFloat(a.dataset.score)
-    if (type === 'lowest') return parseFloat(a.dataset.score) - parseFloat(b.dataset.score)
-    if (type === 'most_upvoted') return parseInt(b.dataset.upvotes) - parseInt(a.dataset.upvotes)
-    if (type === 'most_downvoted') return parseInt(b.dataset.downvotes) - parseInt(a.dataset.downvotes)
-    return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime()
-  })
-  cards.forEach(function(card) { list.appendChild(card) })
-}
-  window.sortReviews = sortReviews
+
+  function switchReviewView(view, btn) {
+    document.querySelectorAll('.review-view-tab').forEach(function(b) { b.classList.remove('active') })
+    if (btn) btn.classList.add('active')
+    _reviewState.view = view
+    var ov = document.getElementById('reviewsOverviewList')
+    var dt = document.getElementById('reviewsList')
+    if (ov) ov.style.display = view === 'overview' ? '' : 'none'
+    if (dt) dt.style.display = view === 'detailed' ? '' : 'none'
+    applyReviewFilters()
+  }
+  window.switchReviewView = switchReviewView
+  window.setReviewSort = function(v) { _reviewState.sort = v; applyReviewFilters() }
+  window.setReviewFilter = function(type, value, sel) {
+    _reviewState[type] = value
+    if (sel) sel.classList.toggle('has-value', !!value)
+    applyReviewFilters()
+  }
+  window.searchReviews = function(v) { _reviewState.search = (v || '').trim(); applyReviewFilters() }
+
+  if (document.getElementById('reviewsOverviewList')) applyReviewFilters()
 
   // ── SWITCH LISTS SECTION ──
   function switchListsSection(type, btn) {
@@ -3634,6 +4044,10 @@ const reviewerBreadcrumbJsonLd = {
   var _libFilter = 'all'
   var _libSort = 'alpha'
   var _libSearch = ''
+  var _libGenre = ''
+  var _libPlatform = ''
+  var _libDev = ''
+  var _libView = 'overview'   // 'overview' (card grid) | 'detailed' (row list)
   var _libEditMode = false
   var _lastClickedIndex = -1
   var _isDragging = false
@@ -3651,11 +4065,12 @@ const reviewerBreadcrumbJsonLd = {
   var _libAllIds = null         // cached full id list from the last "Select all"
   var _libAllIdsKey = ''        // filter/sort/search key those ids were fetched for
 
+  // dot hues mirror the .status-<key> CSS custom properties (--st-c).
   var STATUS_META = {
     playing:         { icon: '🎮', label: 'Playing',      dot: '#60a5fa' },
-    completed:       { icon: '✓',  label: 'Completed',    dot: '#4ade80' },
+    completed:       { icon: '✓',  label: 'Completed',    dot: '#22c55e' },
     hundred_percent: { icon: '💯', label: '100%',         dot: '#fbbf24' },
-    want_to_play:    { icon: '🔖', label: 'Want to Play', dot: '#f59e0b' },
+    want_to_play:    { icon: '🔖', label: 'Want to Play', dot: '#fb923c' },
     owned:           { icon: '📦', label: 'Owned',        dot: '#94a3b8' },
     dropped:         { icon: '✗',  label: 'Dropped',      dot: '#f87171' },
   }
@@ -3670,6 +4085,79 @@ const reviewerBreadcrumbJsonLd = {
     })
   }
 
+  // ── Detailed view: row markup + small formatters ──
+  var _DT_STEAM = '<svg width="12" height="12" viewBox="0 0 24 24" fill="#fff"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>'
+  var _DT_TROPHY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4a2 2 0 0 1-2-2V5h4M18 9h2a2 2 0 0 0 2-2V5h-4M6 3h12v6a6 6 0 0 1-12 0V3zM9 21h6M12 15v6"/></svg>'
+  var _DT_CLOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
+  var _DT_CAL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18M8 2v4M16 2v4"/></svg>'
+
+  function _libFmtHours(it) {
+    if (it.playtime != null && it.playtime > 0) {
+      var h = Math.floor(it.playtime / 60), m = it.playtime % 60
+      return h > 0 ? (m > 0 ? h + 'h ' + m + 'm' : h + 'h') : m + 'm'
+    }
+    if (it.displayHours != null && it.displayHours > 0) return it.displayHours + 'h'
+    return null
+  }
+
+  function _libFmtDate(s) {
+    if (!s) return null
+    var d = new Date(s)
+    if (isNaN(d.getTime())) return null
+    var mm = String(d.getMonth() + 1).padStart(2, '0')
+    var dd = String(d.getDate()).padStart(2, '0')
+    return mm + '/' + dd + '/' + String(d.getFullYear()).slice(2)
+  }
+
+  function _libDetailedRowHtml(it) {
+    var coverUrl = it.cover
+      ? it.cover.replace(/^\/\//, 'https://').replace(/t_[a-z0-9_]+/, 't_cover_big')
+      : null
+    var meta = STATUS_META[it.status]
+    var statusPill = meta
+      ? '<span class="lib-dt-status status-' + it.status + '"><span class="lib-dt-dot"></span>' + meta.label + '</span>'
+      : ''
+    var score = ''
+    if (it.hasReview && it.reviewScore != null) {
+      score = '<span class="lib-score-badge lib-dt-score ' + libScoreClass(it.reviewScore) + '" title="Your review score">' + it.reviewScore + '</span>'
+    }
+    var parts = []
+    if (it.steamAppid != null)
+      parts.push('<span class="lib-dt-mi lib-dt-mi--steam"><span class="lib-dt-plat">' + _DT_STEAM + '</span>Steam</span>')
+    if (it.achTotal != null && it.achTotal > 0)
+      parts.push('<span class="lib-dt-mi">' + _DT_TROPHY + it.achUnlocked + '/' + it.achTotal + '</span>')
+    var hrs = _libFmtHours(it)
+    if (hrs) parts.push('<span class="lib-dt-mi">' + _DT_CLOCK + hrs + '</span>')
+    // Prefer Steam's last-played date; fall back to when the row was last changed.
+    var dt = _libFmtDate(it.lastPlayed || it.updatedAt)
+    if (dt) parts.push('<span class="lib-dt-mi" title="' + (it.lastPlayed ? 'Last played' : 'Updated') + '">' + _DT_CAL + dt + '</span>')
+    var metaRow = parts.length
+      ? '<div class="lib-dt-meta">' + parts.join('<span class="lib-dt-sep">|</span>') + '</div>'
+      : ''
+    var bar = ''
+    if (it.achTotal != null && it.achTotal > 0) {
+      var pct = Math.round((it.achUnlocked / it.achTotal) * 100)
+      bar = '<div class="lib-dt-bar-wrap">' +
+        '<div class="lib-dt-bar"><div class="lib-dt-bar-fill' + (pct >= 100 ? ' full' : '') + '" style="width:' + pct + '%"></div></div>' +
+        '<span class="lib-dt-pct">' + pct + '%</span>' +
+      '</div>'
+    }
+    var perfectAch = it.achTotal && it.achUnlocked === it.achTotal
+    return '<div class="lib-dt-row" data-game-id="' + it.gameId + '">' +
+      '<a class="lib-dt-cover' + (perfectAch ? ' lib-cover-perfect' : '') + '" href="/games/' + it.slug + '"' +
+        (perfectAch ? ' title="100% achievements"' : '') + '>' +
+        (coverUrl ? '<img src="' + coverUrl + '" alt="" loading="lazy"/>' : '<span>🎮</span>') +
+      '</a>' +
+      '<div class="lib-dt-main">' +
+        '<div class="lib-dt-head">' +
+          '<a class="lib-dt-title" href="/games/' + it.slug + '">' + it.title.replace(/</g, '&lt;') + '</a>' +
+          statusPill + score +
+        '</div>' +
+        metaRow + bar +
+      '</div>' +
+    '</div>'
+  }
+
   async function fetchLibrary(page) {
     if (_libLoading) return
     _libLoading = true
@@ -3682,7 +4170,11 @@ const reviewerBreadcrumbJsonLd = {
       sort: _libSort,
     })
     if (_libSearch)    params.set('search', _libSearch)
+    if (_libGenre)     params.set('genre', _libGenre)
+    if (_libPlatform)  params.set('platform', _libPlatform)
+    if (_libDev)       params.set('dev', _libDev)
     if (_filterHidden) params.set('hidden', 'true')
+    if (_libView === 'detailed') params.set('detailed', 'true')
     try {
       var res = await fetch('/api/user-game-status/library?' + params.toString())
       if (!res.ok) throw new Error('fetch failed')
@@ -3713,7 +4205,8 @@ const reviewerBreadcrumbJsonLd = {
   var _LIB_AZ_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z']
 
   function _libLetterKey() {
-    return _libFilter + '|' + _libSort + '|' + (_filterHidden ? '1' : '0')
+    return _libFilter + '|' + _libSort + '|' + (_filterHidden ? '1' : '0') +
+      '|' + _libGenre + '|' + _libPlatform + '|' + _libDev
   }
 
   async function _loadLetterMap() {
@@ -3735,6 +4228,9 @@ const reviewerBreadcrumbJsonLd = {
         filter: _libFilter,
         sort: 'alpha',
       })
+      if (_libGenre)     params.set('genre', _libGenre)
+      if (_libPlatform)  params.set('platform', _libPlatform)
+      if (_libDev)       params.set('dev', _libDev)
       if (_filterHidden) params.set('hidden', 'true')
       var res = await fetch('/api/user-game-status/library?' + params.toString())
       if (!res.ok) throw new Error('fetch failed')
@@ -3774,7 +4270,7 @@ const reviewerBreadcrumbJsonLd = {
     var entry = _libLetterMap && _libLetterMap[l]
     if (!entry) return
     if (entry.page !== _libPage) await fetchLibrary(entry.page)
-    var el = document.querySelector('.lib-item[data-game-id="' + entry.gameId + '"]')
+    var el = document.querySelector('.lib-item[data-game-id="' + entry.gameId + '"], .lib-dt-row[data-game-id="' + entry.gameId + '"]')
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
     else {
       var grid = document.getElementById('libGrid')
@@ -3784,22 +4280,40 @@ const reviewerBreadcrumbJsonLd = {
   window.libJumpLetter = libJumpLetter
 
   function _getVisible() {
-    // Server handles filter/sort/search; only apply client-side reviewed/unreviewed here
-    if (!_filterReviewed && !_filterUnreviewed) return _libItems
-    return _libItems.filter(function(it) {
-      if (_filterReviewed   && !it.hasReview) return false
-      if (_filterUnreviewed &&  it.hasReview) return false
-      return true
-    })
+    // Server handles status filter / search / (alpha·hours·recent) sort. The
+    // reviewed/unreviewed chips and the "Has review first" sort both depend on
+    // the review map, which only the page has — apply them here, on the page.
+    var items = _libItems
+    if (_filterReviewed || _filterUnreviewed) {
+      items = items.filter(function(it) {
+        if (_filterReviewed   && !it.hasReview) return false
+        if (_filterUnreviewed &&  it.hasReview) return false
+        return true
+      })
+    }
+    if (_libSort === 'review') {
+      // Server returned this page in title order; float reviewed games to the
+      // top, each group kept alphabetical.
+      items = items.slice().sort(function(a, b) {
+        if (!a.hasReview !== !b.hasReview) return a.hasReview ? -1 : 1
+        return String(a.title || '').localeCompare(String(b.title || ''), undefined, { sensitivity: 'base' })
+      })
+    }
+    return items
   }
 
   function _renderGrid() {
     var grid = document.getElementById('libGrid')
+    var detailed = document.getElementById('libGridDetailed')
     var empty = document.getElementById('libEmpty')
     var checkboxes = document.getElementById('libCheckboxes')
     var pag = document.getElementById('libPagination')
     if (!grid) return
     var items = _getVisible()
+    // Detailed view is read-only — edit mode always falls back to the card grid.
+    var showDetailed = _libView === 'detailed' && !_libEditMode
+    grid.style.display = showDetailed ? 'none' : ''
+    if (detailed) detailed.style.display = showDetailed ? '' : 'none'
 
     _renderAzBar()
 
@@ -3832,12 +4346,19 @@ const reviewerBreadcrumbJsonLd = {
 
     if (items.length === 0) {
       grid.innerHTML = ''
+      if (detailed) detailed.innerHTML = ''
       if (empty) empty.style.display = (_libLoading || _libTotal > 0) ? 'none' : ''
       if (checkboxes) checkboxes.style.display = 'none'
       return
     }
     if (empty) empty.style.display = 'none'
     if (checkboxes) checkboxes.style.display = ''
+
+    if (showDetailed) {
+      if (detailed) detailed.innerHTML = items.map(_libDetailedRowHtml).join('')
+      return
+    }
+
     grid.innerHTML = items.map(function(it) {
       var coverUrl = it.cover
         ? it.cover.replace(/^\/\//, 'https://').replace(/t_[a-z0-9_]+/, 't_cover_big')
@@ -3854,8 +4375,9 @@ const reviewerBreadcrumbJsonLd = {
       var hiddenBadge = (it.isHidden && _libIsOwn)
         ? '<div class="lib-hidden-badge" title="Hidden from others">🫥</div>'
         : ''
+      var perfectAch = it.achTotal && it.achUnlocked === it.achTotal
       return '<' + 'a href="/games/' + it.slug + '" class="lib-item' + (_libEditMode ? ' lib-edit-active' : '') + (it.isHidden && _libIsOwn ? ' lib-item-hidden' : '') + '" data-status="' + it.status + '" data-game-id="' + it.gameId + '">' +
-        '<div class="lib-cover">' +
+        '<div class="lib-cover' + (perfectAch ? ' lib-cover-perfect' : '') + '"' + (perfectAch ? ' title="100% achievements"' : '') + '>' +
         (coverUrl ? '<img src="' + coverUrl + '" alt="" loading="lazy"/>' : '<span>🎮</span>') +
         hoursHtml + hiddenBadge + scoreHtml +
         (_libEditMode ? '<div class="lib-checkbox' + (checked ? ' checked' : '') + '"><div class="lib-check-inner"></div></div>' : '') +
@@ -3921,18 +4443,20 @@ const reviewerBreadcrumbJsonLd = {
     if (!row) return
     var c = _libCounts
     var pills = [{ key: 'all', label: 'All', count: c.all }]
-    if (c.unplayed) pills.push({ key: 'unplayed', label: '⬜ Unplayed', count: c.unplayed })
+    if (c.unplayed) pills.push({ key: 'unplayed', label: 'Unplayed', count: c.unplayed, status: true })
     var order = ['playing','completed','hundred_percent','want_to_play','owned','dropped']
     var hiddenTabsSet = new Set(_libIsOwn ? [] : (_libSettings.hiddenTabs || []))
     order.forEach(function(s) {
       var count = s === 'owned' ? c.owned : (c[s] || 0)
       if (!count) return
       if (!_libIsOwn && hiddenTabsSet.has(s)) return
-      pills.push({ key: s, label: (STATUS_META[s]?.icon || '') + ' ' + STATUS_META[s]?.label, count: count })
+      // Colour comes from .lib-pill--<key> + the leading dot, so no emoji here.
+      pills.push({ key: s, label: STATUS_META[s]?.label || s, count: count, status: true })
     })
     var pillsHtml = pills.map(function(p) {
       var isActive = _libFilter === p.key
-      return '<button class="lib-pill' + (isActive ? ' active' : '') + '" data-filter="' + p.key + '">' +
+      return '<button class="lib-pill' + (p.status ? ' status-' + p.key : '') + (isActive ? ' active' : '') + '"' +
+        ' data-filter="' + p.key + '"' + (p.status ? ' data-status="' + p.key + '"' : '') + '>' +
         p.label + ' <span class="pill-count">' + p.count + '</span></button>'
     }).join('')
     row.innerHTML = pillsHtml
@@ -3974,6 +4498,7 @@ const reviewerBreadcrumbJsonLd = {
 
   function _libSelKey() {
     return _libFilter + '|' + _libSort + '|' + _libSearch + '|' +
+      _libGenre + '|' + _libPlatform + '|' + _libDev + '|' +
       (_filterHidden ? '1' : '0') + '|' +
       (_filterReviewed ? 'r' : '') + (_filterUnreviewed ? 'u' : '')
   }
@@ -4014,6 +4539,9 @@ const reviewerBreadcrumbJsonLd = {
         idsOnly: 'true',
       })
       if (_libSearch)    params.set('search', _libSearch)
+      if (_libGenre)     params.set('genre', _libGenre)
+      if (_libPlatform)  params.set('platform', _libPlatform)
+      if (_libDev)       params.set('dev', _libDev)
       if (_filterHidden) params.set('hidden', 'true')
       var res = await fetch('/api/user-game-status/library?' + params.toString())
       if (!res.ok) throw new Error('fetch failed')
@@ -4051,10 +4579,27 @@ const reviewerBreadcrumbJsonLd = {
     _lastClickedIndex = -1
     var btn = document.getElementById('libEditBtn')
     if (btn) btn.textContent = _libEditMode ? 'Cancel' : 'Edit library'
+    // Detailed view has no edit affordances — hide the view toggle while editing.
+    var vt = document.getElementById('libViewTabs')
+    if (vt) vt.style.display = _libEditMode ? 'none' : ''
     _renderGrid()
     _updateEditBar()
   }
   window.toggleLibEdit = toggleLibEdit
+
+  function switchLibView(view, btn) {
+    if (_libEditMode || view === _libView) return
+    _libView = view
+    document.querySelectorAll('.lib-view-tab').forEach(function(b) { b.classList.remove('active') })
+    if (btn) btn.classList.add('active')
+    // Card grid data lacks achievement counts — refetch this page for Detailed.
+    if (view === 'detailed' && _libItems.length && _libItems[0].achTotal === undefined) {
+      fetchLibrary(_libPage)
+    } else {
+      _renderGrid()
+    }
+  }
+  window.switchLibView = switchLibView
 
   async function applyBulkStatus() {
     var sel = document.getElementById('libBulkStatus')
@@ -4122,6 +4667,16 @@ const reviewerBreadcrumbJsonLd = {
     if (sort) sort.addEventListener('change', function() { _libSort = sort.value; fetchLibrary(1) })
     _renderFilterPills()
     fetchLibrary(1)
+
+    // Genre / Platform / Dev dropdowns — server-side filters, same as the
+    // Reviews / Lists / Recs tabs. Re-fetch page 1 on change.
+    window.setLibDimFilter = function(type, value, sel) {
+      if (type === 'genre')         _libGenre = value
+      else if (type === 'platform') _libPlatform = value
+      else if (type === 'dev')      _libDev = value
+      if (sel) sel.classList.toggle('has-value', !!value)
+      fetchLibrary(1)
+    }
 
     var reviewedItem   = document.getElementById('libReviewedItem')
     var unreviewedItem = document.getElementById('libUnreviewedItem')
@@ -5069,7 +5624,6 @@ const reviewerBreadcrumbJsonLd = {
   document.querySelectorAll('.tab-link').forEach(function(link) {
     link.addEventListener('click', function(e) {
       var tab = new URL(link.href, location.origin).searchParams.get('tab') || 'overview'
-      if (tab === 'achievements') return; // needs SSR data, let browser navigate
       e.preventDefault()
       document.querySelectorAll('.tab-link').forEach(function(l) { l.classList.remove('active') })
       link.classList.add('active')
@@ -5078,6 +5632,7 @@ const reviewerBreadcrumbJsonLd = {
       if (panel) panel.classList.add('active')
       history.replaceState({}, '', '?tab=' + tab)
       if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
+      if (tab === 'achievements' && window.__achEnsure) window.__achEnsure()
     })
   })
 
@@ -5090,6 +5645,7 @@ const reviewerBreadcrumbJsonLd = {
     var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
     if (panel) panel.classList.add('active')
     if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
+    if (tab === 'achievements' && window.__achEnsure) window.__achEnsure()
   })
 </script>
 <script>
@@ -5184,53 +5740,73 @@ async function createNewList(btn) {
 {isOwnProfile && <RecommendationComposer />}
 
 <style is:global>
-  .prof-recs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-  .prof-recs-sorts { display: flex; gap: 6px; flex-wrap: wrap; }
-  .prof-rec-sort { padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; font-family: inherit; color: var(--text-secondary); background: var(--tag-bg); border: 1px solid var(--border); cursor: pointer; transition: all 0.15s; }
-  .prof-rec-sort:hover { color: var(--text-primary); background: var(--bg-hover); }
-  .prof-rec-sort.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-  .prof-rec-add { padding: 7px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; font-family: inherit; background: var(--accent); color: var(--accent-text); border: none; cursor: pointer; transition: opacity 0.15s; }
-  .prof-rec-add:hover { opacity: 0.9; }
   .prof-recs-empty { text-align: center; padding: 48px 24px; }
   .prof-recs-empty-title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
   .prof-recs-empty p { font-size: 14px; color: var(--text-tertiary); line-height: 1.6; max-width: 380px; margin: 0 auto; }
 </style>
 
 <script is:inline>
+  // Recommendations tab: Overview / Detailed views + shared search & filters —
+  // same behaviour as the Reviews tab.
   (function () {
-    var list = document.getElementById('profRecsList');
-    var overview = document.getElementById('profRecsOverviewList');
-    if (!list) return;
-    var btns = document.querySelectorAll('.prof-rec-sort');
-    function sortBy(mode) {
-      if (mode === 'all') {
-        list.style.display = 'none';
-        if (overview) overview.style.display = '';
-        return;
-      }
-      list.style.display = '';
-      if (overview) overview.style.display = 'none';
-      var items = Array.prototype.slice.call(list.querySelectorAll('.prof-rec-item'));
-      items.sort(function (a, b) {
-        var ca = new Date(a.dataset.created).getTime();
-        var cb = new Date(b.dataset.created).getTime();
-        var na = parseInt(a.dataset.net, 10);
-        var nb = parseInt(b.dataset.net, 10);
-        if (mode === 'recent') return cb - ca;
-        if (mode === 'oldest') return ca - cb;
-        if (mode === 'most_up') return (nb - na) || (cb - ca);
-        if (mode === 'least_up') return (na - nb) || (cb - ca);
-        return 0;
+    if (!document.getElementById('profRecsOverviewList')) return;
+    var _recState = { view: 'overview', sort: 'az', genre: '', platform: '', dev: '', search: '' };
+
+    function applyRecFilters() {
+      var grids = ['profRecsOverviewList', 'profRecsList'];
+      grids.forEach(function (gridId) {
+        var grid = document.getElementById(gridId);
+        if (!grid) return;
+        var isActive = (gridId === 'profRecsOverviewList') === (_recState.view === 'overview');
+        var items = Array.prototype.slice.call(grid.children).filter(function (el) {
+          return el.classList && el.classList.contains('rec-filter-item');
+        });
+
+        items.forEach(function (item) {
+          var show = true;
+          var s = _recState;
+          if (s.search && (item.dataset.title || '').toLowerCase().indexOf(s.search.toLowerCase()) === -1) show = false;
+          if (show && s.genre && (item.dataset.genres || '').split(',').indexOf(s.genre) === -1) show = false;
+          if (show && s.dev && (item.dataset.devs || '').split(',').indexOf(s.dev) === -1) show = false;
+          if (show && s.platform && (item.dataset.platforms || '').split(',').indexOf(s.platform) === -1) show = false;
+          item.style.display = show ? '' : 'none';
+        });
+
+        var visible = items.filter(function (i) { return i.style.display !== 'none'; });
+        visible.sort(function (a, b) {
+          var s = _recState.sort;
+          if (s === 'az') return (a.dataset.sortTitle || '').localeCompare(b.dataset.sortTitle || '', undefined, { sensitivity: 'base' });
+          if (s === 'oldest') return new Date(a.dataset.date) - new Date(b.dataset.date);
+          if (s === 'most-upvoted') return parseInt(b.dataset.upvotes || '0') - parseInt(a.dataset.upvotes || '0');
+          if (s === 'most-downvoted') return parseInt(b.dataset.downvotes || '0') - parseInt(a.dataset.downvotes || '0');
+          return new Date(b.dataset.date) - new Date(a.dataset.date); // recent
+        });
+        visible.forEach(function (i) { grid.appendChild(i); });
+
+        var noRes = document.getElementById(gridId === 'profRecsOverviewList' ? 'recs-ov-no-results' : 'recs-dt-no-results');
+        if (noRes) noRes.style.display = (isActive && visible.length === 0) ? '' : 'none';
       });
-      items.forEach(function (it) { list.appendChild(it); });
     }
-    btns.forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        btns.forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        sortBy(btn.dataset.sort);
-      });
-    });
+
+    window.switchRecView = function (view, btn) {
+      document.querySelectorAll('.rec-view-tab').forEach(function (b) { b.classList.remove('active'); });
+      if (btn) btn.classList.add('active');
+      _recState.view = view;
+      var ov = document.getElementById('profRecsOverviewList');
+      var dt = document.getElementById('profRecsList');
+      if (ov) ov.style.display = view === 'overview' ? '' : 'none';
+      if (dt) dt.style.display = view === 'detailed' ? '' : 'none';
+      applyRecFilters();
+    };
+    window.setRecSort = function (v) { _recState.sort = v; applyRecFilters(); };
+    window.setRecFilter = function (type, value, sel) {
+      _recState[type] = value;
+      if (sel) sel.classList.toggle('has-value', !!value);
+      applyRecFilters();
+    };
+    window.searchRecs = function (v) { _recState.search = (v || '').trim(); applyRecFilters(); };
+
+    applyRecFilters();
   })();
 </script>
 
@@ -5245,7 +5821,6 @@ async function createNewList(btn) {
   // server also persists this, so a plain page reload continues too.
   var cursor = Number(achSyncCursor) || 0;
   var total = 0;
-  var synced = 0;       // achievement rows written so far this run
   var hits = 0;         // games that returned achievement data
   var empties = 0;      // games whose achievement read failed (often privacy)
   var running = false;
@@ -5292,13 +5867,12 @@ async function createNewList(btn) {
     }
 
     total = data.total || total;
-    synced += data.syncedThisCall || 0;
     hits += data.hitAchievements || 0;
     empties += data.emptyResponses || 0;
 
     if (!data.done && data.nextCursor != null) {
       cursor = data.nextCursor;
-      btn.textContent = 'Syncing…' + pct(data.processed) + ' (' + synced.toLocaleString() + ' achievements)';
+      btn.textContent = 'Syncing…' + pct(data.processed);
       setTimeout(function () { runBatch(0); }, 300); // gentle pacing between batches
       return;
     }
@@ -5312,7 +5886,11 @@ async function createNewList(btn) {
       // Every achievement read came back empty — almost always Steam privacy.
       btn.textContent = 'Steam blocked achievement reads — set Profile → Privacy → Game details to Public, then re-sync';
     } else {
-      btn.textContent = 'Done! Reload to see achievements';
+      btn.textContent = 'Done!';
+      // Feed is client-rendered now — refresh it in place instead of asking
+      // the user to reload the page.
+      if (window.__achReload) window.__achReload();
+      else location.reload();
     }
     btn.disabled = false;
   }
@@ -5320,7 +5898,6 @@ async function createNewList(btn) {
   btn.addEventListener('click', function () {
     if (running) return;
     running = true;
-    synced = 0;
     hits = 0;
     empties = 0;
     runBatch(0);
