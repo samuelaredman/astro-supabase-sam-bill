@@ -85,11 +85,7 @@ const [
   { data: _showcaseAchData },
   { data: _newSocialData },
   { data: _aliasRows },
-  { data: reviewerComments },
-  { data: reviewerLists },
-  { data: reviewerListComments },
-  { data: reviewerRecsForVotes },
-  { data: reviewerRecComments },
+  { data: voteTotalsRows },
   { data: followersData },
   { data: followingData },
   { data: currentProfileRow },
@@ -110,12 +106,9 @@ const [
     .gte('changed_at', new Date(Date.now() - ALIAS_WINDOW_MS).toISOString())
     .order('changed_at', { ascending: false })
     .limit(25),
-  // Vote tallies received across every surface the reviewer posts on.
-  (supabase as any).from('review_comments').select('comment_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('lists').select('list_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('list_comments').select('list_comment_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('recommendations').select('recommendation_votes(vote)').eq('profile_id', reviewer.id),
-  (supabase as any).from('recommendation_comments').select('recommendation_comment_votes(vote)').eq('profile_id', reviewer.id),
+  // Vote tallies received across every surface the reviewer posts on, counted
+  // in Postgres — this used to be five queries dragging back every vote row.
+  db.rpc('profile_vote_totals', { p_profile_id: reviewer.id }),
   // Follower / following rows — their .length is the count, so no separate
   // count:exact queries, and `notify` on the follower side means the viewer's
   // own follow/notify state falls out of this list too.
@@ -221,7 +214,9 @@ const avgScore = publishedReviews.length > 0
 const totalHours = publishedReviews.reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0)
 const avgHours = publishedReviews.length > 0 ? Math.round(totalHours / publishedReviews.length) : null
 
-// Tally upvotes + downvotes received on reviews
+// Votes received. Review votes come free from the review payload we already
+// render; everything else (comments, lists, recommendations) is counted by
+// profile_vote_totals rather than dragged back row by row.
 let totalUpvotes = 0, totalDownvotes = 0
 for (const r of publishedReviews) {
   const votes = Array.isArray(r.review_votes) ? r.review_votes : r.review_votes ? [r.review_votes] : []
@@ -230,19 +225,10 @@ for (const r of publishedReviews) {
     else if (v.vote === -1) totalDownvotes++
   }
 }
-// Tally votes received on the reviewer's own comments (reviews, lists, recommendations)
-const voteBuckets = [
-  ...(reviewerComments ?? []).map((c: any) => c.comment_votes),
-  ...(reviewerLists ?? []).map((l: any) => l.list_votes),
-  ...(reviewerListComments ?? []).map((c: any) => c.list_comment_votes),
-  ...(reviewerRecsForVotes ?? []).map((r: any) => r.recommendation_votes),
-  ...(reviewerRecComments ?? []).map((c: any) => c.recommendation_comment_votes),
-]
-for (const votes of voteBuckets) {
-  for (const v of (votes ?? []) as any[]) {
-    if (v.vote === 1) totalUpvotes++
-    else if (v.vote === -1) totalDownvotes++
-  }
+{
+  const t = (voteTotalsRows as any)?.[0]
+  totalUpvotes += Number(t?.upvotes ?? 0)
+  totalDownvotes += Number(t?.downvotes ?? 0)
 }
 
 const memberSince = reviewer.created_at
@@ -653,37 +639,26 @@ let libGenres: string[] = [];
 let libPlatforms: string[] = [];
 let libDevs: string[] = [];
 if (!libraryIsPrivate) {
-  const base = () => (db as any)
-    .from('user_game_status')
-    .select('*', { count: 'exact', head: true })
-    .eq('profile_id', reviewer.id);
-  const [counts, dims] = await Promise.all([
-    Promise.all([
-      base().eq('is_hidden', false),
-      base().eq('status', 'playing').eq('is_hidden', false),
-      canSeeWantToPlay ? base().eq('status', 'want_to_play').eq('is_hidden', false) : Promise.resolve({ count: 0 }),
-      base().eq('is_owned', true).eq('is_hidden', false),
-      base().in('status', ['completed', 'hundred_percent']).eq('is_hidden', false),
-      base().eq('status', 'hundred_percent').eq('is_hidden', false),
-      canSeeDropped ? base().eq('status', 'dropped').eq('is_hidden', false) : Promise.resolve({ count: 0 }),
-      isOwnProfile ? base().eq('is_hidden', true) : Promise.resolve({ count: 0 }),
-      base().eq('is_hidden', false).not('status', 'in', '(completed,hundred_percent)').or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0'),
-    ]),
+  // All nine pill totals in one pass (was nine count:exact round trips).
+  const [{ data: countRows }, dims] = await Promise.all([
+    db.rpc('library_status_counts', { p_profile_id: reviewer.id }),
     Promise.all([
       libDimNames('game_genres', 'genres(name)'),
       libDimNames('game_platforms', 'platforms(name)'),
       libDimNames('game_companies', 'developers(name)', 'developer'),
     ]),
   ]);
-  libCounts.all            = counts[0].count ?? 0;
-  libCounts.playing        = counts[1].count ?? 0;
-  libCounts.want_to_play   = counts[2].count ?? 0;
-  libCounts.owned          = counts[3].count ?? 0;
-  libCounts.completed      = counts[4].count ?? 0;
-  libCounts.hundred_percent = counts[5].count ?? 0;
-  libCounts.dropped        = counts[6].count ?? 0;
-  libCounts.hidden         = counts[7].count ?? 0;
-  libCounts.unplayed       = counts[8].count ?? 0;
+  const c = (countRows as any)?.[0] ?? {};
+  libCounts.all             = Number(c.all_count ?? 0);
+  libCounts.playing         = Number(c.playing ?? 0);
+  // Privacy: these tabs are hidden from viewers who aren't allowed to see them.
+  libCounts.want_to_play    = canSeeWantToPlay ? Number(c.want_to_play ?? 0) : 0;
+  libCounts.owned           = Number(c.owned ?? 0);
+  libCounts.completed       = Number(c.completed ?? 0);
+  libCounts.hundred_percent = Number(c.hundred_percent ?? 0);
+  libCounts.dropped         = canSeeDropped ? Number(c.dropped ?? 0) : 0;
+  libCounts.hidden          = isOwnProfile ? Number(c.hidden ?? 0) : 0;
+  libCounts.unplayed        = Number(c.unplayed ?? 0);
   [libGenres, libPlatforms, libDevs] = dims;
 }
 
