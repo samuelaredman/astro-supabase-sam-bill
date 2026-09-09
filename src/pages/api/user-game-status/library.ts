@@ -203,7 +203,7 @@ export const GET: APIRoute = async (context) => {
   // leaving it out keeps the genre *filter*'s inner-join (added in buildQuery)
   // the only game_genres embed, so there's no duplicate-embed ambiguity.
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at';
   const from = (page - 1) * PAGE_SIZE;
 
   let rows: any[] | null;
@@ -299,6 +299,7 @@ export const GET: APIRoute = async (context) => {
       owned:     ugs?.is_owned ?? false,
       isHidden:  ugs?.is_hidden ?? false,
       updatedAt: ugs?.updated_at ?? '',
+      lastPlayed: ugs?.steam_last_played_at ?? null,
       playtime:  ugs?.steam_playtime_minutes ?? null,
       steamAppid: ugs?.steam_appid ?? null,
     };

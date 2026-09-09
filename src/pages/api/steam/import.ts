@@ -62,7 +62,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   // Fetch owned games from Steam
-  let steamGames: Array<{ appid: number; name: string; playtime_forever: number }> = [];
+  let steamGames: Array<{ appid: number; name: string; playtime_forever: number; rtime_last_played?: number }> = [];
   try {
     const res = await fetch(
       `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=true&include_played_free_games=true`
@@ -89,15 +89,23 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0, removed: 0 });
   }
 
-  // Build lowercase→playtime and lowercase→appid maps from Steam library
+  // Build lowercase→playtime / →appid / →last-played maps from Steam library.
+  // rtime_last_played is unix-seconds; 0 means "never played / unknown".
   const steamByTitle = new Map<string, number>();
   const appidByTitle  = new Map<string, number>();
+  const lastPlayedByTitle = new Map<string, string | null>();
   const originalCaseByTitle = new Map<string, string>();
   for (const g of steamGames) {
     if (g.name) {
       const key = g.name.toLowerCase().trim();
       steamByTitle.set(key, g.playtime_forever);
       appidByTitle.set(key, g.appid);
+      lastPlayedByTitle.set(
+        key,
+        g.rtime_last_played && g.rtime_last_played > 0
+          ? new Date(g.rtime_last_played * 1000).toISOString()
+          : null,
+      );
       originalCaseByTitle.set(key, g.name);
     }
   }
@@ -174,7 +182,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   const toInsert: any[] = [];
-  const toUpdatePlaytime: Array<{ game_id: string; playtime: number; appid: number | null }> = [];
+  const toUpdatePlaytime: Array<{ game_id: string; playtime: number; appid: number | null; last_played: string | null }> = [];
   const seenGameIds = new Set<string>();
 
   for (const game of matches) {
@@ -184,10 +192,11 @@ export const POST: APIRoute = async (context) => {
     seenGameIds.add(game.id);
 
     // Key off the Steam-sent title, not ours — they diverge after normalization.
-    const key      = (game.steam_title ?? game.title).toLowerCase().trim();
-    const playtime = steamByTitle.get(key) ?? 0;
-    const appid    = appidByTitle.get(key) ?? null;
-    const existing = existingByGameId.get(game.id);
+    const key        = (game.steam_title ?? game.title).toLowerCase().trim();
+    const playtime   = steamByTitle.get(key) ?? 0;
+    const appid      = appidByTitle.get(key) ?? null;
+    const lastPlayed = lastPlayedByTitle.get(key) ?? null;
+    const existing   = existingByGameId.get(game.id);
 
     if (!existing) {
       // Skip 0-hour games when playedOnly is set
@@ -199,11 +208,12 @@ export const POST: APIRoute = async (context) => {
         is_owned: true,
         steam_playtime_minutes: playtime,
         steam_appid: appid,
+        steam_last_played_at: lastPlayed,
       });
     } else {
       // Already tracked (e.g. auto-added when the user reviewed it) — refresh
-      // playtime AND steam_appid without touching their chosen status.
-      toUpdatePlaytime.push({ game_id: game.id, playtime, appid });
+      // playtime / appid / last-played without touching their chosen status.
+      toUpdatePlaytime.push({ game_id: game.id, playtime, appid, last_played: lastPlayed });
     }
   }
 
@@ -219,7 +229,7 @@ export const POST: APIRoute = async (context) => {
   // Bulk playtime update via RPC — replaces one-at-a-time loop that would
   // timeout on large libraries (e.g. 2000 games × 1 HTTP call each = ~200s)
   if (toUpdatePlaytime.length > 0) {
-    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime, appid }) => ({ game_id, playtime, appid }));
+    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime, appid, last_played }) => ({ game_id, playtime, appid, last_played }));
     for (const batch of chunk(updatePayload, WRITE_CHUNK)) {
       // Pass the array itself — a jsonb param. JSON.stringify(batch) arrives as a
       // jsonb *string* scalar, so jsonb_array_elements() inside the function
