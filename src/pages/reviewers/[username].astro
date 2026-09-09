@@ -14,6 +14,7 @@ import RecommendationFeedCard from '../../components/RecommendationFeedCard.astr
 import RecommendationComposer from '../../components/RecommendationComposer.astro';
 import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed';
 import { resolveRenamedUsername } from '../../utils/usernameHistory';
+import { SOCIAL_PLATFORMS, SOCIAL_ICON_SVG, SOCIAL_LABELS, SOCIAL_COLORS, SOCIAL_KEYS } from '../../utils/socialLinks';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
@@ -27,7 +28,7 @@ const { data: reviewer, error: reviewerError } = await (supabase as any)
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
     favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
     steam_id, steam_username, steam_synced_at,
-    twitch_url, youtube_url, twitter_url, discord_url, website_url, accent_color,
+    twitch_url, youtube_url, twitter_url, discord_url, accent_color,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
     ),
@@ -62,6 +63,18 @@ const { data: _showcaseAchData } = await (getSupabaseAdmin() as any)
   .eq('id', (reviewer as any).id)
   .maybeSingle();
 (reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
+
+// Extra social-link URL columns, fetched separately for the same reason: if the
+// PostgREST schema cache hasn't picked up 20260908000004 yet, this degrades to
+// "no gamer links" instead of 404ing the profile (the main select above uses
+// .single() and redirects to /404 on any error).
+const _newSocialCols = ['steam_url', 'psn_url', 'xbox_url', 'instagram_url', 'tiktok_url', 'bluesky_url', 'retroachievements_url'];
+const { data: _newSocialData } = await (getSupabaseAdmin() as any)
+  .from('profiles')
+  .select(_newSocialCols.join(', '))
+  .eq('id', (reviewer as any).id)
+  .maybeSingle();
+for (const c of _newSocialCols) (reviewer as any)[c] = (_newSocialData as any)?.[c] ?? null;
 
 // Steam-style alias list: previous usernames this profile changed away from in
 // the last 90 days. RLS blocks anon reads of username_history, so use admin.
@@ -666,31 +679,16 @@ const accentStyle = reviewer.accent_color && /^#[0-9a-f]{6}$/i.test(reviewer.acc
   ? `--accent:${reviewer.accent_color}`
   : undefined
 
-const SOCIAL_PLATFORMS = [
-  { key: 'twitch_url', label: 'Twitch' },
-  { key: 'youtube_url', label: 'YouTube' },
-  { key: 'twitter_url', label: 'Twitter/X' },
-  { key: 'discord_url', label: 'Discord' },
-  { key: 'website_url', label: 'Website' },
-] as const
 const socialLinks = SOCIAL_PLATFORMS
-  .map(p => ({ ...p, url: reviewer[p.key] as string | null }))
+  .map(p => ({ ...p, url: (reviewer as any)[p.key] as string | null }))
   .filter(p => !!p.url)
 
-// Small generic, self-drawn glyphs (not exact trademarked logos) matching the
-// site's existing inline-SVG stroke-icon convention. Always paired with a text
-// label in the pill, so icon fidelity doesn't need to carry meaning alone.
-const SOCIAL_ICON_SVG: Record<string, string> = {
-  twitch_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2h11v8l-3 3h-3l-2 2v-2H3V2z"/><path d="M8 5v3M11 5v3"/></svg>',
-  youtube_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="3.5" width="13" height="9" rx="2.5"/><path d="M6.5 6l4 2-4 2V6z" fill="currentColor" stroke="none"/></svg>',
-  twitter_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 2.5l11 11M13.5 2.5l-11 11"/></svg>',
-  discord_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="12" height="7" rx="3.5"/><path d="M5.5 8.5v.01M10.5 8.5v.01" stroke-width="2"/></svg>',
-  website_url: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 2c0 0-3 2-3 6s3 6 3 6M8 2c0 0 3 2 3 6s-3 6-3 6M2 8h12"/></svg>',
-}
 const hasAccentColor = !!accentStyle
 const initialAccentColorValue = hasAccentColor ? (reviewer.accent_color as string) : '#6050c8'
 const socialIconsJson = JSON.stringify(SOCIAL_ICON_SVG)
-const socialLabelsJson = JSON.stringify(Object.fromEntries(SOCIAL_PLATFORMS.map(p => [p.key, p.label])))
+const socialLabelsJson = JSON.stringify(SOCIAL_LABELS)
+const socialColorsJson = JSON.stringify(SOCIAL_COLORS)
+const socialKeysJson = JSON.stringify(SOCIAL_KEYS)
 
 // Per-game scatter + hot takes
 const perGameData = publishedReviews
@@ -1039,13 +1037,22 @@ const reviewerBreadcrumbJsonLd = {
     .bio-empty{font-size:14px;color:var(--text-tertiary);font-style:italic;cursor:text;padding:4px 6px;border-radius:6px;transition:background .15s;display:inline-block}
     .bio-empty:hover{background:var(--tag-bg);color:var(--text-secondary)}
 
-    /* SOCIAL LINKS */
-    .social-links-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-    .social-link-pill{display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:16px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-tertiary);font-size:12px;font-weight:500;text-decoration:none;transition:all .15s}
-    .social-link-pill:hover{border-color:var(--accent);color:var(--accent)}
-    .social-link-pill svg{flex-shrink:0}
-    .social-links-edit{flex-direction:column;gap:6px;max-width:480px;margin-bottom:10px}
-    .social-edit-row{display:flex;align-items:center;gap:8px}
+    /* SOCIAL LINKS — icon-only brand tiles */
+    .social-links-row{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px}
+    .social-tile{
+      --brand:var(--text-tertiary);
+      display:inline-flex;align-items:center;justify-content:center;
+      width:30px;height:30px;border-radius:8px;flex-shrink:0;
+      background:var(--brand);color:#fff;text-decoration:none;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);
+      transition:transform .12s ease,box-shadow .12s ease,filter .12s ease;
+    }
+    .social-tile svg{width:15px;height:15px;display:block}
+    a.social-tile:hover{transform:translateY(-2px);filter:brightness(1.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18),0 4px 12px rgba(0,0,0,.22)}
+    a.social-tile:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .social-tile-static{cursor:default}
+    .social-links-edit{flex-direction:column;gap:8px;max-width:480px;margin-bottom:10px}
+    .social-edit-row{display:flex;align-items:center;gap:10px}
     .social-edit-label{font-size:11px;font-weight:600;color:var(--text-tertiary);width:70px;flex-shrink:0}
     .social-edit-input{flex:1;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text-primary);background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:6px 10px;outline:none;transition:border-color .15s}
     .social-edit-input:focus{border-color:var(--accent)}
@@ -1522,9 +1529,17 @@ const reviewerBreadcrumbJsonLd = {
 
       <div class="social-links-row" id="socialLinksRow" style={socialLinks.length === 0 ? 'display:none' : ''}>
         {socialLinks.map(link => (
-          <a href={link.url ?? '#'} target="_blank" rel="noopener" class="social-link-pill" data-social-key={link.key}>
-            <Fragment set:html={SOCIAL_ICON_SVG[link.key]} />
-            <span>{link.label}</span>
+          <a
+            href={link.url ?? '#'}
+            target="_blank"
+            rel="noopener nofollow"
+            class="social-tile"
+            style={`--brand:${link.color}`}
+            data-social-key={link.key}
+            title={link.label}
+            aria-label={link.label}
+          >
+            <Fragment set:html={link.icon} />
           </a>
         ))}
       </div>
@@ -1544,14 +1559,17 @@ const reviewerBreadcrumbJsonLd = {
         <div class="social-links-edit" id="socialLinksEdit" style="display:none">
           {SOCIAL_PLATFORMS.map(p => (
             <div class="social-edit-row">
-              <label class="social-edit-label" for={`social-${p.key}`}>{p.label}</label>
+              <span class="social-tile social-tile-static" style={`--brand:${p.color}`} title={p.label} aria-hidden="true">
+                <Fragment set:html={p.icon} />
+              </span>
               <input
                 type="text"
                 class="social-edit-input"
                 id={`social-${p.key}`}
                 data-social-key={p.key}
-                placeholder="https://…"
-                value={(reviewer[p.key] as string | null) ?? ''}
+                placeholder={p.placeholder}
+                aria-label={p.label}
+                value={((reviewer as any)[p.key] as string | null) ?? ''}
               />
             </div>
           ))}
@@ -2614,7 +2632,7 @@ const reviewerBreadcrumbJsonLd = {
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, countsJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, countsJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -2637,9 +2655,10 @@ const reviewerBreadcrumbJsonLd = {
   var _origAccentValue = ''
   var _origAccentCleared = false
   var _hasCustomAccent = hasAccentColor
-  var SOCIAL_KEYS = ['twitch_url', 'youtube_url', 'twitter_url', 'discord_url', 'website_url']
+  var SOCIAL_KEYS = JSON.parse(socialKeysJson)
   var SOCIAL_ICONS = JSON.parse(socialIconsJson)
   var SOCIAL_LABELS = JSON.parse(socialLabelsJson)
+  var SOCIAL_COLORS = JSON.parse(socialColorsJson)
 
   function defaultAccentColor() {
     return document.documentElement.getAttribute('data-theme') === 'light' ? '#4a3a8a' : '#6050c8'
@@ -2820,7 +2839,7 @@ const reviewerBreadcrumbJsonLd = {
           SOCIAL_KEYS.forEach(function(key) {
             var val = payload[key]
             if (!val) return
-            pills += '<a href="' + escAttr(val) + '" target="_blank" rel="noopener" class="social-link-pill" data-social-key="' + key + '">' + SOCIAL_ICONS[key] + '<span>' + SOCIAL_LABELS[key] + '</span></a>'
+            pills += '<a href="' + escAttr(val) + '" target="_blank" rel="noopener nofollow" class="social-tile" style="--brand:' + escAttr(SOCIAL_COLORS[key] || '') + '" data-social-key="' + key + '" title="' + escAttr(SOCIAL_LABELS[key]) + '" aria-label="' + escAttr(SOCIAL_LABELS[key]) + '">' + SOCIAL_ICONS[key] + '</a>'
           })
           socialRow.innerHTML = pills
           socialRow.style.display = pills ? '' : 'none'

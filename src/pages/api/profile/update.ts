@@ -1,6 +1,7 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
 import { requireAuth, json } from '../../../utils/api';
+import { validateSocialUrl } from '../../../utils/socialLinks';
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -8,7 +9,11 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json();
-  const urlFields = ['twitch_url', 'youtube_url', 'twitter_url', 'discord_url', 'website_url'];
+  const urlFields = [
+    'twitch_url', 'youtube_url', 'twitter_url', 'discord_url',
+    'steam_url', 'psn_url', 'xbox_url', 'instagram_url', 'tiktok_url', 'bluesky_url',
+    'retroachievements_url',
+  ];
   const allowed = ['bio', 'favorite_game_id', 'showcase_games', 'showcase_achievements', ...urlFields, 'accent_color'];
   const update: Record<string, any> = {};
   for (const key of allowed) {
@@ -22,9 +27,11 @@ export const POST: APIRoute = async (context) => {
     if (!(key in update)) continue;
     const value = typeof update[key] === 'string' ? update[key].trim() : update[key];
     if (!value) { update[key] = null; continue; }
-    if (typeof value !== 'string' || value.length > 300 || !/^https?:\/\/.+/i.test(value)) {
-      return json({ error: `Invalid ${key.replace('_url', '')} link — must be a full http(s) URL.` }, 400);
+    if (typeof value !== 'string' || value.length > 300) {
+      return json({ error: `Invalid ${key.replace('_url', '')} link.` }, 400);
     }
+    const check = validateSocialUrl(key, value);
+    if (!check.ok) return json({ error: check.error }, 400);
     update[key] = value;
   }
 
