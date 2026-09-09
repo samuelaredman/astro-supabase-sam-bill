@@ -108,6 +108,28 @@ const publishedReviews = (reviewer.reviews ?? [])
     new Date(a.published_at ?? a.created_at).getTime()
   );
 
+// Shared filter/search metadata for the Reviews tab. Both the Overview (card
+// grid) and Detailed (full ReviewCards) views render from this same list and
+// are filtered client-side by the one filter bar underneath the view pills.
+const reviewFilterItems = publishedReviews.map((r: any) => {
+  const genres = [...new Set(
+    (r.games?.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean)
+  )] as string[];
+  const votes = getVoteCounts(r.review_votes);
+  return {
+    review: r,
+    searchText: `${r.games?.title ?? ''} ${r.title ?? ''}`.trim(),
+    genres,
+    platform: r.played_on?.name ?? '',
+    score: r.score,
+    date: r.published_at ?? r.created_at,
+    up: votes.up,
+    down: votes.down,
+  };
+});
+const reviewGenres = [...new Set(reviewFilterItems.flatMap((i: any) => i.genres))].sort() as string[];
+const reviewPlatforms = [...new Set(reviewFilterItems.map((i: any) => i.platform).filter(Boolean))].sort() as string[];
+
 const avgScore = publishedReviews.length > 0
   ? (publishedReviews.reduce((sum: number, r: any) => sum + r.score, 0) / publishedReviews.length).toFixed(1)
   : null;
@@ -1051,8 +1073,11 @@ const reviewerBreadcrumbJsonLd = {
     a.social-tile:hover{transform:translateY(-2px);filter:brightness(1.1);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18),0 4px 12px rgba(0,0,0,.22)}
     a.social-tile:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
     .social-tile-static{cursor:default}
-    .social-links-edit{flex-direction:column;gap:8px;max-width:480px;margin-bottom:10px}
-    .social-edit-row{display:flex;align-items:center;gap:10px}
+    .social-links-edit{display:flex;flex-direction:column;gap:12px;max-width:660px;margin-bottom:10px}
+    .social-edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 16px}
+    .social-edit-row{display:flex;align-items:center;gap:10px;min-width:0}
+    .social-edit-row .social-edit-input{min-width:0}
+    @media(max-width:560px){ .social-edit-grid{grid-template-columns:1fr} }
     .social-edit-label{font-size:11px;font-weight:600;color:var(--text-tertiary);width:70px;flex-shrink:0}
     .social-edit-input{flex:1;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text-primary);background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:6px 10px;outline:none;transition:border-color .15s}
     .social-edit-input:focus{border-color:var(--accent)}
@@ -1195,6 +1220,8 @@ const reviewerBreadcrumbJsonLd = {
     /* OVERVIEW GRID — condensed "All" view for reviews + recommendations. 2-3 per row instead of
        one full-width row, so there's no dead space next to a short title. */
     .reviews-overview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;padding:16px 0}
+    .reviews-overview-grid .rev-filter-item{display:flex;min-width:0}
+    .reviews-overview-grid .rev-filter-item > .review-overview-card{flex:1;min-width:0}
     .review-overview-card{display:flex;align-items:center;gap:10px;padding:7px 10px 7px 9px;border-radius:9px;text-decoration:none;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--border);transition:transform .15s,box-shadow .15s}
     .review-overview-card:hover{transform:translateY(-2px);box-shadow:0 4px 14px rgba(0,0,0,.12)}
     .rov-cover{width:32px;height:43px;border-radius:5px;object-fit:cover;background:var(--tag-bg);flex-shrink:0;display:block}
@@ -1557,23 +1584,25 @@ const reviewerBreadcrumbJsonLd = {
 
       {isOwnProfile && (
         <div class="social-links-edit" id="socialLinksEdit" style="display:none">
-          {SOCIAL_PLATFORMS.map(p => (
-            <div class="social-edit-row">
-              <span class="social-tile social-tile-static" style={`--brand:${p.color}`} title={p.label} aria-hidden="true">
-                <Fragment set:html={p.icon} />
-              </span>
-              <input
-                type="text"
-                class="social-edit-input"
-                id={`social-${p.key}`}
-                data-social-key={p.key}
-                placeholder={p.placeholder}
-                aria-label={p.label}
-                value={((reviewer as any)[p.key] as string | null) ?? ''}
-              />
-            </div>
-          ))}
-          <div class="social-edit-row">
+          <div class="social-edit-grid">
+            {SOCIAL_PLATFORMS.map(p => (
+              <div class="social-edit-row">
+                <span class="social-tile social-tile-static" style={`--brand:${p.color}`} title={p.label} aria-hidden="true">
+                  <Fragment set:html={p.icon} />
+                </span>
+                <input
+                  type="text"
+                  class="social-edit-input"
+                  id={`social-${p.key}`}
+                  data-social-key={p.key}
+                  placeholder={p.placeholder}
+                  aria-label={p.label}
+                  value={((reviewer as any)[p.key] as string | null) ?? ''}
+                />
+              </div>
+            ))}
+          </div>
+          <div class="social-edit-row social-edit-accent">
             <label class="social-edit-label" for="accentColorInput">Accent color</label>
             <input
               type="color"
@@ -1889,42 +1918,87 @@ const reviewerBreadcrumbJsonLd = {
   ) : (
     <>
       <div class="sort-tabs">
-        <button class="sort-tab active" onclick="sortReviews('all',this)">All</button>
-        <button class="sort-tab" onclick="sortReviews('recent',this)">Recent</button>
-        <button class="sort-tab" onclick="sortReviews('highest',this)">Highest</button>
-        <button class="sort-tab" onclick="sortReviews('lowest',this)">Lowest</button>
-        <button class="sort-tab" onclick="sortReviews('most_upvoted',this)">Most upvoted</button>
-        <button class="sort-tab" onclick="sortReviews('most_downvoted',this)">Most downvoted</button>
+        <button class="sort-tab review-view-tab active" onclick="switchReviewView('overview',this)">Overview</button>
+        <button class="sort-tab review-view-tab" onclick="switchReviewView('detailed',this)">Detailed</button>
       </div>
+
+      <div class="lf-bar">
+        <input class="lf-search" type="text" placeholder="Search reviews…" oninput="searchReviews(this.value)" />
+        <select class="lf-select" onchange="setReviewSort(this.value)">
+          <option value="recent">Recent</option>
+          <option value="oldest">Oldest</option>
+          <option value="highest">Highest Rated</option>
+          <option value="lowest">Lowest Rated</option>
+          <option value="most-upvoted">Most Upvoted</option>
+          <option value="most-downvoted">Most Downvoted</option>
+        </select>
+        {reviewGenres.length > 0 && (
+          <select class="lf-select" onchange="setReviewFilter('genre',this.value,this)">
+            <option value="">All Genres</option>
+            {reviewGenres.map((g: string) => <option value={g}>{g}</option>)}
+          </select>
+        )}
+        {reviewPlatforms.length > 0 && (
+          <select class="lf-select" onchange="setReviewFilter('platform',this.value,this)">
+            <option value="">All Platforms</option>
+            {reviewPlatforms.map((p: string) => <option value={p}>{p}</option>)}
+          </select>
+        )}
+      </div>
+
       <div id="reviewsList" style="display:none">
-        {publishedReviews.map((review: any) => (
-          <ReviewCard
-            review={review}
-            isLoggedIn={!!user}
-            isOwnProfile={isOwnProfile}
-            showGame={true}
-            showReviewer={false}
-            currentProfileId={currentProfile?.id ?? null}
-          />
+        {reviewFilterItems.map((it: any) => (
+          <div
+            class="rev-filter-item"
+            data-title={it.searchText}
+            data-genres={it.genres.join(',')}
+            data-platform={it.platform}
+            data-score={it.score}
+            data-date={it.date}
+            data-upvotes={it.up}
+            data-downvotes={it.down}
+          >
+            <ReviewCard
+              review={it.review}
+              isLoggedIn={!!user}
+              isOwnProfile={isOwnProfile}
+              showGame={true}
+              showReviewer={false}
+              currentProfileId={currentProfile?.id ?? null}
+            />
+          </div>
         ))}
       </div>
+      <div class="list-no-results" id="reviews-dt-no-results" style="display:none">No reviews match these filters.</div>
+
       <div class="reviews-overview-grid" id="reviewsOverviewList">
-        {[...publishedReviews].sort((a: any, b: any) =>
-          (a.games?.title ?? '').localeCompare(b.games?.title ?? '')
-        ).map((review: any) => {
+        {reviewFilterItems.map((it: any) => {
+          const review = it.review
           const cover = igdbCover(review.games?.cover_img_url, 't_thumb')
           return (
-            <a href={`/reviews/${review.id}`} class={`review-overview-card rov-${scoreClass(review.score).replace('score-', '')}`}>
-              {cover ? <img class="rov-cover" src={cover} alt="" loading="lazy" /> : <div class="rov-cover" />}
-              <div class="rov-body">
-                <span class="rov-title">{review.games?.title ?? 'Unknown game'}</span>
-                <span class="rov-date">{timeAgo(review.published_at ?? review.created_at)}</span>
-              </div>
-              <span class="rov-score">{review.score}</span>
-            </a>
+            <div
+              class="rev-filter-item"
+              data-title={it.searchText}
+              data-genres={it.genres.join(',')}
+              data-platform={it.platform}
+              data-score={it.score}
+              data-date={it.date}
+              data-upvotes={it.up}
+              data-downvotes={it.down}
+            >
+              <a href={`/reviews/${review.id}`} class={`review-overview-card rov-${scoreClass(review.score).replace('score-', '')}`}>
+                {cover ? <img class="rov-cover" src={cover} alt="" loading="lazy" /> : <div class="rov-cover" />}
+                <div class="rov-body">
+                  <span class="rov-title">{review.games?.title ?? 'Unknown game'}</span>
+                  <span class="rov-date">{timeAgo(review.published_at ?? review.created_at)}</span>
+                </div>
+                <span class="rov-score">{review.score}</span>
+              </a>
+            </div>
           )
         })}
       </div>
+      <div class="list-no-results" id="reviews-ov-no-results" style="display:none">No reviews match these filters.</div>
     </>
   )}
 </div>
@@ -3482,31 +3556,65 @@ const reviewerBreadcrumbJsonLd = {
     }, 50)
   }
 
-  // ── SORT REVIEWS ──
-  function sortReviews(type, btn) {
-  document.querySelectorAll('.sort-tab').forEach(function(b) { b.classList.remove('active') })
-  btn.classList.add('active')
-  var list = document.getElementById('reviewsList')
-  var overview = document.getElementById('reviewsOverviewList')
-  if (type === 'all') {
-    if (list) list.style.display = 'none'
-    if (overview) overview.style.display = ''
-    return
+  // ── REVIEWS TAB: Overview / Detailed views + shared search & filters ──
+  var _reviewState = { view: 'overview', sort: 'recent', genre: '', platform: '', search: '' }
+
+  function applyReviewFilters() {
+    var grids = ['reviewsOverviewList', 'reviewsList']
+    grids.forEach(function(gridId) {
+      var grid = document.getElementById(gridId)
+      if (!grid) return
+      var isActive = (gridId === 'reviewsOverviewList') === (_reviewState.view === 'overview')
+      var items = Array.from(grid.children).filter(function(el) {
+        return el.classList && el.classList.contains('rev-filter-item')
+      })
+
+      items.forEach(function(item) {
+        var show = true
+        var s = _reviewState
+        if (s.search && (item.dataset.title || '').toLowerCase().indexOf(s.search.toLowerCase()) === -1) show = false
+        if (show && s.genre && (item.dataset.genres || '').split(',').indexOf(s.genre) === -1) show = false
+        if (show && s.platform && (item.dataset.platform || '') !== s.platform) show = false
+        item.style.display = show ? '' : 'none'
+      })
+
+      var visible = items.filter(function(i) { return i.style.display !== 'none' })
+      visible.sort(function(a, b) {
+        var s = _reviewState.sort
+        if (s === 'oldest') return new Date(a.dataset.date) - new Date(b.dataset.date)
+        if (s === 'highest') return parseFloat(b.dataset.score) - parseFloat(a.dataset.score)
+        if (s === 'lowest') return parseFloat(a.dataset.score) - parseFloat(b.dataset.score)
+        if (s === 'most-upvoted') return parseInt(b.dataset.upvotes || '0') - parseInt(a.dataset.upvotes || '0')
+        if (s === 'most-downvoted') return parseInt(b.dataset.downvotes || '0') - parseInt(a.dataset.downvotes || '0')
+        return new Date(b.dataset.date) - new Date(a.dataset.date) // recent
+      })
+      visible.forEach(function(i) { grid.appendChild(i) })
+
+      var noRes = document.getElementById(gridId === 'reviewsOverviewList' ? 'reviews-ov-no-results' : 'reviews-dt-no-results')
+      if (noRes) noRes.style.display = (isActive && visible.length === 0) ? '' : 'none'
+    })
   }
-  if (list) list.style.display = ''
-  if (overview) overview.style.display = 'none'
-  if (!list) return
-  var cards = Array.from(list.querySelectorAll('.rc'))
-  cards.sort(function(a, b) {
-    if (type === 'highest') return parseFloat(b.dataset.score) - parseFloat(a.dataset.score)
-    if (type === 'lowest') return parseFloat(a.dataset.score) - parseFloat(b.dataset.score)
-    if (type === 'most_upvoted') return parseInt(b.dataset.upvotes) - parseInt(a.dataset.upvotes)
-    if (type === 'most_downvoted') return parseInt(b.dataset.downvotes) - parseInt(a.dataset.downvotes)
-    return new Date(b.dataset.date).getTime() - new Date(a.dataset.date).getTime()
-  })
-  cards.forEach(function(card) { list.appendChild(card) })
-}
-  window.sortReviews = sortReviews
+
+  function switchReviewView(view, btn) {
+    document.querySelectorAll('.review-view-tab').forEach(function(b) { b.classList.remove('active') })
+    if (btn) btn.classList.add('active')
+    _reviewState.view = view
+    var ov = document.getElementById('reviewsOverviewList')
+    var dt = document.getElementById('reviewsList')
+    if (ov) ov.style.display = view === 'overview' ? '' : 'none'
+    if (dt) dt.style.display = view === 'detailed' ? '' : 'none'
+    applyReviewFilters()
+  }
+  window.switchReviewView = switchReviewView
+  window.setReviewSort = function(v) { _reviewState.sort = v; applyReviewFilters() }
+  window.setReviewFilter = function(type, value, sel) {
+    _reviewState[type] = value
+    if (sel) sel.classList.toggle('has-value', !!value)
+    applyReviewFilters()
+  }
+  window.searchReviews = function(v) { _reviewState.search = (v || '').trim(); applyReviewFilters() }
+
+  if (document.getElementById('reviewsOverviewList')) applyReviewFilters()
 
   // ── SWITCH LISTS SECTION ──
   function switchListsSection(type, btn) {
