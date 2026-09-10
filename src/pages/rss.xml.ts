@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getSupabaseAdmin } from '../utils/database';
 import { igdbImage } from '../utils/format';
+import { cdnCacheControl } from '../utils/cache';
 
 export const prerender = false;
 
@@ -141,7 +142,7 @@ ${items}
     headers: {
       'Content-Type': 'application/rss+xml; charset=utf-8',
       'Cache-Control': 'public, max-age=3600, s-maxage=86400',
-      'Netlify-CDN-Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
+      'Netlify-CDN-Cache-Control': cdnCacheControl(86400, 604800),
     },
   });
 };

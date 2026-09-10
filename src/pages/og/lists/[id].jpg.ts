@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
 import { renderOgImage, fetchImageDataUri } from "../../../utils/og";
 import { buildListOgTree } from "../../../utils/ogList";
+import { cdnCacheControl } from "../../../utils/cache";
 
 export const prerender = false;
 
@@ -89,7 +90,7 @@ export const GET: APIRoute = async ({ params }) => {
       // See home.png.ts for why this is set.
       "Access-Control-Allow-Origin": "*",
       "Cache-Control": "public, max-age=3600",
-      "Netlify-CDN-Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+      "Netlify-CDN-Cache-Control": cdnCacheControl(86400, 604800),
     },
   });
 };
