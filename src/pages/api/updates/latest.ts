@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
-import { cdnCacheControl } from "../../../utils/cache";
+import { cdnCacheHeaders } from "../../../utils/cache";
 
 // CDN-cached 2 min — every page checks this to decide whether to show the dot badge.
 export const GET: APIRoute = async () => {
@@ -30,7 +30,7 @@ export const GET: APIRoute = async () => {
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
-        "Netlify-CDN-Cache-Control": cdnCacheControl(120, 300),
+        ...cdnCacheHeaders(120, 300),
       },
     }
   );

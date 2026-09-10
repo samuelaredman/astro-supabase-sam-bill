@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { cdnCacheControl } from '../utils/cache';
+import { cdnCacheHeaders } from '../utils/cache';
 
 // robots.txt is served dynamically so it can differ by host:
 //  • the real domain (and anything that isn't a Netlify preview) gets the full
@@ -116,7 +116,7 @@ export const GET: APIRoute = (context) => {
       'Content-Type': 'text/plain; charset=utf-8',
       // Cheap to regenerate, but no reason to; cache hard at the edge.
       'Cache-Control': 'public, max-age=3600',
-      'Netlify-CDN-Cache-Control': cdnCacheControl(86400, 604800),
+      ...cdnCacheHeaders(86400, 604800),
     },
   });
 };

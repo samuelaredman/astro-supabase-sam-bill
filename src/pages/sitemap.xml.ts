@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getSupabaseAdmin } from '../utils/database';
-import { cdnCacheControl } from '../utils/cache';
+import { cdnCacheHeaders } from '../utils/cache';
 
 export const prerender = false;
 
@@ -140,7 +140,7 @@ ${urlEntries}
     headers: {
       'Content-Type': 'application/xml; charset=utf-8',
       'Cache-Control': 'public, max-age=3600, s-maxage=86400',
-      'Netlify-CDN-Cache-Control': cdnCacheControl(86400, 604800),
+      ...cdnCacheHeaders(86400, 604800),
     },
   });
 };
