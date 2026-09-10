@@ -155,15 +155,49 @@ async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit:
   }));
 }
 
-const recentLists = await fetchSharedListFeedItems(null, 10);
-
-// ── Recent recommendations (site-wide) — merged into the feed and shown in the sidebar ──
-const { data: recentRecsRaw, error: recsError } = await adminDb
-  .from('recommendations')
-  .select(REC_SELECT)
-  .eq('status', 'published')
-  .order('created_at', { ascending: false })
-  .limit(30);
+// ── Second wave ─────────────────────────────────────────────────────────────
+// Shared lists, site-wide recommendations, the viewer's last review + follow
+// graph, and the hot-takes ranking pass all depend only on the batch above, so
+// they run together instead of one after another.
+//
+// The hot-takes pass deliberately projects to the four columns the ranking
+// needs. It used to pull 500 fully-hydrated reviews (nested votes, reactions
+// and comments) and keep 30 — ~94% of that payload was discarded. Now the
+// winners get hydrated in the wave below.
+const [
+  recentLists,
+  { data: recentRecsRaw, error: recsError },
+  { data: lastReviewData },
+  { data: followRows },
+  { data: htRanking },
+] = await Promise.all([
+  fetchSharedListFeedItems(null, 10),
+  adminDb
+    .from('recommendations')
+    .select(REC_SELECT)
+    .eq('status', 'published')
+    .order('created_at', { ascending: false })
+    .limit(30),
+  currentProfile
+    ? db.from('reviews')
+        .select('id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url )')
+        .eq('profile_id', currentProfile.id)
+        .eq('status', 'published')
+        .order('published_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+    : Promise.resolve({ data: null }),
+  currentProfile
+    ? db.from('follows').select('following_id').eq('follower_id', currentProfile.id)
+    : Promise.resolve({ data: [] }),
+  isLoggedIn
+    ? db.from('reviews')
+        .select('id, game_id, score, published_at, created_at')
+        .eq('status', 'published')
+        .order('published_at', { ascending: false })
+        .limit(500)
+    : Promise.resolve({ data: [] }),
+]);
 if (recsError) console.error('[index] recommendations query error:', JSON.stringify(recsError));
 const recentRecs = (recentRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
 
@@ -231,43 +265,93 @@ const totalReviewers = siteStats.totalReviewers
 
 const { data: genres } = genresRes
 
+const lastReview: any = lastReviewData ?? null
+const followingIds = (followRows ?? []).map((r: any) => r.following_id)
+
+// ── Hot Takes ranking: published reviews scoring ≥2.5 away from their game's
+// consensus average, most-recent-first. Ranked from the light projection above;
+// only the 30 that survive get hydrated for rendering. ──
+const HT_MIN_DEVIATION = 2.5
+const htScores: Record<string, number[]> = {}
+for (const r of (htRanking ?? []) as any[]) {
+  if (r.game_id == null || r.score == null) continue
+  ;(htScores[r.game_id] ||= []).push(r.score)
+}
+const htAvg: Record<string, number> = {}
+for (const [id, s] of Object.entries(htScores)) {
+  if (s.length >= 2) htAvg[id] = s.reduce((a, b) => a + b, 0) / s.length
+}
+const htWinners = ((htRanking ?? []) as any[])
+  .filter((r) => r.game_id != null && htAvg[r.game_id] !== undefined
+    && Math.abs(r.score - htAvg[r.game_id]) >= HT_MIN_DEVIATION)
+  .sort((a, b) =>
+    new Date(b.published_at || b.created_at).getTime() -
+    new Date(a.published_at || a.created_at).getTime()
+  )
+  .slice(0, 30)
+const htWinnerIds = htWinners.map((r) => r.id)
+
+// ── Third wave: the followed-reviewer feed and the hot-take hydration ──
 let followingReviews: any[] = []
 let followingRecs: any[] = []
 let followingLists: any[] = []
-let lastReview: any = null
-if (user && currentProfile) {
-  const [lastReviewRes, followRowsRes] = await Promise.all([
-    db.from('reviews')
-      .select('id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url )')
-      .eq('profile_id', currentProfile.id)
-      .eq('status', 'published')
-      .order('published_at', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    db.from('follows').select('following_id').eq('follower_id', currentProfile.id),
-  ])
-  lastReview = lastReviewRes.data ?? null
-  const followingIds = (followRowsRes.data ?? []).map((r: any) => r.following_id)
-  if (followingIds.length > 0) {
-    const [{ data: fRevs }, { data: fRecsRaw }, fLists] = await Promise.all([
-      db.from('reviews')
+let hotTakes: any[] = []
+
+const HT_FIELDS = `
+  id, score, title, body, play_time_hours,
+  contains_spoilers, status, published_at, created_at,
+  game_id,
+  played_on:platform_played_on ( id, name, slug ),
+  games ( id, title, slug, cover_img_url ),
+  profiles ( id, username, avatar_url ),
+  review_votes( vote, profile_id ),
+  review_reactions( reaction_type, profile_id ),
+  review_comments( id )
+`
+const [{ data: fRevs }, { data: fRecsRaw }, fLists, { data: htFull }] = await Promise.all([
+  followingIds.length > 0
+    ? db.from('reviews')
         .select(REVIEW_FIELDS)
         .eq('status', 'published')
         .in('profile_id', followingIds)
         .order('published_at', { ascending: false })
-        .limit(20),
-      adminDb.from('recommendations')
+        .limit(20)
+    : Promise.resolve({ data: [] }),
+  followingIds.length > 0
+    ? adminDb.from('recommendations')
         .select(REC_SELECT)
         .eq('status', 'published')
         .in('profile_id', followingIds)
         .order('created_at', { ascending: false })
-        .limit(20),
-      fetchSharedListFeedItems(followingIds, 2),
-    ])
-    followingReviews = (fRevs ?? []) as any[]
-    followingRecs = (fRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile.id))
-    followingLists = fLists
-  }
+        .limit(20)
+    : Promise.resolve({ data: [] }),
+  followingIds.length > 0 ? fetchSharedListFeedItems(followingIds, 2) : Promise.resolve([]),
+  htWinnerIds.length > 0
+    ? db.from('reviews').select(HT_FIELDS).in('id', htWinnerIds)
+    : Promise.resolve({ data: [] }),
+])
+if (currentProfile) {
+  followingReviews = (fRevs ?? []) as any[]
+  followingRecs = (fRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile.id))
+  followingLists = fLists as any[]
+}
+{
+  // Re-apply the ranking order the light pass produced, and attach the numbers
+  // the card renders.
+  const byId = new Map((htFull ?? []).map((r: any) => [r.id, r]))
+  hotTakes = htWinners
+    .map((w) => {
+      const full = byId.get(w.id)
+      if (!full) return null
+      return {
+        ...full,
+        _htAvg: htAvg[w.game_id],
+        _htDeviation: w.score - htAvg[w.game_id],
+        _htAbs: Math.abs(w.score - htAvg[w.game_id]),
+        _htCount: htScores[w.game_id].length,
+      }
+    })
+    .filter(Boolean)
 }
 
 // Merge followed reviewers' reviews, recommendations, and shared lists into one chronological feed
@@ -277,57 +361,6 @@ const followingItems: any[] = [
   ...followingLists.map((l: any) => ({ ...l, _date: l.created_at })),
 ].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime())
 
-// ── Hot Takes tab: published reviews scoring ≥2.5 away from their game's
-// consensus average, ordered most-recent-first. Only computed for logged-in
-// users (the pill row is logged-in only). ──
-const HT_MIN_DEVIATION = 2.5
-let hotTakes: any[] = []
-if (isLoggedIn) {
-  const HT_FIELDS = `
-    id, score, title, body, play_time_hours,
-    contains_spoilers, status, published_at, created_at,
-    game_id,
-    played_on:platform_played_on ( id, name, slug ),
-    games ( id, title, slug, cover_img_url ),
-    profiles ( id, username, avatar_url ),
-    review_votes( vote, profile_id ),
-    review_reactions( reaction_type, profile_id ),
-    review_comments( id )
-  `
-  const { data: htRaw } = await db
-    .from('reviews')
-    .select(HT_FIELDS)
-    .eq('status', 'published')
-    .order('published_at', { ascending: false })
-    .limit(500)
-  const htReviews: any[] = htRaw ?? []
-
-  const htScores: Record<string, number[]> = {}
-  for (const r of htReviews) {
-    if (r.game_id == null || r.score == null) continue
-    ;(htScores[r.game_id] ||= []).push(r.score)
-  }
-  const htAvg: Record<string, number> = {}
-  for (const [id, s] of Object.entries(htScores)) {
-    if (s.length >= 2) htAvg[id] = s.reduce((a, b) => a + b, 0) / s.length
-  }
-
-  hotTakes = htReviews
-    .filter(r => r.game_id != null && htAvg[r.game_id] !== undefined)
-    .map(r => ({
-      ...r,
-      _htAvg: htAvg[r.game_id],
-      _htDeviation: r.score - htAvg[r.game_id],
-      _htAbs: Math.abs(r.score - htAvg[r.game_id]),
-      _htCount: htScores[r.game_id].length,
-    }))
-    .filter(h => h._htAbs >= HT_MIN_DEVIATION)
-    .sort((a, b) =>
-      new Date(b.published_at || b.created_at).getTime() -
-      new Date(a.published_at || a.created_at).getTime()
-    )
-    .slice(0, 30)
-}
 function htFmt(n: number): string { return n.toFixed(1) }
 
 function formatCount(n: number): string {
