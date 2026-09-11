@@ -99,13 +99,19 @@ export async function getGroupAuthority(
   groupId: string,
   profileId: string
 ): Promise<GroupAuthority | null> {
-  const [{ data: membership }, { data: adminRow }] = await Promise.all([
+  const [{ data: membership }, siteAdmin] = await Promise.all([
     db.from("group_members")
       .select("role, custom_role_id").eq("group_id", groupId).eq("profile_id", profileId).maybeSingle(),
-    db.from("site_admins").select("profile_id").eq("profile_id", profileId).maybeSingle(),
+    isSiteAdmin(db, profileId),
   ]);
-  if (!adminRow || membership?.role === "owner") return membership;
+  if (!siteAdmin || membership?.role === "owner") return membership;
   return { role: "admin", custom_role_id: null };
+}
+
+/** Whether the profile is in site_admins (managed by hand in the SQL editor). */
+export async function isSiteAdmin(db: SupabaseAdmin, profileId: string): Promise<boolean> {
+  const { data } = await db.from("site_admins").select("profile_id").eq("profile_id", profileId).maybeSingle();
+  return !!data;
 }
 
 /**

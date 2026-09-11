@@ -2,7 +2,8 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
-import { getGroupAuthority } from "../../../utils/api";
+import { getGroupAuthority, isSiteAdmin } from "../../../utils/api";
+import { groupPath } from "../../../utils/groupSlug";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
@@ -95,8 +96,11 @@ const defaultStats = {
 };
 const statsConfig = { ...defaultStats, ...(group.stats_config ?? {}) };
 
+// Custom /c/ links are set by site admins only (/api/groups/slug)
+const siteAdmin = await isSiteAdmin(db, profile.id);
+const sharePath = groupPath(group);
 const inviteUrl = group.invite_code
-  ? `${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`
+  ? `${Astro.url.origin}${sharePath}?code=${group.invite_code}`
   : null;
 
 // Role colors available to pick
@@ -234,13 +238,27 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
       <p class="form-msg" id="general-msg"></p>
     </div>
 
+    <!-- ── Custom Link (site admins) ────────────────────────────── -->
+    {siteAdmin && (
+      <div class="settings-section">
+        <div class="settings-section-title">Custom Link <span style="font-weight:500;text-transform:none;letter-spacing:0">· site admins only</span></div>
+        <div class="form-group">
+          <label class="form-label" for="setting-slug">{Astro.url.host}/c/</label>
+          <input id="setting-slug" class="form-input" type="text" value={group.slug ?? ""} maxlength="32" placeholder="creator-name" autocomplete="off" spellcheck="false" />
+        </div>
+        <p style="font-size:12px;color:var(--text-tertiary);margin:-6px 0 12px">Lowercase letters, numbers and hyphens. Share and invite links switch to it. Leave empty to remove.</p>
+        <button class="btn-primary" onclick="saveSlug()">Save Link</button>
+        <p class="form-msg" id="slug-msg"></p>
+      </div>
+    )}
+
     <!-- ── Invite Link ──────────────────────────────────────────── -->
     {group.invite_code && (
       <div class="settings-section">
         <div class="settings-section-title">Invite Link</div>
         <div class="invite-row">
           <input class="invite-code-display" id="invite-code-display" type="text" readonly
-            value={`${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`} />
+            value={inviteUrl ?? ""} />
           <button class="btn-ghost" onclick="copyInviteLink()">Copy</button>
         </div>
         <div style="margin-top:10px">
@@ -542,7 +560,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
 </div>
 </Layout>
 
-<script define:vars={{ groupId: group.id, minAllowedRank, isOwner }}>
+<script define:vars={{ groupId: group.id, minAllowedRank, isOwner, initialSharePath: sharePath }}>
 // ── Visibility radios ────────────────────────────────────────────────────
 document.querySelectorAll('.vis-option').forEach(opt => {
   opt.addEventListener('click', () => {
@@ -577,10 +595,29 @@ async function saveGeneral() {
   showMsg('general-msg', res.ok ? 'Saved!' : (data.error ?? 'Error saving'), res.ok);
   if (res.ok && data.invite_code) {
     const d = document.getElementById('invite-code-display');
-    if (d) d.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
+    if (d) d.value = `${window.location.origin}${sharePath}?code=${data.invite_code}`;
   }
 }
 window.saveGeneral = saveGeneral;
+
+// ── Custom link ──────────────────────────────────────────────────────────
+let sharePath = initialSharePath;
+
+async function saveSlug() {
+  const slug = document.getElementById('setting-slug').value;
+  const res = await fetch('/api/groups/slug', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, slug }),
+  });
+  const data = await res.json();
+  if (!res.ok) return showMsg('slug-msg', data.error ?? 'Error saving', false);
+  document.getElementById('setting-slug').value = data.slug ?? '';
+  sharePath = data.slug ? `/c/${data.slug}` : `/groups/${groupId}`;
+  const field = document.getElementById('invite-code-display');
+  if (field) field.value = field.value.replace(/^(https?:\/\/[^/]+)[^?]*/, `$1${sharePath}`);
+  showMsg('slug-msg', data.slug ? `Saved — ${window.location.host}/c/${data.slug}` : 'Custom link removed', true);
+}
+window.saveSlug = saveSlug;
 
 // ── Invite link ──────────────────────────────────────────────────────────
 function copyInviteLink() {
@@ -601,7 +638,7 @@ async function regenerateInvite() {
   const data = await res.json();
   if (res.ok && data.invite_code) {
     const field = document.getElementById('invite-code-display');
-    if (field) field.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
+    if (field) field.value = `${window.location.origin}${sharePath}?code=${data.invite_code}`;
     showMsg('invite-msg', 'New link generated!', true);
   } else {
     showMsg('invite-msg', data.error ?? 'Error', false);

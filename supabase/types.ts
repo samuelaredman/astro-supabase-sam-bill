@@ -1062,6 +1062,7 @@ export type Database = {
           join_prompt: string | null
           name: string
           requires_approval: boolean
+          slug: string | null
           stats_config: Json | null
           visibility: string
         }
@@ -1077,6 +1078,7 @@ export type Database = {
           join_prompt?: string | null
           name: string
           requires_approval?: boolean
+          slug?: string | null
           stats_config?: Json | null
           visibility?: string
         }
@@ -1092,6 +1094,7 @@ export type Database = {
           join_prompt?: string | null
           name?: string
           requires_approval?: boolean
+          slug?: string | null
           stats_config?: Json | null
           visibility?: string
         }
