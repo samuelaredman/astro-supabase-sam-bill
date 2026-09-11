@@ -1,7 +1,7 @@
 ---
 import TourManager from "./TourManager.astro";
 import OnboardingWizard from "./OnboardingWizard.astro";
-import { createSupabaseServerClientFromContext } from "../utils/database";
+import { awaitOnboardingProfile } from "../utils/pageAuth";
 import "../styles/shared.css";
 
 interface Props {
@@ -50,7 +50,9 @@ function getInitials(username: string): string {
 // onboarding_completed_at on all pre-existing profiles. Queried fresh here (rather
 // than trusting whatever subset of columns the calling page's own
 // `currentProfile` happens to select) so this stays correct regardless of
-// what any given page fetches for its own purposes.
+// what any given page fetches for its own purposes. getPageUser() starts this
+// lookup at the top of the page, so by the time the Layout renders it's usually
+// already resolved instead of adding a round trip after the page's queries.
 let onboardingGate: {
   hasAvatar: boolean;
   hasFavorite: boolean;
@@ -62,15 +64,12 @@ let onboardingGate: {
 } | null = null;
 
 if (isLoggedIn && currentProfile) {
-  const supabase = createSupabaseServerClientFromContext(Astro);
-  const { data: onboardingProfile } = await supabase
-    .from('profiles')
-    .select('avatar_url, favorite_game_id, showcase_games, backloggd_import_done_at, onboarding_completed_at, favorite_game:games!favorite_game_id (id, title, slug, cover_img_url)')
-    .eq('id', currentProfile.id)
-    .maybeSingle();
+  const onboardingProfile = await awaitOnboardingProfile(Astro.locals, currentProfile.id);
 
   if (onboardingProfile) {
-    const existingShowcase = (Array.isArray(onboardingProfile.showcase_games) ? onboardingProfile.showcase_games : []).filter(Boolean);
+    // showcase_games is jsonb — an array of game snapshots written by /api/profile/update.
+    type ShowcaseGame = NonNullable<typeof onboardingGate>['existingShowcase'][number];
+    const existingShowcase = (Array.isArray(onboardingProfile.showcase_games) ? onboardingProfile.showcase_games : []).filter(Boolean) as ShowcaseGame[];
     // Supabase types this to-one embed as an array — normalize to a single object.
     const favoriteGameRaw = onboardingProfile.favorite_game as any;
     const existingFavorite = Array.isArray(favoriteGameRaw) ? (favoriteGameRaw[0] ?? null) : (favoriteGameRaw ?? null);

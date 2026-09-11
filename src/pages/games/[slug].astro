@@ -15,184 +15,139 @@ import RecommendationFeedCard from '../../components/RecommendationFeedCard.astr
 import RecommendationComposer from '../../components/RecommendationComposer.astro'
 import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed'
 import { setPageCacheHeaders } from '../../utils/cache';
+import { getPageUser } from '../../utils/pageAuth';
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
-const { data: { user } } = await serverClient.auth.getUser();
+const user = await getPageUser(Astro, serverClient);
 const isLoggedIn = !!user;
 
 const { slug } = Astro.params;
 const activeTab = Astro.url.searchParams.get('tab') || 'overview'
 
-const { data: game } = await (supabase as any)
-  .from('games')
-  .select(`
-    id, title, slug, game_description, cover_img_url,
-    date_released, igdb_id,
-    game_genres(genres(id, name, slug)),
-    game_platforms(platforms(id, name, slug)),
-    game_companies(role, developers(id, name, slug))
-  `)
-  .eq('slug', slug)
-  .single()
+const db = getSupabaseAdmin() as any;
+
+// This page used to run ~17 queries plus an IGDB call one after another
+// (~0.9 s server time, logged out). They're now grouped into waves by what each
+// actually depends on; anything with its own follow-up query is a small async
+// chain inside a wave, so the slowest chain — not the sum — sets the page time.
+
+// Every published score on the site, for the all-time / genre / year ranks.
+// Depends on nothing, so it starts first and overlaps everything below.
+// Reviews is an unbounded table — Supabase caps a single query at 1000 rows,
+// so this must page through in batches or scores silently go missing once
+// the site passes 1000 published reviews.
+async function fetchAllScoreRows() {
+  const rows: { game_id: string; score: number }[] = []
+  const PAGE_SIZE = 1000
+  let from = 0
+  while (true) {
+    const { data: page } = await (supabase as any)
+      .from('reviews').select('game_id, score').eq('status', 'published')
+      .range(from, from + PAGE_SIZE - 1)
+    if (!page || page.length === 0) break
+    rows.push(...page)
+    if (page.length < PAGE_SIZE) break
+    from += PAGE_SIZE
+  }
+  return rows
+}
+const allScoreRowsPromise = fetchAllScoreRows()
+
+// Wave 1 — the game and the viewer's profile don't depend on each other.
+const [{ data: game }, { data: cp }] = await Promise.all([
+  (supabase as any)
+    .from('games')
+    .select(`
+      id, title, slug, game_description, cover_img_url,
+      date_released, igdb_id,
+      game_genres(genres(id, name, slug)),
+      game_platforms(platforms(id, name, slug)),
+      game_companies(role, developers(id, name, slug))
+    `)
+    .eq('slug', slug)
+    .single(),
+  user
+    ? (supabase as any).from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single()
+    : Promise.resolve({ data: null }),
+])
 
 if (!game) return Astro.redirect('/404')
 
-const { data: reviews } = await (supabase as any)
-  .from('reviews')
-  .select(`
-    id, score, title, body, published_at, created_at,
-    contains_spoilers, play_time_hours,
-    played_on:platform_played_on ( id, name, slug ),
-    profiles ( id, username, avatar_url ),
-    review_votes ( vote, profile_id ),
-    review_reactions( reaction_type, profile_id ),
-    review_comments( id )
-  `)
-  .eq('game_id', game.id)
-  .eq('status', 'published')
-  .order('published_at', { ascending: false })
+const currentProfileId: string | null = cp?.id ?? null;
+const currentProfile: { id: string; username: string; avatar_url: string | null } | null = cp ?? null;
 
-let currentProfileId: string | null = null;
-let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
-if (user) {
-  const { data: cp } = await (supabase as any)
-    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
-  currentProfileId = cp?.id ?? null;
-  currentProfile = cp ?? null;
-}
-
-// Game status counts (public) + current user's status
-const db = getSupabaseAdmin() as any;
-
-// Recommendations involving this game (as source or target), most-recent-first
-const { data: gameRecsRaw } = await db
-  .from('recommendations')
-  .select(REC_SELECT)
-  .eq('status', 'published')
-  .or(`source_game_id.eq.${game.id},target_game_id.eq.${game.id}`)
-  .order('created_at', { ascending: false })
-  .limit(50);
-const gameRecs = (gameRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfileId));
-
-// Aggregate the "other" game in each rec to build a ranked play-next grid
-const _relatedMap = new Map<string, { game: { id: string; title: string; slug: string; cover_img_url: string | null }; count: number }>();
-for (const rec of gameRecs) {
-  const other = rec.sourceGame?.id === game.id ? rec.targetGame : rec.sourceGame;
-  if (!other?.id) continue;
-  const entry = _relatedMap.get(other.id);
-  if (entry) entry.count++;
-  else _relatedMap.set(other.id, { game: other, count: 1 });
-}
-const relatedGames = [..._relatedMap.values()].sort((a, b) => b.count - a.count);
-
-// The current user's saved draft review for this game (if any), so "Write a review"
-// resumes it instead of starting a duplicate. Auto-opens when arriving via ?draft=.
-let draftReview: any = null;
-if (currentProfileId) {
-  const { data: dr } = await db
-    .from('reviews')
-    .select('id, score, title, body, platform_played_on, play_time_hours, contains_spoilers')
-    .eq('profile_id', currentProfileId)
-    .eq('game_id', game.id)
-    .eq('status', 'draft')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  draftReview = dr ?? null;
-}
-const autoOpenDraft = !!Astro.url.searchParams.get('draft') && !!draftReview;
-
-const { count: wantToPlayCount } = await db
-  .from('user_game_status').select('*', { count: 'exact', head: true })
-  .eq('game_id', game.id).eq('status', 'want_to_play');
-
-let currentGameStatus: string | null = null;
-let currentGameOwned = false;
-let currentGameHidden = false;
-if (currentProfileId) {
-  const { data: statusRow } = await db
-    .from('user_game_status').select('status, is_owned, is_hidden')
-    .eq('profile_id', currentProfileId).eq('game_id', game.id).maybeSingle();
-  currentGameStatus = statusRow?.status ?? null;
-  currentGameOwned = statusRow?.is_owned ?? false;
-  currentGameHidden = statusRow?.is_hidden ?? false;
-}
+const genres = (game.game_genres ?? []).map((gg: any) => gg.genres).filter(Boolean)
+const releaseYear = game.date_released ? new Date(game.date_released).getFullYear() : null
+const releaseYearStr = releaseYear ? String(releaseYear) : null
+const primaryGenreId = genres[0]?.id ?? null
 
 // ── SOCIAL TRACKING — people the current user follows who have tracked this game ──
 type FriendStatusGroups = { playing: any[]; want_to_play: any[]; owned: any[]; completed: any[]; hundred_percent: any[]; dropped: any[] };
-let friendStatusGroups: FriendStatusGroups = { playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [] };
 // 'hidden' is never surfaced in social tracking
-let hasFriendActivity = false;
+async function fetchFriendStatusGroups(viewerId: string): Promise<FriendStatusGroups> {
+  const groups: FriendStatusGroups = { playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [] };
 
-if (currentProfileId) {
   // Step 1: fetch everyone who has tracked THIS game (bounded by game popularity, not follow count).
   // Exclude the viewer themselves, cap at 200 rows — more than enough to find 5 per status group.
   const { data: gameTrackers, error: trackersError } = await db
     .from('user_game_status')
     .select('status, profile_id, profiles(id, username, avatar_url, want_to_play_privacy, dropped_privacy)')
     .eq('game_id', game.id)
-    .neq('profile_id', currentProfileId)
+    .neq('profile_id', viewerId)
     .order('updated_at', { ascending: false })
     .limit(200);
   if (trackersError) console.error('[social-tracking] gameTrackers error:', JSON.stringify(trackersError));
-  console.log('[social-tracking] viewer:', currentProfileId, 'game:', game.id, 'trackers found:', gameTrackers?.length ?? 0);
 
   const trackerIds: string[] = (gameTrackers ?? []).map((r: any) => r.profile_id);
+  if (trackerIds.length === 0) return groups;
 
-  if (trackerIds.length > 0) {
-    // Step 2: which of those does the current user follow? IN clause is bounded by tracker count.
-    const { data: followedRows, error: followsError } = await db
-      .from('follows').select('following_id')
-      .eq('follower_id', currentProfileId)
-      .in('following_id', trackerIds);
-    if (followsError) console.error('[social-tracking] followedRows error:', JSON.stringify(followsError));
-    console.log('[social-tracking] followed trackers:', followedRows?.length ?? 0, followedRows);
-    const followedSet = new Set<string>((followedRows ?? []).map((r: any) => r.following_id));
+  // Step 2: which of those does the current user follow, and which follow them
+  // back? Both IN clauses are bounded by tracker count. Mutual follows are only
+  // needed to enforce the 'friends' privacy tier, but fetching them alongside
+  // costs less than a third round trip.
+  const [{ data: followedRows, error: followsError }, { data: followerRows }] = await Promise.all([
+    db.from('follows').select('following_id')
+      .eq('follower_id', viewerId)
+      .in('following_id', trackerIds),
+    db.from('follows').select('follower_id')
+      .eq('following_id', viewerId)
+      .in('follower_id', trackerIds),
+  ]);
+  if (followsError) console.error('[social-tracking] followedRows error:', JSON.stringify(followsError));
+  const followedSet = new Set<string>((followedRows ?? []).map((r: any) => r.following_id));
+  const mutualIds = new Set<string>((followerRows ?? []).map((r: any) => r.follower_id));
 
-    // Only keep trackers the current user follows
-    const friendStatuses = (gameTrackers ?? []).filter((item: any) => followedSet.has(item.profile_id));
-
-    if (friendStatuses.length > 0) {
-      // Mutual follows — only needed to enforce 'friends' privacy tier
-      const { data: followerRows } = await db
-        .from('follows').select('follower_id')
-        .eq('following_id', currentProfileId)
-        .in('follower_id', trackerIds);
-      const mutualIds = new Set<string>((followerRows ?? []).map((r: any) => r.follower_id));
-
-      for (const item of friendStatuses) {
-        const p = item.profiles;
-        if (!p) continue;
-        // Undefined/null privacy → treat as 'public' (default). Skip only when
-        // explicitly 'private' or 'friends' without a mutual follow.
-        if (item.status === 'want_to_play') {
-          if (p.want_to_play_privacy === 'private') continue;
-          if (p.want_to_play_privacy === 'friends' && !mutualIds.has(item.profile_id)) continue;
-        }
-        if (item.status === 'dropped') {
-          if (p.dropped_privacy === 'private') continue;
-          if (p.dropped_privacy === 'friends' && !mutualIds.has(item.profile_id)) continue;
-        }
-        if (item.status !== 'hidden' && friendStatusGroups[item.status as keyof FriendStatusGroups]) {
-          friendStatusGroups[item.status as keyof FriendStatusGroups].push(p);
-        }
-      }
-      hasFriendActivity = (Object.values(friendStatusGroups) as any[][]).some(arr => arr.length > 0);
+  // Only keep trackers the current user follows
+  for (const item of (gameTrackers ?? []).filter((item: any) => followedSet.has(item.profile_id))) {
+    const p = item.profiles;
+    if (!p) continue;
+    // Undefined/null privacy → treat as 'public' (default). Skip only when
+    // explicitly 'private' or 'friends' without a mutual follow.
+    if (item.status === 'want_to_play') {
+      if (p.want_to_play_privacy === 'private') continue;
+      if (p.want_to_play_privacy === 'friends' && !mutualIds.has(item.profile_id)) continue;
+    }
+    if (item.status === 'dropped') {
+      if (p.dropped_privacy === 'private') continue;
+      if (p.dropped_privacy === 'friends' && !mutualIds.has(item.profile_id)) continue;
+    }
+    if (item.status !== 'hidden' && groups[item.status as keyof FriendStatusGroups]) {
+      groups[item.status as keyof FriendStatusGroups].push(p);
     }
   }
+  return groups;
 }
 
 // ── PUBLIC LISTS containing this game ──
-const { data: containingRaw } = await db
-  .from('list_entries')
-  .select('list_id')
-  .eq('game_id', game.id);
+async function fetchGameLists(): Promise<any[]> {
+  const { data: containingRaw } = await db
+    .from('list_entries')
+    .select('list_id')
+    .eq('game_id', game.id);
 
-const containingListIds = (containingRaw ?? []).map((r: any) => r.list_id);
+  const containingListIds = (containingRaw ?? []).map((r: any) => r.list_id);
+  if (containingListIds.length === 0) return [];
 
-let gameLists: any[] = [];
-
-if (containingListIds.length > 0) {
   const { data: listsRaw } = await db
     .from('lists')
     .select('id, title, is_ranked, visibility, updated_at, profiles(id, username, avatar_url)')
@@ -202,59 +157,44 @@ if (containingListIds.length > 0) {
     .limit(6);
 
   const publicListIds = (listsRaw ?? []).map((l: any) => l.id);
+  if (publicListIds.length === 0) return [];
 
-  if (publicListIds.length > 0) {
-    const [{ data: coverEntries }, { data: allEntries }] = await Promise.all([
-      db.from('list_entries')
-        .select('list_id, games(cover_img_url)')
-        .in('list_id', publicListIds)
-        .order('position', { ascending: true, nullsFirst: false })
-        .order('added_at', { ascending: true }),
-      db.from('list_entries')
-        .select('list_id')
-        .in('list_id', publicListIds),
-    ]);
+  const [{ data: coverEntries }, { data: allEntries }] = await Promise.all([
+    db.from('list_entries')
+      .select('list_id, games(cover_img_url)')
+      .in('list_id', publicListIds)
+      .order('position', { ascending: true, nullsFirst: false })
+      .order('added_at', { ascending: true }),
+    db.from('list_entries')
+      .select('list_id')
+      .in('list_id', publicListIds),
+  ]);
 
-    const coversByListId: Record<string, string[]> = {};
-    for (const e of coverEntries ?? []) {
-      const cover = igdbImage(e.games?.cover_img_url, 't_cover_big');
-      if (cover) {
-        if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
-        if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
-      }
+  const coversByListId: Record<string, string[]> = {};
+  for (const e of coverEntries ?? []) {
+    const cover = igdbImage(e.games?.cover_img_url, 't_cover_big');
+    if (cover) {
+      if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
+      if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
     }
-    const entryCountByListId: Record<string, number> = {};
-    for (const e of allEntries ?? []) {
-      entryCountByListId[e.list_id] = (entryCountByListId[e.list_id] ?? 0) + 1;
-    }
-
-    gameLists = (listsRaw ?? []).map((l: any) => ({
-      ...l,
-      ownerUsername: l.profiles?.username,
-      ownerAvatar: l.profiles?.avatar_url,
-      coverUrls: coversByListId[l.id] ?? [],
-      entryCount: entryCountByListId[l.id] ?? 0,
-    }));
   }
+  const entryCountByListId: Record<string, number> = {};
+  for (const e of allEntries ?? []) {
+    entryCountByListId[e.list_id] = (entryCountByListId[e.list_id] ?? 0) + 1;
+  }
+
+  return (listsRaw ?? []).map((l: any) => ({
+    ...l,
+    ownerUsername: l.profiles?.username,
+    ownerAvatar: l.profiles?.avatar_url,
+    coverUrls: coversByListId[l.id] ?? [],
+    entryCount: entryCountByListId[l.id] ?? 0,
+  }));
 }
 
-const SOCIAL_STATUS_META: Record<string, { label: string; color: string }> = {
-  playing:        { label: '🎮 Playing',      color: '#60a5fa' },
-  completed:      { label: '✓ Completed',     color: '#4ade80' },
-  hundred_percent:{ label: '💯 100%',         color: '#fbbf24' },
-  want_to_play:   { label: '🔖 Want to Play', color: '#f59e0b' },
-  owned:          { label: '📦 Owned',        color: '#94a3b8' },
-  dropped:        { label: '✗ Dropped',       color: '#f87171' },
-};
-const SOCIAL_STATUS_ORDER = ['playing', 'completed', 'hundred_percent', 'want_to_play', 'owned', 'dropped'] as const;
-
-const reviewList = reviews ?? []
-const hasReviewed = currentProfileId
-  ? reviewList.some((r: any) => r.profiles?.id === currentProfileId)
-  : false;
-
-let igdbData: any = null
-if (game.igdb_id) {
+// IGDB details, then the Chekpoint ids of its similar games (for their scores).
+async function fetchIgdb(): Promise<{ igdbData: any; simRows: { id: string; slug: string }[] }> {
+  if (!game.igdb_id) return { igdbData: null, simRows: [] };
   const result = await igdbFetch('games',
     `fields summary, rating,
             artworks.url,
@@ -270,8 +210,121 @@ if (game.igdb_id) {
             similar_games.slug,
             similar_games.cover.url;
      where id = ${game.igdb_id};`)
-  igdbData = result?.[0] ?? null
+  const igdbData = result?.[0] ?? null
+  const similarSlugs = (igdbData?.similar_games ?? []).slice(0, 8).map((g: any) => g.slug).filter(Boolean)
+  if (similarSlugs.length === 0) return { igdbData, simRows: [] };
+  const { data: simRows } = await (supabase as any)
+    .from('games').select('id, slug').in('slug', similarSlugs)
+  return { igdbData, simRows: simRows ?? [] };
 }
+
+// Wave 2 — everything that needs only the game (and the viewer's profile).
+const [
+  { data: reviews },
+  { data: gameRecsRaw },
+  { data: dr },
+  { count: wantToPlayCount },
+  { data: statusRow },
+  friendStatusGroups,
+  gameLists,
+  { igdbData, simRows },
+  { data: genreGameRows },
+  { data: yearGameRows },
+] = await Promise.all([
+  (supabase as any)
+    .from('reviews')
+    .select(`
+      id, score, title, body, published_at, created_at,
+      contains_spoilers, play_time_hours,
+      played_on:platform_played_on ( id, name, slug ),
+      profiles ( id, username, avatar_url ),
+      review_votes ( vote, profile_id ),
+      review_reactions( reaction_type, profile_id ),
+      review_comments( id )
+    `)
+    .eq('game_id', game.id)
+    .eq('status', 'published')
+    .order('published_at', { ascending: false }),
+  // Recommendations involving this game (as source or target), most-recent-first
+  db
+    .from('recommendations')
+    .select(REC_SELECT)
+    .eq('status', 'published')
+    .or(`source_game_id.eq.${game.id},target_game_id.eq.${game.id}`)
+    .order('created_at', { ascending: false })
+    .limit(50),
+  // The current user's saved draft review for this game (if any), so "Write a review"
+  // resumes it instead of starting a duplicate. Auto-opens when arriving via ?draft=.
+  currentProfileId
+    ? db
+        .from('reviews')
+        .select('id, score, title, body, platform_played_on, play_time_hours, contains_spoilers')
+        .eq('profile_id', currentProfileId)
+        .eq('game_id', game.id)
+        .eq('status', 'draft')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+    : Promise.resolve({ data: null }),
+  // Game status counts (public) + current user's status
+  db
+    .from('user_game_status').select('*', { count: 'exact', head: true })
+    .eq('game_id', game.id).eq('status', 'want_to_play'),
+  currentProfileId
+    ? db
+        .from('user_game_status').select('status, is_owned, is_hidden')
+        .eq('profile_id', currentProfileId).eq('game_id', game.id).maybeSingle()
+    : Promise.resolve({ data: null }),
+  currentProfileId
+    ? fetchFriendStatusGroups(currentProfileId)
+    : Promise.resolve<FriendStatusGroups>({ playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [] }),
+  fetchGameLists(),
+  fetchIgdb(),
+  primaryGenreId
+    ? (supabase as any).from('game_genres').select('game_id').eq('genre_id', primaryGenreId)
+    : Promise.resolve({ data: null }),
+  releaseYearStr
+    ? (supabase as any).from('games').select('id')
+        .gte('date_released', `${releaseYearStr}-01-01`).lte('date_released', `${releaseYearStr}-12-31`)
+    : Promise.resolve({ data: null }),
+])
+
+const gameRecs = (gameRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfileId));
+
+// Aggregate the "other" game in each rec to build a ranked play-next grid
+const _relatedMap = new Map<string, { game: { id: string; title: string; slug: string; cover_img_url: string | null }; count: number }>();
+for (const rec of gameRecs) {
+  const other = rec.sourceGame?.id === game.id ? rec.targetGame : rec.sourceGame;
+  if (!other?.id) continue;
+  const entry = _relatedMap.get(other.id);
+  if (entry) entry.count++;
+  else _relatedMap.set(other.id, { game: other, count: 1 });
+}
+const relatedGames = [..._relatedMap.values()].sort((a, b) => b.count - a.count);
+
+const draftReview: any = dr ?? null;
+const autoOpenDraft = !!Astro.url.searchParams.get('draft') && !!draftReview;
+
+const currentGameStatus: string | null = statusRow?.status ?? null;
+const currentGameOwned: boolean = statusRow?.is_owned ?? false;
+const currentGameHidden: boolean = statusRow?.is_hidden ?? false;
+
+const hasFriendActivity = (Object.values(friendStatusGroups) as any[][]).some(arr => arr.length > 0);
+
+const SOCIAL_STATUS_META: Record<string, { label: string; color: string }> = {
+  playing:        { label: '🎮 Playing',      color: '#60a5fa' },
+  completed:      { label: '✓ Completed',     color: '#4ade80' },
+  hundred_percent:{ label: '💯 100%',         color: '#fbbf24' },
+  want_to_play:   { label: '🔖 Want to Play', color: '#f59e0b' },
+  owned:          { label: '📦 Owned',        color: '#94a3b8' },
+  dropped:        { label: '✗ Dropped',       color: '#f87171' },
+};
+const SOCIAL_STATUS_ORDER = ['playing', 'completed', 'hundred_percent', 'want_to_play', 'owned', 'dropped'] as const;
+
+const reviewList = reviews ?? []
+const hasReviewed = currentProfileId
+  ? reviewList.some((r: any) => r.profiles?.id === currentProfileId)
+  : false;
 
 const heroArtwork = igdbData?.artworks?.[0]?.url ?? null
 const heroScreenshot = igdbData?.screenshots?.[0]?.url ?? null
@@ -299,37 +352,16 @@ const avgHours = reviewList.length > 0 ? Math.round(totalHours / reviewList.leng
 
 const developers = (game.game_companies ?? []).filter((c: any) => c.role === 'developer').map((c: any) => c.developers).filter(Boolean)
 const publishers = (game.game_companies ?? []).filter((c: any) => c.role === 'publisher').map((c: any) => c.developers).filter(Boolean)
-const genres = (game.game_genres ?? []).map((gg: any) => gg.genres).filter(Boolean)
 const platforms = (game.game_platforms ?? []).map((gp: any) => gp.platforms).filter(Boolean)
 const similarGames = (igdbData?.similar_games ?? []).slice(0, 8)
 
-const releaseYear = game.date_released ? new Date(game.date_released).getFullYear() : null
 const releaseDate = game.date_released
   ? new Date(game.date_released).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
   : null
 const trailerVideoId = igdbData?.videos?.[0]?.video_id ?? null
 
 // ── STATS ──
-const releaseYearStr = releaseYear ? String(releaseYear) : null
-const primaryGenreId = genres[0]?.id ?? null
-
-// Reviews is an unbounded table — Supabase caps a single query at 1000 rows,
-// so this must page through in batches or scores silently go missing once
-// the site passes 1000 published reviews.
-const allScoreRows: { game_id: string; score: number }[] = []
-{
-  const PAGE_SIZE = 1000
-  let from = 0
-  while (true) {
-    const { data: page } = await (supabase as any)
-      .from('reviews').select('game_id, score').eq('status', 'published')
-      .range(from, from + PAGE_SIZE - 1)
-    if (!page || page.length === 0) break
-    allScoreRows.push(...page)
-    if (page.length < PAGE_SIZE) break
-    from += PAGE_SIZE
-  }
-}
+const allScoreRows = await allScoreRowsPromise
 
 const gameScoreMap: Record<string, number[]> = {}
 for (const r of allScoreRows) {
@@ -341,15 +373,10 @@ for (const [gid, scores] of Object.entries(gameScoreMap)) {
   gameAvgs[gid] = scores.reduce((a: number, b: number) => a + b, 0) / scores.length
 }
 
-// Look up Chekpoint IDs for similar games so we can show their avg scores
-const similarSlugs = similarGames.map((g: any) => g.slug).filter(Boolean)
+// Chekpoint IDs for similar games (fetched in wave 2) so we can show their avg scores
 const similarGameScores: Record<string, number> = {}
-if (similarSlugs.length > 0) {
-  const { data: simRows } = await (supabase as any)
-    .from('games').select('id, slug').in('slug', similarSlugs)
-  for (const row of simRows ?? []) {
-    if (gameAvgs[row.id] != null) similarGameScores[row.slug] = gameAvgs[row.id]
-  }
+for (const row of simRows) {
+  if (gameAvgs[row.id] != null) similarGameScores[row.slug] = gameAvgs[row.id]
 }
 
 // Unified "Recommended Games": user recs first (by count desc), padded with IGDB similar
@@ -380,14 +407,11 @@ const allTimeRank = allAvgs.findIndex(v => v <= thisAvg) + 1
 const allTimeTotal = allAvgs.length
 const allTimePct = allTimeTotal > 0 ? Math.round(((allTimeTotal - allTimeRank) / allTimeTotal) * 100) : 0
 
+const genreGameIds = new Set((genreGameRows ?? []).map((r: any) => r.game_id))
+
 let genreRank = 0, genreTotal = 0, genrePct = 0
 if (primaryGenreId) {
-  const { data: genreGameRows } = await (supabase as any).from('game_genres').select('game_id').eq('genre_id', primaryGenreId)
-  const genreGameIds = new Set((genreGameRows ?? []).map((r: any) => r.game_id))
-  const genreAvgsList = allAvgs.filter((_, i) => {
-    const gid = Object.keys(gameAvgs).find(k => gameAvgs[k] === allAvgs[i])
-    return gid && genreGameIds.has(gid)
-  })
+  const genreAvgsList = Object.entries(gameAvgs).filter(([gid]) => genreGameIds.has(gid)).map(([, avg]) => avg)
   genreTotal = genreAvgsList.length
   genreRank = genreAvgsList.filter(v => v > thisAvg).length + 1
   genrePct = genreTotal > 0 ? Math.round(((genreTotal - genreRank) / genreTotal) * 100) : 0
@@ -395,8 +419,6 @@ if (primaryGenreId) {
 
 let yearRank = 0, yearTotal = 0, yearPct = 0
 if (releaseYearStr) {
-  const { data: yearGameRows } = await (supabase as any).from('games').select('id')
-    .gte('date_released', `${releaseYearStr}-01-01`).lte('date_released', `${releaseYearStr}-12-31`)
   const yearGameIds = new Set((yearGameRows ?? []).map((r: any) => r.id))
   const yearAvgsArr = Object.entries(gameAvgs).filter(([gid]) => yearGameIds.has(gid)).map(([, avg]) => avg).sort((a, b) => b - a)
   yearTotal = yearAvgsArr.length
@@ -418,11 +440,9 @@ const recommendedRate = reviewList.length > 0 ? Math.round((recommendedCount / r
 
 let genreAvgScore = 0
 if (primaryGenreId) {
-  const { data: genreGameRows2 } = await (supabase as any).from('game_genres').select('game_id').eq('genre_id', primaryGenreId)
-  const genreGameIds2 = new Set((genreGameRows2 ?? []).map((r: any) => r.game_id))
   const genreScores: number[] = []
   for (const [gid, scores] of Object.entries(gameScoreMap)) {
-    if (genreGameIds2.has(gid)) genreScores.push(...scores)
+    if (genreGameIds.has(gid)) genreScores.push(...scores)
   }
   genreAvgScore = genreScores.length > 0
     ? Math.round((genreScores.reduce((a, b) => a + b, 0) / genreScores.length) * 10) / 10 : 0

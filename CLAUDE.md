@@ -375,6 +375,28 @@ if (!user) return json({ error: "Unauthorized" }, 401);
 const db = getSupabaseAdmin(); // typed — do NOT cast as any
 ```
 
+### Pages use `getPageUser()`, not `auth.getUser()`
+
+`.astro` pages resolve the viewer with `getPageUser(Astro, client?)` from `src/utils/pageAuth.ts`:
+
+```typescript
+const user = await getPageUser(Astro, serverClient); // { id, email } | null
+```
+
+It calls `getClaims()`, which verifies the JWT locally (the project signs with ES256), where
+`getUser()` costs a ~56 ms round trip to Supabase Auth on every render. It also starts the
+Layout's onboarding lookup early so it overlaps the page's queries. The trade-off — a revoked
+session's token stays valid until expiry (≤ 1 h) — is fine for rendering but not for writes,
+so **API routes keep `getUser()` via `requireAuth`**. Do not reintroduce `auth.getUser()` in pages.
+
+### CDN caching
+
+Never hand-write `Netlify-CDN-Cache-Control`. Use `src/utils/cache.ts`:
+`setPageCacheHeaders(Astro.response.headers, isLoggedIn)` for SSR pages, `...cdnCacheHeaders(maxAge, swr)`
+for endpoints. They add `durable` (shared cache across edge nodes) and the required `Netlify-Vary` —
+the durable cache ignores the query string without `query`, and the auth cookie may be chunked
+into `…-auth-token.0`, which the page vary must also list.
+
 ### profiles.id ≠ auth.users.id
 
 Always resolve the profile before using its ID as a foreign key:
