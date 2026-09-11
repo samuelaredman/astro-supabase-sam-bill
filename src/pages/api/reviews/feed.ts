@@ -1,6 +1,7 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
+import { cdnCacheHeaders } from "../../../utils/cache";
 
 const REVIEW_FIELDS = `
   id, score, title, body, play_time_hours,
@@ -75,7 +76,7 @@ export const GET: APIRoute = async (context) => {
     status: 200,
     headers: {
       "Content-Type": "application/json",
-      "Netlify-CDN-Cache-Control": "public, max-age=120, stale-while-revalidate=300",
+      ...cdnCacheHeaders(120, 300),
       "Cache-Control": "no-store",
     },
   });

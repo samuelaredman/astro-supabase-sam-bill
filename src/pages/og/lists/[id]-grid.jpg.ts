@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
 import { renderOgImage, fetchAndCropCover } from "../../../utils/og";
 import { buildListGridTree, getGridDimensions, CANVAS_W, AVATAR_SIZE } from "../../../utils/ogListGrid";
+import { cdnCacheHeaders } from "../../../utils/cache";
 
 export const prerender = false;
 
@@ -102,7 +103,7 @@ export const GET: APIRoute = async ({ params }) => {
       "Content-Type": "image/jpeg",
       "Access-Control-Allow-Origin": "*",
       "Cache-Control": "public, max-age=3600",
-      "Netlify-CDN-Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+      ...cdnCacheHeaders(86400, 604800),
     },
   });
 };

@@ -4,6 +4,7 @@ import { igdbImage } from "../../utils/format";
 import { GAME_CATEGORY_OR_FILTER } from "../../utils/games";
 import { renderOgImage, fetchImageDataUri } from "../../utils/og";
 import { buildHomeOgTree } from "../../utils/ogHome";
+import { cdnCacheHeaders } from "../../utils/cache";
 
 export const prerender = false;
 
@@ -74,7 +75,7 @@ export const GET: APIRoute = async () => {
       // Homepage content (stat counts, recent covers) moves much more slowly
       // than a single profile/review, so cache far longer than those cards.
       "Cache-Control": "public, max-age=1800",
-      "Netlify-CDN-Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+      ...cdnCacheHeaders(3600, 86400),
     },
   });
 };
