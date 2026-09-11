@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getSupabaseAdmin } from '../utils/database';
 import { cdnCacheHeaders } from '../utils/cache';
+import { fetchAll } from '../utils/fetchAll';
 
 export const prerender = false;
 
@@ -16,22 +17,6 @@ function xmlEscape(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
-}
-
-// Supabase caps a single query at 1000 rows and truncates silently. Page through
-// with .range() until a short page comes back. `build` runs one ranged query.
-async function fetchAll<T>(
-  build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>
-): Promise<T[]> {
-  const out: T[] = [];
-  const size = 1000;
-  for (let from = 0; ; from += size) {
-    const { data, error } = await build(from, from + size - 1);
-    if (error || !data || data.length === 0) break;
-    out.push(...data);
-    if (data.length < size) break;
-  }
-  return out;
 }
 
 export const GET: APIRoute = async () => {
@@ -52,9 +37,10 @@ export const GET: APIRoute = async () => {
   // A game is only indexed once it has ≥1 published review (matches the page's
   // own noindex rule), and a hub (genre/platform/studio) is only indexed once it
   // has ≥1 reviewed game. This keeps bare IGDB stub pages out of the index.
-  const reviewRows = await fetchAll<{ game_id: string }>((f, t) =>
-    db.from('reviews').select('game_id').eq('status', 'published').range(f, t));
-  const reviewedGameIds = new Set(reviewRows.map((r) => r.game_id));
+  // One row per reviewed game from the game_review_stats view, not one per review.
+  const reviewedRows = await fetchAll<{ game_id: string }>((f, t) =>
+    (db as any).from('game_review_stats').select('game_id').order('game_id').range(f, t));
+  const reviewedGameIds = new Set(reviewedRows.map((r) => r.game_id));
 
   const [games, genres, platforms, studios] = await Promise.all([
     fetchAll<{ id: string; slug: string | null }>((f, t) =>

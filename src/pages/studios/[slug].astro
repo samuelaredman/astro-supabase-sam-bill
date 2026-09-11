@@ -7,7 +7,8 @@ import { isAllowedGameCategory } from '../../utils/games'
 import DetailNav from '../../components/DetailNav.astro'
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
-import { hubStatsFor, avgScore, reviewCount, pooled } from '../../utils/hubStats'
+import { hubStatsFor, avgScore, reviewCount, pooled, type HubStatRow } from '../../utils/hubStats'
+import { fetchAll } from '../../utils/fetchAll'
 
 const supabase = getSupabase()
 const _studioUser = await getPageUser(Astro);
@@ -48,7 +49,7 @@ const hasReviewedGame = (reviewedInStudio?.length ?? 0) > 0
 // This studio's games (any role) and, in parallel, the review count + score sum
 // of the reviewed ones — aggregated in Postgres (hub_game_review_stats) rather
 // than an `.in()` of every game id followed by every review row.
-const [{ data: developedRaw }, { data: hubStatRows }] = await Promise.all([
+const [{ data: developedRaw }, hubStatRows] = await Promise.all([
   supabase
     .from('game_companies')
     .select(`
@@ -56,7 +57,9 @@ const [{ data: developedRaw }, { data: hubStatRows }] = await Promise.all([
       games(id, title, slug, cover_img_url, date_released, igdb_id, igdb_category)
     `)
     .eq('company_id', studio.id),
-  (supabase as any).rpc('hub_game_review_stats', { p_company_id: studio.id }),
+  // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
+  fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
+    .rpc('hub_game_review_stats', { p_company_id: studio.id }).order('game_id').range(from, to)),
 ])
 
 const allEntries = developedRaw ?? []

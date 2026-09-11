@@ -351,11 +351,16 @@ every route still enforces that the user is logged in.
 
 ### Review stats — never aggregate review rows in JS
 
-Site-wide and hub-wide review stats come from Postgres. `game_review_stats` is a view with one
-row per reviewed game (`review_count`, `score_sum`, `avg_score`, `hours_count`, `hours_sum`, over
-published reviews). The functions below are built on it and return only the rows a page renders.
-Do not `select` review rows to count or average them in JS: it ships every review over the wire,
-and it silently breaks at Supabase's 1000-row cap. Add a function on top of the view instead.
+Site-wide and hub-wide review stats come from Postgres, and there are two views to read them from:
+- `game_review_stats`: one row per reviewed game, with `review_count`, `score_sum`, `avg_score`,
+  `hours_count` and `hours_sum` over published reviews.
+- `profile_review_stats`: one row per reviewer, with `review_count`.
+
+The functions below are built on those views and return only the rows a page renders.
+
+Do not `select` review rows to count or average them in JS: that ships every review over the wire,
+and it silently breaks at Supabase's 1000-row cap. Add a function on top of the views instead, and
+make it read from the views, not from `reviews`, so the scaling swap below still covers it.
 
 | Function | Used by |
 |----------|---------|
@@ -364,13 +369,22 @@ and it silently breaks at Supabase's 1000-row cap. Add a function on top of the 
 | `most_reviewed_games(limit, genre_id?, platform_id?, exclude_profile_id?)` | `/search` browse, `/discover` fallback |
 | `top_studios_by_reviewed_games(limit)` | `/search` studio tab |
 | `game_rank_stats(game_id, genre_id, release_year)` | `/games/[slug]` ranks + genre average |
+| `game_scores_by_slug(slugs)` | `/games/[slug]` similar-games scores |
 | `reviewer_volume_percentile(profile_id)` | `/reviewers/[username]` |
 | `profile_game_community_stats(profile_id)` | `/reviewers/[username]` community averages |
 | `hub_game_review_stats(genre_id? \| platform_id? \| company_id?)` | genre / platform / studio hubs |
 
-The view aggregates when it's read. Past tens of thousands of reviews, replace it with a table of
-the same name and columns that a trigger on `reviews` keeps up to date. Every caller reads through
-the view's interface, so no caller changes.
+- **Server-only.** Only `service_role` can read the views or execute the functions (migration
+  `20260911000005`), so call them with `getSupabaseAdmin()`. Anon and authenticated clients get
+  permission errors. Grant the same on anything new you add.
+- **Page through unbounded results.** Functions that return one row per game (`hub_…`, `profile_…`)
+  can pass 1000 rows. Read them with `fetchAll` (`src/utils/fetchAll.ts`) plus `.order('game_id')`.
+- **Scaling.** The views aggregate every published review each time they're read. That's about 10 ms
+  at 10k reviews and about 50–130 ms at 100k, but about 350–600 ms at 1M (PGlite upper bounds). Past
+  ~100k reviews, apply `supabase/scaling/review-stats-as-tables.sql` as a new migration. It replaces
+  both views with tables of the same names, kept current by a delta trigger on `reviews`. That brings
+  every function to about 1–30 ms at 1M reviews and adds under 1 ms per review write. No function or
+  page changes.
 
 ### Game search internals
 `games` has three search indexes: `search_vector` (tsvector), `title_search` (tsvector),

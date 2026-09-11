@@ -169,11 +169,11 @@ async function fetchGameLists(): Promise<any[]> {
   }));
 }
 
-// Chekpoint average scores for a handful of games (the recommendation grid's
-// ≤ 16), read from the game_review_stats view rather than every review.
+// Chekpoint average scores for the ≤ 8 games in the recommendation grid, read
+// from the game_review_stats view rather than every review.
 async function fetchAvgScores(ids: string[]): Promise<Record<string, number>> {
   if (ids.length === 0) return {};
-  const { data } = await (supabase as any)
+  const { data } = await db
     .from('game_review_stats').select('game_id, avg_score').in('game_id', ids);
   return Object.fromEntries((data ?? []).map((r: any) => [r.game_id, r.avg_score]));
 }
@@ -204,7 +204,9 @@ async function fetchRecs() {
   return { gameRecs, relatedGames, relatedAvgs };
 }
 
-// IGDB details, then the Chekpoint scores of its similar games, keyed by slug.
+// IGDB details, then the Chekpoint scores of its similar games, keyed by slug —
+// one call (game_scores_by_slug) resolves slug -> average, keeping this chain,
+// the page's slowest, at IGDB + one round trip.
 async function fetchIgdb(): Promise<{ igdbData: any; similarGameScores: Record<string, number> }> {
   if (!game.igdb_id) return { igdbData: null, similarGameScores: {} };
   const result = await igdbFetch('games',
@@ -225,13 +227,9 @@ async function fetchIgdb(): Promise<{ igdbData: any; similarGameScores: Record<s
   const igdbData = result?.[0] ?? null
   const similarSlugs = (igdbData?.similar_games ?? []).slice(0, 8).map((g: any) => g.slug).filter(Boolean)
   if (similarSlugs.length === 0) return { igdbData, similarGameScores: {} };
-  const { data: simRows } = await (supabase as any)
-    .from('games').select('id, slug').in('slug', similarSlugs)
-  const avgs = await fetchAvgScores((simRows ?? []).map((r: any) => r.id))
+  const { data: simRows } = await db.rpc('game_scores_by_slug', { p_slugs: similarSlugs })
   const similarGameScores: Record<string, number> = {}
-  for (const row of simRows ?? []) {
-    if (avgs[row.id] != null) similarGameScores[row.slug] = avgs[row.id]
-  }
+  for (const row of simRows ?? []) similarGameScores[row.slug] = row.avg_score
   return { igdbData, similarGameScores };
 }
 
@@ -291,7 +289,7 @@ const [
   fetchIgdb(),
   // All-time / genre / year ranks and the genre average, computed in Postgres
   // from the game_review_stats view — see game_rank_stats().
-  (supabase as any).rpc('game_rank_stats', {
+  db.rpc('game_rank_stats', {
     p_game_id: game.id,
     p_genre_id: primaryGenreId,
     p_release_year: releaseYear,

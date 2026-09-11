@@ -7,7 +7,8 @@ import { isAllowedGameCategory } from '../../utils/games'
 import DetailNav from '../../components/DetailNav.astro'
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
-import { hubStatsFor, avgScore, reviewCount, pooled } from '../../utils/hubStats'
+import { hubStatsFor, avgScore, reviewCount, pooled, type HubStatRow } from '../../utils/hubStats'
+import { fetchAll } from '../../utils/fetchAll'
 
 const supabase = getSupabase();
 const _platformUser = await getPageUser(Astro);
@@ -46,13 +47,15 @@ const hasReviewedGame = (reviewedOnPlatform?.length ?? 0) > 0
 // its reviewed games — aggregated in Postgres (hub_game_review_stats). This used
 // to send every game id back in one `.in()` URL: ~37 KB at 1000 ids, which
 // failed and left this page showing "0 reviews".
-const [{ data: gamePlatforms }, { data: hubStatRows }] = await Promise.all([
+const [{ data: gamePlatforms }, hubStatRows] = await Promise.all([
   supabase
     .from('game_platforms')
     .select(`games(id, title, slug, cover_img_url, date_released, igdb_category)`)
     .eq('platform_id', platform.id)
     .limit(3000),
-  (supabase as any).rpc('hub_game_review_stats', { p_platform_id: platform.id }),
+  // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
+  fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
+    .rpc('hub_game_review_stats', { p_platform_id: platform.id }).order('game_id').range(from, to)),
 ])
 
 const allGames = (gamePlatforms ?? [])

@@ -9,9 +9,12 @@
 
 export type HubStats = Record<string, { count: number; sum: number }>;
 
+/** One row of hub_game_review_stats(). */
+export type HubStatRow = { game_id: string; review_count: number; score_sum: number };
+
 /** Index the RPC rows by game, keeping only the games the page displays. */
 export function hubStatsFor(
-  rows: { game_id: string; review_count: number; score_sum: number }[] | null | undefined,
+  rows: HubStatRow[] | null | undefined,
   gameIds: Iterable<string>,
 ): HubStats {
   const keep = new Set(gameIds);

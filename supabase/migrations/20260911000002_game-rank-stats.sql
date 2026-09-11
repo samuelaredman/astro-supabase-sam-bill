@@ -4,12 +4,15 @@
 -- year (each capped at 1000 rows by Supabase, so large genres/years ranked
 -- against a truncated set). One row back instead.
 --
--- Semantics match the JS it replaces:
---   * "this game's average" is the displayed one — rounded to one decimal, or
---     0 when the game has no reviews;
---   * all-time rank is the 1-based position of the first game at or below that
---     average (0 when none is); genre/year rank is 1 + the games above it;
---   * a NULL genre or year yields 0 for that rank and total.
+-- Semantics match the JS it replaces, with one deliberate fix:
+--   * all-time rank is the 1-based position of the first game at or below this
+--     game's average (0 when none is, i.e. an unreviewed game); genre/year rank
+--     is 1 + the games above it; a NULL genre or year yields 0 for that rank
+--     and total;
+--   * the JS compared this game's *rounded* display average (8.35 shows as
+--     "8.3") against every other game's exact average, so a game could rank
+--     below games it actually beats. Both sides are exact here. Ranks can
+--     differ from the old ones by one in those rare rounding cases.
 
 CREATE OR REPLACE FUNCTION game_rank_stats(
   p_game_id      uuid,
@@ -27,23 +30,25 @@ RETURNS TABLE(
 ) LANGUAGE sql STABLE AS $$
   WITH this AS (
     SELECT coalesce(
-      (SELECT round(score_sum::numeric / review_count, 1) FROM game_review_stats WHERE game_id = p_game_id),
-      0
-    )::float8 AS avg
+      (SELECT avg_score FROM game_review_stats WHERE game_id = p_game_id), 0
+    ) AS avg
   ),
+  -- LEFT JOINs, not EXISTS in the select list: Postgres runs a select-list
+  -- EXISTS once per reviewed game, where these become one hash join each.
+  -- Both join keys are unique (game_genres PK, games PK), so no row multiplies;
+  -- a NULL genre/year matches nothing.
   s AS (
     SELECT
       st.avg_score,
       st.review_count,
       st.score_sum,
-      p_genre_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM game_genres gg WHERE gg.game_id = st.game_id AND gg.genre_id = p_genre_id
-      ) AS in_genre,
-      p_release_year IS NOT NULL AND EXISTS (
-        SELECT 1 FROM games g
-        WHERE g.id = st.game_id AND extract(year FROM g.date_released) = p_release_year
-      ) AS in_year
+      gg.game_id IS NOT NULL AS in_genre,
+      g.id IS NOT NULL AS in_year
     FROM game_review_stats st
+    LEFT JOIN game_genres gg
+      ON gg.game_id = st.game_id AND gg.genre_id = p_genre_id
+    LEFT JOIN games g
+      ON g.id = st.game_id AND extract(year FROM g.date_released) = p_release_year
   )
   SELECT
     CASE WHEN count(*) FILTER (WHERE s.avg_score <= this.avg) > 0
@@ -62,4 +67,19 @@ RETURNS TABLE(
     count(*) FILTER (WHERE s.in_year)::int
   FROM s CROSS JOIN this
   GROUP BY this.avg;
+$$;
+
+-- The game page's "similar games" grid shows Chekpoint scores for IGDB's
+-- similar games, which arrive as slugs. One call resolves slug -> average (for
+-- the ones that exist here and have reviews), instead of slug -> id and then a
+-- second round trip for the averages on the page's slowest (IGDB) chain.
+CREATE OR REPLACE FUNCTION game_scores_by_slug(p_slugs text[])
+RETURNS TABLE(slug text, avg_score float8)
+LANGUAGE sql STABLE AS $$
+  SELECT g.slug, s.avg_score
+  FROM games g
+  CROSS JOIN LATERAL (
+    SELECT v.avg_score FROM game_review_stats v WHERE v.game_id = g.id
+  ) s
+  WHERE g.slug = ANY(p_slugs);
 $$;
