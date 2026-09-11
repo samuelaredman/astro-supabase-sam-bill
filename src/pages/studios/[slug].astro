@@ -7,6 +7,8 @@ import { isAllowedGameCategory } from '../../utils/games'
 import DetailNav from '../../components/DetailNav.astro'
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
+import { hubStatsFor, avgScore, reviewCount, pooled, type HubStatRow } from '../../utils/hubStats'
+import { fetchAll } from '../../utils/fetchAll'
 
 const supabase = getSupabase()
 const _studioUser = await getPageUser(Astro);
@@ -44,13 +46,21 @@ const { data: reviewedInStudio } = await (getSupabaseAdmin() as any)
   .limit(1)
 const hasReviewedGame = (reviewedInStudio?.length ?? 0) > 0
 
-const { data: developedRaw } = await supabase
-  .from('game_companies')
-  .select(`
-    role,
-    games(id, title, slug, cover_img_url, date_released, igdb_id, igdb_category)
-  `)
-  .eq('company_id', studio.id)
+// This studio's games (any role) and, in parallel, the review count + score sum
+// of the reviewed ones — aggregated in Postgres (hub_game_review_stats) rather
+// than an `.in()` of every game id followed by every review row.
+const [{ data: developedRaw }, hubStatRows] = await Promise.all([
+  supabase
+    .from('game_companies')
+    .select(`
+      role,
+      games(id, title, slug, cover_img_url, date_released, igdb_id, igdb_category)
+    `)
+    .eq('company_id', studio.id),
+  // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
+  fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
+    .rpc('hub_game_review_stats', { p_company_id: studio.id }).order('game_id').range(from, to)),
+])
 
 const allEntries = developedRaw ?? []
 
@@ -78,36 +88,23 @@ const publishedOnly = publishedGames.filter(
 
 const allGameIds = [...new Set(allEntries.map((e: any) => e.games?.id).filter(Boolean))]
 
-const { data: reviewScores } = await supabase
-  .from('reviews')
-  .select('game_id, score')
-  .in('game_id', allGameIds)
-  .eq('status', 'published')
-
-const reviewsByGame: Record<string, number[]> = {}
-for (const r of reviewScores ?? []) {
-  if (r.score == null) continue
-  if (!reviewsByGame[r.game_id]) reviewsByGame[r.game_id] = []
-  reviewsByGame[r.game_id].push(r.score)
-}
+const reviewStats = hubStatsFor(hubStatRows, allGameIds as string[])
 
 function gameAvgScore(gameId: string): string | null {
-  const scores = reviewsByGame[gameId]
-  if (!scores || scores.length === 0) return null
-  return (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)
+  return avgScore(reviewStats, gameId)
 }
 
 function gameReviewCount(gameId: string): number {
-  return reviewsByGame[gameId]?.length ?? 0
+  return reviewCount(reviewStats, gameId)
 }
 
 // review-weighted avg across all games
-const allScores = Object.values(reviewsByGame).flat()
-const overallAvg = allScores.length > 0
-  ? (allScores.reduce((a, b) => a + b, 0) / allScores.length).toFixed(1)
+const overallTotals = pooled(reviewStats)
+const overallAvg = overallTotals.count > 0
+  ? (overallTotals.sum / overallTotals.count).toFixed(1)
   : null
 
-const totalReviews = allScores.length
+const totalReviews = overallTotals.count
 const totalGames = new Set([
   ...developedGames.map((g: any) => g.id),
   ...publishedOnly.map((g: any) => g.id)

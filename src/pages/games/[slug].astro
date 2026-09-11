@@ -31,28 +31,6 @@ const db = getSupabaseAdmin() as any;
 // actually depends on; anything with its own follow-up query is a small async
 // chain inside a wave, so the slowest chain — not the sum — sets the page time.
 
-// Every published score on the site, for the all-time / genre / year ranks.
-// Depends on nothing, so it starts first and overlaps everything below.
-// Reviews is an unbounded table — Supabase caps a single query at 1000 rows,
-// so this must page through in batches or scores silently go missing once
-// the site passes 1000 published reviews.
-async function fetchAllScoreRows() {
-  const rows: { game_id: string; score: number }[] = []
-  const PAGE_SIZE = 1000
-  let from = 0
-  while (true) {
-    const { data: page } = await (supabase as any)
-      .from('reviews').select('game_id, score').eq('status', 'published')
-      .range(from, from + PAGE_SIZE - 1)
-    if (!page || page.length === 0) break
-    rows.push(...page)
-    if (page.length < PAGE_SIZE) break
-    from += PAGE_SIZE
-  }
-  return rows
-}
-const allScoreRowsPromise = fetchAllScoreRows()
-
 // Wave 1 — the game and the viewer's profile don't depend on each other.
 const [{ data: game }, { data: cp }] = await Promise.all([
   (supabase as any)
@@ -78,7 +56,6 @@ const currentProfile: { id: string; username: string; avatar_url: string | null 
 
 const genres = (game.game_genres ?? []).map((gg: any) => gg.genres).filter(Boolean)
 const releaseYear = game.date_released ? new Date(game.date_released).getFullYear() : null
-const releaseYearStr = releaseYear ? String(releaseYear) : null
 const primaryGenreId = genres[0]?.id ?? null
 
 // ── SOCIAL TRACKING — people the current user follows who have tracked this game ──
@@ -192,9 +169,46 @@ async function fetchGameLists(): Promise<any[]> {
   }));
 }
 
-// IGDB details, then the Chekpoint ids of its similar games (for their scores).
-async function fetchIgdb(): Promise<{ igdbData: any; simRows: { id: string; slug: string }[] }> {
-  if (!game.igdb_id) return { igdbData: null, simRows: [] };
+// Chekpoint average scores for the ≤ 8 games in the recommendation grid, read
+// from the game_review_stats view rather than every review.
+async function fetchAvgScores(ids: string[]): Promise<Record<string, number>> {
+  if (ids.length === 0) return {};
+  const { data } = await db
+    .from('game_review_stats').select('game_id, avg_score').in('game_id', ids);
+  return Object.fromEntries((data ?? []).map((r: any) => [r.game_id, r.avg_score]));
+}
+
+// Recommendations involving this game (as source or target), most-recent-first,
+// then the averages of the other games in them.
+async function fetchRecs() {
+  const { data: gameRecsRaw } = await db
+    .from('recommendations')
+    .select(REC_SELECT)
+    .eq('status', 'published')
+    .or(`source_game_id.eq.${game.id},target_game_id.eq.${game.id}`)
+    .order('created_at', { ascending: false })
+    .limit(50);
+  const gameRecs = (gameRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfileId));
+
+  // Aggregate the "other" game in each rec to build a ranked play-next grid
+  const relatedMap = new Map<string, { game: { id: string; title: string; slug: string; cover_img_url: string | null }; count: number }>();
+  for (const rec of gameRecs) {
+    const other = rec.sourceGame?.id === game.id ? rec.targetGame : rec.sourceGame;
+    if (!other?.id) continue;
+    const entry = relatedMap.get(other.id);
+    if (entry) entry.count++;
+    else relatedMap.set(other.id, { game: other, count: 1 });
+  }
+  const relatedGames = [...relatedMap.values()].sort((a, b) => b.count - a.count);
+  const relatedAvgs = await fetchAvgScores(relatedGames.slice(0, 8).map((r) => r.game.id));
+  return { gameRecs, relatedGames, relatedAvgs };
+}
+
+// IGDB details, then the Chekpoint scores of its similar games, keyed by slug —
+// one call (game_scores_by_slug) resolves slug -> average, keeping this chain,
+// the page's slowest, at IGDB + one round trip.
+async function fetchIgdb(): Promise<{ igdbData: any; similarGameScores: Record<string, number> }> {
+  if (!game.igdb_id) return { igdbData: null, similarGameScores: {} };
   const result = await igdbFetch('games',
     `fields summary, rating,
             artworks.url,
@@ -212,24 +226,24 @@ async function fetchIgdb(): Promise<{ igdbData: any; simRows: { id: string; slug
      where id = ${game.igdb_id};`)
   const igdbData = result?.[0] ?? null
   const similarSlugs = (igdbData?.similar_games ?? []).slice(0, 8).map((g: any) => g.slug).filter(Boolean)
-  if (similarSlugs.length === 0) return { igdbData, simRows: [] };
-  const { data: simRows } = await (supabase as any)
-    .from('games').select('id, slug').in('slug', similarSlugs)
-  return { igdbData, simRows: simRows ?? [] };
+  if (similarSlugs.length === 0) return { igdbData, similarGameScores: {} };
+  const { data: simRows } = await db.rpc('game_scores_by_slug', { p_slugs: similarSlugs })
+  const similarGameScores: Record<string, number> = {}
+  for (const row of simRows ?? []) similarGameScores[row.slug] = row.avg_score
+  return { igdbData, similarGameScores };
 }
 
 // Wave 2 — everything that needs only the game (and the viewer's profile).
 const [
   { data: reviews },
-  { data: gameRecsRaw },
+  { gameRecs, relatedGames, relatedAvgs },
   { data: dr },
   { count: wantToPlayCount },
   { data: statusRow },
   friendStatusGroups,
   gameLists,
-  { igdbData, simRows },
-  { data: genreGameRows },
-  { data: yearGameRows },
+  { igdbData, similarGameScores },
+  { data: rankRows },
 ] = await Promise.all([
   (supabase as any)
     .from('reviews')
@@ -245,14 +259,7 @@ const [
     .eq('game_id', game.id)
     .eq('status', 'published')
     .order('published_at', { ascending: false }),
-  // Recommendations involving this game (as source or target), most-recent-first
-  db
-    .from('recommendations')
-    .select(REC_SELECT)
-    .eq('status', 'published')
-    .or(`source_game_id.eq.${game.id},target_game_id.eq.${game.id}`)
-    .order('created_at', { ascending: false })
-    .limit(50),
+  fetchRecs(),
   // The current user's saved draft review for this game (if any), so "Write a review"
   // resumes it instead of starting a duplicate. Auto-opens when arriving via ?draft=.
   currentProfileId
@@ -280,27 +287,14 @@ const [
     : Promise.resolve<FriendStatusGroups>({ playing: [], want_to_play: [], owned: [], completed: [], hundred_percent: [], dropped: [] }),
   fetchGameLists(),
   fetchIgdb(),
-  primaryGenreId
-    ? (supabase as any).from('game_genres').select('game_id').eq('genre_id', primaryGenreId)
-    : Promise.resolve({ data: null }),
-  releaseYearStr
-    ? (supabase as any).from('games').select('id')
-        .gte('date_released', `${releaseYearStr}-01-01`).lte('date_released', `${releaseYearStr}-12-31`)
-    : Promise.resolve({ data: null }),
+  // All-time / genre / year ranks and the genre average, computed in Postgres
+  // from the game_review_stats view — see game_rank_stats().
+  db.rpc('game_rank_stats', {
+    p_game_id: game.id,
+    p_genre_id: primaryGenreId,
+    p_release_year: releaseYear,
+  }),
 ])
-
-const gameRecs = (gameRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfileId));
-
-// Aggregate the "other" game in each rec to build a ranked play-next grid
-const _relatedMap = new Map<string, { game: { id: string; title: string; slug: string; cover_img_url: string | null }; count: number }>();
-for (const rec of gameRecs) {
-  const other = rec.sourceGame?.id === game.id ? rec.targetGame : rec.sourceGame;
-  if (!other?.id) continue;
-  const entry = _relatedMap.get(other.id);
-  if (entry) entry.count++;
-  else _relatedMap.set(other.id, { game: other, count: 1 });
-}
-const relatedGames = [..._relatedMap.values()].sort((a, b) => b.count - a.count);
 
 const draftReview: any = dr ?? null;
 const autoOpenDraft = !!Astro.url.searchParams.get('draft') && !!draftReview;
@@ -361,24 +355,6 @@ const releaseDate = game.date_released
 const trailerVideoId = igdbData?.videos?.[0]?.video_id ?? null
 
 // ── STATS ──
-const allScoreRows = await allScoreRowsPromise
-
-const gameScoreMap: Record<string, number[]> = {}
-for (const r of allScoreRows) {
-  if (!gameScoreMap[r.game_id]) gameScoreMap[r.game_id] = []
-  gameScoreMap[r.game_id].push(r.score)
-}
-const gameAvgs: Record<string, number> = {}
-for (const [gid, scores] of Object.entries(gameScoreMap)) {
-  gameAvgs[gid] = scores.reduce((a: number, b: number) => a + b, 0) / scores.length
-}
-
-// Chekpoint IDs for similar games (fetched in wave 2) so we can show their avg scores
-const similarGameScores: Record<string, number> = {}
-for (const row of simRows) {
-  if (gameAvgs[row.id] != null) similarGameScores[row.slug] = gameAvgs[row.id]
-}
-
 // Unified "Recommended Games": user recs first (by count desc), padded with IGDB similar
 const userRecSlugs = new Set(relatedGames.map((r: any) => r.game?.slug).filter(Boolean))
 const userRecsDisplay = relatedGames.slice(0, 8)
@@ -388,7 +364,7 @@ const recommendedGames: Array<{ slug: string | null; title: string; coverImgUrl:
     slug: r.game?.slug ?? null,
     title: r.game?.title ?? '',
     coverImgUrl: r.game?.cover_img_url ?? null,
-    chekpointScore: r.game?.id ? (gameAvgs[r.game.id] ?? null) : null,
+    chekpointScore: r.game?.id ? (relatedAvgs[r.game.id] ?? null) : null,
   })),
   ...similarGames
     .filter((g: any) => !userRecSlugs.has(g.slug))
@@ -401,30 +377,17 @@ const recommendedGames: Array<{ slug: string | null; title: string; coverImgUrl:
     })),
 ]
 
-const thisAvg = avgScore ? parseFloat(avgScore) : 0
-const allAvgs = Object.values(gameAvgs).sort((a, b) => b - a)
-const allTimeRank = allAvgs.findIndex(v => v <= thisAvg) + 1
-const allTimeTotal = allAvgs.length
+const rankStats = rankRows?.[0] ?? null
+const allTimeRank: number = rankStats?.all_time_rank ?? 0
+const allTimeTotal: number = rankStats?.all_time_total ?? 0
 const allTimePct = allTimeTotal > 0 ? Math.round(((allTimeTotal - allTimeRank) / allTimeTotal) * 100) : 0
-
-const genreGameIds = new Set((genreGameRows ?? []).map((r: any) => r.game_id))
-
-let genreRank = 0, genreTotal = 0, genrePct = 0
-if (primaryGenreId) {
-  const genreAvgsList = Object.entries(gameAvgs).filter(([gid]) => genreGameIds.has(gid)).map(([, avg]) => avg)
-  genreTotal = genreAvgsList.length
-  genreRank = genreAvgsList.filter(v => v > thisAvg).length + 1
-  genrePct = genreTotal > 0 ? Math.round(((genreTotal - genreRank) / genreTotal) * 100) : 0
-}
-
-let yearRank = 0, yearTotal = 0, yearPct = 0
-if (releaseYearStr) {
-  const yearGameIds = new Set((yearGameRows ?? []).map((r: any) => r.id))
-  const yearAvgsArr = Object.entries(gameAvgs).filter(([gid]) => yearGameIds.has(gid)).map(([, avg]) => avg).sort((a, b) => b - a)
-  yearTotal = yearAvgsArr.length
-  yearRank = yearAvgsArr.filter(v => v > thisAvg).length + 1
-  yearPct = yearTotal > 0 ? Math.round(((yearTotal - yearRank) / yearTotal) * 100) : 0
-}
+const genreRank: number = rankStats?.genre_rank ?? 0
+const genreTotal: number = rankStats?.genre_total ?? 0
+const genrePct = genreTotal > 0 ? Math.round(((genreTotal - genreRank) / genreTotal) * 100) : 0
+const yearRank: number = rankStats?.year_rank ?? 0
+const yearTotal: number = rankStats?.year_total ?? 0
+const yearPct = yearTotal > 0 ? Math.round(((yearTotal - yearRank) / yearTotal) * 100) : 0
+const genreAvgScore: number = rankStats?.genre_avg_score ?? 0
 
 const platformCounts: Record<string, number> = {}
 for (const r of reviewList) {
@@ -437,16 +400,6 @@ const platformBreakdown = Object.entries(platformCounts)
 
 const recommendedCount = reviewList.filter((r: any) => r.score >= 7).length
 const recommendedRate = reviewList.length > 0 ? Math.round((recommendedCount / reviewList.length) * 100) : 0
-
-let genreAvgScore = 0
-if (primaryGenreId) {
-  const genreScores: number[] = []
-  for (const [gid, scores] of Object.entries(gameScoreMap)) {
-    if (genreGameIds.has(gid)) genreScores.push(...scores)
-  }
-  genreAvgScore = genreScores.length > 0
-    ? Math.round((genreScores.reduce((a, b) => a + b, 0) / genreScores.length) * 10) / 10 : 0
-}
 
 // monthly reviews + avg scores — last 6 months
 const monthlyReviews: Record<string, number> = {}
