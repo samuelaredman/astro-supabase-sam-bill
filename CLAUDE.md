@@ -743,6 +743,25 @@ the existing delegated handler.
 `data-review-id`, `data-vote` (+1/-1), `data-count` — must stay in sync if
 HTML structure changes.
 
+### Reviewer profile tabs (`reviewers/[username].astro`): only the open tab is built
+
+The profile page server-renders only the tab in its URL. The Reviews, Recommendations, Lists and
+Library tabs start as empty panels with a `data-src` attribute. The first time a tab is opened,
+the page fetches its HTML from the partial route `/reviewers/[username]/tab/[tab]`. Hovering,
+focusing or touching the tab link starts that fetch early.
+
+- **Adding tab content:** put the data in that tab's loader in `src/utils/profileTabs.ts`, and the
+  markup in `src/components/profile/<Tab>Tab.astro`. Don't add them to the page. The page and the
+  partial route render the same loader and component; queries added to the page run on every
+  profile visit.
+- **Tab JS runs after the tab's HTML is inserted.** Register the tab's setup as
+  `window.__profileTabInit.<tab> = fn`, and call it at load in case the tab was server-rendered.
+  Look elements up when a function is called, not once at load: a lazy tab's elements don't exist
+  until it has been opened.
+- **Card behaviour lives in `src/scripts/*.ts`,** imported by both the card and the profile page. A
+  component's `<script>` only ships with pages that render that component, so cards inserted
+  later would have no JS without the page's import.
+
 ### Layout.astro
 
 Wraps all non-standalone pages. Provides nav, theme CSS vars, and OG meta.
