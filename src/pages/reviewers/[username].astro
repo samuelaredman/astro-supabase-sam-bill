@@ -7,17 +7,21 @@ import { timeAgo, scoreClass, getVoteCounts, igdbImage as igdbCover } from '../.
 import ReportModal from '../../components/ReportModal.astro';
 import EditModal from '../../components/EditModal.astro';
 import CropModal from '../../components/CropModal.astro';
-import ReviewCard from '../../components/ReviewCard.astro';
-import ListCard from '../../components/ListCard.astro';
 import ShareButton from '../../components/ShareButton.astro';
-import RecommendationFeedCard from '../../components/RecommendationFeedCard.astro';
 import RecommendationComposer from '../../components/RecommendationComposer.astro';
-import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed';
 import { resolveRenamedUsername } from '../../utils/usernameHistory';
 import { SOCIAL_PLATFORMS, SOCIAL_ICON_SVG, SOCIAL_LABELS, SOCIAL_COLORS, SOCIAL_KEYS } from '../../utils/socialLinks';
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
 import { fetchAll } from '../../utils/fetchAll';
+import ReviewsTab from '../../components/profile/ReviewsTab.astro';
+import RecommendationsTab from '../../components/profile/RecommendationsTab.astro';
+import ListsTab from '../../components/profile/ListsTab.astro';
+import LibraryTab from '../../components/profile/LibraryTab.astro';
+import {
+  isLazyProfileTab, loadProfileTab, PROFILE_REVIEWS_SELECT, sortPublishedReviews,
+  type ProfileTabContext,
+} from '../../utils/profileTabs';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { username } = Astro.params;
@@ -36,15 +40,7 @@ const [user, { data: reviewer, error: reviewerError }] = await Promise.all([
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
     ),
-    reviews (
-      id, score, title, body, published_at, created_at,
-      contains_spoilers, play_time_hours, status,
-      played_on:platform_played_on ( id, name, slug ),
-      games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) ),
-      review_votes ( vote, profile_id ),
-      review_reactions( reaction_type, profile_id ),
-      review_comments( id )
-    )
+    reviews (${PROFILE_REVIEWS_SELECT})
   `)
   .eq('username', username)
   .single(),
@@ -63,16 +59,7 @@ if (reviewerError || !reviewer || !reviewer.is_active) {
 
 const db = getSupabaseAdmin() as any;
 
-const publishedReviews = (reviewer.reviews ?? [])
-  .filter((r: any) => r.status === 'published')
-  .sort((a: any, b: any) =>
-    new Date(b.published_at ?? b.created_at).getTime() -
-    new Date(a.published_at ?? a.created_at).getTime()
-  );
-
-// Every game this reviewer has a published review for — drives the dev filter,
-// the community score delta and the chart data below.
-const _reviewGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))] as string[];
+const publishedReviews = sortPublishedReviews(reviewer.reviews);
 
 // Steam-style alias list: previous usernames this profile changed away from in
 // the last 90 days. RLS blocks anon reads of username_history, so use admin.
@@ -92,12 +79,10 @@ const [
   { data: followersData },
   { data: followingData },
   { data: currentProfileRow },
-  { data: profileListsRaw },
-  { data: savedRaw },
-  { data: reviewerRecsRaw },
-  { data: libSettingsRow },
+  { count: ownListsCount },
+  { data: savedListRows },
+  { count: recsCount },
   communityStatsRows,
-  { data: _revCompanyRows },
   { data: volumePercentileRaw },
 ] = await Promise.all([
   // Split out from the main select so a not-yet-applied migration degrades one
@@ -125,24 +110,13 @@ const [
   user
     ? (supabase as any).from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).maybeSingle()
     : Promise.resolve({ data: null }),
-  (supabase as any).from('lists')
-    .select('id, title, is_ranked, visibility, cover_image_url, updated_at')
-    .eq('profile_id', reviewer.id)
-    .order('updated_at', { ascending: false }),
-  (supabase as any).from('list_saves')
-    .select('list_id, is_hidden, lists(id, title, is_ranked, visibility, cover_image_url, updated_at, profiles(id, username, avatar_url))')
-    .eq('profile_id', reviewer.id)
-    .order('created_at', { ascending: false }),
-  db.from('recommendations')
-    .select(REC_SELECT)
-    .eq('profile_id', reviewer.id)
-    .eq('status', 'published')
-    .order('created_at', { ascending: false })
-    .limit(100),
-  db.from('profiles')
-    .select('library_visibility, library_show_hours, library_hidden_tabs')
-    .eq('id', reviewer.id)
-    .maybeSingle(),
+  // Tab-bar counts only. Each tab's own data loads with the tab (src/utils/profileTabs.ts).
+  // Lists go through the viewer's client so private lists count only for their owner,
+  // as they're shown; `lists!inner` drops saves of lists the viewer can't see.
+  (supabase as any).from('lists').select('id', { count: 'exact', head: true }).eq('profile_id', reviewer.id),
+  (supabase as any).from('list_saves').select('is_hidden, lists!inner(id)').eq('profile_id', reviewer.id),
+  db.from('recommendations').select('id', { count: 'exact', head: true })
+    .eq('profile_id', reviewer.id).eq('status', 'published'),
   // Community score / play-time aggregates for every game this reviewer
   // covered — feeds both the score-delta stat and the chart averages. Aggregated
   // in Postgres (one row per game) instead of shipping every community review of
@@ -150,12 +124,6 @@ const [
   // Paged: an imported library can pass 1000 reviewed games.
   fetchAll((from: number, to: number) => db
     .rpc('profile_game_community_stats', { p_profile_id: reviewer.id }).order('game_id').range(from, to)),
-  _reviewGameIds.length > 0
-    ? (supabase as any).from('game_companies')
-        .select('game_id, developers(name)')
-        .eq('role', 'developer')
-        .in('game_id', _reviewGameIds)
-    : Promise.resolve({ data: [] }),
   // "More reviews than N% of reviewers" — computed in Postgres. This used to
   // page through the author of every published review on the site.
   db.rpc('reviewer_volume_percentile', { p_profile_id: reviewer.id }),
@@ -176,41 +144,6 @@ const previousUsernames: { name: string; changed_at: string }[] = [];
     previousUsernames.push({ name: row.old_username, changed_at: row.changed_at });
   }
 }
-
-// Developer names per reviewed game — for the Reviews tab dev filter.
-const _reviewDevsByGameId: Record<string, string[]> = {};
-for (const row of (_revCompanyRows ?? []) as any[]) {
-  if (row.developers?.name) {
-    if (!_reviewDevsByGameId[row.game_id]) _reviewDevsByGameId[row.game_id] = [];
-    _reviewDevsByGameId[row.game_id].push(row.developers.name);
-  }
-}
-
-// Shared filter/search metadata for the Reviews tab. Both the Overview (card
-// grid) and Detailed (full ReviewCards) views render from this same list and
-// are filtered client-side by the one filter bar underneath the view pills.
-const reviewFilterItems = publishedReviews.map((r: any) => {
-  const genres = [...new Set(
-    (r.games?.game_genres ?? []).map((gg: any) => gg.genres?.name).filter(Boolean)
-  )] as string[];
-  const devs = [...new Set(_reviewDevsByGameId[r.games?.id] ?? [])] as string[];
-  const votes = getVoteCounts(r.review_votes);
-  return {
-    review: r,
-    searchText: `${r.games?.title ?? ''} ${r.title ?? ''}`.trim(),
-    sortTitle: r.games?.title ?? '',
-    genres,
-    devs,
-    platform: r.played_on?.name ?? '',
-    score: r.score,
-    date: r.published_at ?? r.created_at,
-    up: votes.up,
-    down: votes.down,
-  };
-});
-const reviewGenres = [...new Set(reviewFilterItems.flatMap((i: any) => i.genres))].sort() as string[];
-const reviewPlatforms = [...new Set(reviewFilterItems.map((i: any) => i.platform).filter(Boolean))].sort() as string[];
-const reviewDevs = [...new Set(reviewFilterItems.flatMap((i: any) => i.devs))].sort() as string[];
 
 const avgScore = publishedReviews.length > 0
   ? (publishedReviews.reduce((sum: number, r: any) => sum + r.score, 0) / publishedReviews.length).toFixed(1)
@@ -261,6 +194,25 @@ const isNotifying = _viewerFollowRow?.notify ?? false;
 const isMutualFollow = isFollowing
   && followingList.some((p) => p.id === currentProfile.id);
 
+// ── ON-DEMAND TABS ──
+// Only the tab in the URL is built here; the others arrive as fragments from
+// /reviewers/[username]/tab/[tab] when first opened (same loaders, same
+// components). Started now so it overlaps the remaining queries below.
+const tabCtx: ProfileTabContext = {
+  db, supabase, reviewer, publishedReviews,
+  viewerProfileId: currentProfile?.id ?? null,
+  isLoggedIn: !!user, isOwnProfile, isMutualFollow,
+};
+const activeTabDataPromise: Promise<any> = isLazyProfileTab(activeTab)
+  ? loadProfileTab(activeTab, tabCtx)
+  : Promise.resolve(null);
+const tabSrc = (tab: string) => `/reviewers/${encodeURIComponent(reviewer.username)}/tab/${tab}`;
+
+// Tab-bar counts. The recommendations tab shows at most 100, as before.
+const savedListsCount = (savedListRows ?? []).filter((s: any) => isOwnProfile || !s.is_hidden).length;
+const listsTabCount = (ownListsCount ?? 0) + savedListsCount;
+const recsTabCount = Math.min(recsCount ?? 0, 100);
+
 // How far a previous (possibly interrupted) achievement sync got, so the owner's
 // Sync button resumes instead of restarting. Its own query so a not-yet-run
 // migration can't take out anything else on the page.
@@ -280,173 +232,6 @@ if (isOwnProfile) {
 // page people actually land on for their own profile (Layout's nav points
 // here, not at /profile), so the nudge belongs here rather than there.
 const showSearchNudge = isOwnProfile && !reviewer.search_indexable && publishedReviews.length > 0;
-
-// ── LISTS ── (rows came from wave 1)
-const profileListIds = (profileListsRaw ?? []).map((l: any) => l.id);
-
-const [{ data: coverEntriesRaw }, { data: allEntriesRaw }] = profileListIds.length > 0
-  ? await Promise.all([
-      (supabase as any)
-        .from('list_entries')
-        .select('list_id, games(id, cover_img_url, date_released)')
-        .in('list_id', profileListIds)
-        .order('position', { ascending: true, nullsFirst: false })
-        .order('added_at', { ascending: true }),
-      (supabase as any)
-        .from('list_entries')
-        .select('list_id')
-        .in('list_id', profileListIds),
-    ])
-  : [{ data: [] }, { data: [] }];
-
-const coversByListId: Record<string, string[]> = {};
-const gameIdsByListId: Record<string, string[]> = {};
-const yearsByListId: Record<string, number[]> = {};
-for (const e of coverEntriesRaw ?? []) {
-  const cover = igdbCover(e.games?.cover_img_url, 't_cover_big');
-  if (cover) {
-    if (!coversByListId[e.list_id]) coversByListId[e.list_id] = [];
-    if (coversByListId[e.list_id].length < 4) coversByListId[e.list_id].push(cover);
-  }
-  if (e.games?.id) {
-    if (!gameIdsByListId[e.list_id]) gameIdsByListId[e.list_id] = [];
-    gameIdsByListId[e.list_id].push(e.games.id);
-  }
-  if (e.games?.date_released) {
-    const yr = new Date(e.games.date_released).getFullYear();
-    if (!yearsByListId[e.list_id]) yearsByListId[e.list_id] = [];
-    yearsByListId[e.list_id].push(yr);
-  }
-}
-const entryCountByListId: Record<string, number> = {};
-for (const e of allEntriesRaw ?? []) {
-  entryCountByListId[e.list_id] = (entryCountByListId[e.list_id] ?? 0) + 1;
-}
-let profileLists = (profileListsRaw ?? []).map((l: any) => ({
-  ...l,
-  coverUrls: coversByListId[l.id] ?? [],
-  entryCount: entryCountByListId[l.id] ?? 0,
-}));
-
-// ── SAVED LISTS ──
-let savedLists: any[] = []
-const savedGameIdsByListId: Record<string, string[]> = {};
-const savedYearsByListId: Record<string, number[]> = {};
-{
-  // Owners see all saves; others only see non-hidden ones (rows from wave 1)
-  const rawSavedLists = (savedRaw ?? [])
-    .filter((s: any) => s.lists && (isOwnProfile || !s.is_hidden))
-    .map((s: any) => ({ ...s.lists, isHidden: s.is_hidden ?? false }))
-
-  if (rawSavedLists.length > 0) {
-    const savedListIds = rawSavedLists.map((l: any) => l.id)
-    const [{ data: savedCoversRaw }, { data: savedEntriesRaw }] = await Promise.all([
-      (supabase as any)
-        .from('list_entries')
-        .select('list_id, games(id, cover_img_url, date_released)')
-        .in('list_id', savedListIds)
-        .order('position', { ascending: true, nullsFirst: false })
-        .order('added_at', { ascending: true }),
-      (supabase as any)
-        .from('list_entries')
-        .select('list_id')
-        .in('list_id', savedListIds),
-    ])
-    const savedCoversByListId: Record<string, string[]> = {}
-    for (const e of savedCoversRaw ?? []) {
-      const cover = igdbCover(e.games?.cover_img_url, 't_cover_big')
-      if (cover) {
-        if (!savedCoversByListId[e.list_id]) savedCoversByListId[e.list_id] = []
-        if (savedCoversByListId[e.list_id].length < 4) savedCoversByListId[e.list_id].push(cover)
-      }
-      if (e.games?.id) {
-        if (!savedGameIdsByListId[e.list_id]) savedGameIdsByListId[e.list_id] = [];
-        savedGameIdsByListId[e.list_id].push(e.games.id);
-      }
-      if (e.games?.date_released) {
-        const yr = new Date(e.games.date_released).getFullYear();
-        if (!savedYearsByListId[e.list_id]) savedYearsByListId[e.list_id] = [];
-        savedYearsByListId[e.list_id].push(yr);
-      }
-    }
-    const savedEntryCountByListId: Record<string, number> = {}
-    for (const e of savedEntriesRaw ?? []) {
-      savedEntryCountByListId[e.list_id] = (savedEntryCountByListId[e.list_id] ?? 0) + 1
-    }
-    savedLists = rawSavedLists.map((l: any) => ({
-      ...l,
-      ownerId: l.profiles?.id ?? null,
-      ownerUsername: l.profiles?.username,
-      ownerAvatar: l.profiles?.avatar_url,
-      coverUrls: savedCoversByListId[l.id] ?? [],
-      entryCount: savedEntryCountByListId[l.id] ?? 0,
-    }))
-  }
-}
-
-// ── LIST METADATA for genre/platform/dev filters ──
-{
-  const allGameIds = [...new Set([
-    ...Object.values(gameIdsByListId).flat(),
-    ...Object.values(savedGameIdsByListId).flat(),
-  ])];
-  if (allGameIds.length > 0) {
-    const [{ data: genreRows }, { data: platformRows }, { data: companyRows }] = await Promise.all([
-      (supabase as any).from('game_genres').select('game_id, genres(name)').in('game_id', allGameIds),
-      (supabase as any).from('game_platforms').select('game_id, platforms(name)').in('game_id', allGameIds),
-      (supabase as any).from('game_companies').select('game_id, role, developers(name)').eq('role', 'developer').in('game_id', allGameIds),
-    ]);
-    const genresByGameId: Record<string, string[]> = {};
-    const platformsByGameId: Record<string, string[]> = {};
-    const devsByGameId: Record<string, string[]> = {};
-    for (const row of genreRows ?? []) {
-      if (row.genres?.name) { if (!genresByGameId[row.game_id]) genresByGameId[row.game_id] = []; genresByGameId[row.game_id].push(row.genres.name); }
-    }
-    for (const row of platformRows ?? []) {
-      if (row.platforms?.name) { if (!platformsByGameId[row.game_id]) platformsByGameId[row.game_id] = []; platformsByGameId[row.game_id].push(row.platforms.name); }
-    }
-    for (const row of companyRows ?? []) {
-      if (row.developers?.name) { if (!devsByGameId[row.game_id]) devsByGameId[row.game_id] = []; devsByGameId[row.game_id].push(row.developers.name); }
-    }
-    function buildListMeta(listId: string, gids: Record<string, string[]>, yrs: Record<string, number[]>) {
-      const ids = gids[listId] ?? [];
-      const genres = [...new Set(ids.flatMap((id: string) => genresByGameId[id] ?? []))].sort();
-      const platforms = [...new Set(ids.flatMap((id: string) => platformsByGameId[id] ?? []))].sort();
-      const devs = [...new Set(ids.flatMap((id: string) => devsByGameId[id] ?? []))].sort();
-      const years = yrs[listId] ?? [];
-      return { genres, platforms, devs, minYear: years.length ? Math.min(...years) : null, maxYear: years.length ? Math.max(...years) : null };
-    }
-    profileLists = profileLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, gameIdsByListId, yearsByListId) }));
-    savedLists = savedLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, savedGameIdsByListId, savedYearsByListId) }));
-  }
-}
-
-// Per-list review metrics (avg score + total hours from user's own reviews)
-{
-  const reviewByGameId: Record<string, { score: number; hours: number }> = {};
-  for (const r of publishedReviews) {
-    if ((r as any).games?.id) {
-      reviewByGameId[(r as any).games.id] = { score: (r as any).score, hours: (r as any).play_time_hours ?? 0 };
-    }
-  }
-  function buildListReviewMeta(gameIds: string[]) {
-    const reviews = gameIds.map(id => reviewByGameId[id]).filter(Boolean);
-    const avgScore = reviews.length > 0
-      ? reviews.reduce((s: number, r: any) => s + r.score, 0) / reviews.length
-      : null;
-    const totalHours = reviews.reduce((s: number, r: any) => s + r.hours, 0);
-    return { avgScore, totalHours };
-  }
-  profileLists = profileLists.map((l: any) => ({ ...l, ...buildListReviewMeta(gameIdsByListId[l.id] ?? []) }));
-  savedLists = savedLists.map((l: any) => ({ ...l, ...buildListReviewMeta(savedGameIdsByListId[l.id] ?? []) }));
-}
-
-const myGenres = [...new Set(profileLists.flatMap((l: any) => l.genres ?? []))].sort() as string[];
-const myPlatforms = [...new Set(profileLists.flatMap((l: any) => l.platforms ?? []))].sort() as string[];
-const myDevs = [...new Set(profileLists.flatMap((l: any) => l.devs ?? []))].sort() as string[];
-const savedGenres = [...new Set(savedLists.flatMap((l: any) => l.genres ?? []))].sort() as string[];
-const savedPlatforms = [...new Set(savedLists.flatMap((l: any) => l.platforms ?? []))].sort() as string[];
-const savedDevs = [...new Set(savedLists.flatMap((l: any) => l.devs ?? []))].sort() as string[];
 
 // favorite game — find reviewer's own review of it
 const favGame = reviewer.favorite_game ?? null
@@ -523,140 +308,6 @@ let scoreDelta: number | null = null
 }
 
 const recentGames = publishedReviews.slice(0, 6).map((r: any) => r.games).filter(Boolean)
-
-// ── LIBRARY (user_game_status) ──
-// isMutualFollow is derived above from the follower/following lists.
-
-// This reviewer's authored recommendations (rows from wave 1; rendered
-// most-recent-first, re-sortable client-side)
-const reviewerRecs = (reviewerRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile?.id ?? null));
-
-// Shared filter/search metadata for the Recommendations tab — same Overview /
-// Detailed + single filter bar treatment as the Reviews tab. Genre / platform /
-// dev are the union across a rec's source and target games.
-const _recGameIds = [...new Set(
-  reviewerRecs.flatMap((r: any) => [r.sourceGame?.id, r.targetGame?.id]).filter(Boolean)
-)] as string[];
-const _recGenresByGame: Record<string, string[]> = {};
-const _recPlatformsByGame: Record<string, string[]> = {};
-const _recDevsByGame: Record<string, string[]> = {};
-if (_recGameIds.length > 0) {
-  const [{ data: _rgGenres }, { data: _rgPlatforms }, { data: _rgCompanies }] = await Promise.all([
-    (db as any).from('game_genres').select('game_id, genres(name)').in('game_id', _recGameIds),
-    (db as any).from('game_platforms').select('game_id, platforms(name)').in('game_id', _recGameIds),
-    (db as any).from('game_companies').select('game_id, developers(name)').eq('role', 'developer').in('game_id', _recGameIds),
-  ]);
-  for (const row of _rgGenres ?? []) {
-    if (row.genres?.name) { if (!_recGenresByGame[row.game_id]) _recGenresByGame[row.game_id] = []; _recGenresByGame[row.game_id].push(row.genres.name); }
-  }
-  for (const row of _rgPlatforms ?? []) {
-    if (row.platforms?.name) { if (!_recPlatformsByGame[row.game_id]) _recPlatformsByGame[row.game_id] = []; _recPlatformsByGame[row.game_id].push(row.platforms.name); }
-  }
-  for (const row of _rgCompanies ?? []) {
-    if (row.developers?.name) { if (!_recDevsByGame[row.game_id]) _recDevsByGame[row.game_id] = []; _recDevsByGame[row.game_id].push(row.developers.name); }
-  }
-}
-const recFilterItems = reviewerRecs.map((rec: any) => {
-  const gids = [rec.sourceGame?.id, rec.targetGame?.id].filter(Boolean) as string[];
-  const genres = [...new Set(gids.flatMap((id) => _recGenresByGame[id] ?? []))] as string[];
-  const platforms = [...new Set(gids.flatMap((id) => _recPlatformsByGame[id] ?? []))] as string[];
-  const devs = [...new Set(gids.flatMap((id) => _recDevsByGame[id] ?? []))] as string[];
-  return {
-    rec,
-    searchText: `${rec.sourceGame?.title ?? ''} ${rec.targetGame?.title ?? ''} ${rec.body ?? ''}`.trim(),
-    sortTitle: rec.sourceGame?.title ?? rec.targetGame?.title ?? '',
-    genres,
-    platforms,
-    devs,
-    date: rec.createdAt,
-    up: rec.upVotes,
-    down: rec.downVotes,
-  };
-});
-const recGenres = [...new Set(recFilterItems.flatMap((i: any) => i.genres))].sort() as string[];
-const recPlatforms = [...new Set(recFilterItems.flatMap((i: any) => i.platforms))].sort() as string[];
-const recDevs = [...new Set(recFilterItems.flatMap((i: any) => i.devs))].sort() as string[];
-
-// Library data is fetched client-side via /api/user-game-status/library (paginated).
-// Only lightweight COUNT queries run server-side for filter pill totals.
-
-// Library settings from profile (wave 1; defaults for old rows or pre-migration)
-const libraryVisibility: string = libSettingsRow?.library_visibility ?? 'public'
-const libraryShowHours: boolean = libSettingsRow?.library_show_hours ?? true
-const libraryHiddenTabs: string[] = libSettingsRow?.library_hidden_tabs ?? []
-const libraryIsPrivate = libraryVisibility === 'private' && !isOwnProfile
-
-// Apply privacy filtering
-const canSeeWantToPlay = isOwnProfile
-  || !(reviewer.want_to_play_privacy === 'private'
-       || (reviewer.want_to_play_privacy === 'friends' && !isMutualFollow));
-const canSeeDropped = isOwnProfile
-  || !(reviewer.dropped_privacy === 'private'
-       || (reviewer.dropped_privacy === 'friends' && !isMutualFollow));
-
-// Distinct genre / platform / developer names across this reviewer's visible
-// library — powers the Library filter dropdowns, matching the Reviews / Lists /
-// Recs tabs. Queried FROM each game↔X junction with a two-level inner join down
-// to user_game_status (the same shape as genres/[slug].astro's indexability
-// probe), deduped in JS. One row per (game, value) pair, so paginate past the
-// 1000-row cap.
-async function libDimNames(
-  junction: string,
-  dimEmbed: string,
-  roleFilter?: string,
-): Promise<string[]> {
-  const CHUNK = 1000;
-  const key = dimEmbed.split('(')[0];
-  const names = new Set<string>();
-  for (let start = 0; ; start += CHUNK) {
-    let q = (db as any)
-      .from(junction)
-      .select(`${dimEmbed}, games!inner(user_game_status!inner(profile_id, is_hidden))`)
-      .eq('games.user_game_status.profile_id', reviewer.id)
-      .eq('games.user_game_status.is_hidden', false);
-    if (roleFilter) q = q.eq('role', roleFilter);
-    const { data, error } = await q.range(start, start + CHUNK - 1);
-    if (error) {
-      console.error(`[profile library] ${junction} filter-option query failed:`, JSON.stringify(error));
-      break;
-    }
-    for (const row of (data ?? []) as any[]) {
-      const n = row[key]?.name;
-      if (n) names.add(n);
-    }
-    if (!data || data.length < CHUNK) break;
-  }
-  return [...names].sort();
-}
-
-// Filter-pill counts and filter-dropdown options — one wave, not two.
-const libCounts = { all: 0, playing: 0, want_to_play: 0, owned: 0, completed: 0, hundred_percent: 0, dropped: 0, unplayed: 0, hidden: 0 };
-let libGenres: string[] = [];
-let libPlatforms: string[] = [];
-let libDevs: string[] = [];
-if (!libraryIsPrivate) {
-  // All nine pill totals in one pass (was nine count:exact round trips).
-  const [{ data: countRows }, dims] = await Promise.all([
-    db.rpc('library_status_counts', { p_profile_id: reviewer.id }),
-    Promise.all([
-      libDimNames('game_genres', 'genres(name)'),
-      libDimNames('game_platforms', 'platforms(name)'),
-      libDimNames('game_companies', 'developers(name)', 'developer'),
-    ]),
-  ]);
-  const c = (countRows as any)?.[0] ?? {};
-  libCounts.all             = Number(c.all_count ?? 0);
-  libCounts.playing         = Number(c.playing ?? 0);
-  // Privacy: these tabs are hidden from viewers who aren't allowed to see them.
-  libCounts.want_to_play    = canSeeWantToPlay ? Number(c.want_to_play ?? 0) : 0;
-  libCounts.owned           = Number(c.owned ?? 0);
-  libCounts.completed       = Number(c.completed ?? 0);
-  libCounts.hundred_percent = Number(c.hundred_percent ?? 0);
-  libCounts.dropped         = canSeeDropped ? Number(c.dropped ?? 0) : 0;
-  libCounts.hidden          = isOwnProfile ? Number(c.hidden ?? 0) : 0;
-  libCounts.unplayed        = Number(c.unplayed ?? 0);
-  [libGenres, libPlatforms, libDevs] = dims;
-}
 
 // ── CHART DATA ──
 // Reuses the single community-score scan from wave 1 (this used to re-run a
@@ -808,19 +459,9 @@ for (const r of publishedReviews) {
   if ((r as any).play_time_hours != null) reviewHoursByGameId[gid] = (r as any).play_time_hours
 }
 
-const countsJson      = JSON.stringify(libCounts)
 const reviewScoresJson = JSON.stringify(reviewScoreByGameId)
 const reviewHoursJson  = JSON.stringify(reviewHoursByGameId)
-const libGenresJson    = JSON.stringify(libGenres)
-const libPlatformsJson = JSON.stringify(libPlatforms)
-const libDevsJson      = JSON.stringify(libDevs)
 const libraryIsOwn = JSON.stringify(isOwnProfile)
-const librarySettingsJson = JSON.stringify({
-  visibility: libraryVisibility,
-  showHours: libraryShowHours,
-  hiddenTabs: libraryHiddenTabs,
-  isPrivate: libraryIsPrivate,
-})
 
 // vote counting logic for reviews
 // CDN cache — anonymous visitors share a cached response; auth users get a fresh render
@@ -849,6 +490,8 @@ if (!(reviewer as any).steam_id && !isOwnProfile) {
 // Check if this reviewer has Steam connected (for showing sync button to owner)
 const hasSteam = !!(reviewer as any).steam_id;
 const showAchievementsTab = hasSteam || isOwnProfile || _achHasRows;
+
+const activeTabData = await activeTabDataPromise;
 
 // ── SEO ──
 const reviewerDescription = reviewer.bio
@@ -1735,8 +1378,8 @@ const reviewerBreadcrumbJsonLd = {
     <a href={`/reviewers/${reviewer.username}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`}>Stats</a>
     <a href={`/reviewers/${reviewer.username}?tab=library`} class={`tab-link ${activeTab === 'library' ? 'active' : ''}`}>Library</a>
     <a href={`/reviewers/${reviewer.username}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>Reviews {publishedReviews.length > 0 && <span class="tab-count">{publishedReviews.length}</span>}</a>
-    <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {(profileLists.length + savedLists.length) > 0 && <span class="tab-count">{profileLists.length + savedLists.length}</span>}</a>
-    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Recommendations {reviewerRecs.length > 0 && <span class="tab-count">{reviewerRecs.length}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {listsTabCount > 0 && <span class="tab-count">{listsTabCount}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Recommendations {recsTabCount > 0 && <span class="tab-count">{recsTabCount}</span>}</a>
     {(showAchievementsTab) && <a href={`/reviewers/${reviewer.username}?tab=achievements`} class={`tab-link ${activeTab === 'achievements' ? 'active' : ''}`}>Achievements</a>}
   </nav>
 
@@ -1900,427 +1543,24 @@ const reviewerBreadcrumbJsonLd = {
   </div>
 
   <!-- ── REVIEWS TAB ── -->
-  <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`} data-tab="reviews">
-  {publishedReviews.length === 0 ? (
-    <div class="empty-state">
-      <div class="empty-title">No reviews yet</div>
-      <p style="font-size:14px;color:var(--text-tertiary)">@{reviewer.username} hasn't posted any reviews.</p>
-      {isOwnProfile && <a class="tab-add-btn" href="/?compose=review" style="margin-top:14px">+ Write a review</a>}
-    </div>
-  ) : (
-    <>
-      <div class="sort-tabs">
-        <button class="sort-tab review-view-tab active" onclick="switchReviewView('overview',this)">Overview</button>
-        <button class="sort-tab review-view-tab" onclick="switchReviewView('detailed',this)">Detailed</button>
-        {isOwnProfile && <a class="tab-add-btn" style="margin-left:auto" href="/?compose=review">+ Write a review</a>}
-      </div>
-
-      <div class="lf-bar">
-        <input class="lf-search" type="text" placeholder="Search reviews…" oninput="searchReviews(this.value)" />
-        <select class="lf-select" onchange="setReviewSort(this.value)">
-          <option value="az" selected>A–Z</option>
-          <option value="recent">Recent</option>
-          <option value="oldest">Oldest</option>
-          <option value="highest">Highest Rated</option>
-          <option value="lowest">Lowest Rated</option>
-          <option value="most-upvoted">Most Upvoted</option>
-          <option value="most-downvoted">Most Downvoted</option>
-        </select>
-        {reviewGenres.length > 0 && (
-          <select class="lf-select" onchange="setReviewFilter('genre',this.value,this)">
-            <option value="">All Genres</option>
-            {reviewGenres.map((g: string) => <option value={g}>{g}</option>)}
-          </select>
-        )}
-        {reviewPlatforms.length > 0 && (
-          <select class="lf-select" onchange="setReviewFilter('platform',this.value,this)">
-            <option value="">All Platforms</option>
-            {reviewPlatforms.map((p: string) => <option value={p}>{p}</option>)}
-          </select>
-        )}
-        {reviewDevs.length > 0 && (
-          <select class="lf-select" onchange="setReviewFilter('dev',this.value,this)">
-            <option value="">All Devs</option>
-            {reviewDevs.map((d: string) => <option value={d}>{d}</option>)}
-          </select>
-        )}
-      </div>
-
-      <div id="reviewsList" style="display:none">
-        {reviewFilterItems.map((it: any) => (
-          <div
-            class="rev-filter-item"
-            data-title={it.searchText}
-            data-sort-title={it.sortTitle}
-            data-genres={it.genres.join(',')}
-            data-devs={it.devs.join(',')}
-            data-platform={it.platform}
-            data-score={it.score}
-            data-date={it.date}
-            data-upvotes={it.up}
-            data-downvotes={it.down}
-          >
-            <ReviewCard
-              review={it.review}
-              isLoggedIn={!!user}
-              isOwnProfile={isOwnProfile}
-              showGame={true}
-              showReviewer={false}
-              currentProfileId={currentProfile?.id ?? null}
-            />
-          </div>
-        ))}
-      </div>
-      <div class="list-no-results" id="reviews-dt-no-results" style="display:none">No reviews match these filters.</div>
-
-      <div class="reviews-overview-grid" id="reviewsOverviewList">
-        {reviewFilterItems.map((it: any) => {
-          const review = it.review
-          const cover = igdbCover(review.games?.cover_img_url, 't_thumb')
-          return (
-            <div
-              class="rev-filter-item"
-              data-title={it.searchText}
-              data-sort-title={it.sortTitle}
-              data-genres={it.genres.join(',')}
-              data-devs={it.devs.join(',')}
-              data-platform={it.platform}
-              data-score={it.score}
-              data-date={it.date}
-              data-upvotes={it.up}
-              data-downvotes={it.down}
-            >
-              <a href={`/reviews/${review.id}`} class={`review-overview-card rov-${scoreClass(review.score).replace('score-', '')}`}>
-                {cover ? <img class="rov-cover" src={cover} alt="" loading="lazy" /> : <div class="rov-cover" />}
-                <div class="rov-body">
-                  <span class="rov-title">{review.games?.title ?? 'Unknown game'}</span>
-                  <span class="rov-date">{timeAgo(review.published_at ?? review.created_at)}</span>
-                </div>
-                <span class="rov-score">{review.score}</span>
-              </a>
-            </div>
-          )
-        })}
-      </div>
-      <div class="list-no-results" id="reviews-ov-no-results" style="display:none">No reviews match these filters.</div>
-    </>
-  )}
-</div>
+  <div class={`tab-panel ${activeTab === 'reviews' ? 'active' : ''}`} data-tab="reviews" data-src={activeTab === 'reviews' ? undefined : tabSrc('reviews')}>
+    {activeTab === 'reviews'
+      ? <ReviewsTab data={activeTabData} reviewer={reviewer} isLoggedIn={!!user} isOwnProfile={isOwnProfile} currentProfileId={currentProfile?.id ?? null} />
+      : <div class="tab-lazy-loading">Loading…</div>}
+  </div>
 
   <!-- ── RECOMMENDATIONS TAB — this reviewer's authored "if you liked A, try B" posts ── -->
-  <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
-    {reviewerRecs.length === 0 ? (
-      <div class="prof-recs-empty">
-        <div class="prof-recs-empty-title">No recommendations yet</div>
-        <p>{isOwnProfile ? "Share a “if you liked X, you’ll like Y” pairing and it’ll show up here and in the feed." : `${reviewer.username} hasn’t recommended any games yet.`}</p>
-        {isOwnProfile && <button class="tab-add-btn" onclick="openRecComposer()" style="margin-top:14px">+ Add a recommendation</button>}
-      </div>
-    ) : (
-      <>
-        <div class="sort-tabs">
-          <button class="sort-tab rec-view-tab active" onclick="switchRecView('overview',this)">Overview</button>
-          <button class="sort-tab rec-view-tab" onclick="switchRecView('detailed',this)">Detailed</button>
-          {isOwnProfile && <button class="tab-add-btn" style="margin-left:auto" onclick="openRecComposer()">+ Add a recommendation</button>}
-        </div>
-
-        <div class="lf-bar">
-          <input class="lf-search" type="text" placeholder="Search recommendations…" oninput="searchRecs(this.value)" />
-          <select class="lf-select" onchange="setRecSort(this.value)">
-            <option value="az" selected>A–Z</option>
-            <option value="recent">Recent</option>
-            <option value="oldest">Oldest</option>
-            <option value="most-upvoted">Most Upvoted</option>
-            <option value="most-downvoted">Most Downvoted</option>
-          </select>
-          {recGenres.length > 0 && (
-            <select class="lf-select" onchange="setRecFilter('genre',this.value,this)">
-              <option value="">All Genres</option>
-              {recGenres.map((g: string) => <option value={g}>{g}</option>)}
-            </select>
-          )}
-          {recPlatforms.length > 0 && (
-            <select class="lf-select" onchange="setRecFilter('platform',this.value,this)">
-              <option value="">All Platforms</option>
-              {recPlatforms.map((p: string) => <option value={p}>{p}</option>)}
-            </select>
-          )}
-          {recDevs.length > 0 && (
-            <select class="lf-select" onchange="setRecFilter('dev',this.value,this)">
-              <option value="">All Devs</option>
-              {recDevs.map((d: string) => <option value={d}>{d}</option>)}
-            </select>
-          )}
-        </div>
-
-        <div id="profRecsList" style="display:none">
-          {recFilterItems.map((it: any) => (
-            <div
-              class="rec-filter-item"
-              data-title={it.searchText}
-              data-sort-title={it.sortTitle}
-              data-genres={it.genres.join(',')}
-              data-devs={it.devs.join(',')}
-              data-platforms={it.platforms.join(',')}
-              data-date={it.date}
-              data-upvotes={it.up}
-              data-downvotes={it.down}
-            >
-              <RecommendationFeedCard
-                id={it.rec.id}
-                sourceGame={it.rec.sourceGame}
-                targetGame={it.rec.targetGame}
-                body={it.rec.body}
-                containsSpoilers={it.rec.containsSpoilers}
-                ownerUsername={it.rec.ownerUsername}
-                ownerAvatar={it.rec.ownerAvatar}
-                createdAt={it.rec.createdAt}
-                upVotes={it.rec.upVotes}
-                downVotes={it.rec.downVotes}
-                myVote={it.rec.myVote}
-                commentCount={it.rec.commentCount}
-                reactions={it.rec.reactions}
-                isLoggedIn={!!user}
-                currentProfileId={currentProfile?.id ?? null}
-                profileId={it.rec.profileId}
-              />
-            </div>
-          ))}
-        </div>
-        <div class="list-no-results" id="recs-dt-no-results" style="display:none">No recommendations match these filters.</div>
-
-        <div class="recs-overview-grid" id="profRecsOverviewList">
-          {recFilterItems.map((it: any) => {
-            const rec = it.rec
-            const srcCover = igdbCover(rec.sourceGame?.cover_img_url, 't_cover_big')
-            const tgtCover = igdbCover(rec.targetGame?.cover_img_url, 't_cover_big')
-            return (
-              <div
-                class="rec-filter-item"
-                data-title={it.searchText}
-                data-sort-title={it.sortTitle}
-                data-genres={it.genres.join(',')}
-                data-devs={it.devs.join(',')}
-                data-platforms={it.platforms.join(',')}
-                data-date={it.date}
-                data-upvotes={it.up}
-                data-downvotes={it.down}
-              >
-                <a href={`/recommendations/${rec.id}`} class="rec-overview-tile">
-                  <div class="rot-covers">
-                    <div class="rot-cover">{srcCover ? <img src={srcCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
-                    <span class="rot-arrow">→</span>
-                    <div class="rot-cover">{tgtCover ? <img src={tgtCover} alt="" loading="lazy" /> : <span>🎮</span>}</div>
-                  </div>
-                  <div class="rot-titles">{rec.sourceGame?.title ?? 'Unknown'} → {rec.targetGame?.title ?? 'Unknown'}</div>
-                </a>
-              </div>
-            )
-          })}
-        </div>
-        <div class="list-no-results" id="recs-ov-no-results" style="display:none">No recommendations match these filters.</div>
-      </>
-    )}
+  <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations" data-src={activeTab === 'recommendations' ? undefined : tabSrc('recommendations')}>
+    {activeTab === 'recommendations'
+      ? <RecommendationsTab data={activeTabData} reviewer={reviewer} isLoggedIn={!!user} isOwnProfile={isOwnProfile} currentProfileId={currentProfile?.id ?? null} />
+      : <div class="tab-lazy-loading">Loading…</div>}
   </div>
 
   <!-- ── LIBRARY TAB ── -->
-  <div class={`tab-panel ${activeTab === 'library' ? 'active' : ''}`} data-tab="library">
-
-    {/* Steam CTA — only while not yet connected. The compact "connected" sync bar
-        lives on the Overview/Detailed row inside #libControls below. */}
-    {isOwnProfile && !reviewer.steam_id && (
-      <div class="steam-cta">
-        <div class="steam-cta-icon">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
-        </div>
-        <div class="steam-cta-body">
-          <div class="steam-cta-title">Import your Steam library</div>
-          <div class="steam-cta-desc">Connect Steam to automatically add your owned games and playtime.</div>
-        </div>
-        <a href={`/api/auth/steam-connect?from=${encodeURIComponent(`/reviewers/${reviewer.username}?tab=library`)}`} class="steam-cta-btn">Connect Steam</a>
-      </div>
-    )}
-
-    {libraryIsPrivate && (
-      <div class="empty-state" style="margin-top:16px">
-        <div class="empty-title">Library is private</div>
-        <p style="font-size:14px;color:var(--text-tertiary)">@{reviewer.username} has set their library to private.</p>
-      </div>
-    )}
-
-    {/* Library controls — search, sort, edit (rendered by JS from libraryJson) */}
-    <div id="libControls" style="display:none">
-      <div class="lib-view-row">
-        <div class="sort-tabs" id="libViewTabs">
-          <button class="sort-tab lib-view-tab active" onclick="switchLibView('overview',this)">Overview</button>
-          <button class="sort-tab lib-view-tab" onclick="switchLibView('detailed',this)">Detailed</button>
-        </div>
-        {isOwnProfile && reviewer.steam_id && (
-          <div class="steam-sync-bar steam-sync-bar--compact">
-            <span class="steam-sync-info">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="color:#60a5fa;flex-shrink:0"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
-              <span class="steam-sync-label">{reviewer.steam_username ? `Connected as ${reviewer.steam_username}` : 'Steam connected'}</span>
-              {reviewer.steam_synced_at && (
-                <span class="steam-sync-when"> · {timeAgo(reviewer.steam_synced_at)}</span>
-              )}
-            </span>
-            <label class="steam-sync-played">
-              <input type="checkbox" id="profilePlayedOnly" />
-              Played only
-            </label>
-            <button class="steam-sync-btn" id="profileSyncBtn" data-username={reviewer.username} onclick="profileSteamSync()">Sync now</button>
-          </div>
-        )}
-      </div>
-      <div id="profileSyncStatus" class="steam-sync-status" style="display:none"></div>
-      <div class="lib-controls-row lf-bar">
-        <input id="libSearch" class="lf-search" type="search" placeholder="Search library…" autocomplete="off" />
-        <select id="libSort" class="lf-select">
-          <option value="alpha">A – Z</option>
-          <option value="recent">Recently added</option>
-          <option value="review">Has review first</option>
-          <option value="hours">Most hours played</option>
-          <option value="completion">Completion %</option>
-        </select>
-        {libGenres.length > 0 && (
-          <select id="libGenre" class="lf-select" onchange="setLibDimFilter('genre',this.value,this)">
-            <option value="">All Genres</option>
-            {libGenres.map((g: string) => <option value={g}>{g}</option>)}
-          </select>
-        )}
-        {libPlatforms.length > 0 && (
-          <select id="libPlatform" class="lf-select" onchange="setLibDimFilter('platform',this.value,this)">
-            <option value="">All Platforms</option>
-            {libPlatforms.map((pl: string) => <option value={pl}>{pl}</option>)}
-          </select>
-        )}
-        {libDevs.length > 0 && (
-          <select id="libDev" class="lf-select" onchange="setLibDimFilter('dev',this.value,this)">
-            <option value="">All Devs</option>
-            {libDevs.map((d: string) => <option value={d}>{d}</option>)}
-          </select>
-        )}
-        {isOwnProfile && (
-          <button id="libGearBtn" class="lib-gear-btn" title="Library settings" style="margin-left:auto" onclick="toggleLibGear()">
-            <svg width="15" height="15" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="9" cy="9" r="2.5"/>
-              <path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>
-            </svg>
-          </button>
-        )}
-        {isOwnProfile && (
-          <button id="libEditBtn" class="lib-edit-btn" onclick="toggleLibEdit()">Edit library</button>
-        )}
-      </div>
-      <div class="lib-filter-row" id="libFilterRow"></div>
-    </div>
-
-    {isOwnProfile && (
-      <div class="lib-gear-panel" id="libGearPanel">
-        <div class="lib-gear-tabs">
-          <button class="lib-gear-tab active" data-tab="settings" onclick="switchGearTab('settings',this)">Main Settings</button>
-          <button class="lib-gear-tab" data-tab="hidden" onclick="switchGearTab('hidden',this)">Hidden Games</button>
-        </div>
-
-        {/* ── Main Settings tab ── */}
-        <div class="lib-gear-tab-content" id="libGearTabSettings">
-          <div class="lib-gear-section">
-            <div class="lib-gear-section-title">Library Visibility</div>
-            <div class="lib-gear-radio-group" id="libVisibilityGroup">
-              <label class="lib-gear-radio">
-                <input type="radio" name="libVisibility" value="public" />
-                <span class="lib-gear-radio-label"><strong>Public</strong> — anyone can see your library</span>
-              </label>
-              <label class="lib-gear-radio">
-                <input type="radio" name="libVisibility" value="private" />
-                <span class="lib-gear-radio-label"><strong>Private</strong> — only you can see your library</span>
-              </label>
-            </div>
-          </div>
-          <div class="lib-gear-section">
-            <div class="lib-gear-section-title">Hours Played</div>
-            <label class="lib-gear-toggle-row" id="libShowHoursRow">
-              <span style="font-size:13px;color:var(--text-secondary)">Show hours played on cards</span>
-              <button class="lib-gear-toggle" id="libShowHoursBtn" onclick="toggleLibShowHours()"></button>
-            </label>
-          </div>
-          <div class="lib-gear-section" style="margin-bottom:0">
-            <div class="lib-gear-section-title">Visible Status Tabs</div>
-            <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:8px">Choose which filter tabs are visible to others on your profile.</div>
-            <div id="libTabToggles"></div>
-          </div>
-        </div>
-
-        {/* ── Hidden Games tab ── */}
-        <div class="lib-gear-tab-content" id="libGearTabHidden" style="display:none">
-          <div class="lib-gear-section">
-            <div class="lib-gear-section-title">Hidden Games</div>
-            <div id="libHiddenList"></div>
-          </div>
-          <div class="lib-gear-section" style="margin-bottom:0">
-            <div class="lib-gear-section-title">Hide a game</div>
-            <input class="lib-hide-search" id="libHideSearch" type="search" placeholder="Search your library…" autocomplete="off" />
-            <div class="lib-hide-results" id="libHideResults"></div>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {/* Bulk edit action bar */}
-    {isOwnProfile && (
-      <div id="libEditBar" style="display:none">
-        <span id="libEditCount" class="lib-edit-count">0 selected</span>
-        <button class="lib-select-all" id="libSelectAllBtn" onclick="toggleLibSelectAll()">Select page</button>
-        <button class="lib-select-all" id="libSelectAllPagesBtn" onclick="selectAllLibPages()">Select all</button>
-        <select id="libBulkStatus" class="lib-sort" style="font-size:12px">
-          <option value="">Change status…</option>
-          <option value="playing">🎮 Playing</option>
-          <option value="want_to_play">🔖 Want to Play</option>
-          <option value="owned">📦 Owned</option>
-          <option value="completed">✓ Completed</option>
-          <option value="hundred_percent">💯 100%</option>
-          <option value="dropped">✗ Dropped</option>
-        </select>
-        <button class="lib-bulk-apply" onclick="applyBulkStatus()">Apply</button>
-        <button class="lib-bulk-delete" onclick="applyBulkDelete()">Remove</button>
-        <button class="lib-edit-cancel" onclick="toggleLibEdit()">Done</button>
-      </div>
-    )}
-
-    {/* Grid — rendered entirely by JS so sort/search/edit all work off one source of truth */}
-    <div id="libEmpty" style="display:none">
-      <div class="empty-state">
-        <div class="empty-title">{libCounts.all === 0 ? 'No games tracked yet' : 'No games match'}</div>
-        <p style="font-size:14px;color:var(--text-tertiary)">
-          {libCounts.all === 0
-            ? (isOwnProfile
-                ? 'Track your games from any game page, or connect Steam above to import your library automatically.'
-                : `@${reviewer.username} hasn't tracked any games yet.`)
-            : 'Try a different search or filter.'
-          }
-        </p>
-      </div>
-    </div>
-    <div class="lib-check-row" id="libCheckboxes" style="display:none">
-      <label class="lib-check-item" id="libReviewedItem">
-        <div class="lib-check-box"></div>
-        <span>Reviewed</span>
-      </label>
-      <label class="lib-check-item" id="libUnreviewedItem">
-        <div class="lib-check-box"></div>
-        <span>Unreviewed</span>
-      </label>
-      {isOwnProfile && (
-        <label class="lib-check-item" id="libHiddenItem">
-          <div class="lib-check-box"></div>
-          <span>Hidden</span>
-        </label>
-      )}
-    </div>
-    <div class="lib-az" id="libAzBar" style="display:none"></div>
-    <div class="lib-grid" id="libGrid"></div>
-    <div class="lib-dt-list" id="libGridDetailed" style="display:none"></div>
-    <div class="lib-pag" id="libPagination" style="display:none"></div>
-
+  <div class={`tab-panel ${activeTab === 'library' ? 'active' : ''}`} data-tab="library" data-src={activeTab === 'library' ? undefined : tabSrc('library')}>
+    {activeTab === 'library'
+      ? <LibraryTab data={activeTabData} reviewer={reviewer} isOwnProfile={isOwnProfile} />
+      : <div class="tab-lazy-loading">Loading…</div>}
   </div>
 
   <!-- ── STATS TAB ── -->
@@ -2463,212 +1703,10 @@ const reviewerBreadcrumbJsonLd = {
   </div>
 
   <!-- ── LISTS TAB ── -->
-  <div class={`tab-panel ${activeTab === 'lists' ? 'active' : ''}`} data-tab="lists">
-
-    <!-- Section switcher (only shown when saved lists exist) -->
-    {(savedLists.length > 0 || isOwnProfile) && (
-      <div class="sort-tabs" style="margin-bottom: 20px">
-        <button class="sort-tab list-filter-tab active" onclick="switchListsSection('my', this)">
-          {isOwnProfile ? 'My Lists' : `${reviewer.username}'s Lists`}
-        </button>
-        <button class="sort-tab list-filter-tab" onclick="switchListsSection('saved', this)">
-          Saved {savedLists.length > 0 && <span style="opacity:.6">({savedLists.length})</span>}
-        </button>
-        {isOwnProfile && profileLists.length > 0 && (
-          <button class="tab-add-btn" style="margin-left:auto" onclick="createNewList(this)">+ New list</button>
-        )}
-      </div>
-    )}
-
-    <!-- ── MY LISTS SECTION ── -->
-    <div id="lists-my-section">
-      {profileLists.length === 0 ? (
-        <div class="empty-state-tab">
-          <div class="empty-title">{isOwnProfile ? "You haven't created any lists yet" : `@${reviewer.username} hasn't created any lists yet`}</div>
-          {isOwnProfile && (
-            <button class="tab-add-btn" onclick="createNewList(this)">+ Create your first list</button>
-          )}
-        </div>
-      ) : (
-        <>
-          <!-- Filter bar -->
-          <div class="lf-bar">
-            <input class="lf-search" type="text" placeholder="Search lists…" oninput="searchLists('my',this.value)" />
-            <select class="lf-select" onchange="setListSort('my',this.value)">
-              <option value="recent">Recent</option>
-              <option value="oldest">Oldest</option>
-              <option value="az">A–Z</option>
-              <option value="most-games">Most Games</option>
-              <option value="highest-rated">Highest Rated</option>
-              <option value="lowest-rated">Lowest Rated</option>
-              <option value="most-hours">Most Hours</option>
-            </select>
-            {myGenres.length > 0 && (
-              <select class="lf-select" onchange="setListFilter('my','genre',this.value,this)">
-                <option value="">All Genres</option>
-                {myGenres.map((g: string) => <option value={g}>{g}</option>)}
-              </select>
-            )}
-            {myPlatforms.length > 0 && (
-              <select class="lf-select" onchange="setListFilter('my','platform',this.value,this)">
-                <option value="">All Platforms</option>
-                {myPlatforms.map((p: string) => <option value={p}>{p}</option>)}
-              </select>
-            )}
-            {myDevs.length > 0 && (
-              <select class="lf-select" onchange="setListFilter('my','dev',this.value,this)">
-                <option value="">All Devs</option>
-                {myDevs.map((d: string) => <option value={d}>{d}</option>)}
-              </select>
-            )}
-            <label class="lf-checkbox">
-              <input type="checkbox" onchange="setListCheckboxFilter('my','ranked',this.checked)" /> Ranked
-            </label>
-            {isOwnProfile && (
-              <label class="lf-checkbox">
-                <input type="checkbox" onchange="setListCheckboxFilter('my','private',this.checked)" /> Private
-              </label>
-            )}
-          </div>
-
-          <div class="lists-grid" id="my-lists-grid">
-            {profileLists.map((list: any) => (
-              <div class="list-card-wrapper"
-                data-title={list.title}
-                data-updated={list.updated_at}
-                data-count={list.entryCount}
-                data-genres={(list.genres ?? []).join(',')}
-                data-platforms={(list.platforms ?? []).join(',')}
-                data-devs={(list.devs ?? []).join(',')}
-                data-min-year={list.minYear ?? ''}
-                data-avg-score={list.avgScore != null ? list.avgScore.toFixed(2) : ''}
-                data-total-hours={list.totalHours ?? 0}
-                data-ranked={list.is_ranked ? 'true' : 'false'}
-                data-visibility={list.visibility}
-              >
-                <ListCard
-                  id={list.id}
-                  title={list.title}
-                  isRanked={list.is_ranked}
-                  visibility={list.visibility}
-                  entryCount={list.entryCount}
-                  coverUrls={list.coverUrls}
-                  coverImageUrl={list.cover_image_url}
-                  showOwner={false}
-                  showActions={true}
-                  ownerId={reviewer.id}
-                  isLoggedIn={!!user}
-                  currentProfileId={currentProfile?.id ?? null}
-                />
-              </div>
-            ))}
-          </div>
-          <div class="list-no-results" id="my-no-results" style="display:none">No lists match these filters.</div>
-        </>
-      )}
-    </div>
-
-    <!-- ── SAVED LISTS SECTION ── -->
-    <div id="lists-saved-section" style="display: none">
-      {savedLists.length === 0 ? (
-        <div class="empty-state-tab">
-          <div class="empty-title">{isOwnProfile ? "No saved lists yet" : `@${reviewer.username} hasn't saved any public lists yet`}</div>
-          {isOwnProfile && <p style="font-size: 13px; color: var(--text-tertiary); margin-top: 8px">Browse public lists and hit "Save list" to bookmark them here</p>}
-        </div>
-      ) : (
-        <>
-          <!-- Filter bar + settings button -->
-          <div class="lf-bar">
-            <input class="lf-search" type="text" placeholder="Search lists…" oninput="searchLists('saved',this.value)" />
-            <select class="lf-select" onchange="setListSort('saved',this.value)">
-              <option value="recent">Recent</option>
-              <option value="oldest">Oldest</option>
-              <option value="az">A–Z</option>
-              <option value="most-games">Most Games</option>
-              <option value="highest-rated">Highest Rated</option>
-              <option value="lowest-rated">Lowest Rated</option>
-              <option value="most-hours">Most Hours</option>
-            </select>
-            {savedGenres.length > 0 && (
-              <select class="lf-select" onchange="setListFilter('saved','genre',this.value,this)">
-                <option value="">All Genres</option>
-                {savedGenres.map((g: string) => <option value={g}>{g}</option>)}
-              </select>
-            )}
-            {savedPlatforms.length > 0 && (
-              <select class="lf-select" onchange="setListFilter('saved','platform',this.value,this)">
-                <option value="">All Platforms</option>
-                {savedPlatforms.map((p: string) => <option value={p}>{p}</option>)}
-              </select>
-            )}
-            {savedDevs.length > 0 && (
-              <select class="lf-select" onchange="setListFilter('saved','dev',this.value,this)">
-                <option value="">All Devs</option>
-                {savedDevs.map((d: string) => <option value={d}>{d}</option>)}
-              </select>
-            )}
-            <label class="lf-checkbox">
-              <input type="checkbox" onchange="setListCheckboxFilter('saved','ranked',this.checked)" /> Ranked
-            </label>
-            {isOwnProfile && (
-              <label class="lf-checkbox">
-                <input type="checkbox" onchange="setListCheckboxFilter('saved','hidden',this.checked)" /> Hidden
-              </label>
-            )}
-            {isOwnProfile && (
-              <button id="saved-settings-btn" class="list-settings-btn" style="margin-left:auto" onclick="toggleSavedEditMode(this)" title="Manage saved list visibility">
-                ⚙ Manage
-              </button>
-            )}
-          </div>
-
-          <div class="lists-grid" id="saved-lists-grid">
-            {savedLists.map((list: any) => (
-              <div class={`list-card-wrapper saved-list-wrap${list.isHidden ? ' is-hidden' : ''}`}
-                data-title={list.title}
-                data-updated={list.updated_at}
-                data-count={list.entryCount}
-                data-genres={(list.genres ?? []).join(',')}
-                data-platforms={(list.platforms ?? []).join(',')}
-                data-devs={(list.devs ?? []).join(',')}
-                data-min-year={list.minYear ?? ''}
-                data-avg-score={list.avgScore != null ? list.avgScore.toFixed(2) : ''}
-                data-total-hours={list.totalHours ?? 0}
-                data-ranked={list.is_ranked ? 'true' : 'false'}
-                data-hidden={list.isHidden ? 'true' : 'false'}
-              >
-                <ListCard
-                  id={list.id}
-                  title={list.title}
-                  isRanked={list.is_ranked}
-                  visibility={list.visibility}
-                  entryCount={list.entryCount}
-                  coverUrls={list.coverUrls}
-                  coverImageUrl={list.cover_image_url}
-                  ownerUsername={list.ownerUsername}
-                  ownerAvatar={list.ownerAvatar}
-                  showOwner={true}
-                  showActions={true}
-                  ownerId={list.ownerId}
-                  isLoggedIn={!!user}
-                  currentProfileId={currentProfile?.id ?? null}
-                />
-                {isOwnProfile && (
-                  <button
-                    class="saved-hide-btn"
-                    data-list-id={list.id}
-                    data-hidden={String(list.isHidden)}
-                    onclick="toggleSaveHidden(this)"
-                    title={list.isHidden ? 'Show on profile' : 'Hide from profile'}
-                  >{list.isHidden ? '👁' : '🫥'}</button>
-                )}
-              </div>
-            ))}
-          </div>
-          <div class="list-no-results" id="saved-no-results" style="display:none">No lists match these filters.</div>
-        </>
-      )}
-    </div>
+  <div class={`tab-panel ${activeTab === 'lists' ? 'active' : ''}`} data-tab="lists" data-src={activeTab === 'lists' ? undefined : tabSrc('lists')}>
+    {activeTab === 'lists'
+      ? <ListsTab data={activeTabData} reviewer={reviewer} isLoggedIn={!!user} isOwnProfile={isOwnProfile} currentProfileId={currentProfile?.id ?? null} />
+      : <div class="tab-lazy-loading">Loading…</div>}
   </div>
 
 </div>
@@ -2720,7 +1758,7 @@ const reviewerBreadcrumbJsonLd = {
 
 </div><!-- /#accentScope -->
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, countsJson, reviewScoresJson, reviewHoursJson, libGenresJson, libPlatformsJson, libDevsJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, librarySettingsJson, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -3797,7 +2835,12 @@ const reviewerBreadcrumbJsonLd = {
   }
   window.searchReviews = function(v) { _reviewState.search = (v || '').trim(); applyReviewFilters() }
 
-  if (document.getElementById('reviewsOverviewList')) applyReviewFilters()
+  // Initial A–Z order — at load for ?tab=reviews, else when the fragment arrives.
+  window.__profileTabInit = window.__profileTabInit || {}
+  window.__profileTabInit.reviews = function() {
+    if (document.getElementById('reviewsOverviewList')) applyReviewFilters()
+  }
+  window.__profileTabInit.reviews()
 
   // ── SWITCH LISTS SECTION ──
   function switchListsSection(type, btn) {
@@ -3936,11 +2979,12 @@ const reviewerBreadcrumbJsonLd = {
   var _libPage = 1
   var _libTotal = 0
   var _libLoading = false
-  var _libCounts = JSON.parse(countsJson)
+  // Counts + settings arrive with the Library tab (#libData) — see initLibrary().
+  var _libCounts = { all: 0 }
   var _reviewScores = JSON.parse(reviewScoresJson)
   var _reviewHours  = JSON.parse(reviewHoursJson)
   var _libIsOwn = JSON.parse(libraryIsOwn)
-  var _libSettings = JSON.parse(librarySettingsJson)
+  var _libSettings = {}
   var _libFilter = 'all'
   var _libSort = 'alpha'
   var _libSearch = ''
@@ -4547,8 +3591,17 @@ const reviewerBreadcrumbJsonLd = {
     if (_dragMoved) { _dragMoved = false; _renderGrid(); _updateEditBar() }
   })
 
-  // Init library
-  ;(function() {
+  // Init library — runs once, when the Library tab is on the page: at load for
+  // ?tab=library, otherwise when its on-demand fragment arrives. (It used to
+  // run on every profile load and fetch page 1 of the library regardless of
+  // which tab was open.)
+  var _libInitDone = false
+  function initLibrary() {
+    var libData = document.getElementById('libData')
+    if (_libInitDone || !libData) return
+    _libInitDone = true
+    _libCounts = JSON.parse(libData.dataset.counts || '{}')
+    _libSettings = JSON.parse(libData.dataset.settings || '{}')
     if (_libSettings.isPrivate) return
     if (_libCounts.all === 0 && !_libIsOwn) {
       var empty = document.getElementById('libEmpty')
@@ -4781,7 +3834,10 @@ const reviewerBreadcrumbJsonLd = {
       _renderHideResults(hideSearch ? hideSearch.value : '')
       await fetchLibrary(_libPage)
     }
-  })()
+  }
+  window.__profileTabInit = window.__profileTabInit || {}
+  window.__profileTabInit.library = initLibrary
+  initLibrary()
 
 
   // ── STATS TAB ──
@@ -5517,9 +4573,56 @@ const reviewerBreadcrumbJsonLd = {
 
   document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closePicker() })
 
+  // ── ON-DEMAND TABS ──
+  // Only the tab in the URL is server-rendered. The others are empty panels with
+  // data-src; the first open fetches that tab's HTML fragment
+  // (/reviewers/[username]/tab/[tab]), inserts it and runs the tab's
+  // window.__profileTabInit hook. Hovering, focusing or touching a tab link
+  // starts the fetch early, so most opens find it already done.
+  var _tabFetches = {}
+  function _fetchTab(panel) {
+    var src = panel.dataset.src
+    if (!_tabFetches[src]) {
+      _tabFetches[src] = fetch(src, { credentials: 'same-origin' }).then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status)
+        return r.text()
+      })
+      // Forget failures so the next open (or the retry button) tries again.
+      _tabFetches[src].catch(function() { delete _tabFetches[src] })
+    }
+    return _tabFetches[src]
+  }
+  function _lazyPanel(tab) {
+    var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
+    return panel && panel.dataset.src && panel.dataset.loaded !== '1' ? panel : null
+  }
+  function prefetchTab(tab) {
+    var panel = _lazyPanel(tab)
+    if (panel) _fetchTab(panel)
+  }
+  function ensureTab(tab) {
+    var panel = _lazyPanel(tab)
+    if (!panel || panel.dataset.loading === '1') return
+    panel.dataset.loading = '1'
+    _fetchTab(panel).then(function(html) {
+      panel.innerHTML = html
+      panel.dataset.loaded = '1'
+      delete panel.dataset.loading
+      var init = window.__profileTabInit && window.__profileTabInit[tab]
+      if (init) init()
+    }).catch(function() {
+      delete panel.dataset.loading
+      panel.innerHTML = '<div class="tab-lazy-error">Couldn\u2019t load this tab. <button type="button" class="tab-lazy-retry">Try again</button></div>'
+      panel.querySelector('.tab-lazy-retry').addEventListener('click', function() {
+        panel.innerHTML = '<div class="tab-lazy-loading">Loading\u2026</div>'
+        ensureTab(tab)
+      })
+    })
+  }
+
   // ── CLIENT-SIDE TAB SWITCHING ──
-  // All tab content is server-rendered and already in the DOM.
-  // Intercept clicks and toggle classes instead of doing a full page reload.
+  // Intercept clicks and toggle classes instead of doing a full page reload;
+  // on-demand tabs load on first open (above).
   var _statsBuilt = (activeTab === 'stats')
   document.querySelectorAll('.tab-link').forEach(function(link) {
     link.addEventListener('click', function(e) {
@@ -5531,9 +4634,14 @@ const reviewerBreadcrumbJsonLd = {
       var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
       if (panel) panel.classList.add('active')
       history.replaceState({}, '', '?tab=' + tab)
+      ensureTab(tab)
       if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
       if (tab === 'achievements' && window.__achEnsure) window.__achEnsure()
     })
+    var _tabOf = function() { return new URL(link.href, location.origin).searchParams.get('tab') }
+    link.addEventListener('mouseenter', function() { prefetchTab(_tabOf()) })
+    link.addEventListener('focus', function() { prefetchTab(_tabOf()) })
+    link.addEventListener('touchstart', function() { prefetchTab(_tabOf()) }, { passive: true })
   })
 
   window.addEventListener('popstate', function() {
@@ -5544,9 +4652,17 @@ const reviewerBreadcrumbJsonLd = {
     document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active') })
     var panel = document.querySelector('.tab-panel[data-tab="' + tab + '"]')
     if (panel) panel.classList.add('active')
+    ensureTab(tab)
     if (tab === 'stats' && !_statsBuilt) { buildStats(); _statsBuilt = true }
     if (tab === 'achievements' && window.__achEnsure) window.__achEnsure()
   })
+</script>
+<script>
+  // Cards inside on-demand tabs arrive after load, and a component's script only
+  // ships with pages that render it — so load the card behaviour up front.
+  import '../../scripts/review-card';
+  import '../../scripts/recommendation-feed-card';
+  import '../../scripts/list-card';
 </script>
 <script>
   // Strip ?steam= param left by the OAuth callback — no auto-action, user syncs manually
@@ -5640,6 +4756,8 @@ async function createNewList(btn) {
 {isOwnProfile && <RecommendationComposer />}
 
 <style is:global>
+  .tab-lazy-loading, .tab-lazy-error { text-align: center; padding: 48px 24px; font-size: 14px; color: var(--text-tertiary); }
+  .tab-lazy-retry { margin-left: 6px; background: none; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; color: var(--text-secondary); font: inherit; cursor: pointer; }
   .prof-recs-empty { text-align: center; padding: 48px 24px; }
   .prof-recs-empty-title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
   .prof-recs-empty p { font-size: 14px; color: var(--text-tertiary); line-height: 1.6; max-width: 380px; margin: 0 auto; }
@@ -5649,7 +4767,6 @@ async function createNewList(btn) {
   // Recommendations tab: Overview / Detailed views + shared search & filters —
   // same behaviour as the Reviews tab.
   (function () {
-    if (!document.getElementById('profRecsOverviewList')) return;
     var _recState = { view: 'overview', sort: 'az', genre: '', platform: '', dev: '', search: '' };
 
     function applyRecFilters() {
@@ -5706,7 +4823,13 @@ async function createNewList(btn) {
     };
     window.searchRecs = function (v) { _recState.search = (v || '').trim(); applyRecFilters(); };
 
-    applyRecFilters();
+    // Initial A–Z order — at load for ?tab=recommendations, else when the
+    // on-demand fragment arrives.
+    window.__profileTabInit = window.__profileTabInit || {};
+    window.__profileTabInit.recommendations = function () {
+      if (document.getElementById('profRecsOverviewList')) applyRecFilters();
+    };
+    window.__profileTabInit.recommendations();
   })();
 </script>
 
