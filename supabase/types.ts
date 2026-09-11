@@ -2181,6 +2181,118 @@ export type Database = {
     }
     Functions: {
       get_my_profile_id: { Args: never; Returns: string }
+      group_game_member_scores: {
+        Args: { p_game_ids: string[]; p_group_id: string }
+        Returns: {
+          game_id: string
+          profile_id: string
+          score: number
+        }[]
+      }
+      group_game_review_stats: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+        }
+        Returns: {
+          avg_score: number
+          cover_img_url: string
+          game_id: string
+          max_score: number
+          min_score: number
+          review_count: number
+          slug: string
+          title: string
+        }[]
+      }
+      group_hot_take: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+        }
+        Returns: {
+          community_avg: number
+          community_count: number
+          game_id: string
+          group_avg: number
+          group_count: number
+        }[]
+      }
+      group_member_review_stats: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+        }
+        Returns: {
+          avg_score: number
+          profile_id: string
+          review_count: number
+        }[]
+      }
+      group_review_summary: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+        }
+        Returns: {
+          avg_score: number
+          game_count: number
+          hours_sum: number
+          review_count: number
+        }[]
+      }
+      group_reviews: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+        }
+        Returns: {
+          body: string
+          contains_spoilers: boolean
+          created_at: string | null
+          edited: boolean | null
+          game_id: string
+          id: string
+          platform_played_on: string | null
+          play_time_days: number | null
+          play_time_hours: number | null
+          play_time_months: number | null
+          play_time_weeks: number | null
+          play_time_years: number | null
+          profile_id: string
+          published_at: string | null
+          score: number | null
+          status: string | null
+          title: string | null
+          updated_at: string | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "reviews"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      group_split_decision: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+        }
+        Returns: {
+          game_id: string
+          high_profile_id: string
+          high_score: number
+          low_profile_id: string
+          low_score: number
+          spread: number
+        }[]
+      }
       is_group_admin_or_owner: { Args: { gid: string }; Returns: boolean }
       is_group_member: { Args: { gid: string }; Returns: boolean }
       log_unmatched_steam_titles: {

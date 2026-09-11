@@ -4,12 +4,15 @@ import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../.
 import Layout from "../../../components/Layout.astro";
 import DetailNav from "../../../components/DetailNav.astro";
 import { timeAgo, scoreClass, igdbImage as igdbCover } from '../../../utils/format';
+import { fetchAll } from '../../../utils/fetchAll';
+import { topRatedMinReviews } from '../../../utils/groupStats';
 import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
-const { id } = Astro.params;
+const id = Astro.params.id;
+if (!id) return Astro.redirect("/groups");
 const activeTab = Astro.url.searchParams.get("tab") ?? "overview";
 const joinCode = Astro.url.searchParams.get("code");
 
@@ -22,7 +25,7 @@ if (user) {
 
 // Use admin client for the group query so non-members can view private group info
 // (needed for the join-request wall — RLS would otherwise block non-members)
-const db = getSupabaseAdmin() as any;
+const db = getSupabaseAdmin();
 
 let { data: group, error: groupError } = await db
   .from("groups")
@@ -100,14 +103,26 @@ if (isAdminOrOwner) {
   pendingJoinRequests = jrs ?? [];
 }
 
-const { data: members } = await (supabase as any)
-  .from("group_members")
-  .select("role, joined_at, profiles ( id, username, avatar_url )")
-  .eq("group_id", id)
-  .order("joined_at", { ascending: true });
+// Everything below the header is for people who can see the group: anyone for
+// a public group; members or holders of the invite code for a private one.
+const canViewContent = group.visibility !== "private" || !!canViewPrivate;
 
-const memberList = (members ?? []).map((m: any) => ({ ...m.profiles, role: m.role, joined_at: m.joined_at }));
+// Admin client: RLS shows a group's members only to its other members, so on
+// the user client a visitor to a public group saw 0 members and empty stats.
+const members: any[] = canViewContent
+  ? await fetchAll((from, to) => db
+      .from("group_members")
+      .select("role, joined_at, custom_role_id, profiles ( id, username, avatar_url )")
+      .eq("group_id", id)
+      .order("joined_at", { ascending: true })
+      .order("profile_id")
+      .range(from, to))
+  : [];
+
+const memberList = members.map((m: any) => ({ ...m.profiles, role: m.role, joined_at: m.joined_at }));
 const memberProfileIds = memberList.map((m: any) => m.id);
+const memberById: Record<string, any> = {};
+for (const m of memberList) memberById[m.id] = m;
 
 // ── Stats config (with defaults) ──
 const defaultStats = {
@@ -117,7 +132,7 @@ const defaultStats = {
   show_announcements: true, show_polls: true, show_split_decision: true,
   focus_genre_id: null as string | null, focus_platform_id: null as string | null,
 };
-const statsConf = { ...defaultStats, ...(group.stats_config ?? {}) };
+const statsConf = { ...defaultStats, ...((group.stats_config ?? {}) as Partial<typeof defaultStats>) };
 
 // ── Announcements ──
 let announcements: any[] = [];
@@ -177,44 +192,94 @@ for (const r of groupRoles) roleMap[r.id] = r;
 
 // Custom role assignments per member
 const memberCustomRoles: Record<string, string | null> = {};
-try {
-  const { data: mcr } = await db.from("group_members")
-    .select("profile_id, custom_role_id").eq("group_id", id);
-  for (const cr of mcr ?? []) memberCustomRoles[cr.profile_id] = cr.custom_role_id ?? null;
-} catch { /* column may not exist yet */ }
+for (const m of members) memberCustomRoles[m.profiles?.id] = m.custom_role_id ?? null;
 
-// ── Genre / platform focus filter ──
-let allowedGameIds: string[] | null = null;
+// ── Genre / platform focus — applied inside the group stat functions ──
 let focusLabel: string | null = null;
 if (statsConf.focus_genre_id) {
-  const { data: genreGames } = await db.from("game_genres").select("game_id").eq("genre_id", statsConf.focus_genre_id);
-  const genreIds = (genreGames ?? []).map((g: any) => g.game_id) as string[];
-  allowedGameIds = genreIds.length === 0 ? ["00000000-0000-0000-0000-000000000000"] : genreIds;
   const { data: gn } = await db.from("genres").select("name").eq("id", statsConf.focus_genre_id).maybeSingle();
   focusLabel = gn?.name ? `${gn.name} focus` : null;
 } else if (statsConf.focus_platform_id) {
-  const { data: platGames } = await db.from("game_platforms").select("game_id").eq("platform_id", statsConf.focus_platform_id);
-  const platIds = (platGames ?? []).map((g: any) => g.game_id) as string[];
-  allowedGameIds = platIds.length === 0 ? ["00000000-0000-0000-0000-000000000000"] : platIds;
   const { data: pl } = await db.from("platforms").select("name").eq("id", statsConf.focus_platform_id).maybeSingle();
   focusLabel = pl?.name ? `${pl.name} focus` : null;
 }
 
-// Accurate full stats — lightweight query, no limit
-let allReviewStatsQuery = (supabase as any)
-  .from("reviews")
-  .select("game_id, score, play_time_hours, profile_id")
-  .in("profile_id", memberProfileIds.length ? memberProfileIds : ["00000000-0000-0000-0000-000000000000"])
-  .eq("status", "published");
-if (allowedGameIds) allReviewStatsQuery = allReviewStatsQuery.in("game_id", allowedGameIds);
-const { data: allReviewStats } = await allReviewStatsQuery;
-const totalReviews = (allReviewStats ?? []).length;
-const uniqueGamesCount = new Set((allReviewStats ?? []).map((r: any) => r.game_id)).size;
-const allGroupScores = (allReviewStats ?? []).map((r: any) => r.score);
-const groupAvgScoreAccurate = allGroupScores.length > 0
-  ? +(allGroupScores.reduce((a: number, b: number) => a + b, 0) / allGroupScores.length).toFixed(1)
-  : null;
-const totalHours = (allReviewStats ?? []).reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0);
+// ── Review stats — aggregated in Postgres (group_* functions, service role).
+// Reading members' review rows here was capped at 1000 rows, so totals came
+// out low once a group had ~150 active reviewers.
+const statArgs = {
+  p_group_id: group.id as string,
+  p_genre_id: statsConf.focus_genre_id ?? undefined,
+  p_platform_id: statsConf.focus_genre_id ? undefined : statsConf.focus_platform_id ?? undefined,
+};
+const TOP_RATED_MIN_REVIEWS = topRatedMinReviews(memberList.length);
+// Critic Spectrum plots the most active reviewers; The Range skips members
+// with fewer than this many reviews when enough members clear it.
+const SPECTRUM_MAX = 40;
+const RANGE_MIN_REVIEWS = 3;
+// Members card shows this many before "See all"
+const MEMBERS_SHOWN = 24;
+
+let summary: { review_count: number; game_count: number; avg_score: number | null; hours_sum: number } | null = null;
+let memberStats: { profile_id: string; review_count: number; avg_score: number }[] = [];
+let topGameRows: any[] = [];
+let topRatedRows: any[] = [];
+let sharedGameRows: any[] = [];
+let splitRow: any = null;
+let hotTakeRow: any = null;
+let activityReviews: any[] = [];
+
+if (canViewContent && memberProfileIds.length > 0) {
+  const gameStats = () => db.rpc("group_game_review_stats", statArgs);
+  const [summaryRes, memberStatsRows, topGamesRes, topRatedRes, sharedRes, splitRes, hotTakeRes, activityRes] = await Promise.all([
+    db.rpc("group_review_summary", statArgs).maybeSingle(),
+    fetchAll((from, to) => db.rpc("group_member_review_stats", statArgs).order("profile_id").range(from, to)),
+    gameStats().order("review_count", { ascending: false }).order("avg_score", { ascending: false }).order("game_id").limit(7),
+    gameStats().gte("review_count", TOP_RATED_MIN_REVIEWS)
+      .order("avg_score", { ascending: false }).order("review_count", { ascending: false }).order("game_id").limit(3),
+    gameStats().gte("review_count", 2).order("review_count", { ascending: false }).order("game_id").limit(30),
+    db.rpc("group_split_decision", statArgs).maybeSingle(),
+    db.rpc("group_hot_take", statArgs).maybeSingle(),
+    db.rpc("group_reviews", statArgs)
+      .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
+      .order("published_at", { ascending: false })
+      .limit(50),
+  ]);
+  for (const res of [summaryRes, topGamesRes, topRatedRes, sharedRes, splitRes, hotTakeRes, activityRes]) {
+    if (res.error) console.error("[groups/[id]] stats error:", JSON.stringify(res.error));
+  }
+  summary = summaryRes.data ?? null;
+  memberStats = memberStatsRows;
+  topGameRows = topGamesRes.data ?? [];
+  topRatedRows = topRatedRes.data ?? [];
+  sharedGameRows = sharedRes.data ?? [];
+  splitRow = splitRes.data ?? null;
+  hotTakeRow = hotTakeRes.data ?? null;
+  activityReviews = activityRes.data ?? [];
+}
+
+const totalReviews = summary?.review_count ?? 0;
+const uniqueGamesCount = summary?.game_count ?? 0;
+const groupAvgScoreAccurate = summary?.avg_score != null ? +summary.avg_score.toFixed(1) : null;
+const totalHours = summary?.hours_sum ?? 0;
+
+// Second wave: rows that name games or members the first wave only had ids for
+const sharedGameIds = sharedGameRows.map((g: any) => g.game_id);
+const extraGameIds = [splitRow?.game_id, hotTakeRow?.game_id].filter(Boolean);
+const [sharedScoreRows, { data: extraGames }] = await Promise.all([
+  sharedGameIds.length
+    ? fetchAll((from, to) => db.rpc("group_game_member_scores", { p_group_id: group.id, p_game_ids: sharedGameIds })
+        .order("game_id").order("profile_id").range(from, to))
+    : Promise.resolve([] as any[]),
+  extraGameIds.length
+    ? db.from("games").select("id, title, slug, cover_img_url").in("id", extraGameIds)
+    : Promise.resolve({ data: [] as any[] }),
+]);
+const extraGameById: Record<string, any> = {};
+for (const g of extraGames ?? []) extraGameById[g.id] = g;
+
+const toGame = (row: any) => ({ id: row.game_id, title: row.title, slug: row.slug, cover_img_url: row.cover_img_url });
+const toGameStat = (row: any) => ({ game: toGame(row), count: row.review_count, avgScore: +row.avg_score.toFixed(1) });
 
 const { data: watchlistData } = await (supabase as any)
   .from("group_watchlist")
@@ -234,89 +299,40 @@ const { data: sessionsData } = await (supabase as any)
   .order("played_at", { ascending: false })
   .limit(50);
 
-let sharedGames: any[] = [];
-if (memberProfileIds.length >= 2) {
-  let memberReviewsQuery = (supabase as any)
-    .from("reviews")
-    .select("profile_id, game_id, score, games ( id, title, slug, cover_img_url )")
-    .in("profile_id", memberProfileIds)
-    .eq("status", "published");
-  if (allowedGameIds) memberReviewsQuery = memberReviewsQuery.in("game_id", allowedGameIds);
-  const { data: memberReviews } = await memberReviewsQuery;
+// Stats tab: the 30 games most members reviewed, with each member's score
+const scoresByGame: Record<string, { profile_id: string; score: number }[]> = {};
+for (const s of sharedScoreRows) (scoresByGame[s.game_id] ??= []).push({ profile_id: s.profile_id, score: s.score });
+const sharedGames = sharedGameRows.map((row: any) => ({
+  game: toGame(row),
+  reviews: (scoresByGame[row.game_id] ?? []).sort((a, b) => b.score - a.score),
+}));
 
-  const gameReviewMap: Record<string, any> = {};
-  for (const r of memberReviews ?? []) {
-    if (!gameReviewMap[r.game_id]) gameReviewMap[r.game_id] = { game: r.games, reviews: [] };
-    gameReviewMap[r.game_id].reviews.push({ profile_id: r.profile_id, score: r.score });
-  }
-  sharedGames = Object.values(gameReviewMap)
-    .filter((g: any) => g.reviews.length >= 2)
-    .sort((a: any, b: any) => b.reviews.length - a.reviews.length)
-    .slice(0, 30);
-}
-
-// Split Decision — the shared game where two members disagree the most
-let splitDecision: any = null;
-if (sharedGames.length > 0) {
-  let maxSpread = 0;
-  for (const g of sharedGames) {
-    let hi = g.reviews[0], lo = g.reviews[0];
-    for (const r of g.reviews) {
-      if (r.score > hi.score) hi = r;
-      if (r.score < lo.score) lo = r;
+// Split Decision — the game where two members disagree the most
+const splitDecision = splitRow && extraGameById[splitRow.game_id] && memberById[splitRow.high_profile_id] && memberById[splitRow.low_profile_id]
+  ? {
+      game: extraGameById[splitRow.game_id],
+      spread: splitRow.spread,
+      high: { ...memberById[splitRow.high_profile_id], score: splitRow.high_score },
+      low: { ...memberById[splitRow.low_profile_id], score: splitRow.low_score },
     }
-    const spread = hi.score - lo.score;
-    if (spread > maxSpread) {
-      maxSpread = spread;
-      const hiMember = memberList.find((m: any) => m.id === hi.profile_id);
-      const loMember = memberList.find((m: any) => m.id === lo.profile_id);
-      splitDecision = { game: g.game, spread, high: { ...hiMember, score: hi.score }, low: { ...loMember, score: lo.score } };
-    }
-  }
-}
-
-let activityQuery = (supabase as any)
-  .from("reviews")
-  .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
-  .in("profile_id", memberProfileIds.length ? memberProfileIds : ['00000000-0000-0000-0000-000000000000'])
-  .eq("status", "published")
-  .order("published_at", { ascending: false })
-  .limit(50);
-if (allowedGameIds) activityQuery = activityQuery.in("game_id", allowedGameIds);
-const { data: activityReviews } = await activityQuery;
-
-const gameCounts: Record<string, { game: any; count: number; avgScore: number; scores: number[] }> = {};
-for (const r of activityReviews ?? []) {
-  const gid = r.games?.id;
-  if (!gid) continue;
-  if (!gameCounts[gid]) gameCounts[gid] = { game: r.games, count: 0, avgScore: 0, scores: [] };
-  gameCounts[gid].count++;
-  gameCounts[gid].scores.push(r.score);
-}
-const gameList = Object.values(gameCounts)
-  .map((g: any) => ({ ...g, avgScore: +(g.scores.reduce((a: number, b: number) => a + b, 0) / g.scores.length).toFixed(1) }));
-const topGames = [...gameList].sort((a: any, b: any) => b.count - a.count).slice(0, 7);
-const topRatedGames = [...gameList].sort((a: any, b: any) => b.avgScore - a.avgScore).slice(0, 3);
-
-const allScores = (activityReviews ?? []).map((r: any) => r.score);
-const groupAvgScore = allScores.length > 0
-  ? +(allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length).toFixed(1)
   : null;
 
-// Critic spectrum — avg score per member
-const memberAvgScores = memberList
-  .map((m: any) => {
-    const revs = (allReviewStats ?? []).filter((r: any) => r.profile_id === m.id);
-    if (revs.length === 0) return null;
-    const avg = +(revs.reduce((s: number, r: any) => s + r.score, 0) / revs.length).toFixed(1);
-    return { ...m, avgScore: avg, reviewCount: revs.length };
-  })
-  .filter(Boolean);
+const topGames = topGameRows.map(toGameStat);
+const topRatedGames = topRatedRows.map(toGameStat);
+
+// Critic spectrum — avg score per member, most active reviewers first
+const memberAvgScores = memberStats
+  .filter((s) => memberById[s.profile_id])
+  .sort((a, b) => b.review_count - a.review_count || a.profile_id.localeCompare(b.profile_id))
+  .slice(0, SPECTRUM_MAX)
+  .map((s) => ({ ...memberById[s.profile_id], avgScore: +s.avg_score.toFixed(1), reviewCount: s.review_count }));
 
 // The Range — the toughest and easiest graders in the group
 let scoreRange: any = null;
-if (memberAvgScores.length >= 2) {
-  const sorted = [...memberAvgScores].sort((a: any, b: any) => a.avgScore - b.avgScore);
+const settled = memberAvgScores.filter((m: any) => m.reviewCount >= RANGE_MIN_REVIEWS);
+const rangePool = settled.length >= 2 ? settled : memberAvgScores;
+if (rangePool.length >= 2) {
+  const sorted = [...rangePool].sort((a: any, b: any) => a.avgScore - b.avgScore);
   const toughest = sorted[0];
   const easiest = sorted[sorted.length - 1];
   if (toughest.id !== easiest.id && toughest.avgScore !== easiest.avgScore) {
@@ -325,31 +341,13 @@ if (memberAvgScores.length >= 2) {
 }
 
 // Hot take — group's biggest divergence from community average
-const gameListIds = gameList.map((g: any) => g.game?.id).filter(Boolean);
-let hotTake: any = null;
-if (gameListIds.length > 0) {
-  const { data: communityRevs } = await (supabase as any)
-    .from("reviews")
-    .select("game_id, score")
-    .in("game_id", gameListIds)
-    .eq("status", "published");
-  const commGroups: Record<string, number[]> = {};
-  for (const r of communityRevs ?? []) {
-    if (!commGroups[r.game_id]) commGroups[r.game_id] = [];
-    commGroups[r.game_id].push(r.score);
-  }
-  let maxDelta = 0;
-  for (const g of gameList) {
-    const gid = g.game?.id;
-    if (!gid || !commGroups[gid] || commGroups[gid].length < 3) continue;
-    const commAvg = +(commGroups[gid].reduce((a: number, b: number) => a + b, 0) / commGroups[gid].length).toFixed(1);
-    const delta = +((g.avgScore as number) - commAvg).toFixed(1);
-    if (Math.abs(delta) > maxDelta) {
-      maxDelta = Math.abs(delta);
-      hotTake = { game: g.game, groupAvg: g.avgScore, commAvg, delta };
-    }
-  }
-}
+const hotTake = hotTakeRow && extraGameById[hotTakeRow.game_id]
+  ? (() => {
+      const groupAvg = +hotTakeRow.group_avg.toFixed(1);
+      const commAvg = +hotTakeRow.community_avg.toFixed(1);
+      return { game: extraGameById[hotTakeRow.game_id], groupAvg, commAvg, delta: +(groupAvg - commAvg).toFixed(1) };
+    })()
+  : null;
 
 function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
 const inviteUrl = group.invite_code
@@ -1261,8 +1259,8 @@ const groupOgDescription = group.description
             </div>
           )}
 
-          {memberList.map((m: any) => (
-            <div class="member-item" data-profile-id={m.id}>
+          {memberList.map((m: any, i: number) => (
+            <div class={`member-item${i >= MEMBERS_SHOWN ? " member-extra" : ""}`} data-profile-id={m.id} style={i >= MEMBERS_SHOWN ? "display:none" : undefined}>
               <div class="member-avatar">
                 {m.avatar_url
                   ? <img src={m.avatar_url} alt={m.username} />
@@ -1286,6 +1284,11 @@ const groupOgDescription = group.description
               )}
             </div>
           ))}
+          {memberList.length > MEMBERS_SHOWN && (
+            <button id="see-all-members-btn" data-label={`See all ${memberList.length}`} onclick="toggleAllMembers()" style="display:block;width:100%;margin-top:8px;padding:6px;border:none;border-radius:8px;background:var(--tag-bg);color:var(--accent);font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;text-align:center">
+              See all {memberList.length}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1315,18 +1318,12 @@ const groupOgDescription = group.description
                 <span class={`variance-tag ${varClass}`}>{varLabel}</span>
               </div>
               <div class="compare-scores">
-                {memberList.map((m: any) => {
-                  const rev = g.reviews.find((r: any) => r.profile_id === m.id);
-                  return (
-                    <div class="compare-score-item">
-                      <span class="compare-username">@{m.username}</span>
-                      {rev
-                        ? <div class={`score-badge ${scoreClass(rev.score)}`}>{rev.score}</div>
-                        : <span style="font-size:12px;color:var(--text-tertiary);font-style:italic">—</span>
-                      }
-                    </div>
-                  );
-                })}
+                {g.reviews.filter((r: any) => memberById[r.profile_id]).map((r: any) => (
+                  <div class="compare-score-item">
+                    <span class="compare-username">@{memberById[r.profile_id].username}</span>
+                    <div class={`score-badge ${scoreClass(r.score)}`}>{r.score}</div>
+                  </div>
+                ))}
               </div>
             </div>
           );
@@ -1796,6 +1793,16 @@ function toggleMoreReviews() {
   btn.textContent = isHidden ? 'See less' : (btn.dataset.label || 'See more');
 }
 window.toggleMoreReviews = toggleMoreReviews;
+
+function toggleAllMembers() {
+  const btn = document.getElementById('see-all-members-btn');
+  if (!btn) return;
+  const show = btn.dataset.open !== '1';
+  document.querySelectorAll('.member-extra').forEach((el) => { el.style.display = show ? '' : 'none'; });
+  btn.dataset.open = show ? '1' : '';
+  btn.textContent = show ? 'See less' : (btn.dataset.label || 'See all');
+}
+window.toggleAllMembers = toggleAllMembers;
 
 async function deleteSession(sessionId) {
   if (!confirm('Delete this session?')) return;
