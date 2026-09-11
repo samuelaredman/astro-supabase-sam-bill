@@ -349,6 +349,29 @@ every route still enforces that the user is logged in.
 | `check_group_limit()` | trigger | Enforces max 10 groups per user (called by `enforce_group_limit` trigger). |
 | `search_games(query, ...)` | records | Full-text + trigram game search. Combines exact match, prefix, LIKE, `ts_rank`, and `similarity()` into a ranked result. Used by the game search API. |
 
+### Review stats — never aggregate review rows in JS
+
+Site-wide and hub-wide review stats come from Postgres. `game_review_stats` is a view with one
+row per reviewed game (`review_count`, `score_sum`, `avg_score`, `hours_count`, `hours_sum`, over
+published reviews). The functions below are built on it and return only the rows a page renders.
+Do not `select` review rows to count or average them in JS: it ships every review over the wire,
+and it silently breaks at Supabase's 1000-row cap. Add a function on top of the view instead.
+
+| Function | Used by |
+|----------|---------|
+| `ranked_games(limit, min_reviews, prior_weight)` | `/rankings` (Bayesian order) |
+| `review_score_summary()` | `/rankings` sidebar totals |
+| `most_reviewed_games(limit, genre_id?, platform_id?, exclude_profile_id?)` | `/search` browse, `/discover` fallback |
+| `top_studios_by_reviewed_games(limit)` | `/search` studio tab |
+| `game_rank_stats(game_id, genre_id, release_year)` | `/games/[slug]` ranks + genre average |
+| `reviewer_volume_percentile(profile_id)` | `/reviewers/[username]` |
+| `profile_game_community_stats(profile_id)` | `/reviewers/[username]` community averages |
+| `hub_game_review_stats(genre_id? \| platform_id? \| company_id?)` | genre / platform / studio hubs |
+
+The view aggregates when it's read. Past tens of thousands of reviews, replace it with a table of
+the same name and columns that a trigger on `reviews` keeps up to date. Every caller reads through
+the view's interface, so no caller changes.
+
 ### Game search internals
 `games` has three search indexes: `search_vector` (tsvector), `title_search` (tsvector),
 and a trigram index on `title`. The `search_games` function uses all three plus

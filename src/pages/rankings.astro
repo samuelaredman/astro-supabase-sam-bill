@@ -23,33 +23,26 @@ if (user) {
   currentProfile = cp;
 }
 
-const { data: scoreRows } = await (supabase as any)
-  .from('reviews').select('game_id, score').eq('status', 'published');
-
-const gameMap: Record<string, { scores: number[] }> = {};
-for (const r of scoreRows ?? []) {
-  if (!gameMap[r.game_id]) gameMap[r.game_id] = { scores: [] };
-  gameMap[r.game_id].scores.push(r.score);
-}
-
-const allScores = (scoreRows ?? []).map((r: any) => r.score);
-const globalMean = allScores.length > 0
-  ? allScores.reduce((a: number, b: number) => a + b, 0) / allScores.length
-  : 7;
-
+// Bayesian ranking (each game's scores blended with C phantom reviews at the
+// site-wide mean) runs in Postgres — see ranked_games(). It used to read every
+// published review and rank in JS, which Supabase's 1000-row cap would have
+// silently truncated.
 const C = 5;
 const MIN_REVIEWS = 2;
 
-const ranked = Object.entries(gameMap)
-  .filter(([, d]) => d.scores.length >= MIN_REVIEWS)
-  .map(([gameId, d]) => {
-    const n = d.scores.length;
-    const rawAvg = d.scores.reduce((a, b) => a + b, 0) / n;
-    const bayesian = (C * globalMean + d.scores.reduce((a, b) => a + b, 0)) / (C + n);
-    return { gameId, reviewCount: n, rawAvg, bayesian };
-  })
-  .sort((a, b) => b.bayesian - a.bayesian)
-  .slice(0, 100);
+const [{ data: rankedRows }, { data: summaryRows }] = await Promise.all([
+  (supabase as any).rpc('ranked_games', { p_limit: 100, p_min_reviews: MIN_REVIEWS, p_prior_weight: C }),
+  (supabase as any).rpc('review_score_summary'),
+]);
+const totalReviews: number = summaryRows?.[0]?.review_count ?? 0;
+const globalMean: number = summaryRows?.[0]?.avg_score ?? 7;
+
+const ranked: { gameId: string; reviewCount: number; rawAvg: number; bayesian: number }[] = (rankedRows ?? []).map((r: any) => ({
+  gameId: r.game_id as string,
+  reviewCount: r.review_count as number,
+  rawAvg: r.avg_score as number,
+  bayesian: r.bayesian_score as number,
+}));
 
 let rankedGames: any[] = [];
 if (ranked.length > 0) {
@@ -146,7 +139,7 @@ if (ranked.length > 0) {
         </div>
         <div class="stat-row">
           <span class="stat-label">Total reviews</span>
-          <span class="stat-value">{(scoreRows ?? []).length}</span>
+          <span class="stat-value">{totalReviews}</span>
         </div>
         <div class="stat-row">
           <span class="stat-label">Community avg</span>
