@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../../utils/api";
+import { requireAuth, json, getGroupAuthority } from "../../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -13,8 +13,7 @@ export const POST: APIRoute = async (context) => {
     .select("id, group_id, profile_id").eq("id", announcement_id).maybeSingle();
   if (!announcement) return json({ error: "Announcement not found" }, 404);
 
-  const { data: membership } = await db.from("group_members")
-    .select("role, custom_role_id").eq("group_id", announcement.group_id).eq("profile_id", profile.id).maybeSingle();
+  const membership = await getGroupAuthority(db, announcement.group_id, profile.id);
   if (!membership) return json({ error: "Not a member" }, 403);
 
   let canManage = ["owner", "admin"].includes(membership.role);

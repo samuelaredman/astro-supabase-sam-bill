@@ -79,6 +79,35 @@ export async function requireAdmin(
   return { auth, response: null };
 }
 
+export interface GroupAuthority {
+  role: string;
+  custom_role_id: string | null;
+}
+
+/**
+ * The caller's standing in a group, for permission checks: their group_members
+ * role and custom role — except that site admins count as a group admin in
+ * every group, joined or not, so they can moderate the groups they run.
+ * Owner-only actions (delete, transfer ownership, promote to admin) keep
+ * checking for the real owner row. null = not a member and not a site admin.
+ *
+ * For admin-gated actions only. Member actions (leave, vote, log a session)
+ * should read group_members directly: a site admin who hasn't joined isn't in it.
+ */
+export async function getGroupAuthority(
+  db: SupabaseAdmin,
+  groupId: string,
+  profileId: string
+): Promise<GroupAuthority | null> {
+  const [{ data: membership }, { data: adminRow }] = await Promise.all([
+    db.from("group_members")
+      .select("role, custom_role_id").eq("group_id", groupId).eq("profile_id", profileId).maybeSingle(),
+    db.from("site_admins").select("profile_id").eq("profile_id", profileId).maybeSingle(),
+  ]);
+  if (!adminRow || membership?.role === "owner") return membership;
+  return { role: "admin", custom_role_id: null };
+}
+
 /**
  * Page-oriented counterpart to requireAdmin, for .astro pages (which redirect
  * rather than return a JSON error response). Returns the profile (for Layout's

@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../utils/api";
+import { requireAuth, json, getGroupAuthority } from "../../../utils/api";
 import { validateName } from "../../../utils/moderation/nameRules";
 
 function randomCode(len = 8) {
@@ -14,8 +14,7 @@ export const POST: APIRoute = async (context) => {
   const body = await context.request.json();
   const { group_id, name, description, visibility, regenerate_invite, join_prompt, stats_config, requires_approval } = body;
 
-  const { data: membership } = await db.from("group_members")
-    .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
+  const membership = await getGroupAuthority(db, group_id, profile.id);
   if (!membership) return json({ error: "Not authorized" }, 403);
 
   const isOwner = membership.role === "owner";

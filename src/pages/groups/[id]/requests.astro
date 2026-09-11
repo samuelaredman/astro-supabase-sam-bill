@@ -2,6 +2,7 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
+import { getGroupAuthority } from "../../../utils/api";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const { data: { user } } = await supabase.auth.getUser();
@@ -18,19 +19,8 @@ const { data: group } = await db
   .from("groups").select("id, name, visibility").eq("id", id).single();
 if (!group) return Astro.redirect("/groups");
 
-// Resilient membership query — fall back to role-only if custom_role_id column doesn't exist yet
-let membership: any = null;
-{
-  const { data: m, error: mErr } = await db.from("group_members")
-    .select("role, custom_role_id").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
-  if (mErr) {
-    const { data: m2 } = await db.from("group_members")
-      .select("role").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
-    membership = m2;
-  } else {
-    membership = m;
-  }
-}
+// Site admins count as a group admin here without joining (getGroupAuthority)
+const membership = await getGroupAuthority(db, group.id, profile.id);
 
 // Determine access: owner, admin, or custom role with can_remove_members
 let canManage = membership && ["owner", "admin"].includes(membership.role);

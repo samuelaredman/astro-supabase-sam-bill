@@ -6,6 +6,7 @@ import DetailNav from "../../../components/DetailNav.astro";
 import { timeAgo, scoreClass, igdbImage as igdbCover } from '../../../utils/format';
 import { fetchAll } from '../../../utils/fetchAll';
 import { topRatedMinReviews } from '../../../utils/groupStats';
+import { getGroupAuthority, type GroupAuthority } from '../../../utils/api';
 import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 
@@ -50,18 +51,26 @@ if (!group) return Astro.redirect("/groups");
 const needsApproval = group.visibility === "private" || !!group.requires_approval;
 
 let membership: any = null;
+let authority: GroupAuthority | null = null;
 if (currentProfile) {
-  const { data: m } = await (supabase as any)
-    .from("group_members").select("role").eq("group_id", id).eq("profile_id", currentProfile.id).maybeSingle();
+  const [{ data: m }, a] = await Promise.all([
+    db.from("group_members").select("role").eq("group_id", id).eq("profile_id", currentProfile.id).maybeSingle(),
+    getGroupAuthority(db, id, currentProfile.id),
+  ]);
   membership = m;
+  authority = a;
 }
 
 const isMember = !!membership;
-const isAdminOrOwner = ["owner", "admin"].includes(membership?.role);
+// Site admins get admin controls in every group without joining (getGroupAuthority)
+const isAdminOrOwner = ["owner", "admin"].includes(authority?.role ?? "");
 const isOwner = membership?.role === "owner";
+const isSiteAdminGuest = !isMember && isAdminOrOwner;
+// Announcements and polls are for members — and for site admins moderating them
+const canSeeMemberContent = isMember || isAdminOrOwner;
 
 // Private groups: non-members need a valid invite code to see the page
-const canViewPrivate = isMember || (joinCode && joinCode.toUpperCase() === group.invite_code);
+const canViewPrivate = canSeeMemberContent || (joinCode && joinCode.toUpperCase() === group.invite_code);
 if (group.visibility === "private" && !canViewPrivate) {
   // Don't redirect — render a join-request wall below (handled in HTML)
 }
@@ -136,8 +145,9 @@ const statsConf = { ...defaultStats, ...((group.stats_config ?? {}) as Partial<t
 
 // ── Announcements ──
 let announcements: any[] = [];
-if (isMember) {
-  const { data: ann } = await (supabase as any)
+if (canSeeMemberContent) {
+  // Admin client: site admins moderating a group they haven't joined can't read these through RLS
+  const { data: ann } = await db
     .from("group_announcements")
     .select("id, body, pinned, created_at, profiles ( id, username, avatar_url )")
     .eq("group_id", id)
@@ -149,8 +159,8 @@ if (isMember) {
 
 // ── Polls ──
 let polls: any[] = [];
-if (isMember) {
-  const { data: pollRows } = await (supabase as any)
+if (canSeeMemberContent) {
+  const { data: pollRows } = await db
     .from("group_polls")
     .select("id, question, closed, created_at, profile_id")
     .eq("group_id", id)
@@ -159,9 +169,11 @@ if (isMember) {
 
   if (pollRows?.length) {
     const pollIds = pollRows.map((p: any) => p.id);
-    const [{ data: optionRows }, { data: voteRows }] = await Promise.all([
-      (supabase as any).from("group_poll_options").select("id, poll_id, label, position").in("poll_id", pollIds).order("position", { ascending: true }),
-      (supabase as any).from("group_poll_votes").select("poll_id, option_id, profile_id").in("poll_id", pollIds),
+    // Votes are paged: five polls in a 250-member group can pass the 1000-row cap
+    const [{ data: optionRows }, voteRows] = await Promise.all([
+      db.from("group_poll_options").select("id, poll_id, label, position").in("poll_id", pollIds).order("position", { ascending: true }),
+      fetchAll((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
+        .in("poll_id", pollIds).order("id").range(from, to)),
     ]);
     polls = pollRows.map((p: any) => {
       const options = (optionRows ?? []).filter((o: any) => o.poll_id === p.id);
@@ -687,6 +699,7 @@ const groupOgDescription = group.description
         <span class="badge">{group.visibility}</span>
         {group.visibility === "public" && group.requires_approval && <span class="badge">Application required</span>}
         {membership && <span class="badge badge-accent">{membership.role}</span>}
+        {isSiteAdminGuest && <span class="badge badge-accent">site admin</span>}
         {focusLabel && <span class="badge" style="background:rgba(96,80,200,.12);color:var(--accent)">🎯 {focusLabel}</span>}
       </div>
       <div class="group-stats-row">
@@ -753,7 +766,7 @@ const groupOgDescription = group.description
       )}
 
       {/* Members */}
-      {isMember && isAdminOrOwner && (
+      {isAdminOrOwner && (
         <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
       )}
       {isMember && !isOwner && (
@@ -799,7 +812,7 @@ const groupOgDescription = group.description
   )}
 
   {/* Full tab nav — only shown to members or non-private groups */}
-  {(isMember || group.visibility !== "private") && (
+  {(canSeeMemberContent || group.visibility !== "private") && (
   <nav class="tab-nav">
     <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>Overview</a>
     {statsConf.show_sessions && (
@@ -819,7 +832,7 @@ const groupOgDescription = group.description
     <div class="two-col">
       <!-- Left: top games + podium -->
       <div>
-        {statsConf.show_announcements && isMember && (
+        {statsConf.show_announcements && canSeeMemberContent && (
           <div class="card">
             <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
               <span>Announcements</span>
@@ -1141,7 +1154,7 @@ const groupOgDescription = group.description
         </div>}
 
         <!-- Polls -->
-        {statsConf.show_polls && isMember && (
+        {statsConf.show_polls && canSeeMemberContent && (
           <div class="card">
             <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
               <span>Polls</span>
