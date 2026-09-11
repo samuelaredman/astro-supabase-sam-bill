@@ -3102,8 +3102,13 @@ const reviewerBreadcrumbJsonLd = {
     '</div>'
   }
 
+  // Latest request wins. Each call gets a sequence number and responses that a
+  // newer call has superseded are dropped. (This used to return early while a
+  // fetch was in flight, silently discarding the newer request — e.g. a search
+  // typed while the tab's first page was loading left the grid unfiltered.)
+  var _libFetchSeq = 0
   async function fetchLibrary(page) {
-    if (_libLoading) return
+    var seq = ++_libFetchSeq
     _libLoading = true
     var grid = document.getElementById('libGrid')
     if (grid) grid.innerHTML = '<div style="padding:48px 0;text-align:center;color:var(--text-tertiary);font-size:13px">Loading…</div>'
@@ -3123,14 +3128,16 @@ const reviewerBreadcrumbJsonLd = {
       var res = await fetch('/api/user-game-status/library?' + params.toString())
       if (!res.ok) throw new Error('fetch failed')
       var data = await res.json()
+      if (seq !== _libFetchSeq) return
       _libItems = _enrichItems(data.items ?? [])
       _libPage  = data.page ?? 1
       _libTotal = data.total ?? 0
     } catch(e) {
+      if (seq !== _libFetchSeq) return
       console.error('[library] fetch error', e)
       _libItems = []
     } finally {
-      _libLoading = false
+      if (seq === _libFetchSeq) _libLoading = false
     }
     _renderGrid()
     _updateEditBar()
