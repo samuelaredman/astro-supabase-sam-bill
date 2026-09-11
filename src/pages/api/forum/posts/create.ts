@@ -14,8 +14,8 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "Title and body are required." }, 400);
   if (title.trim().length > 200)
     return json({ error: "Title must be 200 characters or fewer." }, 400);
-  if (body.trim().length > 20000)
-    return json({ error: "Post must be 20000 characters or fewer." }, 400);
+  if (body.trim().length > 2000000)
+    return json({ error: "Post body is too large." }, 400);
 
   const { data: inserted, error } = await (db as any)
     .from("forum_posts")

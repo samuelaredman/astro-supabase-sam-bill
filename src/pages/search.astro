@@ -1,15 +1,17 @@
 ---
-import { getSupabase, createSupabaseServerClientFromContext } from '../utils/database'
+import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../utils/database'
 import { igdbFetch, escapeIgdbString } from '../utils/igdb'
 import { igdbImage } from '../utils/format'
 import { GAME_CATEGORY_OR_FILTER } from '../utils/games'
 import Layout from '../components/Layout.astro'
+import { setPageCacheHeaders } from '../utils/cache';
+import { getPageUser } from '../utils/pageAuth';
 
 export const prerender = false
 
 const supabase = getSupabase()
 const serverClient = createSupabaseServerClientFromContext(Astro)
-const { data: { user } } = await serverClient.auth.getUser()
+const user = await getPageUser(Astro, serverClient)
 const isLoggedIn = !!user
 
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null
@@ -125,47 +127,17 @@ if (tab === 'games') {
     igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.igdb_id) && !existingIds.has(g.id))
 
   } else {
-    const { data: allReviews } = await supabase
-      .from('reviews')
-      .select('game_id')
-      .eq('status', 'published')
-      .limit(2000)
+    // Most-reviewed games, optionally within a genre and/or platform, ranked in
+    // Postgres (most_reviewed_games). This used to read every published review
+    // plus every game in the genre/platform — each capped at 1000 rows.
+    // Server-only RPC (service role) — see the 20260911000005 migration.
+    const { data: topRows } = await (getSupabaseAdmin() as any).rpc('most_reviewed_games', {
+      p_limit: 48,
+      p_genre_id: genreFilter || null,
+      p_platform_id: platformFilter || null,
+    })
 
-    const reviewCountMap: Record<string, number> = {}
-    for (const r of allReviews ?? []) {
-      reviewCountMap[r.game_id] = (reviewCountMap[r.game_id] ?? 0) + 1
-    }
-
-    let topGameIds = Object.entries(reviewCountMap)
-      .sort((a, b) => b[1] - a[1])
-      .map(([id]) => id)
-
-    if (genreFilter || platformFilter) {
-      let genreIds: string[] | null = null
-      let platformIds: string[] | null = null
-
-      if (genreFilter) {
-        const { data: gRows } = await supabase.from('game_genres').select('game_id').eq('genre_id', genreFilter)
-        genreIds = (gRows ?? []).map((r: any) => r.game_id)
-      }
-      if (platformFilter) {
-        const { data: pRows } = await supabase.from('game_platforms').select('game_id').eq('platform_id', platformFilter)
-        platformIds = (pRows ?? []).map((r: any) => r.game_id)
-      }
-
-      if (genreIds && platformIds) {
-        const intersection = new Set(genreIds.filter(id => platformIds!.includes(id)))
-        topGameIds = topGameIds.filter(id => intersection.has(id))
-      } else if (genreIds) {
-        const set = new Set(genreIds)
-        topGameIds = topGameIds.filter(id => set.has(id))
-      } else if (platformIds) {
-        const set = new Set(platformIds)
-        topGameIds = topGameIds.filter(id => set.has(id))
-      }
-    }
-
-    const pageIds = topGameIds.slice(0, 48)
+    const pageIds: string[] = (topRows ?? []).map((r: any) => r.game_id)
 
     if (pageIds.length > 0) {
       const { data: browseGames } = await supabase
@@ -261,41 +233,14 @@ if (tab === 'studios') {
     const { data } = await supabase.from('developers').select('id, name, slug').ilike('name', `%${query}%`).limit(12)
     companies = data ?? []
   } else {
-    const { data: allDevGames } = await supabase
-      .from('game_companies')
-      .select('company_id, game_id')
-      .eq('role', 'developer')
+    // Developers ranked by how many of their games have a published review,
+    // ranked in Postgres (top_studios_by_reviewed_games). This used to read all
+    // of game_companies — far past Supabase's 1000-row cap, so the ranking was
+    // built from an arbitrary slice of it.
+    const { data: topDevs } = await (getSupabaseAdmin() as any).rpc('top_studios_by_reviewed_games', { p_limit: 24 })
 
-    const { data: allReviewRows } = await supabase
-      .from('reviews')
-      .select('game_id')
-      .eq('status', 'published')
-      .limit(5000)
-
-    const reviewGameSet = new Set((allReviewRows ?? []).map((r: any) => r.game_id))
-
-    const companyReviewCount: Record<string, number> = {}
-    for (const row of allDevGames ?? []) {
-      if (reviewGameSet.has(row.game_id)) {
-        companyReviewCount[row.company_id] = (companyReviewCount[row.company_id] ?? 0) + 1
-      }
-    }
-
-    const topCompanyIds = Object.entries(companyReviewCount)
-      .sort((a, b) => b[1] - a[1])
-      .map(([id]) => id)
-      .slice(0, 24)
-
-    if (topCompanyIds.length > 0) {
-      const { data: topDevs } = await supabase
-        .from('developers')
-        .select('id, name, slug')
-        .in('id', topCompanyIds)
-
-      const orderMap = new Map(topCompanyIds.map((id, i) => [id, i]))
-      companies = (topDevs ?? []).sort((a: any, b: any) =>
-        (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
-      )
+    if ((topDevs ?? []).length > 0) {
+      companies = topDevs
     } else {
       const { data } = await supabase.from('developers').select('id, name, slug').order('name').limit(24)
       companies = data ?? []
@@ -350,13 +295,7 @@ const sidebarPlatforms = platformOrder
   .filter(Boolean)
 
 // CDN cache — anonymous visitors share a cached response per unique URL; auth users get a fresh render
-if (!isLoggedIn) {
-  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
-  Astro.response.headers.set('Cache-Control', 'no-store');
-} else {
-  Astro.response.headers.set('Cache-Control', 'private, no-store');
-}
-Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
+setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 ---
 
 <Layout

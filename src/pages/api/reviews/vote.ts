@@ -58,44 +58,47 @@ export const POST: APIRoute = async (context) => {
     notifAction = 'insert';
   }
 
-  // Return the real counts from DB so the client never has to guess
-  const [{ count: upCount }, { count: downCount }] = await Promise.all([
-    db.from('review_votes').select('*', { count: 'exact', head: true }).eq('review_id', review_id).eq('vote', 1),
-    db.from('review_votes').select('*', { count: 'exact', head: true }).eq('review_id', review_id).eq('vote', -1),
+  // Recompute counts and (if we might notify) the review author in a single
+  // round trip instead of three separate ones. One select of this review's
+  // votes is cheaper than two count(*) scans and gives us both totals.
+  const [votesRes, reviewRes] = await Promise.all([
+    db.from('review_votes').select('vote').eq('review_id', review_id),
+    notifAction !== 'none'
+      ? db.from('reviews').select('profile_id').eq('id', review_id).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
 
-  // Fire vote notification (non-blocking)
-  if (notifAction !== 'none') {
+  const voteRows = votesRes.data ?? [];
+  const upCount = voteRows.filter((v: { vote: number }) => v.vote === 1).length;
+  const downCount = voteRows.filter((v: { vote: number }) => v.vote === -1).length;
+
+  // Fire vote notification (non-fatal — must never fail the vote itself)
+  const review = reviewRes.data as { profile_id: string } | null;
+  if (notifAction !== 'none' && review && review.profile_id !== profile.id) {
     try {
-      const { data: review } = await db
-        .from('reviews').select('profile_id').eq('id', review_id).single();
-      // Don't notify if the voter is the review author
-      if (review && review.profile_id !== profile.id) {
-        const notifType = newVote === 1 ? 'review_upvote' : 'review_downvote';
-        const { data: existingNotif } = await db
-          .from('notifications')
-          .select('id')
-          .eq('profile_id', review.profile_id)
-          .eq('actor_profile_id', profile.id)
-          .eq('review_id', review_id)
-          .in('type', ['review_upvote', 'review_downvote'])
-          .maybeSingle();
-        if (existingNotif) {
-          await db.from('notifications').update({ type: notifType, read: false })
-            .eq('id', existingNotif.id);
-        } else {
-          await db.from('notifications').insert({
-            profile_id: review.profile_id,
-            actor_profile_id: profile.id,
-            review_id,
-            type: notifType,
-          });
-        }
+      const notifType = newVote === 1 ? 'review_upvote' : 'review_downvote';
+      // Update an existing upvote/downvote notification in place; only insert a
+      // new row when nothing was updated. Avoids the prior select-then-write.
+      const { data: updated } = await db
+        .from('notifications')
+        .update({ type: notifType, read: false })
+        .eq('profile_id', review.profile_id)
+        .eq('actor_profile_id', profile.id)
+        .eq('review_id', review_id)
+        .in('type', ['review_upvote', 'review_downvote'])
+        .select('id');
+      if (!updated || updated.length === 0) {
+        await db.from('notifications').insert({
+          profile_id: review.profile_id,
+          actor_profile_id: profile.id,
+          review_id,
+          type: notifType,
+        });
       }
     } catch (e) {
       console.error('[vote] notification error (non-fatal):', e);
     }
   }
 
-  return json({ vote: newVote, up: upCount ?? 0, down: downCount ?? 0 });
+  return json({ vote: newVote, up: upCount, down: downCount });
 };

@@ -1,6 +1,23 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, type SupabaseAdmin } from "../../../utils/api";
 
+// PostgREST encodes .in() as URL query params — large arrays get silently
+// truncated. Keep each chunk well inside any gateway URL limit.
+const IN_CHUNK = 100;
+// Insert / RPC payload chunk — large enough to be efficient, small enough to
+// avoid body-size issues at Supabase's API gateway.
+const WRITE_CHUNK = 500;
+// match_steam_games returns at most one row per input title (ROW_NUMBER rn=1).
+// Chunking inputs keeps each RPC response well under Supabase's max-rows=1000
+// hard cap, which Range-header pagination cannot reliably override on RPC calls.
+const TITLE_CHUNK = 200;
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 // Fire-and-forget — logging a sync gap must never fail the actual sync.
 function logUnmatchedTitles(db: SupabaseAdmin, titles: string[]): void {
   if (titles.length === 0) return;
@@ -45,7 +62,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   // Fetch owned games from Steam
-  let steamGames: Array<{ appid: number; name: string; playtime_forever: number }> = [];
+  let steamGames: Array<{ appid: number; name: string; playtime_forever: number; rtime_last_played?: number }> = [];
   try {
     const res = await fetch(
       `https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=true&include_played_free_games=true`
@@ -72,36 +89,68 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0, removed: 0 });
   }
 
-  // Build lowercase→playtime map from Steam library
+  // Build lowercase→playtime / →appid / →last-played maps from Steam library.
+  // rtime_last_played is unix-seconds; 0 means "never played / unknown".
   const steamByTitle = new Map<string, number>();
+  const appidByTitle  = new Map<string, number>();
+  const lastPlayedByTitle = new Map<string, string | null>();
   const originalCaseByTitle = new Map<string, string>();
   for (const g of steamGames) {
     if (g.name) {
-      steamByTitle.set(g.name.toLowerCase().trim(), g.playtime_forever);
-      originalCaseByTitle.set(g.name.toLowerCase().trim(), g.name);
+      const key = g.name.toLowerCase().trim();
+      steamByTitle.set(key, g.playtime_forever);
+      appidByTitle.set(key, g.appid);
+      lastPlayedByTitle.set(
+        key,
+        g.rtime_last_played && g.rtime_last_played > 0
+          ? new Date(g.rtime_last_played * 1000).toISOString()
+          : null,
+      );
+      originalCaseByTitle.set(key, g.name);
     }
   }
 
-  // Match against our games table via DB function (case-insensitive)
+  // Match against our games table via DB function (case-insensitive).
+  // Chunk input titles so each RPC call handles at most TITLE_CHUNK titles.
+  // match_steam_games returns at most one row per input title, so each batch
+  // returns ≤ TITLE_CHUNK rows — safely under Supabase's max-rows=1000 cap.
+  // (Range-header pagination on RPC calls is unreliable when the function uses
+  //  SELECT DISTINCT without ORDER BY, and max-rows still caps the page size.)
   const steamTitles = Array.from(steamByTitle.keys());
-
   console.log(`[steam/import] Sending ${steamTitles.length} titles to match_steam_games`);
   console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
 
-  const { data: matchedGames, error: matchError } = await db
-    .rpc('match_steam_games', { steam_titles: steamTitles });
+  // Fire all title batches in parallel — sequential calls were eating the
+  // entire Netlify 10s timeout before the INSERT step could run.
+  const matchBatchResults = await Promise.all(
+    chunk(steamTitles, TITLE_CHUNK).map(titleBatch =>
+      (db as any).rpc('match_steam_games', { steam_titles: titleBatch })
+    )
+  );
 
-  if (matchError) {
-    console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
-    return json({ error: 'Failed to match games.' }, 500);
+  // steam_title is the input value Steam sent that matched this game — use it
+  // (not our title, which can differ after normalization) to look up playtime
+  // and appid below.
+  const allMatchedGames: Array<{ id: string; title: string; steam_title: string }> = [];
+  const seenMatchedIds = new Set<string>();
+  for (const { data: batchMatches, error: matchError } of matchBatchResults) {
+    if (matchError) {
+      console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
+      return json({ error: 'Failed to match games.' }, 500);
+    }
+    for (const row of (batchMatches ?? []) as Array<{ id: string; title: string; steam_title: string }>) {
+      if (!seenMatchedIds.has(row.id)) {
+        seenMatchedIds.add(row.id);
+        allMatchedGames.push(row);
+      }
+    }
   }
-
-  const matches: Array<{ id: string; title: string }> = matchedGames ?? [];
+  const matches = allMatchedGames;
 
   console.log(`[steam/import] match_steam_games returned ${matches.length} matches:`, matches.map(m => m.title));
 
   if (matches.length > 0) {
-    const matchedTitlesSet = new Set(matches.map(m => m.title.toLowerCase().trim()));
+    const matchedTitlesSet = new Set(matches.map(m => (m.steam_title ?? m.title).toLowerCase().trim()));
     const unmatched = steamTitles.filter(t => !matchedTitlesSet.has(t));
     console.log(`[steam/import] Unmatched Steam titles (${unmatched.length}):`, unmatched);
     logUnmatchedTitles(db, unmatched.map(t => originalCaseByTitle.get(t) ?? t));
@@ -113,20 +162,27 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: steamGames.length, total: steamGames.length });
   }
 
-  // Get this user's existing game statuses to avoid overwriting manual entries
+  // Get this user's existing game statuses to avoid overwriting manual entries.
+  // Chunk .in() to avoid URL truncation — large arrays get silently cut off by
+  // PostgREST's query-string encoding, causing games to appear non-existent and
+  // then fail on INSERT with a unique-constraint violation.
   const matchedGameIds = matches.map(m => m.id);
-  const { data: existingStatuses } = await db
-    .from('user_game_status')
-    .select('game_id, status')
-    .eq('profile_id', profile.id)
-    .in('game_id', matchedGameIds);
-
-  const existingByGameId = new Map<string, string>(
-    (existingStatuses ?? []).map((r: any) => [r.game_id, r.status])
+  const existingByGameId = new Map<string, string>();
+  const existingChunks = await Promise.all(
+    chunk(matchedGameIds, IN_CHUNK).map(ids =>
+      (db as any)
+        .from('user_game_status')
+        .select('game_id, status')
+        .eq('profile_id', profile.id)
+        .in('game_id', ids)
+    )
   );
+  for (const { data: rows } of existingChunks) {
+    for (const r of (rows ?? [])) existingByGameId.set(r.game_id, r.status);
+  }
 
   const toInsert: any[] = [];
-  const toUpdatePlaytime: any[] = [];
+  const toUpdatePlaytime: Array<{ game_id: string; playtime: number; appid: number | null; last_played: string | null }> = [];
   const seenGameIds = new Set<string>();
 
   for (const game of matches) {
@@ -135,8 +191,12 @@ export const POST: APIRoute = async (context) => {
     if (seenGameIds.has(game.id)) continue;
     seenGameIds.add(game.id);
 
-    const playtime = steamByTitle.get(game.title.toLowerCase().trim()) ?? 0;
-    const existing = existingByGameId.get(game.id);
+    // Key off the Steam-sent title, not ours — they diverge after normalization.
+    const key        = (game.steam_title ?? game.title).toLowerCase().trim();
+    const playtime   = steamByTitle.get(key) ?? 0;
+    const appid      = appidByTitle.get(key) ?? null;
+    const lastPlayed = lastPlayedByTitle.get(key) ?? null;
+    const existing   = existingByGameId.get(game.id);
 
     if (!existing) {
       // Skip 0-hour games when playedOnly is set
@@ -147,35 +207,50 @@ export const POST: APIRoute = async (context) => {
         status: 'owned',
         is_owned: true,
         steam_playtime_minutes: playtime,
+        steam_appid: appid,
+        steam_last_played_at: lastPlayed,
       });
     } else {
-      // Already tracked — only update playtime
-      toUpdatePlaytime.push({ game_id: game.id, playtime });
+      // Already tracked (e.g. auto-added when the user reviewed it) — refresh
+      // playtime / appid / last-played without touching their chosen status.
+      toUpdatePlaytime.push({ game_id: game.id, playtime, appid, last_played: lastPlayed });
     }
   }
 
-  // Bulk insert new rows
-  if (toInsert.length > 0) {
-    const { error: insertError } = await db.from('user_game_status').insert(toInsert);
+  // Chunked INSERT — avoids large single-request body failures
+  for (const batch of chunk(toInsert, WRITE_CHUNK)) {
+    const { error: insertError } = await (db as any).from('user_game_status').insert(batch);
     if (insertError) {
       console.error('[steam/import] insert error:', JSON.stringify(insertError));
       return json({ error: 'Failed to save game statuses.' }, 500);
     }
   }
 
-  // Update playtime on existing rows one at a time (no bulk update in PostgREST without RPC)
-  for (const { game_id, playtime } of toUpdatePlaytime) {
-    await db.from('user_game_status')
-      .update({ steam_playtime_minutes: playtime })
-      .eq('profile_id', profile.id)
-      .eq('game_id', game_id);
+  // Bulk playtime update via RPC — replaces one-at-a-time loop that would
+  // timeout on large libraries (e.g. 2000 games × 1 HTTP call each = ~200s)
+  if (toUpdatePlaytime.length > 0) {
+    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime, appid, last_played }) => ({ game_id, playtime, appid, last_played }));
+    for (const batch of chunk(updatePayload, WRITE_CHUNK)) {
+      // Pass the array itself — a jsonb param. JSON.stringify(batch) arrives as a
+      // jsonb *string* scalar, so jsonb_array_elements() inside the function
+      // errors out ("cannot extract elements from a scalar") and every
+      // already-tracked game (e.g. one added by reviewing it) silently kept its
+      // old NULL steam_appid / playtime.
+      const { error: updateError } = await (db as any).rpc('bulk_update_steam_playtime', {
+        p_profile_id: profile.id,
+        p_updates: batch,
+      });
+      if (updateError) {
+        console.error('[steam/import] playtime update error (non-fatal):', JSON.stringify(updateError));
+      }
+    }
   }
 
   // If playedOnly, remove any existing 'owned' rows that were imported with 0 playtime
   // (steam_playtime_minutes = 0 means Steam-imported with no hours; NULL means manually added)
   let removed = 0;
   if (playedOnly) {
-    const { data: removed0, error: removeError } = await db
+    const { data: removed0, error: removeError } = await (db as any)
       .from('user_game_status')
       .delete()
       .eq('profile_id', profile.id)

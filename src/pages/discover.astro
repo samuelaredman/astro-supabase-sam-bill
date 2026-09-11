@@ -1,13 +1,14 @@
 ---
 export const prerender = false;
-import { getSupabase, createSupabaseServerClientFromContext } from '../utils/database';
+import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../utils/database';
 import Layout from '../components/Layout.astro';
 import { igdbImage, scoreClass } from '../utils/format';
 import { GAME_CATEGORY_OR_FILTER } from '../utils/games';
+import { getPageUser } from '../utils/pageAuth';
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
-const { data: { user } } = await serverClient.auth.getUser();
+const user = await getPageUser(Astro, serverClient);
 const isLoggedIn = !!user;
 
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
@@ -93,23 +94,15 @@ if (currentProfile) {
   if (recommendations.length === 0) {
     isFallback = true;
 
-    const { data: fallbackRows } = await (supabase as any)
-      .from('reviews').select('game_id, score').eq('status', 'published');
-
-    const gameStats: Record<string, { count: number; scoreSum: number }> = {};
-    for (const r of fallbackRows ?? []) {
-      if (!gameStats[r.game_id]) gameStats[r.game_id] = { count: 0, scoreSum: 0 };
-      gameStats[r.game_id].count++;
-      gameStats[r.game_id].scoreSum += r.score;
-    }
-
-    const rankedFallback = Object.entries(gameStats)
-      .filter(([gameId]) => !myGameIds.has(gameId))
-      .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 24);
+    // Ranked in Postgres (most_reviewed_games), excluding games this viewer has
+    // already reviewed — it used to read every published review into JS.
+    // Server-only RPC (service role) — see the 20260911000005 migration.
+    const { data: fallbackData } = await (getSupabaseAdmin() as any)
+      .rpc('most_reviewed_games', { p_limit: 24, p_exclude_profile_id: currentProfile.id });
+    const rankedFallback: { game_id: string; review_count: number; avg_score: number }[] = fallbackData ?? [];
 
     if (rankedFallback.length > 0) {
-      const topIds = rankedFallback.map(([gameId]) => gameId);
+      const topIds = rankedFallback.map((r: any) => r.game_id);
       const { data: gameRows } = await (supabase as any)
         .from('games').select('id, title, slug, cover_img_url').in('id', topIds).or(GAME_CATEGORY_OR_FILTER);
 
@@ -117,10 +110,10 @@ if (currentProfile) {
       for (const g of gameRows ?? []) gameById[g.id] = g;
 
       recommendations = rankedFallback
-        .map(([gameId, d]) => ({
-          gameId,
-          recommenderCount: d.count,
-          weightedAvg: d.scoreSum / d.count,
+        .map((r) => ({
+          gameId: r.game_id,
+          recommenderCount: r.review_count,
+          weightedAvg: r.avg_score,
         }))
         .map(r => ({ ...r, game: gameById[r.gameId] }))
         .filter(r => r.game);

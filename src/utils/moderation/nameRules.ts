@@ -37,11 +37,22 @@ export interface ValidateNameResult {
 
 const UNAVAILABLE: ValidateNameResult = { ok: false, error: "That name isn't available." };
 
+// Shared by signup and the change-username endpoint so both entry points enforce
+// the same shape. Existing usernames predating this check (e.g. email-prefix
+// derived ones with dots/hyphens) are grandfathered — it only gates new names.
+const FORMAT = /^[A-Za-z0-9_]{3,20}$/;
+const BAD_FORMAT: ValidateNameResult = {
+  ok: false,
+  error: "Usernames must be 3–20 characters: letters, numbers and underscores only.",
+};
+
 export function validateName(input: unknown): ValidateNameResult {
   // Coerce defensively: this runs on the signup endpoint, and a malformed body
   // (e.g. a non-string username) must never throw and turn into a 500.
   const trimmed = typeof input === "string" ? input.trim() : "";
   if (!trimmed) return UNAVAILABLE;
+
+  if (!FORMAT.test(trimmed)) return BAD_FORMAT;
 
   const normalized = normalize(trimmed);
 

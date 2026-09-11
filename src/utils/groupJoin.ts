@@ -1,4 +1,6 @@
 import type { SupabaseAdmin } from "./api";
+import { getSupabaseAdmin } from "./database";
+import { groupPath } from "./groupSlug";
 
 export type JoinOutcome =
   | { ok: true; groupId: string }
@@ -67,10 +69,11 @@ export async function joinGroup(
 // ── Join after signup ────────────────────────────────────────────────────
 // Signing up from a group page stores the group in the new user's metadata
 // (auth.users.raw_user_meta_data.pending_group) — the one place that survives
-// the email round trip, even when the link is opened on another device. The
-// first signed-in page after confirming (/welcome, or signin as a fallback)
-// joins it and removes the key. Users can write their own metadata, so the
-// join goes through joinGroup's rules like any other.
+// the email round trip, even when the link is opened on another device.
+// /auth/confirm (and set-session, for its hash-fragment branch) calls
+// landingAfterConfirm once the session exists: it joins the group, removes the
+// key, and sends them to the group instead of the feed. Users can write their
+// own metadata, so the join goes through joinGroup's rules like any other.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODE_RE = /^[A-Za-z0-9]{1,16}$/;
@@ -128,4 +131,27 @@ export async function consumePendingGroup(
   if (!joined) console.log("[groupJoin] pending group not joined:", group.id, outcome.status, outcome.code ?? outcome.error);
 
   return { group, joined };
+}
+
+/**
+ * Where to send someone who has just confirmed their email: the group they
+ * signed up from — joined if its rules allow, otherwise its page, where they
+ * can request to join — or null for the usual landing. Never throws: a
+ * failure here must not break confirmation.
+ */
+export async function landingAfterConfirm(
+  user: { id: string; user_metadata?: Record<string, any> | null } | null | undefined
+): Promise<string | null> {
+  if (!user?.user_metadata?.pending_group) return null;
+  try {
+    const db = getSupabaseAdmin();
+    const { data: profile } = await db
+      .from("profiles").select("id").eq("auth_user_id", user.id).maybeSingle();
+    if (!profile) return null;
+    const pending = await consumePendingGroup(db, user, profile.id);
+    return pending ? groupPath(pending.group) : null;
+  } catch (e) {
+    console.error("[groupJoin] landingAfterConfirm error (non-fatal):", e);
+    return null;
+  }
 }

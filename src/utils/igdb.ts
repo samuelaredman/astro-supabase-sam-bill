@@ -45,6 +45,25 @@ export async function igdbFetch(endpoint: string, query: string) {
   return res.json();
 }
 
+/**
+ * Resolve an IGDB game by its exact slug. Backloggd (like us) is IGDB-backed and
+ * its game URLs use the IGDB slug, so this is the reliable second step in the
+ * Backloggd import's game-matching cascade (after a local `games.slug` lookup).
+ * Returns `{ id, name, slug }` or null.
+ */
+export async function igdbGameBySlug(
+  slug: string,
+): Promise<{ id: number; name: string; slug: string } | null> {
+  const clean = slug.trim().toLowerCase();
+  if (!clean) return null;
+  const rows = await igdbFetch(
+    "games",
+    `fields id, name, slug; where slug = "${escapeIgdbString(clean)}"; limit 1;`,
+  );
+  const row = Array.isArray(rows) ? rows[0] : null;
+  return row && typeof row.id === "number" ? { id: row.id, name: row.name, slug: row.slug } : null;
+}
+
 export async function getGameDetails(igdbId: number) {
   const [_, involvedCompanies, genres, gameModes, themes,
          franchises, engines, alternativeTitles, keywords] = await Promise.all([

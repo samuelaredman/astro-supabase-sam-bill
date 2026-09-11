@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "../../../utils/database";
 import { igdbImage } from "../../../utils/format";
 import { renderOgImage, fetchImageDataUri } from "../../../utils/og";
 import { buildReviewOgTree } from "../../../utils/ogReview";
+import { cdnCacheHeaders } from "../../../utils/cache";
 
 export const prerender = false;
 
@@ -17,7 +18,7 @@ export const GET: APIRoute = async ({ params }) => {
   const { data: review } = await db
     .from("reviews")
     .select(`
-      score, title, status,
+      score, title, body, status,
       games ( title, cover_img_url ),
       profiles ( username, avatar_url )
     `)
@@ -42,6 +43,7 @@ export const GET: APIRoute = async ({ params }) => {
     coverDataUri,
     score: review.score,
     reviewTitle: review.title ?? null,
+    reviewBody: review.body ?? "",
     reviewerUsername: review.profiles?.username ?? "unknown",
     reviewerAvatarDataUri,
   });
@@ -55,7 +57,7 @@ export const GET: APIRoute = async ({ params }) => {
       // See home.png.ts for why this is set.
       "Access-Control-Allow-Origin": "*",
       "Cache-Control": "public, max-age=3600",
-      "Netlify-CDN-Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+      ...cdnCacheHeaders(86400, 604800),
     },
   });
 };

@@ -1,6 +1,7 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { validateName } from "../../../utils/moderation/nameRules";
+import { likeEscape } from "../../../utils/usernameHistory";
 import { toPendingGroup } from "../../../utils/groupJoin";
 
 export const POST: APIRoute = async (context) => {
@@ -29,7 +30,7 @@ export const POST: APIRoute = async (context) => {
   const { data: existing } = await db
     .from("profiles")
     .select("id")
-    .ilike("username", username)
+    .ilike("username", likeEscape(username))
     .maybeSingle();
 
   if (existing) {
@@ -52,8 +53,8 @@ export const POST: APIRoute = async (context) => {
   const emailRedirectTo = new URL("/auth/confirm", context.site ?? context.url.origin).toString();
 
   // Signed up from a group page: remember the group in the user's metadata so
-  // /welcome can join it after the email round trip (utils/groupJoin). Anything
-  // malformed is dropped — it never blocks the signup itself.
+  // /auth/confirm can join it after the email round trip (utils/groupJoin).
+  // Anything malformed is dropped — it never blocks the signup itself.
   const pendingGroup = toPendingGroup(group_id, invite_code);
 
   const { error } = await supabase.auth.signUp({

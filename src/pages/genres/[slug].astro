@@ -1,13 +1,17 @@
 ---
 export const prerender = false;
-import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database'
+import { getSupabase, getSupabaseAdmin } from '../../utils/database'
 import { igdbFetch } from '../../utils/igdb'
 import { igdbImage, timeAgo } from '../../utils/format'
 import { isAllowedGameCategory } from '../../utils/games'
 import DetailNav from '../../components/DetailNav.astro'
+import { setPageCacheHeaders } from '../../utils/cache';
+import { getPageUser } from '../../utils/pageAuth';
+import { hubStatsFor, avgScore, reviewCount, pooled, type HubStatRow } from '../../utils/hubStats'
+import { fetchAll } from '../../utils/fetchAll'
 
 const supabase = getSupabase()
-const { data: { user: _genreUser } } = await createSupabaseServerClientFromContext(Astro).auth.getUser();
+const _genreUser = await getPageUser(Astro);
 const isLoggedIn = !!_genreUser;
 
 let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
@@ -40,12 +44,19 @@ const { data: reviewedInGenre } = await (getSupabaseAdmin() as any)
   .limit(1)
 const hasReviewedGame = (reviewedInGenre?.length ?? 0) > 0
 
-// fetch all games in this genre
-const { data: gameGenres } = await supabase
-  .from('game_genres')
-  .select(`games(id, title, slug, cover_img_url, date_released, igdb_category)`)
-  .eq('genre_id', genre.id)
-  .limit(500)
+// fetch all games in this genre and, in parallel, the review count + score sum
+// of its reviewed games — aggregated in Postgres (hub_game_review_stats), so no
+// list of game ids has to travel in the request URL
+const [{ data: gameGenres }, hubStatRows] = await Promise.all([
+  supabase
+    .from('game_genres')
+    .select(`games(id, title, slug, cover_img_url, date_released, igdb_category)`)
+    .eq('genre_id', genre.id)
+    .limit(500),
+  // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
+  fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
+    .rpc('hub_game_review_stats', { p_genre_id: genre.id }).order('game_id').range(from, to)),
+])
 
 const allGames = (gameGenres ?? [])
   .map((gg: any) => gg.games)
@@ -57,36 +68,22 @@ const allGames = (gameGenres ?? [])
 
 const gameIds = allGames.map((g: any) => g.id)
 
-// fetch review scores
-const { data: reviewScores } = await supabase
-  .from('reviews')
-  .select('game_id, score')
-  .in('game_id', gameIds.length > 0 ? gameIds : ['00000000-0000-0000-0000-000000000000'])
-  .eq('status', 'published')
-
-const reviewsByGame: Record<string, number[]> = {}
-for (const r of reviewScores ?? []) {
-  if (r.score == null) continue
-  if (!reviewsByGame[r.game_id]) reviewsByGame[r.game_id] = []
-  reviewsByGame[r.game_id].push(r.score)
-}
+const reviewStats = hubStatsFor(hubStatRows, gameIds)
 
 function gameAvgScore(gameId: string): string | null {
-  const scores = reviewsByGame[gameId]
-  if (!scores || scores.length === 0) return null
-  return (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)
+  return avgScore(reviewStats, gameId)
 }
 
 function gameReviewCount(gameId: string): number {
-  return reviewsByGame[gameId]?.length ?? 0
+  return reviewCount(reviewStats, gameId)
 }
 
 // overall stats
-const allScores = Object.values(reviewsByGame).flat()
-const overallAvg = allScores.length > 0
-  ? (allScores.reduce((a, b) => a + b, 0) / allScores.length).toFixed(1)
+const overallTotals = pooled(reviewStats)
+const overallAvg = overallTotals.count > 0
+  ? (overallTotals.sum / overallTotals.count).toFixed(1)
   : null
-const totalReviews = allScores.length
+const totalReviews = overallTotals.count
 
 // top rated games — all games sorted by avg score (min 3 reviews)
 const topRated = allGames
@@ -190,13 +187,9 @@ const yearAvgScoresMap: Record<number, number | null> = {}
 for (const year of years) {
   const gamesInYear = byYear[year] ?? []
   yearGameCountsMap[year] = gamesInYear.length
-  const allYearScores: number[] = []
-  for (const g of gamesInYear) {
-    const scores = reviewsByGame[g.id]
-    if (scores?.length > 0) allYearScores.push(...scores)
-  }
-  yearAvgScoresMap[year] = allYearScores.length > 0
-    ? Math.round((allYearScores.reduce((a, b) => a + b, 0) / allYearScores.length) * 10) / 10
+  const yearTotals = pooled(reviewStats, gamesInYear.map((g: any) => g.id))
+  yearAvgScoresMap[year] = yearTotals.count > 0
+    ? Math.round((yearTotals.sum / yearTotals.count) * 10) / 10
     : null
 }
 const yearGameCountsJson = JSON.stringify(yearGameCountsMap)
@@ -247,14 +240,11 @@ const byYearJson      = JSON.stringify(
 const yearsJson = JSON.stringify(years)
 
 // Stats tab data
-const reviewedGameCount = allGames.filter((g: any) => (reviewsByGame[g.id]?.length ?? 0) > 0).length
+const reviewedGameCount = allGames.filter((g: any) => gameReviewCount(g.id) > 0).length
 
 const gameAvgScoresList: number[] = allGames
-  .filter((g: any) => reviewsByGame[g.id]?.length > 0)
-  .map((g: any) => {
-    const scores = reviewsByGame[g.id]
-    return scores.reduce((a: number, b: number) => a + b, 0) / scores.length
-  })
+  .filter((g: any) => gameReviewCount(g.id) > 0)
+  .map((g: any) => reviewStats[g.id].sum / reviewStats[g.id].count)
 
 const gameScoreDist = Array.from({ length: 10 }, (_, i) => {
   if (i === 9) return gameAvgScoresList.filter(avg => avg >= 9.5).length
@@ -265,7 +255,7 @@ const reviewsByYearMap: Record<number, number> = {}
 for (const g of allGames) {
   const year = g.date_released ? new Date(g.date_released).getFullYear() : 0
   if (!year) continue
-  const rc = reviewsByGame[g.id]?.length ?? 0
+  const rc = gameReviewCount(g.id)
   if (rc > 0) reviewsByYearMap[year] = (reviewsByYearMap[year] ?? 0) + rc
 }
 const reviewsByYearData = Object.entries(reviewsByYearMap)
@@ -273,8 +263,8 @@ const reviewsByYearData = Object.entries(reviewsByYearMap)
   .sort((a, b) => a.year - b.year)
 
 const topReviewedGames = allGames
-  .filter((g: any) => (reviewsByGame[g.id]?.length ?? 0) > 0)
-  .sort((a: any, b: any) => (reviewsByGame[b.id]?.length ?? 0) - (reviewsByGame[a.id]?.length ?? 0))
+  .filter((g: any) => gameReviewCount(g.id) > 0)
+  .sort((a: any, b: any) => gameReviewCount(b.id) - gameReviewCount(a.id))
   .slice(0, 5)
   .map((g: any) => {
     const avg   = gameAvgScore(g.id)
@@ -311,13 +301,7 @@ const accentLight = '#4a3a8a'
 const accentDark  = '#6050c8'
 const accentRgb   = '96,80,200'
 
-if (!isLoggedIn) {
-  Astro.response.headers.set('Netlify-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
-  Astro.response.headers.set('Cache-Control', 'no-store');
-} else {
-  Astro.response.headers.set('Cache-Control', 'private, no-store');
-}
-Astro.response.headers.set('Netlify-Vary', 'cookie=sb-bzlwwtatoiyzwirerify-auth-token');
+setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 ---
 
 <!DOCTYPE html>

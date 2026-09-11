@@ -61,7 +61,7 @@ src/
     discover.astro, following.astro, notifications.astro
     profile.astro, settings.astro
     signin.astro, signup.astro, forgot-password.astro, reset-password-confirm.astro
-    welcome.astro, contact.astro, terms.astro, privacy.astro
+    contact.astro, terms.astro, privacy.astro
   components/
     Layout.astro        ← Wraps all non-standalone pages. OG, nav, theme CSS vars.
     ReviewCard.astro    ← Feed card used on index, game, reviewer, search pages.
@@ -274,7 +274,8 @@ supabase/
 - **Stats come from the `group_*` SQL functions** (migration `20260911120000`): `group_review_summary`,
   `group_member_review_stats`, `group_game_review_stats`, `group_game_member_scores`,
   `group_split_decision`, `group_hot_take`, all reading through `group_reviews(group, genre?, platform?)`,
-  which applies "published, by a current member, inside the group's focus". Service role only. Never
+  which applies "published, by a current member, inside the group's focus". Site-wide numbers (Hot
+  Take's community side) come from `game_review_stats`, per the review-stats rule. Service role only. Never
   `.in('profile_id', memberIds)` over reviews: it truncates at 1000 rows and fails on URL length.
 - **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
   not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
@@ -368,6 +369,43 @@ every route still enforces that the user is logged in.
 | `check_group_limit()` | trigger | Enforces max 10 groups per user (called by `enforce_group_limit` trigger). |
 | `search_games(query, ...)` | records | Full-text + trigram game search. Combines exact match, prefix, LIKE, `ts_rank`, and `similarity()` into a ranked result. Used by the game search API. |
 
+### Review stats — never aggregate review rows in JS
+
+Site-wide and hub-wide review stats come from Postgres, and there are two views to read them from:
+- `game_review_stats`: one row per reviewed game, with `review_count`, `score_sum`, `avg_score`,
+  `hours_count` and `hours_sum` over published reviews.
+- `profile_review_stats`: one row per reviewer, with `review_count`.
+
+The functions below are built on those views and return only the rows a page renders.
+
+Do not `select` review rows to count or average them in JS: that ships every review over the wire,
+and it silently breaks at Supabase's 1000-row cap. Add a function on top of the views instead, and
+make it read from the views, not from `reviews`, so the scaling swap below still covers it.
+
+| Function | Used by |
+|----------|---------|
+| `ranked_games(limit, min_reviews, prior_weight)` | `/rankings` (Bayesian order) |
+| `review_score_summary()` | `/rankings` sidebar totals |
+| `most_reviewed_games(limit, genre_id?, platform_id?, exclude_profile_id?)` | `/search` browse, `/discover` fallback |
+| `top_studios_by_reviewed_games(limit)` | `/search` studio tab |
+| `game_rank_stats(game_id, genre_id, release_year)` | `/games/[slug]` ranks + genre average |
+| `game_scores_by_slug(slugs)` | `/games/[slug]` similar-games scores |
+| `reviewer_volume_percentile(profile_id)` | `/reviewers/[username]` |
+| `profile_game_community_stats(profile_id)` | `/reviewers/[username]` community averages |
+| `hub_game_review_stats(genre_id? \| platform_id? \| company_id?)` | genre / platform / studio hubs |
+
+- **Server-only.** Only `service_role` can read the views or execute the functions (migration
+  `20260911000005`), so call them with `getSupabaseAdmin()`. Anon and authenticated clients get
+  permission errors. Grant the same on anything new you add.
+- **Page through unbounded results.** Functions that return one row per game (`hub_…`, `profile_…`)
+  can pass 1000 rows. Read them with `fetchAll` (`src/utils/fetchAll.ts`) plus `.order('game_id')`.
+- **Scaling.** The views aggregate every published review each time they're read. That's about 10 ms
+  at 10k reviews and about 50–130 ms at 100k, but about 350–600 ms at 1M (PGlite upper bounds). Past
+  ~100k reviews, apply `supabase/scaling/review-stats-as-tables.sql` as a new migration. It replaces
+  both views with tables of the same names, kept current by a delta trigger on `reviews`. That brings
+  every function to about 1–30 ms at 1M reviews and adds under 1 ms per review write. No function or
+  page changes.
+
 ### Game search internals
 `games` has three search indexes: `search_vector` (tsvector), `title_search` (tsvector),
 and a trigram index on `title`. The `search_games` function uses all three plus
@@ -394,6 +432,28 @@ if (!user) return json({ error: "Unauthorized" }, 401);
 const db = getSupabaseAdmin(); // typed — do NOT cast as any
 ```
 
+### Pages use `getPageUser()`, not `auth.getUser()`
+
+`.astro` pages resolve the viewer with `getPageUser(Astro, client?)` from `src/utils/pageAuth.ts`:
+
+```typescript
+const user = await getPageUser(Astro, serverClient); // { id, email } | null
+```
+
+It calls `getClaims()`, which verifies the JWT locally (the project signs with ES256), where
+`getUser()` costs a ~56 ms round trip to Supabase Auth on every render. It also starts the
+Layout's onboarding lookup early so it overlaps the page's queries. The trade-off — a revoked
+session's token stays valid until expiry (≤ 1 h) — is fine for rendering but not for writes,
+so **API routes keep `getUser()` via `requireAuth`**. Do not reintroduce `auth.getUser()` in pages.
+
+### CDN caching
+
+Never hand-write `Netlify-CDN-Cache-Control`. Use `src/utils/cache.ts`:
+`setPageCacheHeaders(Astro.response.headers, isLoggedIn)` for SSR pages, `...cdnCacheHeaders(maxAge, swr)`
+for endpoints. They add `durable` (shared cache across edge nodes) and the required `Netlify-Vary` —
+the durable cache ignores the query string without `query`, and the auth cookie may be chunked
+into `…-auth-token.0`, which the page vary must also list.
+
 ### profiles.id ≠ auth.users.id
 
 Always resolve the profile before using its ID as a foreign key:
@@ -416,7 +476,7 @@ touching the files below as high-risk regardless of how small the diff looks.
 
 **Files in scope:** `src/pages/api/auth/signup.ts`, `signin.ts`, `reset-password.ts`,
 `update-password.ts`, `set-session.ts`, `src/utils/groupJoin.ts`, `src/pages/auth/confirm.astro`,
-`src/pages/reset-password-confirm.astro`, `src/pages/welcome.astro`, `src/pages/signup.astro`,
+`src/pages/reset-password-confirm.astro`, `src/pages/signup.astro`,
 `src/pages/signin.astro`, `src/pages/forgot-password.astro`.
 
 ### Rule 1 — never use `context.url.origin` / `new URL(request.url).origin` for a redirect URL sent to Supabase
@@ -434,9 +494,10 @@ and was fixed 2026-07-03/04. If you ever see `context.url.origin` reappear in an
 ### Rule 2 — any redirect path passed to Supabase must correspond to an actual route, and must be in the Supabase Redirect URLs allowlist
 
 `signup.ts`'s `emailRedirectTo` pointed at `/welcome` directly for a long stretch — but
-`/welcome` only checks for an existing cookie session; it never exchanges a confirmation
+`/welcome` only checked for an existing cookie session; it never exchanged a confirmation
 token for one. Confirmation links must land on `/auth/confirm` (`src/pages/auth/confirm.astro`),
-which does the actual exchange and sets the session cookie, then forwards to `/welcome`.
+which does the actual exchange and sets the session cookie, then forwards to the homepage — or
+to the group they signed up from (Rule 5). `/welcome` no longer exists.
 Before changing any redirect path, confirm the target file actually exists at that route
 (check `src/pages/`, not just what "should" be there) and that the path is listed in
 Supabase → Authentication → URL Configuration → Redirect URLs.
@@ -491,16 +552,19 @@ have no link and are unaffected.
 **Never revert a template to `{{ .ConfirmationURL }}`** — it reintroduces the `supabase.co`
 link and silently breaks Gmail delivery again with zero error anywhere in our stack.
 
-### Rule 5 — signing up from a group page joins the group on `/welcome`
+### Rule 5 — signing up from a group page joins the group on confirmation
 
 A logged-out group page links to `/signup?group=<id>[&code=<invite>]`. `signup.ts` stores that as
 `pending_group` in the new user's metadata, the only place that survives the email round trip
-(even when the link is opened on another device). `/welcome` calls `consumePendingGroup()`, which
-clears the key (GoTrue merges `user_metadata`, so `username` is kept), joins through `joinGroup()`'s
-rules, and redirects to `/welcome?group=<id>`. That page renders from the membership, so a refresh
-keeps the message. Users can edit their own metadata, so never trust `pending_group` beyond
-`joinGroup()`. Confirmation must still land on `/welcome` (Rule 2); if you move the landing page,
-move this with it, or signups from creator links silently stop joining.
+(even when the link is opened on another device). Once the session exists, `/auth/confirm` calls
+`landingAfterConfirm(user)` (`src/utils/groupJoin.ts`) and redirects to what it returns instead of
+`/`: in both the server-side `code`/`token_hash` branch, and the hash-fragment branch via
+`/api/auth/set-session`, which returns it as `redirect`. `landingAfterConfirm` clears the key
+(GoTrue merges `user_metadata`, so `username` is kept), joins through `joinGroup()`'s rules, and
+returns the group's path. For an approval-only group, they land on its page to request access.
+It never throws. Users can edit their own metadata, so never trust `pending_group` beyond
+`joinGroup()`. If you change where confirmation lands, keep this call on the way, or signups from
+creator links silently stop joining.
 
 ### Verification standard for any change in this area
 
@@ -713,6 +777,25 @@ the existing delegated handler.
 **Vote button attributes:**
 `data-review-id`, `data-vote` (+1/-1), `data-count` — must stay in sync if
 HTML structure changes.
+
+### Reviewer profile tabs (`reviewers/[username].astro`): only the open tab is built
+
+The profile page server-renders only the tab in its URL. The Reviews, Recommendations, Lists and
+Library tabs start as empty panels with a `data-src` attribute. The first time a tab is opened,
+the page fetches its HTML from the partial route `/reviewers/[username]/tab/[tab]`. Hovering,
+focusing or touching the tab link starts that fetch early.
+
+- **Adding tab content:** put the data in that tab's loader in `src/utils/profileTabs.ts`, and the
+  markup in `src/components/profile/<Tab>Tab.astro`. Don't add them to the page. The page and the
+  partial route render the same loader and component; queries added to the page run on every
+  profile visit.
+- **Tab JS runs after the tab's HTML is inserted.** Register the tab's setup as
+  `window.__profileTabInit.<tab> = fn`, and call it at load in case the tab was server-rendered.
+  Look elements up when a function is called, not once at load: a lazy tab's elements don't exist
+  until it has been opened.
+- **Card behaviour lives in `src/scripts/*.ts`,** imported by both the card and the profile page. A
+  component's `<script>` only ships with pages that render that component, so cards inserted
+  later would have no JS without the page's import.
 
 ### Layout.astro
 

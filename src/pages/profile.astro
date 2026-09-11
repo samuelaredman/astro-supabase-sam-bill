@@ -3,9 +3,10 @@ export const prerender = false;
 
 import { createSupabaseServerClientFromContext } from "../utils/database";
 import { igdbImage, getVoteCounts } from '../utils/format';
+import { getPageUser } from '../utils/pageAuth';
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
-const { data: { user } } = await serverClient.auth.getUser();
+const user = await getPageUser(Astro, serverClient);
 
 if (!user) {
   return Astro.redirect("/signin");
@@ -74,16 +75,17 @@ function formatCount(n: number): string {
 let followerCount: number | null = 0;
 let followingCount: number | null = 0;
 if (profile) {
-  const { count: fc } = await (serverClient as any)
-    .from('follows')
-    .select('*', { count: 'exact', head: true })
-    .eq('following_id', profile.id);
+  const [{ count: fc }, { count: fic }] = await Promise.all([
+    (serverClient as any)
+      .from('follows')
+      .select('*', { count: 'exact', head: true })
+      .eq('following_id', profile.id),
+    (serverClient as any)
+      .from('follows')
+      .select('*', { count: 'exact', head: true })
+      .eq('follower_id', profile.id),
+  ]);
   followerCount = fc ?? 0;
-
-  const { count: fic } = await (serverClient as any)
-    .from('follows')
-    .select('*', { count: 'exact', head: true })
-    .eq('follower_id', profile.id);
   followingCount = fic ?? 0;
 }
 
@@ -512,42 +514,53 @@ const showSearchNudge = !!profile && !profile.search_indexable && reviewCount > 
     });
   });
 
-  // review count button listener
-  document.querySelectorAll('.vote-btn').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const reviewId = btn.dataset.reviewId;
-    const vote = parseInt(btn.dataset.vote);
-
-    const res = await fetch('/api/reviews/vote', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ review_id: reviewId, vote }),
-    });
-
-    if (res.status === 401) { window.location.href = '/signin'; return; }
-    if (!res.ok) return;
-
-    const data = await res.json();
-
-    const pair = document.querySelectorAll(`.vote-btn[data-review-id="${reviewId}"]`);
-    pair.forEach(b => {
+  // review vote button listener — optimistic: repaint immediately, reconcile
+  // with the server's authoritative counts, revert on failure.
+  function paintReviewVote(reviewId, myVote, up, down) {
+    document.querySelectorAll(`.vote-btn[data-review-id="${reviewId}"]`).forEach(b => {
       const bVote = parseInt(b.dataset.vote);
-      const currentCount = parseInt(b.textContent.trim().split(' ').pop());
+      const count = bVote === 1 ? up : down;
+      b.dataset.count = count;
+      b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + count;
+      b.classList.toggle('active-up',   bVote === 1  && myVote === 1);
+      b.classList.toggle('active-down', bVote === -1 && myVote === -1);
+    });
+  }
+  document.querySelectorAll('.vote-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const reviewId = btn.dataset.reviewId;
+      const vote = parseInt(btn.dataset.vote);
+      const upBtn   = document.querySelector(`.vote-btn[data-review-id="${reviewId}"][data-vote="1"]`);
+      const downBtn = document.querySelector(`.vote-btn[data-review-id="${reviewId}"][data-vote="-1"]`);
+      const prevUp   = upBtn   ? (parseInt(upBtn.dataset.count)   || 0) : 0;
+      const prevDown = downBtn ? (parseInt(downBtn.dataset.count) || 0) : 0;
+      const prevMy = upBtn && upBtn.classList.contains('active-up') ? 1
+                   : downBtn && downBtn.classList.contains('active-down') ? -1 : 0;
 
-      if (data.vote === null) {
-        b.classList.remove('active-up', 'active-down');
-        if (bVote === vote) b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (currentCount - 1);
-      } else if (data.vote === bVote) {
-        b.classList.add(bVote === 1 ? 'active-up' : 'active-down');
-        b.classList.remove(bVote === 1 ? 'active-down' : 'active-up');
-        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + (currentCount + 1);
-      } else {
-        b.classList.remove('active-up', 'active-down');
-        b.textContent = (bVote === 1 ? '▲ ' : '▼ ') + Math.max(0, currentCount - 1);
-      }
+      const nextMy = prevMy === vote ? 0 : vote;
+      let up = prevUp, down = prevDown;
+      if (prevMy === 1) up = Math.max(0, up - 1);
+      if (prevMy === -1) down = Math.max(0, down - 1);
+      if (nextMy === 1) up += 1;
+      if (nextMy === -1) down += 1;
+      paintReviewVote(reviewId, nextMy, up, down);
+
+      fetch('/api/reviews/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ review_id: reviewId, vote }),
+      }).then(res => {
+        if (res.status === 401) { window.location.href = '/signin'; return null; }
+        if (!res.ok) { paintReviewVote(reviewId, prevMy, prevUp, prevDown); return null; }
+        return res.json();
+      }).then(data => {
+        if (!data) return;
+        paintReviewVote(reviewId, data.vote || 0, data.up, data.down);
+      }).catch(() => {
+        paintReviewVote(reviewId, prevMy, prevUp, prevDown);
+      });
     });
   });
-});
 
   // Search-visibility nudge — snoozed rather than permanently dismissed, so it
   // re-presents the opt-in after a while instead of nagging every visit.
