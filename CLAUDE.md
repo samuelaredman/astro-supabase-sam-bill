@@ -238,6 +238,7 @@ supabase/
 | | `banner_url` | text | YES | — |
 | | `visibility` | text | NO | `'public'` |
 | | `invite_code` | text UNIQUE | YES | — |
+| | `slug` | text UNIQUE | YES | — |
 | | `created_by` | uuid FK→profiles | NO | — |
 | | `created_at` | timestamptz | NO | now() |
 | `group_members` | `id` | uuid PK | NO | uuid_generate_v4() |
@@ -267,6 +268,24 @@ supabase/
 | | `status` | text | NO | `'pending'` |
 | | `created_at` | timestamptz | NO | now() |
 | | `expires_at` | timestamptz | YES | — |
+
+### Groups: stats, admin checks, custom links
+
+- **Stats come from the `group_*` SQL functions** (migration `20260911120000`): `group_review_summary`,
+  `group_member_review_stats`, `group_game_review_stats`, `group_game_member_scores`,
+  `group_split_decision`, `group_hot_take`, all reading through `group_reviews(group, genre?, platform?)`,
+  which applies "published, by a current member, inside the group's focus". Service role only. Never
+  `.in('profile_id', memberIds)` over reviews: it truncates at 1000 rows and fails on URL length.
+- **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
+  not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
+  so we can moderate the groups we run without joining them. Owner-only actions (delete, transfer,
+  promote to admin) still check for the real owner; member actions (leave, vote, log a session) still
+  need real membership.
+- **`groups.slug` is the custom link `chekpoint.gg/c/<slug>`** (`src/pages/c/[slug].astro`, a 302 to
+  the group that keeps the query string). Only site admins set it (`POST /api/groups/slug`). Build
+  share and invite links with `groupPath(group)` (`src/utils/groupSlug.ts`).
+- **Joining goes through `joinGroup()`** (`src/utils/groupJoin.ts`), the single copy of the join rules
+  (public without approval, or a private group's current invite code).
 
 ### Other tables
 
@@ -396,7 +415,7 @@ before this was caught). It is the single most fragile part of the app. Treat an
 touching the files below as high-risk regardless of how small the diff looks.
 
 **Files in scope:** `src/pages/api/auth/signup.ts`, `signin.ts`, `reset-password.ts`,
-`update-password.ts`, `set-session.ts`, `src/pages/auth/confirm.astro`,
+`update-password.ts`, `set-session.ts`, `src/utils/groupJoin.ts`, `src/pages/auth/confirm.astro`,
 `src/pages/reset-password-confirm.astro`, `src/pages/welcome.astro`, `src/pages/signup.astro`,
 `src/pages/signin.astro`, `src/pages/forgot-password.astro`.
 
@@ -471,6 +490,17 @@ have no link and are unaffected.
 
 **Never revert a template to `{{ .ConfirmationURL }}`** — it reintroduces the `supabase.co`
 link and silently breaks Gmail delivery again with zero error anywhere in our stack.
+
+### Rule 5 — signing up from a group page joins the group on `/welcome`
+
+A logged-out group page links to `/signup?group=<id>[&code=<invite>]`. `signup.ts` stores that as
+`pending_group` in the new user's metadata, the only place that survives the email round trip
+(even when the link is opened on another device). `/welcome` calls `consumePendingGroup()`, which
+clears the key (GoTrue merges `user_metadata`, so `username` is kept), joins through `joinGroup()`'s
+rules, and redirects to `/welcome?group=<id>`. That page renders from the membership, so a refresh
+keeps the message. Users can edit their own metadata, so never trust `pending_group` beyond
+`joinGroup()`. Confirmation must still land on `/welcome` (Rule 2); if you move the landing page,
+move this with it, or signups from creator links silently stop joining.
 
 ### Verification standard for any change in this area
 
