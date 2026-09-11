@@ -1,0 +1,72 @@
+---
+// One reviewer-profile tab as an HTML fragment, fetched by the profile page the
+// first time that tab is opened (see "ON-DEMAND TABS" in
+// src/pages/reviewers/[username].astro). Renders exactly what the page renders
+// for a ?tab= URL: same loaders (src/utils/profileTabs.ts), same components.
+export const prerender = false;
+export const partial = true;
+
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../../utils/database';
+import { getPageUser } from '../../../../utils/pageAuth';
+import { setPageCacheHeaders } from '../../../../utils/cache';
+import {
+  isLazyProfileTab, loadReviewsTab, loadRecommendationsTab, loadListsTab, loadLibraryTab,
+  PROFILE_REVIEWS_SELECT, sortPublishedReviews, type ProfileTabContext,
+} from '../../../../utils/profileTabs';
+import ReviewsTab from '../../../../components/profile/ReviewsTab.astro';
+import RecommendationsTab from '../../../../components/profile/RecommendationsTab.astro';
+import ListsTab from '../../../../components/profile/ListsTab.astro';
+import LibraryTab from '../../../../components/profile/LibraryTab.astro';
+
+const { username, tab } = Astro.params;
+if (!tab || !isLazyProfileTab(tab)) return new Response(null, { status: 404 });
+
+const supabase = createSupabaseServerClientFromContext(Astro) as any;
+const db = getSupabaseAdmin() as any;
+
+// getPageUser verifies the session locally, so the two profile lookups can
+// start together right after it.
+const user = await getPageUser(Astro, supabase);
+
+// Reviews and Lists need the reviewer's reviews (cards / per-list score + hours).
+const needsReviews = tab === 'reviews' || tab === 'lists';
+const [{ data: reviewer }, { data: viewer }] = await Promise.all([
+  supabase
+    .from('profiles')
+    .select(`id, username, is_active, steam_id, steam_username, steam_synced_at,
+             want_to_play_privacy, dropped_privacy${needsReviews ? `, reviews (${PROFILE_REVIEWS_SELECT})` : ''}`)
+    .eq('username', username)
+    .maybeSingle(),
+  user
+    ? supabase.from('profiles').select('id').eq('auth_user_id', user.id).maybeSingle()
+    : Promise.resolve({ data: null }),
+]);
+if (!reviewer || !reviewer.is_active) return new Response(null, { status: 404 });
+
+const viewerProfileId: string | null = viewer?.id ?? null;
+const isOwnProfile = viewerProfileId === reviewer.id;
+
+// Mutual follow only matters for the library's "friends" privacy tier.
+let isMutualFollow = false;
+if (tab === 'library' && viewerProfileId && !isOwnProfile) {
+  const [{ data: a }, { data: b }] = await Promise.all([
+    supabase.from('follows').select('id').eq('follower_id', viewerProfileId).eq('following_id', reviewer.id).maybeSingle(),
+    supabase.from('follows').select('id').eq('follower_id', reviewer.id).eq('following_id', viewerProfileId).maybeSingle(),
+  ]);
+  isMutualFollow = !!a && !!b;
+}
+
+const ctx: ProfileTabContext = {
+  db, supabase, reviewer,
+  publishedReviews: needsReviews ? sortPublishedReviews(reviewer.reviews) : [],
+  viewerProfileId, isLoggedIn: !!user, isOwnProfile, isMutualFollow,
+};
+
+// Same caching as the page: shared at the CDN for logged-out visitors, never
+// for logged-in ones (the fragment reflects the viewer's votes and ownership).
+setPageCacheHeaders(Astro.response.headers, !!user);
+---
+{tab === 'reviews' && <ReviewsTab data={await loadReviewsTab(ctx)} reviewer={reviewer} isLoggedIn={!!user} isOwnProfile={isOwnProfile} currentProfileId={viewerProfileId} />}
+{tab === 'recommendations' && <RecommendationsTab data={await loadRecommendationsTab(ctx)} reviewer={reviewer} isLoggedIn={!!user} isOwnProfile={isOwnProfile} currentProfileId={viewerProfileId} />}
+{tab === 'lists' && <ListsTab data={await loadListsTab(ctx)} reviewer={reviewer} isLoggedIn={!!user} isOwnProfile={isOwnProfile} currentProfileId={viewerProfileId} />}
+{tab === 'library' && <LibraryTab data={await loadLibraryTab(ctx)} reviewer={reviewer} isOwnProfile={isOwnProfile} />}
