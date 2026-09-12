@@ -239,6 +239,7 @@ supabase/
 | | `visibility` | text | NO | `'public'` |
 | | `invite_code` | text UNIQUE | YES | — |
 | | `slug` | text UNIQUE | YES | — |
+| | `is_site_group` | bool | NO | false — at most one row true (`groups_one_site_group`) |
 | | `created_by` | uuid FK→profiles | NO | — |
 | | `created_at` | timestamptz | NO | now() |
 | `group_members` | `id` | uuid PK | NO | uuid_generate_v4() |
@@ -318,6 +319,12 @@ supabase/
 - **`groups.slug` is the custom link `chekpoint.gg/c/<slug>`** (`src/pages/c/[slug].astro`, a 302 to
   the group that keeps the query string). Only site admins set it (`POST /api/groups/slug`). Build
   share and invite links with `groupPath(group)` (`src/utils/groupSlug.ts`).
+- **The site group ("Chekpoint", `groups.is_site_group`) has every profile in it**, so group stats
+  work site-wide. Migration `20260912000003`: `on_profile_join_site_group` adds each new profile
+  (it swallows its own errors so it can never break signup), and triggers refuse deleting its
+  memberships or the group (account deletion still cascades). `leave`, `members/remove` and `delete`
+  refuse first via `src/utils/siteGroup.ts`, and the page hides those buttons. On it the Stats tab
+  starts from the viewer, not the owner. Never count its members by fetching `group_members` rows.
 - **Joining goes through `joinGroup()`** (`src/utils/groupJoin.ts`), the single copy of the join rules
   (public without approval, or a private group's current invite code).
 
@@ -388,6 +395,8 @@ every route still enforces that the user is logged in.
 | Trigger | Table | Event | What it does |
 |---------|-------|-------|-------------|
 | `handle_new_user` | `auth.users` | AFTER INSERT | **Auto-creates a `profiles` row** on signup. Sets `auth_user_id = NEW.id`, `username = raw_user_meta_data->>'username'` or email prefix. Never manually insert profiles on signup — this trigger handles it. |
+| `on_profile_join_site_group` | `profiles` | AFTER INSERT | Adds the new profile to the site group (`groups.is_site_group`). Never raises. |
+| `keep_site_group_members` / `keep_site_group` | `group_members` / `groups` | BEFORE DELETE | Refuse removing site-group members or deleting the site group; cascades from a deleted profile still go through. |
 | `enforce_group_limit` | `groups` | BEFORE INSERT | Raises exception if `created_by` user already has 10 groups. INSERT will hard-fail with a DB exception — handle this in the API route. |
 | `contact_submissions` | `contact_submissions` | AFTER INSERT | Fires HTTP POST to `notify-contact` Edge Function to email the team. |
 | `on_report_insert` | `reports` | AFTER INSERT | Fires HTTP POST to `notify-report` Edge Function to email the team. |

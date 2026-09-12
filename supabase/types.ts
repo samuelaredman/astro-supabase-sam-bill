@@ -1235,6 +1235,7 @@ export type Database = {
           description: string | null
           id: string
           invite_code: string | null
+          is_site_group: boolean
           join_prompt: string | null
           name: string
           requires_approval: boolean
@@ -1251,6 +1252,7 @@ export type Database = {
           description?: string | null
           id?: string
           invite_code?: string | null
+          is_site_group?: boolean
           join_prompt?: string | null
           name: string
           requires_approval?: boolean
@@ -1267,6 +1269,7 @@ export type Database = {
           description?: string | null
           id?: string
           invite_code?: string | null
+          is_site_group?: boolean
           join_prompt?: string | null
           name?: string
           requires_approval?: boolean

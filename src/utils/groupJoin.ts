@@ -20,7 +20,7 @@ export async function joinGroup(
   const inviteCode = target.inviteCode ? target.inviteCode.toUpperCase() : null;
 
   // Resolve the group — by invite code if there is one, else by id
-  let groupQuery = db.from("groups").select("id, visibility, invite_code, requires_approval");
+  let groupQuery = db.from("groups").select("id, visibility, invite_code, requires_approval, is_site_group");
   if (inviteCode) {
     groupQuery = groupQuery.eq("invite_code", inviteCode);
   } else if (target.groupId) {
@@ -32,8 +32,12 @@ export async function joinGroup(
   const { data: group } = await groupQuery.maybeSingle();
   if (!group) return { ok: false, status: 404, error: "Group not found" };
 
-  // Private groups: only joinable via a valid admin-sent invite code
-  if (group.visibility === "private") {
+  // The site group is everyone's (a trigger adds each new profile, so this only
+  // matters for someone it missed): no approval or invite code applies.
+  if (group.is_site_group) {
+    // Skip the checks below
+  } else if (group.visibility === "private") {
+    // Private groups: only joinable via a valid admin-sent invite code
     if (!inviteCode || group.invite_code !== inviteCode) {
       return { ok: false, status: 403, error: "This group is private. Request to join or use an invite link.", code: "PRIVATE_GROUP" };
     }

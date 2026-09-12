@@ -41,7 +41,7 @@ const db = getSupabaseAdmin();
 
 let { data: group, error: groupError } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt, is_site_group")
   .eq("id", id)
   .single();
 
@@ -52,7 +52,7 @@ if (!group && groupError) {
     .select("id, name, description, avatar_url, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt")
     .eq("id", id)
     .single();
-  if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center' };
+  if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center', is_site_group: false };
 }
 
 if (!group) return Astro.redirect("/groups");
@@ -381,12 +381,15 @@ if (canViewContent && activeTab === "feed") {
 // who is being compared re-fetch /groups/[id]/compare, which runs the same
 // loader and component (src/utils/groupCompare.ts).
 let compareData: GroupCompareData | null = null;
+// The site group's owner is only whoever runs it, not a creator to line up
+// against, so there "vs the community" and the picker start from the viewer.
+const compareOwnerId = group.is_site_group ? null : group.created_by;
 if (canViewContent && statsConf.show_score_compare && activeTab === "compare") {
   const compareSelection = resolveCompareSelection(Astro.url.searchParams, {
     memberIds: memberProfileIds,
     memberStats,
     viewerProfileId: currentProfile?.id ?? null,
-    ownerProfileId: group.created_by,
+    ownerProfileId: compareOwnerId,
   });
   compareData = await loadGroupCompare({
     db,
@@ -394,14 +397,14 @@ if (canViewContent && statsConf.show_score_compare && activeTab === "compare") {
     genreId: statsConf.focus_genre_id,
     platformId: statsConf.focus_platform_id,
     members: memberList,
-    ownerProfileId: group.created_by,
+    ownerProfileId: compareOwnerId,
     viewerProfileId: currentProfile?.id ?? null,
     selectedIds: compareSelection,
     subjectId: resolveCommunitySubject(Astro.url.searchParams, {
       memberIds: memberProfileIds,
       rankedMemberIds: rankMemberIds(memberStats),
       viewerProfileId: currentProfile?.id ?? null,
-      ownerProfileId: group.created_by,
+      ownerProfileId: compareOwnerId,
     }),
     sort: parseCompareSort(Astro.url.searchParams.get("sort"), compareSelection.length),
     mode: parseCompareMode(Astro.url.searchParams.get("mode")),
@@ -1051,7 +1054,8 @@ const groupOgDescription = group.description
       {isAdminOrOwner && (
         <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
       )}
-      {isMember && !isOwner && (
+      {/* Nobody leaves the site group (src/utils/siteGroup.ts) */}
+      {isMember && !isOwner && !group.is_site_group && (
         <button class="btn-ghost" id="leave-btn" onclick="leaveGroup()">Leave</button>
       )}
     </div>
@@ -1585,7 +1589,9 @@ const groupOgDescription = group.description
                       {m.role === "admin" ? "Demote" : "Admin"}
                     </button>
                   )}
-                  <button class="btn-xs btn-xs-danger" onclick={`removeMember('${m.id}')`}>Remove</button>
+                  {!group.is_site_group && (
+                    <button class="btn-xs btn-xs-danger" onclick={`removeMember('${m.id}')`}>Remove</button>
+                  )}
                 </div>
               )}
             </div>

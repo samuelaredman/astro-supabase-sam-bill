@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, getGroupAuthority } from "../../../../utils/api";
+import { SITE_GROUP_REMOVE_ERROR, isSiteGroup } from "../../../../utils/siteGroup";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -9,6 +10,8 @@ export const POST: APIRoute = async (context) => {
   const { group_id, target_profile_id } = await context.request.json();
   if (!group_id || !target_profile_id)
     return json({ error: "group_id and target_profile_id required" }, 400);
+
+  if (await isSiteGroup(db, group_id)) return json({ error: SITE_GROUP_REMOVE_ERROR }, 403);
 
   const callerMembership = await getGroupAuthority(db, group_id, profile.id);
   if (!callerMembership) return json({ error: "Not a member of this group" }, 403);

@@ -23,16 +23,19 @@ const { data: myMemberships } = await (supabase as any)
 
 const myGroups = (myMemberships ?? []).map((m: any) => ({ ...m.groups, role: m.role }));
 
-// Count members for each group
-const groupIds = myGroups.map((g: any) => g.id);
-const memberCounts: Record<string, number> = {};
-if (groupIds.length > 0) {
-  const { data: counts } = await (supabase as any)
-    .from("group_members").select("group_id").in("group_id", groupIds);
-  for (const row of counts ?? []) {
-    memberCounts[row.group_id] = (memberCounts[row.group_id] ?? 0) + 1;
-  }
+// Count members for each group. Counted in Postgres: fetching one row per
+// member stops at 1000, and the site group has every profile in it.
+async function countMembers(ids: string[]): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  if (ids.length === 0) return counts;
+  const { data, error } = await db.from("groups").select("id, group_members ( count )").in("id", ids);
+  if (error) console.error("[groups] member count error:", JSON.stringify(error));
+  for (const row of data ?? []) counts[row.id] = Number(row.group_members?.[0]?.count ?? 0);
+  return counts;
 }
+
+const groupIds = myGroups.map((g: any) => g.id);
+const memberCounts = await countMembers(groupIds);
 
 // Pending invites
 const { data: pendingInvites } = await (supabase as any)
@@ -50,15 +53,7 @@ const { data: discoverGroups } = await db
   .order("created_at", { ascending: false })
   .limit(20);
 
-const discoverMemberCounts: Record<string, number> = {};
-if ((discoverGroups ?? []).length > 0) {
-  const discIds = (discoverGroups ?? []).map((g: any) => g.id);
-  const { data: discCounts } = await db
-    .from("group_members").select("group_id").in("group_id", discIds);
-  for (const row of discCounts ?? []) {
-    discoverMemberCounts[row.group_id] = (discoverMemberCounts[row.group_id] ?? 0) + 1;
-  }
-}
+const discoverMemberCounts = await countMembers((discoverGroups ?? []).map((g: any) => g.id));
 
 // User's pending join requests (so we can show status in discover)
 const { data: pendingRequests } = await (supabase as any)
