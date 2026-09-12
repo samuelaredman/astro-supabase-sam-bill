@@ -706,6 +706,65 @@ export type Database = {
           },
         ]
       }
+      group_disagreement_votes: {
+        Row: {
+          created_at: string
+          day: string
+          game_id: string
+          group_id: string
+          id: string
+          profile_id: string
+          voted_for: string
+        }
+        Insert: {
+          created_at?: string
+          day: string
+          game_id: string
+          group_id: string
+          id?: string
+          profile_id: string
+          voted_for: string
+        }
+        Update: {
+          created_at?: string
+          day?: string
+          game_id?: string
+          group_id?: string
+          id?: string
+          profile_id?: string
+          voted_for?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_disagreement_votes_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_disagreement_votes_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_disagreement_votes_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_disagreement_votes_voted_for_fkey"
+            columns: ["voted_for"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_invites: {
         Row: {
           created_at: string
@@ -2827,6 +2886,139 @@ export type Database = {
     }
     Functions: {
       get_my_profile_id: { Args: never; Returns: string }
+      group_compare_games: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+          p_profile_ids: string[]
+        }
+        Returns: {
+          cover_img_url: string
+          game_id: string
+          group_avg: number
+          group_count: number
+          sel_avg: number
+          sel_count: number
+          sel_spread: number
+          sel_vs_group: number
+          sel_vs_group_abs: number
+          slug: string
+          title: string
+        }[]
+      }
+      group_compare_member_stats: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+          p_profile_ids: string[]
+        }
+        Returns: {
+          avg_score: number
+          hours_sum: number
+          profile_id: string
+          review_count: number
+          vs_group_abs_diff: number
+          vs_group_above: number
+          vs_group_below: number
+          vs_group_games: number
+          vs_group_level: number
+        }[]
+      }
+      group_compare_pairs: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+          p_profile_ids: string[]
+        }
+        Returns: {
+          a_higher: number
+          a_profile_id: string
+          b_higher: number
+          b_profile_id: string
+          exact_matches: number
+          mean_abs_diff: number
+          shared_games: number
+          within_one: number
+        }[]
+      }
+      group_compare_scores: {
+        Args: {
+          p_game_ids: string[]
+          p_group_id: string
+          p_profile_ids: string[]
+        }
+        Returns: {
+          game_id: string
+          profile_id: string
+          score: number
+        }[]
+      }
+      group_daily_disagreement: {
+        Args: {
+          p_day: string
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+        }
+        Returns: {
+          game_id: string
+          high_profile_id: string
+          high_review_id: string
+          high_score: number
+          low_profile_id: string
+          low_review_id: string
+          low_score: number
+          spread: number
+        }[]
+      }
+      group_disagreement_tally: {
+        Args: {
+          p_day: string
+          p_group_id: string
+        }
+        Returns: {
+          voted_for: string
+          votes: number
+        }[]
+      }
+      group_feed: {
+        Args: {
+          p_filter?: string
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+          p_viewer_profile_id?: string
+        }
+        Returns: {
+          body: string
+          contains_spoilers: boolean
+          created_at: string | null
+          edited: boolean | null
+          game_id: string
+          id: string
+          platform_played_on: string | null
+          play_time_days: number | null
+          play_time_hours: number | null
+          play_time_months: number | null
+          play_time_weeks: number | null
+          play_time_years: number | null
+          profile_id: string
+          published_at: string | null
+          score: number | null
+          status: string | null
+          title: string | null
+          updated_at: string | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "reviews"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       group_game_member_scores: {
         Args: { p_game_ids: string[]; p_group_id: string }
         Returns: {
@@ -2923,6 +3115,19 @@ export type Database = {
           isOneToOne: false
           isSetofReturn: true
         }
+      }
+      group_score_distribution: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+          p_profile_ids?: string[]
+        }
+        Returns: {
+          profile_id: string
+          review_count: number
+          score: number
+        }[]
       }
       group_split_decision: {
         Args: {
