@@ -8,6 +8,15 @@ import { fetchAll } from '../../../utils/fetchAll';
 import { topRatedMinReviews } from '../../../utils/groupStats';
 import { getGroupAuthority, type GroupAuthority } from '../../../utils/api';
 import { groupPath } from '../../../utils/groupSlug';
+import {
+  loadGroupCompare, parseCompareMode, parseCompareSort,
+  resolveCompareSelection, type GroupCompareData,
+} from '../../../utils/groupCompare';
+import CompareTab from '../../../components/groups/CompareTab.astro';
+import {
+  loadGroupFeed, parseFeedFilter, parseFeedOffset, type GroupFeedData,
+} from '../../../utils/groupFeed';
+import FeedTab from '../../../components/groups/FeedTab.astro';
 import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 import { getPageUser } from "../../../utils/pageAuth";
@@ -16,7 +25,7 @@ const supabase = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, supabase);
 const id = Astro.params.id;
 if (!id) return Astro.redirect("/groups");
-const activeTab = Astro.url.searchParams.get("tab") ?? "overview";
+const requestedTab = Astro.url.searchParams.get("tab");
 const joinCode = Astro.url.searchParams.get("code");
 
 let currentProfile: any = null;
@@ -64,6 +73,9 @@ if (currentProfile) {
 }
 
 const isMember = !!membership;
+// Members land on the feed — what the group has been up to since they last
+// looked; everyone else lands on Overview, which is the group's shop window.
+const activeTab = requestedTab ?? (isMember ? "feed" : "overview");
 // Site admins get admin controls in every group without joining (getGroupAuthority)
 const isAdminOrOwner = ["owner", "admin"].includes(authority?.role ?? "");
 const isOwner = membership?.role === "owner";
@@ -238,20 +250,18 @@ let summary: { review_count: number; game_count: number; avg_score: number | nul
 let memberStats: { profile_id: string; review_count: number; avg_score: number }[] = [];
 let topGameRows: any[] = [];
 let topRatedRows: any[] = [];
-let sharedGameRows: any[] = [];
 let splitRow: any = null;
 let hotTakeRow: any = null;
 let activityReviews: any[] = [];
 
 if (canViewContent && memberProfileIds.length > 0) {
   const gameStats = () => db.rpc("group_game_review_stats", statArgs);
-  const [summaryRes, memberStatsRows, topGamesRes, topRatedRes, sharedRes, splitRes, hotTakeRes, activityRes] = await Promise.all([
+  const [summaryRes, memberStatsRows, topGamesRes, topRatedRes, splitRes, hotTakeRes, activityRes] = await Promise.all([
     db.rpc("group_review_summary", statArgs).maybeSingle(),
     fetchAll((from, to) => db.rpc("group_member_review_stats", statArgs).order("profile_id").range(from, to)),
     gameStats().order("review_count", { ascending: false }).order("avg_score", { ascending: false }).order("game_id").limit(7),
     gameStats().gte("review_count", TOP_RATED_MIN_REVIEWS)
       .order("avg_score", { ascending: false }).order("review_count", { ascending: false }).order("game_id").limit(3),
-    gameStats().gte("review_count", 2).order("review_count", { ascending: false }).order("game_id").limit(30),
     db.rpc("group_split_decision", statArgs).maybeSingle(),
     db.rpc("group_hot_take", statArgs).maybeSingle(),
     db.rpc("group_reviews", statArgs)
@@ -259,14 +269,13 @@ if (canViewContent && memberProfileIds.length > 0) {
       .order("published_at", { ascending: false })
       .limit(50),
   ]);
-  for (const res of [summaryRes, topGamesRes, topRatedRes, sharedRes, splitRes, hotTakeRes, activityRes]) {
+  for (const res of [summaryRes, topGamesRes, topRatedRes, splitRes, hotTakeRes, activityRes]) {
     if (res.error) console.error("[groups/[id]] stats error:", JSON.stringify(res.error));
   }
   summary = summaryRes.data ?? null;
   memberStats = memberStatsRows;
   topGameRows = topGamesRes.data ?? [];
   topRatedRows = topRatedRes.data ?? [];
-  sharedGameRows = sharedRes.data ?? [];
   splitRow = splitRes.data ?? null;
   hotTakeRow = hotTakeRes.data ?? null;
   activityReviews = activityRes.data ?? [];
@@ -278,17 +287,10 @@ const groupAvgScoreAccurate = summary?.avg_score != null ? +summary.avg_score.to
 const totalHours = summary?.hours_sum ?? 0;
 
 // Second wave: rows that name games or members the first wave only had ids for
-const sharedGameIds = sharedGameRows.map((g: any) => g.game_id);
 const extraGameIds = [splitRow?.game_id, hotTakeRow?.game_id].filter(Boolean);
-const [sharedScoreRows, { data: extraGames }] = await Promise.all([
-  sharedGameIds.length
-    ? fetchAll((from, to) => db.rpc("group_game_member_scores", { p_group_id: group.id, p_game_ids: sharedGameIds })
-        .order("game_id").order("profile_id").range(from, to))
-    : Promise.resolve([] as any[]),
-  extraGameIds.length
-    ? db.from("games").select("id, title, slug, cover_img_url").in("id", extraGameIds)
-    : Promise.resolve({ data: [] as any[] }),
-]);
+const { data: extraGames } = extraGameIds.length
+  ? await db.from("games").select("id, title, slug, cover_img_url").in("id", extraGameIds)
+  : { data: [] as any[] };
 const extraGameById: Record<string, any> = {};
 for (const g of extraGames ?? []) extraGameById[g.id] = g;
 
@@ -312,14 +314,6 @@ const { data: sessionsData } = await (supabase as any)
   .eq("group_id", id)
   .order("played_at", { ascending: false })
   .limit(50);
-
-// Stats tab: the 30 games most members reviewed, with each member's score
-const scoresByGame: Record<string, { profile_id: string; score: number }[]> = {};
-for (const s of sharedScoreRows) (scoresByGame[s.game_id] ??= []).push({ profile_id: s.profile_id, score: s.score });
-const sharedGames = sharedGameRows.map((row: any) => ({
-  game: toGame(row),
-  reviews: (scoresByGame[row.game_id] ?? []).sort((a, b) => b.score - a.score),
-}));
 
 // Split Decision — the game where two members disagree the most
 const splitDecision = splitRow && extraGameById[splitRow.game_id] && memberById[splitRow.high_profile_id] && memberById[splitRow.low_profile_id]
@@ -362,6 +356,53 @@ const hotTake = hotTakeRow && extraGameById[hotTakeRow.game_id]
       return { game: extraGameById[hotTakeRow.game_id], groupAvg, commAvg, delta: +(groupAvg - commAvg).toFixed(1) };
     })()
   : null;
+
+// ── Feed tab ──
+// Like the Stats tab, built only when it's the tab in the URL. Filter changes
+// and further pages re-fetch /groups/[id]/feed, which runs the same loader and
+// components (src/utils/groupFeed.ts).
+let feedData: GroupFeedData | null = null;
+if (canViewContent && activeTab === "feed") {
+  feedData = await loadGroupFeed({
+    db,
+    groupId: group.id,
+    genreId: statsConf.focus_genre_id,
+    platformId: statsConf.focus_platform_id,
+    viewerProfileId: currentProfile?.id ?? null,
+    filter: parseFeedFilter(Astro.url.searchParams.get("filter"), !!currentProfile),
+    offset: parseFeedOffset(Astro.url.searchParams.get("offset")),
+    withDisagreement: true,
+  });
+}
+
+// ── Stats tab ──
+// Built only when it's the tab in the URL: the tab links are ordinary
+// navigations, so an Overview visit has no use for any of this. Later changes to
+// who is being compared re-fetch /groups/[id]/compare, which runs the same
+// loader and component (src/utils/groupCompare.ts).
+let compareData: GroupCompareData | null = null;
+if (canViewContent && statsConf.show_score_compare && activeTab === "compare") {
+  const compareSelection = resolveCompareSelection(Astro.url.searchParams, {
+    memberIds: memberProfileIds,
+    memberStats,
+    viewerProfileId: currentProfile?.id ?? null,
+    ownerProfileId: group.created_by,
+  });
+  compareData = await loadGroupCompare({
+    db,
+    groupId: group.id,
+    genreId: statsConf.focus_genre_id,
+    platformId: statsConf.focus_platform_id,
+    members: memberList,
+    ownerProfileId: group.created_by,
+    viewerProfileId: currentProfile?.id ?? null,
+    selectedIds: compareSelection,
+    sort: parseCompareSort(Astro.url.searchParams.get("sort"), compareSelection.length),
+    mode: parseCompareMode(Astro.url.searchParams.get("mode")),
+    summary,
+    memberStats,
+  });
+}
 
 function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
 // Query for the logged-out Sign up / Sign in buttons: signup joins the group
@@ -522,13 +563,6 @@ const groupOgDescription = group.description
   .game-count-badge{position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;font-size:10px;font-weight:700;padding:2px 5px;border-radius:5px}
 
   /* ── Score compare ── */
-  .compare-game{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px}
-  .compare-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-  .compare-cover{width:30px;height:40px;border-radius:5px;object-fit:cover;background:var(--tag-bg);flex-shrink:0}
-  .compare-title{font-size:14px;font-weight:600;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .compare-scores{display:flex;gap:8px;flex-wrap:wrap}
-  .compare-score-item{display:flex;align-items:center;gap:6px}
-  .compare-username{font-size:12px;color:var(--text-secondary)}
   .variance-tag{font-size:11px;padding:2px 8px;border-radius:8px;margin-left:auto}
   .variance-low{background:var(--score-great-bg);color:var(--score-great)}
   .variance-mid{background:var(--score-mid-bg);color:var(--score-mid)}
@@ -661,6 +695,187 @@ const groupOgDescription = group.description
     .tab-nav{flex-wrap:wrap}
     .stats-row{grid-template-columns:repeat(2,1fr)}
   }
+
+  /* ── Stats tab (src/components/groups/CompareTab.astro) ──
+     Last in the block on purpose: .gc-hist-bar and .gc-spark-bar take their
+     colour from the score classes above via currentColor, which needs to win
+     over those rules' own background. */
+  #compare-panel{transition:opacity .12s}
+  #compare-panel.gc-busy{opacity:.5;pointer-events:none}
+  .gc-block{margin-bottom:26px}
+
+  /* Group averages */
+  .gc-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-bottom:16px}
+  .gc-tile{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+  .gc-tile-val{font-family:'DM Serif Display',serif;font-size:26px;line-height:1.3;letter-spacing:-.5px;margin-bottom:6px}
+  .gc-tile-score{display:inline-flex;align-items:center;justify-content:center;min-width:54px;height:36px;border-radius:9px;font-size:21px;line-height:1;padding:0 10px}
+  .gc-tile-lbl{font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.08em}
+
+  /* Score distribution, with each pick's average ticked on the same scale */
+  .gc-hist{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 14px 12px}
+  .gc-hist-bars{position:relative;display:grid;grid-template-columns:repeat(10,1fr);gap:4px;align-items:end}
+  .gc-hist-col{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0}
+  .gc-hist-count{font-size:10px;color:var(--text-tertiary);font-variant-numeric:tabular-nums;height:13px;line-height:13px}
+  .gc-hist-track{width:100%;height:74px;display:flex;align-items:flex-end}
+  .gc-hist-bar{width:100%;min-height:2px;border-radius:4px 4px 0 0;background:currentColor}
+  .gc-hist-x{font-size:11px;font-weight:600;color:var(--text-tertiary);line-height:14px}
+  .gc-hist-ticks{position:absolute;left:0;right:0;bottom:14px;height:78px;pointer-events:none}
+  .gc-tick{position:absolute;bottom:0;width:2px;height:100%;border-radius:1px;transform:translateX(-1px)}
+  .gc-tick-group{background:var(--text-secondary);opacity:.85}
+  .gc-hist-legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle)}
+  .gc-legend-item{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+  .gc-legend-key{width:9px;height:9px;border-radius:3px;flex-shrink:0}
+  .gc-legend-key-group{width:9px;height:9px;flex-shrink:0;background:var(--text-secondary);transform:rotate(45deg);border-radius:2px}
+
+  /* Member picker */
+  .gc-search{width:100%;background:var(--bg-hover);border:1px solid var(--border);border-radius:9px;padding:8px 12px;font-size:13px;font-family:inherit;color:var(--text-primary);margin-bottom:10px}
+  .gc-search:focus{outline:none;border-color:var(--accent)}
+  .gc-picker{display:flex;flex-wrap:wrap;gap:8px}
+  .gc-chip{display:inline-flex;align-items:center;gap:7px;background:var(--bg-card);border:1px solid var(--border);border-radius:999px;padding:5px 12px 5px 5px;font-family:inherit;font-size:13px;color:var(--text-secondary);cursor:pointer;transition:border-color .12s,color .12s,background .12s}
+  .gc-chip:hover{background:var(--bg-hover);color:var(--text-primary)}
+  .gc-chip-on{border-color:var(--gc-color);color:var(--text-primary);background:color-mix(in srgb,var(--gc-color) 12%,transparent)}
+  .gc-chip-on .gc-chip-av{box-shadow:0 0 0 2px var(--gc-color)}
+  .gc-chip-av{width:24px;height:24px;border-radius:50%;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--text-tertiary);overflow:hidden;flex-shrink:0}
+  .gc-chip-av img{width:100%;height:100%;object-fit:cover}
+  .gc-chip-name{font-weight:600;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .gc-chip-tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);background:var(--accent-subtle);border-radius:6px;padding:1px 5px}
+  .gc-chip-n{font-size:11px;color:var(--text-tertiary);font-variant-numeric:tabular-nums}
+  .gc-picker-empty,.gc-picker-hint,.gc-picker-error{font-size:12px;color:var(--text-tertiary);margin-top:10px}
+  .gc-picker-hint{color:var(--score-mid)}
+  .gc-picker-error{color:var(--score-low)}
+
+  /* One card per pick, beside the group's own */
+  .gc-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:12px;margin-bottom:26px}
+  .gc-card{background:var(--bg-card);border:1px solid var(--border);border-top:3px solid var(--gc-color,var(--border));border-radius:12px;padding:14px}
+  .gc-card-group{border-top-color:var(--text-secondary)}
+  .gc-card-head{display:flex;align-items:center;gap:7px;margin-bottom:10px;min-width:0}
+  .gc-card-av{width:26px;height:26px;border-radius:50%;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--text-tertiary);overflow:hidden;flex-shrink:0}
+  .gc-card-av img{width:100%;height:100%;object-fit:cover}
+  .gc-card-key{width:10px;height:10px;background:var(--text-secondary);transform:rotate(45deg);border-radius:2px;flex-shrink:0}
+  .gc-card-name{font-size:13px;font-weight:600;color:var(--text-primary);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  a.gc-card-name:hover{color:var(--accent)}
+  .gc-card-score{display:inline-flex;align-items:center;justify-content:center;min-width:56px;height:38px;border-radius:10px;font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;padding:0 10px}
+  .gc-delta{font-size:12px;font-weight:600;margin-top:7px;color:var(--text-tertiary)}
+  .gc-delta-up{color:var(--score-great)}
+  .gc-delta-down{color:var(--score-orange)}
+  .gc-card-sub{font-size:12px;color:var(--text-tertiary);margin-top:7px}
+  .gc-spark{display:flex;align-items:flex-end;gap:2px;height:26px;margin-top:12px}
+  .gc-spark-bar{flex:1;min-height:2px;border-radius:2px 2px 0 0;background:var(--text-tertiary);opacity:.45}
+  .gc-spark-bar-member{background:var(--gc-color);opacity:.8}
+  .gc-card-vs{margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle)}
+  .gc-vs-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:12px;color:var(--text-secondary);margin-bottom:4px}
+  .gc-vs-row strong{color:var(--text-primary);font-variant-numeric:tabular-nums}
+  .gc-vs-note{font-size:11px;color:var(--text-tertiary);line-height:1.45;margin-top:4px}
+
+  /* Pairwise agreement */
+  .gc-pair{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px}
+  .gc-pair-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .gc-pair-who{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600}
+  .gc-pair-vs{font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.08em}
+  .gc-pair-label{margin-left:auto;font-size:11px;font-weight:700;color:var(--text-secondary);background:var(--tag-bg);border-radius:8px;padding:3px 9px}
+  .gc-pair-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--tag-bg)}
+  .gc-pair-seg{display:block;height:100%}
+  .gc-pair-seg-same{background:var(--text-tertiary);opacity:.45}
+  .gc-pair-stats{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;font-size:12px;color:var(--text-tertiary)}
+  .gc-pair-stats strong{color:var(--text-primary);font-variant-numeric:tabular-nums}
+
+  /* Game by game */
+  .gc-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .gc-control{display:inline-flex;align-items:center;gap:8px}
+  .gc-control-lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary)}
+  .gc-select{background:var(--bg-card);border:1px solid var(--border);border-radius:9px;padding:7px 10px;font-size:13px;font-family:inherit;color:var(--text-primary);cursor:pointer}
+  .gc-select:focus{outline:none;border-color:var(--accent)}
+  .gc-toggle{display:inline-flex;background:var(--bg-card);border:1px solid var(--border);border-radius:9px;padding:3px;gap:2px}
+  .gc-toggle-btn{background:none;border:none;border-radius:7px;padding:5px 12px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text-secondary);cursor:pointer}
+  .gc-toggle-btn:hover{color:var(--text-primary)}
+  .gc-toggle-on{background:var(--accent);color:#fff}
+  .gc-toggle-on:hover{color:#fff}
+  .gc-game{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px}
+  .gc-game-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .gc-game-cover{width:30px;height:40px;border-radius:5px;object-fit:cover;background:var(--tag-bg);flex-shrink:0}
+  .gc-game-title{font-size:14px;font-weight:600;color:var(--text-primary);text-decoration:none;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gc-game-title:hover{color:var(--accent)}
+  .gc-game-group{font-size:12px;color:var(--text-tertiary);white-space:nowrap;font-variant-numeric:tabular-nums}
+  .gc-game-group strong{color:var(--text-secondary)}
+  .gc-game-n{margin-left:3px}
+  .gc-bars{display:flex;flex-direction:column;gap:7px}
+  .gc-bar-row{display:flex;align-items:center;gap:10px}
+  .gc-bar-name{flex:0 0 104px;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gc-bar-track{position:relative;flex:1;min-width:0;height:16px;background:var(--tag-bg);border-radius:8px}
+  .gc-bar-fill{height:100%;border-radius:8px}
+  .gc-bar-groupline{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text-primary);opacity:.55;border-radius:1px;transform:translateX(-1px)}
+
+  @media (max-width:560px){
+    .gc-bar-name{flex-basis:74px;font-size:11px}
+    .gc-hist-count{font-size:9px}
+    .gc-game-group{font-size:11px}
+    .gc-pair-label{margin-left:0}
+  }
+
+
+  /* ── Feed tab (src/components/groups/FeedTab.astro) ── */
+  #feed-panel{transition:opacity .12s}
+  #feed-panel.gf-busy{opacity:.5;pointer-events:none}
+  .gf-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+  .gf-filter{background:var(--bg-card);border:1px solid var(--border);border-radius:999px;padding:6px 14px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text-secondary);cursor:pointer;transition:background .12s,color .12s,border-color .12s}
+  .gf-filter:hover{background:var(--bg-hover);color:var(--text-primary)}
+  .gf-filter-on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .gf-filter-on:hover{background:var(--accent);color:#fff}
+  .gf-list{display:flex;flex-direction:column;gap:16px}
+  .gf-item{display:flex;flex-direction:column;gap:0}
+  /* The viewer's own score, annotating the card below it */
+  .gf-compare{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--text-tertiary);border-bottom:none;border-radius:12px 12px 0 0;padding:8px 14px}
+  .gf-compare-agree{border-left-color:var(--score-great)}
+  .gf-compare-close{border-left-color:var(--score-mid)}
+  .gf-compare-disagree{border-left-color:var(--score-low)}
+  .gf-compare .score-badge{width:24px;height:24px;font-size:11px;border-radius:6px}
+  .gf-compare-verdict{font-weight:600;color:var(--text-primary)}
+  .gf-compare-disagree .gf-compare-verdict{color:var(--score-low)}
+  .gf-own{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-tertiary);background:var(--bg-card);border:1px solid var(--border);border-bottom:none;border-radius:12px 12px 0 0;padding:7px 14px}
+  .gf-more{display:block;width:100%;margin-top:4px;padding:11px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--accent);font-size:13px;font-weight:600;font-family:inherit;cursor:pointer}
+  .gf-more:hover{background:var(--bg-hover)}
+  .gf-error,.dd-error{font-size:12px;color:var(--score-low);margin-top:10px}
+
+  /* ── Disagreement of the day (src/components/groups/DailyDisagreement.astro) ── */
+  .dd-card{background:var(--bg-card);border:1px solid var(--accent);border-radius:14px;padding:16px;margin-bottom:20px}
+  .dd-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+  .dd-kicker{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--accent)}
+  .dd-spread{font-size:11px;font-weight:700;color:var(--score-low);background:var(--score-low-bg);border-radius:8px;padding:3px 9px;white-space:nowrap}
+  .dd-game{display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit;margin-bottom:14px}
+  .dd-cover{width:34px;height:45px;border-radius:6px;object-fit:cover;background:var(--tag-bg);flex-shrink:0}
+  .dd-game-title{font-family:'DM Serif Display',serif;font-size:18px;letter-spacing:-.2px;min-width:0}
+  .dd-game:hover .dd-game-title{color:var(--accent)}
+  .dd-sides{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .dd-side{background:var(--bg-hover);border:1px solid var(--border-subtle);border-radius:11px;padding:12px}
+  .dd-side-mine{border-color:var(--accent)}
+  .dd-side-head{display:flex;align-items:center;gap:7px;margin-bottom:9px;min-width:0}
+  .dd-av{width:26px;height:26px;border-radius:50%;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--text-tertiary);overflow:hidden;flex-shrink:0}
+  .dd-av img{width:100%;height:100%;object-fit:cover}
+  .dd-name{font-size:13px;font-weight:600;color:var(--text-primary);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .dd-name:hover{color:var(--accent)}
+  .dd-you{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);background:var(--accent-subtle);border-radius:6px;padding:1px 5px}
+  .dd-side .score-badge{margin-left:auto}
+  .dd-read{display:block;font-size:12px;color:var(--text-secondary);text-decoration:none;margin-bottom:10px}
+  .dd-read:hover{color:var(--accent)}
+  .dd-vote{width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:9px;padding:8px 10px;font-size:12px;font-weight:600;font-family:inherit;color:var(--text-primary);cursor:pointer;transition:background .12s,border-color .12s;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dd-vote:hover{background:var(--bg-hover);border-color:var(--accent)}
+  .dd-vote-on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .dd-vote-on:hover{background:var(--accent);color:#fff}
+  .dd-own{font-size:12px;color:var(--text-tertiary);line-height:1.45}
+  .dd-result{margin-top:10px}
+  .dd-bar{height:6px;border-radius:3px;background:var(--tag-bg);overflow:hidden}
+  .dd-bar-fill{display:block;height:100%;background:var(--accent);border-radius:3px;transition:width .25s}
+  .dd-pct{display:block;font-size:11px;color:var(--text-tertiary);margin-top:5px;font-variant-numeric:tabular-nums}
+  .dd-foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:13px;padding-top:12px;border-top:1px solid var(--border-subtle)}
+  .dd-note{font-size:12px;color:var(--text-tertiary)}
+  .dd-cta{font-size:12px;font-weight:600;color:var(--accent);text-decoration:none}
+  .dd-cta:hover{text-decoration:underline}
+
+  @media (max-width:560px){
+    .dd-sides{grid-template-columns:1fr}
+    .dd-game-title{font-size:16px}
+  }
+
 </style>
 
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet" />
@@ -829,6 +1044,7 @@ const groupOgDescription = group.description
   {/* Full tab nav — only shown to members or non-private groups */}
   {(canSeeMemberContent || group.visibility !== "private") && (
   <nav class="tab-nav">
+    <a href={`/groups/${group.id}?tab=feed`} class={`tab-link${activeTab === "feed" ? " active" : ""}`}>Feed</a>
     <a href={`/groups/${group.id}?tab=overview`} class={`tab-link${activeTab === "overview" ? " active" : ""}`}>Overview</a>
     {statsConf.show_sessions && (
     <a href={`/groups/${group.id}?tab=sessions`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
@@ -837,10 +1053,20 @@ const groupOgDescription = group.description
     )}
     {statsConf.show_score_compare && (
     <a href={`/groups/${group.id}?tab=compare`} class={`tab-link${activeTab === "compare" ? " active" : ""}`}>
-      Stats {sharedGames.length > 0 && <span class="tab-count">{sharedGames.length}</span>}
+      Stats
     </a>
     )}
   </nav>
+
+  <!-- Feed tab -->
+  <div class={`tab-panel${activeTab === "feed" ? " active" : ""}`} id="tab-feed">
+    {/* The filters and Load more swap this container — src/scripts/group-feed.ts */}
+    <div id="feed-panel">
+      {feedData && (
+        <FeedTab data={feedData} groupId={group.id} isMember={isMember} isLoggedIn={!!user} />
+      )}
+    </div>
+  </div>
 
   <!-- Overview tab -->
   <div class={`tab-panel${activeTab === "overview" ? " active" : ""}`} id="tab-overview">
@@ -1323,41 +1549,14 @@ const groupOgDescription = group.description
   </div>
 
   <!-- Stats tab -->
-  {statsConf.show_score_compare && <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
-    <div class="stats-section-header">
-      <span>Score Comparison</span>
-      <span class="stats-section-count">{sharedGames.length} shared game{sharedGames.length !== 1 ? "s" : ""}</span>
+  {statsConf.show_score_compare && (
+  <div class={`tab-panel${activeTab === "compare" ? " active" : ""}`} id="tab-compare">
+    {/* The picker swaps this container's contents — src/scripts/group-compare.ts */}
+    <div id="compare-panel">
+      {compareData && <CompareTab data={compareData} groupId={group.id} focusLabel={focusLabel} />}
     </div>
-    {sharedGames.length === 0
-      ? <div class="empty-tab">No games reviewed by 2 or more members yet.</div>
-      : sharedGames.map((g: any) => {
-          const scores = g.reviews.map((r: any) => r.score);
-          const variance = scores.length > 1 ? Math.max(...scores) - Math.min(...scores) : 0;
-          const varClass = variance >= 5 ? "variance-high" : variance >= 3 ? "variance-mid" : "variance-low";
-          const varLabel = variance >= 5 ? "Divisive" : variance >= 3 ? "Mixed" : "Consensus";
-          return (
-            <div class="compare-game">
-              <div class="compare-header">
-                {igdbCover(g.game.cover_img_url, "t_thumb")
-                  ? <img class="compare-cover" src={igdbCover(g.game.cover_img_url, "t_thumb")!} alt={g.game.title} />
-                  : <div class="compare-cover" />
-                }
-                <a class="compare-title" href={`/games/${g.game.slug}`} style="color:inherit">{g.game.title}</a>
-                <span class={`variance-tag ${varClass}`}>{varLabel}</span>
-              </div>
-              <div class="compare-scores">
-                {g.reviews.filter((r: any) => memberById[r.profile_id]).map((r: any) => (
-                  <div class="compare-score-item">
-                    <span class="compare-username">@{memberById[r.profile_id].username}</span>
-                    <div class={`score-badge ${scoreClass(r.score)}`}>{r.score}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })
-    }
-  </div>}
+  </div>
+  )}
 
   <!-- Sessions tab -->
   {statsConf.show_sessions && <div class={`tab-panel${activeTab === "sessions" ? " active" : ""}`} id="tab-sessions">
@@ -1420,6 +1619,17 @@ const groupOgDescription = group.description
   )} {/* end isMember || non-private tab nav */}
 
 </div>
+
+<script>
+  // The Stats tab's picker replaces its own controls when the comparison
+  // changes, so its listeners are delegated and registered here, once.
+  import '../../../scripts/group-compare';
+  import '../../../scripts/group-feed';
+  // Feed cards are rendered server-side and inserted after load, and a
+  // component's script only ships with pages that render it — so bring the
+  // review-card behaviour along with the page.
+  import '../../../scripts/review-card';
+</script>
 
 <script is:inline>
   function toggleTheme() {

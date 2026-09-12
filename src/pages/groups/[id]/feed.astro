@@ -1,0 +1,82 @@
+---
+/**
+ * The group feed as an HTML fragment: a filter change (the whole tab) or the
+ * next page (`?offset=`, items only, appended to the list). Renders exactly what
+ * the page renders for ?tab=feed — same loader (src/utils/groupFeed.ts), same
+ * components — so the two can't drift.
+ */
+export const prerender = false;
+export const partial = true;
+
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { getPageUser } from "../../../utils/pageAuth";
+import { setPageCacheHeaders } from "../../../utils/cache";
+import { getGroupAuthority } from "../../../utils/api";
+import { loadGroupFeed, parseFeedFilter, parseFeedOffset } from "../../../utils/groupFeed";
+import FeedTab from "../../../components/groups/FeedTab.astro";
+
+const id = Astro.params.id;
+if (!id) return new Response(null, { status: 404 });
+
+const supabase = createSupabaseServerClientFromContext(Astro) as any;
+const db = getSupabaseAdmin() as any;
+
+const user = await getPageUser(Astro, supabase);
+
+const { data: group } = await db
+  .from("groups")
+  .select("id, visibility, invite_code, stats_config")
+  .eq("id", id)
+  .maybeSingle();
+if (!group) return new Response(null, { status: 404 });
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await supabase
+    .from("profiles").select("id").eq("auth_user_id", user.id).maybeSingle();
+  currentProfile = cp;
+}
+
+// Same gate as the page: a public group is open, a private one needs a member,
+// a site admin, or the invite code.
+const authority = currentProfile ? await getGroupAuthority(db, id, currentProfile.id) : null;
+const isAdminOrOwner = ["owner", "admin"].includes(authority?.role ?? "");
+const joinCode = Astro.url.searchParams.get("code");
+const canView =
+  group.visibility !== "private" ||
+  isAdminOrOwner ||
+  !!authority ||
+  (!!joinCode && joinCode.toUpperCase() === group.invite_code);
+if (!canView) return new Response(null, { status: 403 });
+
+const { data: membership } = currentProfile
+  ? await db.from("group_members").select("role")
+      .eq("group_id", id).eq("profile_id", currentProfile.id).maybeSingle()
+  : { data: null };
+
+const statsConf = (group.stats_config ?? {}) as {
+  focus_genre_id?: string | null; focus_platform_id?: string | null;
+};
+
+const offset = parseFeedOffset(Astro.url.searchParams.get("offset"));
+const data = await loadGroupFeed({
+  db,
+  groupId: id,
+  genreId: statsConf.focus_genre_id,
+  platformId: statsConf.focus_platform_id,
+  viewerProfileId: currentProfile?.id ?? null,
+  filter: parseFeedFilter(Astro.url.searchParams.get("filter"), !!currentProfile),
+  offset,
+  // The day's argument heads the feed; it isn't part of the page being appended
+  withDisagreement: offset === 0,
+});
+
+setPageCacheHeaders(Astro.response.headers, !!user);
+---
+<FeedTab
+  data={data}
+  groupId={id}
+  isMember={!!membership}
+  isLoggedIn={!!user}
+  appendOnly={offset > 0}
+/>

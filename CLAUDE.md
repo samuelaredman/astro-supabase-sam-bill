@@ -271,12 +271,40 @@ supabase/
 
 ### Groups: stats, admin checks, custom links
 
-- **Stats come from the `group_*` SQL functions** (migration `20260911120000`): `group_review_summary`,
-  `group_member_review_stats`, `group_game_review_stats`, `group_game_member_scores`,
-  `group_split_decision`, `group_hot_take`, all reading through `group_reviews(group, genre?, platform?)`,
-  which applies "published, by a current member, inside the group's focus". Site-wide numbers (Hot
-  Take's community side) come from `game_review_stats`, per the review-stats rule. Service role only. Never
-  `.in('profile_id', memberIds)` over reviews: it truncates at 1000 rows and fails on URL length.
+- **Stats come from the `group_*` SQL functions** (migrations `20260911120000` and `20260912000000`):
+  `group_review_summary`, `group_member_review_stats`, `group_game_review_stats`,
+  `group_game_member_scores`, `group_split_decision`, `group_hot_take`, plus the Stats tab's
+  `group_score_distribution`, `group_compare_member_stats`, `group_compare_games`,
+  `group_compare_scores` and `group_compare_pairs` — all reading through
+  `group_reviews(group, genre?, platform?)`, which applies "published, by a current member, inside the
+  group's focus". Site-wide numbers (Hot Take's community side) come from `game_review_stats`, per the
+  review-stats rule. Service role only. Never `.in('profile_id', memberIds)` over reviews: it truncates
+  at 1000 rows and fails on URL length.
+- **The Stats tab (`?tab=compare`) compares chosen members with each other and with the group.**
+  `loadGroupCompare()` (`src/utils/groupCompare.ts`) builds it and `CompareTab.astro` renders it; the
+  group page calls both for the first paint, and the picker re-fetches the partial route
+  `/groups/[id]/compare` (same loader, same component) when the picks, sort or mode change. The picks
+  live in `?with=` so a comparison is a shareable link, and they are re-validated against current
+  members on every request. Behaviour is delegated once from `src/scripts/group-compare.ts`; the CSS
+  lives in the page's global block, like the profile tab components, so swapped-in markup is styled.
+  Add a stat by putting the query in a `group_compare_*` function and reading it in the loader — the
+  compare queries are bounded by the picked set (at most four) or by `COMPARE_GAMES_SHOWN`, which is
+  what keeps them clear of the 1000-row cap. The tab's queries only run when it is the tab in the URL.
+- **The Feed tab (`?tab=feed`) is the group's activity, and members land on it** rather than Overview
+  (visitors still land on Overview, which is the group's shop window). `loadGroupFeed()`
+  (`src/utils/groupFeed.ts`) builds a page and `FeedTab.astro` renders it; filter changes and further
+  pages re-fetch the partial route `/groups/[id]/feed`, which runs the same loader and components.
+  Each card carries the viewer's own score for that game — the point of the tab, and the one thing a
+  chat app can't show. The filters ("We disagree", "Haven't played") are applied inside `group_feed()`,
+  not after the rows arrive: filtering a page of 20 in JS shows a handful of rows and pages wrongly.
+- **The disagreement of the day heads the feed.** `group_daily_disagreement(group, day)` picks one game
+  two members scored 3+ apart, derived from the group id and the date rather than stored — the same
+  pick for everyone all day, rotating through the 30 widest disagreements, with no nightly job. Votes
+  go to `group_disagreement_votes` (one per member per group per day) via
+  `POST /api/groups/disagreement/vote`, which re-derives the day's pairing server-side so a
+  hand-written request can't vote for a profile that isn't one of today's two sides. The day boundary
+  is `siteDay()` — Los Angeles, matching the home page's "today" — so it must not be the viewer's own
+  timezone. Note the viewer can be one of the two sides; they get "that's your review", not a vote.
 - **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
   not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
   so we can moderate the groups we run without joining them. Owner-only actions (delete, transfer,

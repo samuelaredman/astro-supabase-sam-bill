@@ -1,0 +1,126 @@
+---
+/**
+ * The group Stats tab as an HTML fragment, re-fetched whenever the viewer
+ * changes who is being compared, the sort, or the any/all mode (see
+ * src/scripts/group-compare.ts). Renders exactly what the page renders for
+ * ?tab=compare: the same loader (src/utils/groupCompare.ts) and the same
+ * component, so the two can't drift.
+ */
+export const prerender = false;
+export const partial = true;
+
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { getPageUser } from "../../../utils/pageAuth";
+import { setPageCacheHeaders } from "../../../utils/cache";
+import { fetchAll } from "../../../utils/fetchAll";
+import { getGroupAuthority } from "../../../utils/api";
+import {
+  loadGroupCompare,
+  parseCompareMode,
+  parseCompareSort,
+  resolveCompareSelection,
+} from "../../../utils/groupCompare";
+import CompareTab from "../../../components/groups/CompareTab.astro";
+
+const id = Astro.params.id;
+if (!id) return new Response(null, { status: 404 });
+
+const supabase = createSupabaseServerClientFromContext(Astro) as any;
+const db = getSupabaseAdmin() as any;
+
+const user = await getPageUser(Astro, supabase);
+
+const { data: group } = await db
+  .from("groups")
+  .select("id, visibility, invite_code, created_by, stats_config")
+  .eq("id", id)
+  .maybeSingle();
+if (!group) return new Response(null, { status: 404 });
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await supabase
+    .from("profiles").select("id").eq("auth_user_id", user.id).maybeSingle();
+  currentProfile = cp;
+}
+
+// Same gate as the page: a public group is open, a private one needs a member,
+// a site admin, or the invite code.
+const authority = currentProfile ? await getGroupAuthority(db, id, currentProfile.id) : null;
+const isAdminOrOwner = ["owner", "admin"].includes(authority?.role ?? "");
+const joinCode = Astro.url.searchParams.get("code");
+const canView =
+  group.visibility !== "private" ||
+  isAdminOrOwner ||
+  !!authority ||
+  (!!joinCode && joinCode.toUpperCase() === group.invite_code);
+if (!canView) return new Response(null, { status: 403 });
+
+const statsConf = (group.stats_config ?? {}) as { show_score_compare?: boolean; focus_genre_id?: string | null; focus_platform_id?: string | null };
+if (statsConf.show_score_compare === false) return new Response(null, { status: 404 });
+
+const genreId = statsConf.focus_genre_id ?? null;
+const platformId = statsConf.focus_platform_id ?? null;
+const statArgs = {
+  p_group_id: id,
+  p_genre_id: genreId ?? undefined,
+  p_platform_id: genreId ? undefined : platformId ?? undefined,
+};
+
+// Admin client: RLS shows a group's members only to its other members, so a
+// visitor to a public group would otherwise compare an empty group.
+const [memberRows, summaryRes, memberStats] = await Promise.all([
+  fetchAll<any>((from, to) => db
+    .from("group_members")
+    .select("role, profiles ( id, username, avatar_url )")
+    .eq("group_id", id)
+    .order("joined_at", { ascending: true })
+    .order("profile_id")
+    .range(from, to)),
+  db.rpc("group_review_summary", statArgs).maybeSingle(),
+  fetchAll<{ profile_id: string; review_count: number; avg_score: number }>(
+    (from, to) => db.rpc("group_member_review_stats", statArgs).order("profile_id").range(from, to)),
+]);
+if (summaryRes.error) console.error("[groups/compare] summary error:", JSON.stringify(summaryRes.error));
+
+// The page shows the group's focus beside its totals; keep the fragment matching
+let focusLabel: string | null = null;
+if (genreId) {
+  const { data: gn } = await db.from("genres").select("name").eq("id", genreId).maybeSingle();
+  focusLabel = gn?.name ? `${gn.name} focus` : null;
+} else if (platformId) {
+  const { data: pl } = await db.from("platforms").select("name").eq("id", platformId).maybeSingle();
+  focusLabel = pl?.name ? `${pl.name} focus` : null;
+}
+
+const members = memberRows
+  .filter((m: any) => m.profiles)
+  .map((m: any) => ({ ...m.profiles, role: m.role }));
+
+const selectedIds = resolveCompareSelection(Astro.url.searchParams, {
+  memberIds: members.map((m: any) => m.id),
+  memberStats,
+  viewerProfileId: currentProfile?.id ?? null,
+  ownerProfileId: group.created_by,
+});
+
+const data = await loadGroupCompare({
+  db,
+  groupId: id,
+  genreId,
+  platformId,
+  members,
+  ownerProfileId: group.created_by,
+  viewerProfileId: currentProfile?.id ?? null,
+  selectedIds,
+  sort: parseCompareSort(Astro.url.searchParams.get("sort"), selectedIds.length),
+  mode: parseCompareMode(Astro.url.searchParams.get("mode")),
+  summary: summaryRes.data ?? null,
+  memberStats,
+});
+
+// Same caching as the page: shared at the CDN for logged-out visitors, never
+// for logged-in ones (the fragment marks the viewer's own chip).
+setPageCacheHeaders(Astro.response.headers, !!user);
+---
+<CompareTab data={data} groupId={id} focusLabel={focusLabel} />
