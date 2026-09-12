@@ -14,7 +14,7 @@
 import { getVoteCounts, igdbImage as igdbCover } from './format';
 import { REC_SELECT, shapeRec } from './recommendationsFeed';
 
-export const LAZY_PROFILE_TABS = ['reviews', 'recommendations', 'lists', 'library'] as const;
+export const LAZY_PROFILE_TABS = ['reviews', 'recommendations', 'lists', 'library', 'groups'] as const;
 export type LazyProfileTab = (typeof LAZY_PROFILE_TABS)[number];
 
 export function isLazyProfileTab(tab: string): tab is LazyProfileTab {
@@ -377,11 +377,52 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
 }
 export type LibraryTabData = Awaited<ReturnType<typeof loadLibraryTab>>;
 
+// ── Groups ───────────────────────────────────────────────────────────────────
+
+export interface ProfileGroup {
+  id: string;
+  name: string;
+  avatar_url: string | null;
+  visibility: string;
+  slug: string | null;
+  role: string;
+  memberCount: number;
+}
+
+/**
+ * Groups this reviewer belongs to: public ones for everyone, private ones only
+ * on their own profile. Member counts are counted by Postgres (an embedded
+ * count), not by fetching every member row — creator groups run to hundreds.
+ */
+export async function loadGroupsTab(ctx: ProfileTabContext) {
+  const { data, error } = await ctx.db
+    .from('group_members')
+    .select('role, groups!inner ( id, name, avatar_url, visibility, slug, group_members ( count ) )')
+    .eq('profile_id', ctx.reviewer.id)
+    .order('joined_at', { ascending: true });
+  if (error) console.error('[profileTabs] groups error:', JSON.stringify(error));
+
+  const groups: ProfileGroup[] = (data ?? [])
+    .map((m: any): ProfileGroup => ({
+      id: m.groups.id,
+      name: m.groups.name,
+      avatar_url: m.groups.avatar_url,
+      visibility: m.groups.visibility,
+      slug: m.groups.slug,
+      role: m.role,
+      memberCount: Number(m.groups.group_members?.[0]?.count ?? 1),
+    }))
+    .filter((g: ProfileGroup) => ctx.isOwnProfile || g.visibility === 'public');
+  return { groups };
+}
+export type GroupsTabData = Awaited<ReturnType<typeof loadGroupsTab>>;
+
 export function loadProfileTab(tab: LazyProfileTab, ctx: ProfileTabContext) {
   switch (tab) {
     case 'reviews': return loadReviewsTab(ctx);
     case 'recommendations': return loadRecommendationsTab(ctx);
     case 'lists': return loadListsTab(ctx);
     case 'library': return loadLibraryTab(ctx);
+    case 'groups': return loadGroupsTab(ctx);
   }
 }

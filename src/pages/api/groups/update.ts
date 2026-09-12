@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../utils/api";
+import { requireAuth, json, getGroupAuthority } from "../../../utils/api";
 import { validateName } from "../../../utils/moderation/nameRules";
 
 function randomCode(len = 8) {
@@ -12,10 +12,9 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json();
-  const { group_id, name, description, visibility, regenerate_invite, join_prompt, stats_config } = body;
+  const { group_id, name, description, visibility, regenerate_invite, join_prompt, stats_config, requires_approval } = body;
 
-  const { data: membership } = await db.from("group_members")
-    .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
+  const membership = await getGroupAuthority(db, group_id, profile.id);
   if (!membership) return json({ error: "Not authorized" }, 403);
 
   const isOwner = membership.role === "owner";
@@ -43,26 +42,32 @@ export const POST: APIRoute = async (context) => {
   if (join_prompt !== undefined)  updates.join_prompt = join_prompt?.trim() || null;
   if (stats_config !== undefined) updates.stats_config = stats_config;
 
-  // Visibility and invite regeneration require at least owner/admin
+  // Visibility, join settings, and invite regeneration require at least owner/admin
   if (visibility !== undefined && !isOwner && !isAdmin)
     return json({ error: "Only the group owner or admin can change visibility" }, 403);
+  if (requires_approval !== undefined && !isOwner && !isAdmin)
+    return json({ error: "Only the group owner or admin can change join settings" }, 403);
   if (regenerate_invite && !isOwner && !isAdmin)
     return json({ error: "Only the group owner or admin can regenerate the invite code" }, 403);
 
   if (visibility !== undefined) {
-    if (!["public", "private", "community"].includes(visibility))
+    if (!["public", "private"].includes(visibility))
       return json({ error: "Invalid visibility" }, 400);
-    if (visibility === "community") {
-      const { data: prof } = await db.from("profiles")
-        .select("is_group_admin").eq("id", profile.id).single();
-      if (!prof?.is_group_admin)
-        return json({ error: "Only admins can set Community visibility" }, 403);
-    }
     updates.visibility = visibility;
     if (visibility === "private") {
       const { data: g } = await db.from("groups").select("invite_code").eq("id", group_id).single();
       if (!g?.invite_code) updates.invite_code = randomCode();
     }
+  }
+
+  // requires_approval only means anything for public groups — force it off for private
+  if (requires_approval !== undefined || visibility === "private") {
+    let effectiveVisibility = visibility;
+    if (effectiveVisibility === undefined) {
+      const { data: g } = await db.from("groups").select("visibility").eq("id", group_id).single();
+      effectiveVisibility = g?.visibility;
+    }
+    updates.requires_approval = effectiveVisibility === "public" ? !!requires_approval : false;
   }
 
   if (regenerate_invite) updates.invite_code = randomCode();

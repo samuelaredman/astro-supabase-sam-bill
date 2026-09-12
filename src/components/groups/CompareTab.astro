@@ -1,0 +1,359 @@
+---
+/**
+ * The group Stats tab: the group's own averages, then any two to four members
+ * lined up against each other and against the group average.
+ *
+ * Rendered both by the group page (first paint) and by the partial route
+ * /groups/[id]/compare that the picker re-fetches, from the same
+ * loadGroupCompare() data — see src/utils/groupCompare.ts. Styles live in the
+ * page's global block, like the profile tab components, so markup swapped in
+ * later is styled without shipping the CSS twice. Behaviour is delegated from
+ * src/scripts/group-compare.ts.
+ */
+import { igdbImage as igdbCover, scoreClass } from "../../utils/format";
+import {
+  COMPARE_MAX_MEMBERS,
+  COMPARE_SORTS,
+  COMPARE_SORT_LABELS,
+  agreementLabel,
+  barPercent,
+  spreadLabel,
+  type GroupCompareData,
+} from "../../utils/groupCompare";
+
+interface Props {
+  data: GroupCompareData;
+  /** The group being compared — the picker re-fetches /groups/<id>/compare. */
+  groupId: string;
+  /** Shown next to the group totals when the group has a genre/platform focus. */
+  focusLabel?: string | null;
+}
+const { data, groupId, focusLabel } = Astro.props;
+const {
+  members, pickable, groupAvg, groupReviewCount, groupGameCount, groupHoursSum,
+  groupDistribution, games, pairs, sort, mode, truncated,
+} = data;
+
+const memberById = new Map(members.map((m) => [m.id, m]));
+const distMax = Math.max(1, ...groupDistribution);
+
+const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
+const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+const hours = (h: number) => (h > 0 ? `${h.toLocaleString()}h` : "—");
+const signed = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(1)}`;
+/** A member's own distribution, scaled to their own busiest score. */
+const sparkMax = (buckets: number[]) => Math.max(1, ...buckets);
+---
+
+<div
+  class="gc-root"
+  data-gc-group={groupId}
+  data-gc-selected={members.map((m) => m.id).join(",")}
+  data-gc-sort-value={sort}
+  data-gc-mode-value={mode}
+>
+
+  {/* ── Group averages ── */}
+  <div class="gc-block">
+    <div class="stats-section-header">
+      <span>Group averages</span>
+      <span class="stats-section-count">
+        {plural(groupReviewCount, "review")} · {plural(groupGameCount, "game")}
+        {focusLabel && ` · ${focusLabel}`}
+      </span>
+    </div>
+
+    <div class="gc-tiles">
+      <div class="gc-tile">
+        <div class={`gc-tile-val${groupAvg != null ? ` gc-tile-score ${scoreClass(Math.round(groupAvg))}` : ""}`}>
+          {groupAvg != null ? groupAvg.toFixed(1) : "—"}
+        </div>
+        <div class="gc-tile-lbl">Average score</div>
+      </div>
+      <div class="gc-tile">
+        <div class="gc-tile-val">{groupReviewCount.toLocaleString()}</div>
+        <div class="gc-tile-lbl">Reviews</div>
+      </div>
+      <div class="gc-tile">
+        <div class="gc-tile-val">{groupGameCount.toLocaleString()}</div>
+        <div class="gc-tile-lbl">Games reviewed</div>
+      </div>
+      <div class="gc-tile">
+        <div class="gc-tile-val">{groupHoursSum > 0 ? groupHoursSum.toLocaleString() : "—"}</div>
+        <div class="gc-tile-lbl">Hours logged</div>
+      </div>
+    </div>
+
+    {groupReviewCount > 0 && (
+      <div class="gc-hist">
+        <div class="gc-hist-bars">
+          {groupDistribution.map((count, i) => (
+            <div class="gc-hist-col" title={`${plural(count, "review")} at ${i + 1}`}>
+              <div class="gc-hist-count">{count > 0 ? count.toLocaleString() : ""}</div>
+              <div class="gc-hist-track">
+                <div class={`gc-hist-bar ${scoreClass(i + 1)}`} style={`height:${(count / distMax) * 100}%`}></div>
+              </div>
+              <div class="gc-hist-x">{i + 1}</div>
+            </div>
+          ))}
+          <div class="gc-hist-ticks">
+            {groupAvg != null && (
+              <span class="gc-tick gc-tick-group" style={`left:${barPercent(groupAvg)}%`}></span>
+            )}
+            {members.filter((m) => m.avgScore != null).map((m) => (
+              <span class="gc-tick" style={`left:${barPercent(m.avgScore!)}%;background:${m.color}`}></span>
+            ))}
+          </div>
+        </div>
+        <div class="gc-hist-legend">
+          {groupAvg != null && (
+            <span class="gc-legend-item"><span class="gc-legend-key gc-legend-key-group"></span>Group {groupAvg.toFixed(1)}</span>
+          )}
+          {members.filter((m) => m.avgScore != null).map((m) => (
+            <span class="gc-legend-item"><span class="gc-legend-key" style={`background:${m.color}`}></span>@{m.username} {m.avgScore!.toFixed(1)}</span>
+          ))}
+        </div>
+      </div>
+    )}
+  </div>
+
+  {/* ── Member picker ── */}
+  <div class="gc-block">
+    <div class="stats-section-header">
+      <span>Compare members</span>
+      <span class="stats-section-count">Pick up to {COMPARE_MAX_MEMBERS}</span>
+    </div>
+
+    {pickable.length === 0 ? (
+      <div class="empty-tab">No member has published a review yet.</div>
+    ) : (
+      <>
+        {pickable.length > 12 && (
+          <input
+            class="gc-search"
+            type="search"
+            placeholder="Find a member…"
+            aria-label="Filter members"
+            data-gc-search
+          />
+        )}
+        <div class="gc-picker" data-gc-picker>
+          {pickable.map((p) => {
+            const picked = memberById.get(p.id);
+            return (
+              <button
+                type="button"
+                class={`gc-chip${picked ? " gc-chip-on" : ""}`}
+                style={picked ? `--gc-color:${picked.color}` : undefined}
+                data-gc-toggle={p.id}
+                data-gc-username={p.username}
+                aria-pressed={picked ? "true" : "false"}
+              >
+                <span class="gc-chip-av">
+                  {p.avatar_url
+                    ? <img src={p.avatar_url} alt="" loading="lazy" />
+                    : initials(p.username)}
+                </span>
+                <span class="gc-chip-name">@{p.username}</span>
+                {p.isViewer && <span class="gc-chip-tag">you</span>}
+                {p.isOwner && <span class="gc-chip-tag">owner</span>}
+                <span class="gc-chip-n">{p.reviewCount}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div class="gc-picker-empty" data-gc-picker-empty hidden>No member matches that name.</div>
+        <div class="gc-picker-hint" data-gc-hint hidden>
+          Deselect someone first — up to {COMPARE_MAX_MEMBERS} at a time.
+        </div>
+        <div class="gc-picker-error" data-gc-error hidden>
+          Couldn't update the comparison. The one below is still the last one that loaded.
+        </div>
+      </>
+    )}
+  </div>
+
+  {members.length === 0 ? (
+    pickable.length > 0 && <div class="empty-tab">Pick a member above to compare them with the group.</div>
+  ) : (
+    <>
+      {/* ── Each pick beside the group average ── */}
+      <div class="gc-cards">
+        <div class="gc-card gc-card-group">
+          <div class="gc-card-head">
+            <span class="gc-card-key gc-legend-key-group"></span>
+            <span class="gc-card-name">Group average</span>
+          </div>
+          <div class={`gc-card-score${groupAvg != null ? ` ${scoreClass(Math.round(groupAvg))}` : ""}`}>
+            {groupAvg != null ? groupAvg.toFixed(1) : "—"}
+          </div>
+          <div class="gc-card-sub">{plural(groupReviewCount, "review")} · {hours(groupHoursSum)}</div>
+          <div class="gc-spark" aria-hidden="true">
+            {groupDistribution.map((count, i) => (
+              <span class="gc-spark-bar" style={`height:${(count / distMax) * 100}%`} title={`${count} at ${i + 1}`}></span>
+            ))}
+          </div>
+        </div>
+
+        {members.map((m) => {
+          const delta = m.avgScore != null && groupAvg != null ? Math.round((m.avgScore - groupAvg) * 10) / 10 : null;
+          const max = sparkMax(m.distribution);
+          return (
+            <div class="gc-card" style={`--gc-color:${m.color}`}>
+              <div class="gc-card-head">
+                <span class="gc-card-av">
+                  {m.avatar_url
+                    ? <img src={m.avatar_url} alt="" loading="lazy" />
+                    : initials(m.username)}
+                </span>
+                <a class="gc-card-name" href={`/reviewers/${m.username}`}>@{m.username}</a>
+                {m.isViewer && <span class="gc-chip-tag">you</span>}
+                {m.isOwner && <span class="gc-chip-tag">owner</span>}
+              </div>
+              <div class={`gc-card-score${m.avgScore != null ? ` ${scoreClass(Math.round(m.avgScore))}` : ""}`}>
+                {m.avgScore != null ? m.avgScore.toFixed(1) : "—"}
+              </div>
+              {delta != null && (
+                <div class={`gc-delta${delta > 0 ? " gc-delta-up" : delta < 0 ? " gc-delta-down" : ""}`}>
+                  {delta === 0 ? "level with group" : `${signed(delta)} vs group`}
+                </div>
+              )}
+              <div class="gc-card-sub">{plural(m.reviewCount, "review")} · {hours(m.hoursSum)}</div>
+              <div class="gc-spark" aria-hidden="true">
+                {m.distribution.map((count, i) => (
+                  <span
+                    class="gc-spark-bar gc-spark-bar-member"
+                    style={`height:${(count / max) * 100}%`}
+                    title={`${count} at ${i + 1}`}
+                  ></span>
+                ))}
+              </div>
+              {m.vsGroupGames > 0 ? (
+                <div class="gc-card-vs">
+                  <div class="gc-vs-row">
+                    <span>Average gap</span>
+                    <strong>{m.vsGroupAbsDiff != null ? m.vsGroupAbsDiff.toFixed(1) : "—"}</strong>
+                  </div>
+                  <div class="gc-vs-row">
+                    <span>Above / level / below</span>
+                    <strong>{m.vsGroupAbove} / {m.vsGroupLevel} / {m.vsGroupBelow}</strong>
+                  </div>
+                  <div class="gc-vs-note">over {plural(m.vsGroupGames, "game")} another member also reviewed</div>
+                </div>
+              ) : (
+                <div class="gc-card-vs">
+                  <div class="gc-vs-note">No game of theirs has a second review in the group yet.</div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Pairwise agreement ── */}
+      {pairs.length > 0 && (
+        <div class="gc-block">
+          <div class="stats-section-header">
+            <span>Agreement</span>
+            <span class="stats-section-count">over games both reviewed</span>
+          </div>
+          {pairs.map((p) => (
+            <div class="gc-pair">
+              <div class="gc-pair-head">
+                <span class="gc-pair-who"><span class="gc-legend-key" style={`background:${p.a.color}`}></span>@{p.a.username}</span>
+                <span class="gc-pair-vs">vs</span>
+                <span class="gc-pair-who"><span class="gc-legend-key" style={`background:${p.b.color}`}></span>@{p.b.username}</span>
+                <span class="gc-pair-label">{agreementLabel(p.meanAbsDiff)}</span>
+              </div>
+              <div class="gc-pair-bar" title={`${p.aHigher} higher for @${p.a.username}, ${p.exactMatches} identical, ${p.bHigher} higher for @${p.b.username}`}>
+                <span class="gc-pair-seg" style={`width:${(p.aHigher / p.sharedGames) * 100}%;background:${p.a.color}`}></span>
+                <span class="gc-pair-seg gc-pair-seg-same" style={`width:${(p.exactMatches / p.sharedGames) * 100}%`}></span>
+                <span class="gc-pair-seg" style={`width:${(p.bHigher / p.sharedGames) * 100}%;background:${p.b.color}`}></span>
+              </div>
+              <div class="gc-pair-stats">
+                <span><strong>{p.agreementPct}%</strong> within a point</span>
+                <span><strong>{p.meanAbsDiff.toFixed(1)}</strong> average gap</span>
+                <span><strong>{p.exactMatches}</strong> identical</span>
+                <span><strong>{p.sharedGames}</strong> shared</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Game by game ── */}
+      <div class="gc-block">
+        <div class="stats-section-header">
+          <span>Game by game</span>
+          <span class="stats-section-count">
+            {games.length === 0 ? "nothing to show" : truncated ? `top ${games.length}` : plural(games.length, "game")}
+          </span>
+        </div>
+
+        <div class="gc-controls">
+          <label class="gc-control">
+            <span class="gc-control-lbl">Sort</span>
+            <select class="gc-select" data-gc-sort>
+              {COMPARE_SORTS.map((s) => (
+                <option value={s} selected={s === sort}>{COMPARE_SORT_LABELS[s]}</option>
+              ))}
+            </select>
+          </label>
+          {members.length >= 2 && (
+            <div class="gc-toggle" role="group" aria-label="Which games to list">
+              <button type="button" class={`gc-toggle-btn${mode === "any" ? " gc-toggle-on" : ""}`} data-gc-mode="any">Any pick</button>
+              <button type="button" class={`gc-toggle-btn${mode === "all" ? " gc-toggle-on" : ""}`} data-gc-mode="all">All picks</button>
+            </div>
+          )}
+        </div>
+
+        {games.length === 0 ? (
+          <div class="empty-tab">
+            {mode === "all"
+              ? "No game has been reviewed by every pick. Try “Any pick”."
+              : "None of the picked members has published a review yet."}
+          </div>
+        ) : (
+          games.map((g) => {
+            const spread = spreadLabel(g.selSpread);
+            return (
+              <div class="gc-game">
+                <div class="gc-game-head">
+                  {igdbCover(g.game.cover_img_url, "t_thumb")
+                    ? <img class="gc-game-cover" src={igdbCover(g.game.cover_img_url, "t_thumb")!} alt="" loading="lazy" />
+                    : <div class="gc-game-cover"></div>}
+                  <a class="gc-game-title" href={`/games/${g.game.slug}`}>{g.game.title}</a>
+                  {g.selCount >= 2 && <span class={`variance-tag ${spread.className}`}>{spread.label}</span>}
+                  <span class="gc-game-group">
+                    Group <strong>{g.groupAvg.toFixed(1)}</strong>
+                    <span class="gc-game-n">({g.groupCount})</span>
+                  </span>
+                </div>
+                <div class="gc-bars">
+                  {g.scores.map((s) => {
+                    const m = memberById.get(s.profileId);
+                    if (!m) return null;
+                    return (
+                      <div class="gc-bar-row">
+                        <span class="gc-bar-name" style={`color:${m.color}`}>@{m.username}</span>
+                        <div class="gc-bar-track">
+                          <div class="gc-bar-fill" style={`width:${barPercent(s.score)}%;background:${m.color}`}></div>
+                          <span
+                            class="gc-bar-groupline"
+                            style={`left:${barPercent(g.groupAvg)}%`}
+                            title={`Group average ${g.groupAvg.toFixed(1)}`}
+                          ></span>
+                        </div>
+                        <span class={`score-badge ${scoreClass(s.score)}`}>{s.score}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </>
+  )}
+</div>

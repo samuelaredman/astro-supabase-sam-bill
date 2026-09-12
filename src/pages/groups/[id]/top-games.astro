@@ -1,9 +1,10 @@
 ---
 export const prerender = false;
-import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
 import DetailNav from "../../../components/DetailNav.astro";
 import { scoreClass, igdbImage as igdbCover } from '../../../utils/format';
+import { fetchAll } from '../../../utils/fetchAll';
 import { getPageUser } from '../../../utils/pageAuth';
 
 const supabase = createSupabaseServerClientFromContext(Astro);
@@ -17,18 +18,22 @@ if (user) {
   currentProfile = cp;
 }
 
-const { data: group } = await (supabase as any)
+// Admin client: RLS hides private groups and member lists from non-members,
+// and the group stat functions are service-role only.
+const db = getSupabaseAdmin();
+
+const { data: group } = await db
   .from("groups")
-  .select("id, name, visibility, invite_code")
-  .eq("id", id)
-  .single();
+  .select("id, name, visibility, invite_code, stats_config")
+  .eq("id", id!)
+  .maybeSingle();
 
 if (!group) return Astro.redirect("/groups");
 
 let membership: any = null;
 if (currentProfile) {
-  const { data: m } = await (supabase as any)
-    .from("group_members").select("role").eq("group_id", id).eq("profile_id", currentProfile.id).maybeSingle();
+  const { data: m } = await db
+    .from("group_members").select("role").eq("group_id", group.id).eq("profile_id", currentProfile.id).maybeSingle();
   membership = m;
 }
 
@@ -41,35 +46,26 @@ if (group.visibility === "private" && !isMember) {
   }
 }
 
-const { data: members } = await (supabase as any)
-  .from("group_members")
-  .select("profile_id")
-  .eq("group_id", id);
+// Same focus as the group page's card this list expands
+const statsConf = (group.stats_config ?? {}) as { focus_genre_id?: string | null; focus_platform_id?: string | null };
+const statArgs = {
+  p_group_id: group.id,
+  p_genre_id: statsConf.focus_genre_id ?? undefined,
+  p_platform_id: statsConf.focus_genre_id ? undefined : statsConf.focus_platform_id ?? undefined,
+};
 
-const memberProfileIds = (members ?? []).map((m: any) => m.profile_id);
+// Aggregated in Postgres — reading members' review rows here stopped at 1000.
+const gameRows = await fetchAll((from, to) => db
+  .rpc("group_game_review_stats", statArgs)
+  .order("review_count", { ascending: false }).order("avg_score", { ascending: false })
+  .order("game_id")
+  .range(from, to));
 
-const { data: allReviews } = await (supabase as any)
-  .from("reviews")
-  .select("profile_id, game_id, score, games ( id, title, slug, cover_img_url )")
-  .in("profile_id", memberProfileIds.length ? memberProfileIds : ["00000000-0000-0000-0000-000000000000"])
-  .eq("status", "published")
-  .limit(1000);
-
-const gameCounts: Record<string, { game: any; count: number; scores: number[] }> = {};
-for (const r of allReviews ?? []) {
-  const gid = r.games?.id;
-  if (!gid) continue;
-  if (!gameCounts[gid]) gameCounts[gid] = { game: r.games, count: 0, scores: [] };
-  gameCounts[gid].count++;
-  gameCounts[gid].scores.push(r.score);
-}
-
-const sortedGames = Object.values(gameCounts)
-  .map((g: any) => ({
-    ...g,
-    avgScore: +(g.scores.reduce((a: number, b: number) => a + b, 0) / g.scores.length).toFixed(1),
-  }))
-  .sort((a: any, b: any) => b.count - a.count);
+const sortedGames = gameRows.map((row) => ({
+  game: { id: row.game_id, title: row.title, slug: row.slug, cover_img_url: row.cover_img_url },
+  count: row.review_count,
+  avgScore: +row.avg_score.toFixed(1),
+}));
 
 ---
 

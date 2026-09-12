@@ -15,28 +15,30 @@ export const POST: APIRoute = async (context) => {
   const db = getSupabaseAdmin();
 
   const { data: profile } = await db
-    .from("profiles").select("id, is_group_admin").eq("auth_user_id", user.id).single();
+    .from("profiles").select("id").eq("auth_user_id", user.id).single();
   if (!profile) return json({ error: "Profile not found" }, 404);
 
   const body = await context.request.json();
-  const { name, description, visibility, join_prompt } = body;
+  const { name, description, visibility, join_prompt, requires_approval } = body;
 
   if (!name?.trim()) return json({ error: "Name is required" }, 400);
   const nameCheck = validateName(name);
   if (!nameCheck.ok) return json({ error: nameCheck.error }, 400);
-  if (!["public", "private", "community"].includes(visibility)) {
+  if (!["public", "private"].includes(visibility)) {
     return json({ error: "Invalid visibility" }, 400);
   }
-  if (visibility === "community" && !profile.is_group_admin) {
-    return json({ error: "Only admins can create Community groups" }, 403);
-  }
+
+  // requires_approval only applies to public groups — private groups are already gated
+  const requiresApproval = visibility === "public" && !!requires_approval;
+  const needsJoinPrompt = visibility === "private" || requiresApproval;
 
   const { data: group, error } = await db.from("groups").insert({
     name: name.trim(),
     description: description?.trim() || null,
     visibility,
+    requires_approval: requiresApproval,
     invite_code: visibility === "private" ? randomCode() : null,
-    join_prompt: visibility === "private" ? (join_prompt?.trim() || null) : null,
+    join_prompt: needsJoinPrompt ? (join_prompt?.trim() || null) : null,
     created_by: profile.id,
   }).select("id, invite_code").single();
 
