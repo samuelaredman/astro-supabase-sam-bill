@@ -10,8 +10,13 @@ import {
   distributionBuckets,
   parseCompareMode,
   parseCompareSelection,
+  graderLabel,
   parseCompareSort,
+  pickHottestTake,
+  rankMemberIds,
+  resolveCommunitySubject,
   resolveCompareSelection,
+  signedScore,
   spreadLabel,
 } from "./groupCompare";
 
@@ -244,5 +249,94 @@ describe("resolveCompareSelection", () => {
   it("falls back to the most active reviewers for a logged-out visitor", () => {
     expect(resolveCompareSelection(new URLSearchParams(), { ...opts, viewerProfileId: null }))
       .toEqual(["owner", "top"]);
+  });
+});
+
+describe("rankMemberIds", () => {
+  it("puts the most active reviewers first, ties by id", () => {
+    expect(rankMemberIds([
+      { profile_id: "b", review_count: 3 },
+      { profile_id: "c", review_count: 9 },
+      { profile_id: "a", review_count: 3 },
+    ])).toEqual(["c", "a", "b"]);
+  });
+});
+
+describe("resolveCommunitySubject", () => {
+  const opts = {
+    memberIds: ["me", "owner", "top"],
+    rankedMemberIds: ["top", "owner", "me"],
+    viewerProfileId: "me",
+    ownerProfileId: "owner",
+  };
+
+  it("defaults to the owner", () => {
+    expect(resolveCommunitySubject(new URLSearchParams(), opts)).toBe("owner");
+  });
+
+  it("takes ?vs= when it names a current member", () => {
+    expect(resolveCommunitySubject(new URLSearchParams("vs=me"), opts)).toBe("me");
+    expect(resolveCommunitySubject(new URLSearchParams("vs=top"), opts)).toBe("top");
+  });
+
+  it("ignores a ?vs= that isn't a member", () => {
+    expect(resolveCommunitySubject(new URLSearchParams("vs=stranger"), opts)).toBe("owner");
+  });
+
+  it("falls back to the viewer, then the most active reviewer, when the owner has left", () => {
+    const noOwner = { ...opts, ownerProfileId: "departed" };
+    expect(resolveCommunitySubject(new URLSearchParams(), noOwner)).toBe("me");
+    expect(resolveCommunitySubject(new URLSearchParams(), { ...noOwner, viewerProfileId: null })).toBe("top");
+  });
+
+  it("is null for a group with no members", () => {
+    expect(resolveCommunitySubject(new URLSearchParams("vs=x"), { memberIds: [], rankedMemberIds: [] })).toBeNull();
+  });
+});
+
+describe("graderLabel", () => {
+  it("describes how generous a member is next to the community", () => {
+    expect(graderLabel(7.1, 7)).toBe("Scores in line with the community");
+    expect(graderLabel(8, 7)).toBe("Scores more generously than the community");
+    expect(graderLabel(5.5, 7)).toBe("Scores tougher than the community");
+  });
+
+  it("is null without both averages", () => {
+    expect(graderLabel(null, 7)).toBeNull();
+    expect(graderLabel(7, null)).toBeNull();
+  });
+});
+
+describe("signedScore", () => {
+  it("signs and rounds to one decimal", () => {
+    expect(signedScore(1.46)).toBe("+1.5");
+    expect(signedScore(-0.4)).toBe("−0.4");
+    expect(signedScore(0)).toBe("0.0");
+  });
+
+  it("doesn't sign a gap that rounds to zero", () => {
+    expect(signedScore(-0.04)).toBe("0.0");
+  });
+});
+
+describe("pickHottestTake", () => {
+  const row = (diff: number) => ({
+    game: { id: String(diff), title: "", slug: null, cover_img_url: null },
+    communityCount: 3, communityAvg: 5, subjectScore: 5 + diff, diff,
+  });
+
+  it("takes whichever list leads with the bigger gap", () => {
+    expect(pickHottestTake([row(3)], [row(-4.5)])?.diff).toBe(-4.5);
+    expect(pickHottestTake([row(4)], [row(-2)])?.diff).toBe(4);
+  });
+
+  it("prefers the higher list on a tie", () => {
+    expect(pickHottestTake([row(3)], [row(-3)])?.diff).toBe(3);
+  });
+
+  it("copes with an empty side", () => {
+    expect(pickHottestTake([], [row(-2)])?.diff).toBe(-2);
+    expect(pickHottestTake([row(2)], [])?.diff).toBe(2);
+    expect(pickHottestTake([], [])).toBeNull();
   });
 });

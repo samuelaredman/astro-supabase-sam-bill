@@ -2886,6 +2886,46 @@ export type Database = {
     }
     Functions: {
       get_my_profile_id: { Args: never; Returns: string }
+      group_compare_community_games: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_platform_id?: string
+          p_prior_weight?: number
+          p_profile_id: string
+        }
+        Returns: {
+          community_avg: number
+          community_count: number
+          community_weighted: number
+          cover_img_url: string
+          diff: number
+          diff_abs: number
+          game_id: string
+          slug: string
+          subject_score: number
+          title: string
+        }[]
+      }
+      group_compare_community_summary: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_min_reviews?: number
+          p_platform_id?: string
+          p_profile_id: string
+        }
+        Returns: {
+          above: number
+          below: number
+          community_avg: number
+          level: number
+          mean_abs_diff: number
+          shared_games: number
+          subject_avg: number
+          within_one: number
+        }[]
+      }
       group_compare_games: {
         Args: {
           p_genre_id?: string

@@ -94,7 +94,113 @@ export interface ComparePairRow {
   agreementPct: number;
 }
 
+/**
+ * "Me vs my community": one member — the creator unless the viewer switches to
+ * themselves — against everyone else in the group, with their own reviews taken
+ * out of the community side (group_compare_community_*, migration
+ * 20260912000002).
+ */
+
+/** Other members who must have reviewed a game before it counts as the community's opinion. */
+export const COMMUNITY_MIN_REVIEWS = 2;
+
+/** Games in each "rated higher / lower" and "hasn't reviewed" list. */
+export const COMMUNITY_LIST_SHOWN = 5;
+
+/** Length of the side-by-side top lists. */
+export const COMMUNITY_TOP_SHOWN = 10;
+
+/** More than this far from the community average counts as a disagreement — the flip side of "within a point". */
+export const COMMUNITY_DISAGREE_GAP = 1;
+
+export interface CommunityGameRow {
+  game: { id: string; title: string; slug: string | null; cover_img_url: string | null };
+  /** Other members who reviewed it, and their average — the subject left out. */
+  communityCount: number;
+  communityAvg: number | null;
+  subjectScore: number | null;
+  /** subjectScore − communityAvg, null unless both exist. */
+  diff: number | null;
+}
+
+export interface CommunitySubject {
+  id: string;
+  username: string;
+  avatar_url?: string | null;
+  isOwner: boolean;
+  isViewer: boolean;
+  reviewCount: number;
+}
+
+export interface CommunityCompareData {
+  subject: CommunitySubject;
+  /** Who the switcher offers: the owner, and the viewer when they're a different member. */
+  options: CommunitySubject[];
+  /** Games the subject reviewed that COMMUNITY_MIN_REVIEWS others also did. */
+  sharedGames: number;
+  subjectAvg: number | null;
+  communityAvg: number | null;
+  meanAbsDiff: number | null;
+  agreementPct: number;
+  above: number;
+  below: number;
+  level: number;
+  /** The single biggest gap either way. */
+  hottestTake: CommunityGameRow | null;
+  higher: CommunityGameRow[];
+  lower: CommunityGameRow[];
+  subjectTop: CommunityGameRow[];
+  communityTop: CommunityGameRow[];
+  /** The community's favourites the subject hasn't reviewed. */
+  unreviewed: CommunityGameRow[];
+}
+
+/**
+ * Whose "vs the community" to show. An explicit `?vs=` naming a current member
+ * wins; otherwise the owner — the creator on a creator's group — then the
+ * viewer, then the most active reviewer, so a group whose owner has left still
+ * has something to show.
+ */
+export function resolveCommunitySubject(
+  params: URLSearchParams,
+  opts: {
+    memberIds: string[];
+    /** Most active reviewers first. */
+    rankedMemberIds: string[];
+    viewerProfileId?: string | null;
+    ownerProfileId?: string | null;
+  }
+): string | null {
+  const members = new Set(opts.memberIds);
+  const candidates = [params.get("vs")?.trim(), opts.ownerProfileId, opts.viewerProfileId, opts.rankedMemberIds[0]];
+  return candidates.find((id): id is string => !!id && members.has(id)) ?? null;
+}
+
+/** How a member's scores sit against the community's on the same games. */
+export function graderLabel(subjectAvg: number | null, communityAvg: number | null): string | null {
+  if (subjectAvg == null || communityAvg == null) return null;
+  const delta = subjectAvg - communityAvg;
+  if (Math.abs(delta) < 0.3) return "Scores in line with the community";
+  return delta > 0 ? "Scores more generously than the community" : "Scores tougher than the community";
+}
+
+/** A score gap with its sign, one decimal: "+1.5", "−0.4", "0.0". */
+export function signedScore(n: number): string {
+  const rounded = Math.round(n * 10) / 10;
+  return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded).toFixed(1)}`;
+}
+
+/** The larger gap of the two lists' leaders — each list is already sorted furthest first. */
+export function pickHottestTake(higher: CommunityGameRow[], lower: CommunityGameRow[]): CommunityGameRow | null {
+  const a = higher[0] ?? null;
+  const b = lower[0] ?? null;
+  if (!a || !b) return a ?? b;
+  return Math.abs(b.diff ?? 0) > Math.abs(a.diff ?? 0) ? b : a;
+}
+
 export interface GroupCompareData {
+  /** Null when no member can be the subject (nobody in the group). */
+  community: CommunityCompareData | null;
   members: CompareMemberRow[];
   /** The members the picker offers — see comparePickerList. */
   pickable: { id: string; username: string; avatar_url?: string | null; reviewCount: number; isOwner: boolean; isViewer: boolean }[];
@@ -202,6 +308,13 @@ export function comparePickerList<T extends { id: string; isOwner: boolean; isVi
   return out.slice(0, max);
 }
 
+/** Member ids with reviews, most active reviewer first, ties in a stable order. */
+export function rankMemberIds(memberStats: { profile_id: string; review_count: number }[]): string[] {
+  return [...memberStats]
+    .sort((a, b) => b.review_count - a.review_count || a.profile_id.localeCompare(b.profile_id))
+    .map((s) => s.profile_id);
+}
+
 /**
  * Who to compare, for a request. An explicit `?with=` wins, re-validated against
  * the current members; an empty one is a deliberate "compare nobody"; an absent
@@ -220,11 +333,8 @@ export function resolveCompareSelection(
   if (params.has("with")) {
     return parseCompareSelection(params.get("with"), opts.memberIds);
   }
-  const rankedMemberIds = [...opts.memberStats]
-    .sort((a, b) => b.review_count - a.review_count || a.profile_id.localeCompare(b.profile_id))
-    .map((s) => s.profile_id);
   return defaultCompareSelection({
-    rankedMemberIds,
+    rankedMemberIds: rankMemberIds(opts.memberStats),
     viewerProfileId: opts.viewerProfileId,
     ownerProfileId: opts.ownerProfileId,
   });
@@ -295,6 +405,8 @@ export interface GroupCompareContext {
   viewerProfileId?: string | null;
   /** Picked member ids, already validated (parseCompareSelection). */
   selectedIds: string[];
+  /** Whose "vs the community" to show, already validated (resolveCommunitySubject). */
+  subjectId?: string | null;
   sort: CompareSort;
   mode: CompareMode;
   /** group_review_summary, which the page has already read for its header. */
@@ -342,6 +454,9 @@ export async function loadGroupCompare(ctx: GroupCompareContext): Promise<GroupC
     }))
     .sort((a, b) => b.reviewCount - a.reviewCount || a.id.localeCompare(b.id));
   const pickable = comparePickerList(ranked, selectedIds);
+
+  // Runs alongside the rest; its queries don't depend on the picks
+  const communityPromise = loadCommunityCompare(ctx, ranked);
 
   const hasPicks = selectedIds.length > 0;
   let gamesQuery = hasPicks
@@ -450,6 +565,7 @@ export async function loadGroupCompare(ctx: GroupCompareContext): Promise<GroupC
     .sort((x: ComparePairRow, y: ComparePairRow) => y.sharedGames - x.sharedGames);
 
   return {
+    community: await communityPromise,
     members: membersOut,
     pickable,
     groupAvg: round1(ctx.summary?.avg_score ?? null),
@@ -462,5 +578,100 @@ export async function loadGroupCompare(ctx: GroupCompareContext): Promise<GroupC
     sort,
     mode,
     truncated,
+  };
+}
+
+const toCommunityGame = (row: any): CommunityGameRow => ({
+  game: { id: row.game_id, title: row.title, slug: row.slug, cover_img_url: row.cover_img_url },
+  communityCount: row.community_count,
+  communityAvg: round1(row.community_avg),
+  subjectScore: row.subject_score ?? null,
+  diff: round1(row.diff),
+});
+
+/**
+ * The "vs the community" block. Every list is a .limit()ed read of
+ * group_compare_community_games and the headline is one row, so like the rest of
+ * the tab nothing here can reach the 1000-row cap.
+ */
+async function loadCommunityCompare(
+  ctx: GroupCompareContext,
+  /** Every member, most active reviewer first. */
+  ranked: { id: string; username: string; avatar_url: string | null; reviewCount: number; isOwner: boolean; isViewer: boolean }[]
+): Promise<CommunityCompareData | null> {
+  const { db, groupId, subjectId, ownerProfileId, viewerProfileId } = ctx;
+  const byId = new Map(ranked.map((m) => [m.id, m]));
+  const subject = subjectId ? byId.get(subjectId) : undefined;
+  if (!subject) return null;
+
+  const options: CommunitySubject[] = [];
+  for (const id of [ownerProfileId, viewerProfileId, subject.id]) {
+    const m = id ? byId.get(id) : undefined;
+    if (m && !options.some((o) => o.id === m.id)) options.push(m);
+  }
+
+  const empty: CommunityCompareData = {
+    subject, options,
+    sharedGames: 0, subjectAvg: null, communityAvg: null, meanAbsDiff: null,
+    agreementPct: 0, above: 0, below: 0, level: 0,
+    hottestTake: null, higher: [], lower: [], subjectTop: [], communityTop: [], unreviewed: [],
+  };
+
+  const focus = {
+    p_genre_id: ctx.genreId ?? undefined,
+    p_platform_id: ctx.genreId ? undefined : ctx.platformId ?? undefined,
+  };
+  const args = { p_group_id: groupId, p_profile_id: subject.id, ...focus };
+  const games = () => db.rpc("group_compare_community_games", args);
+  // Scored by the subject and by enough of the community to call it an opinion
+  const shared = () => games().not("subject_score", "is", null).gte("community_count", COMMUNITY_MIN_REVIEWS);
+
+  const [summaryRes, higherRes, lowerRes, subjectTopRes, communityTopRes, unreviewedRes] = await Promise.all([
+    db.rpc("group_compare_community_summary", { ...args, p_min_reviews: COMMUNITY_MIN_REVIEWS }).maybeSingle(),
+    shared().gt("diff", COMMUNITY_DISAGREE_GAP)
+      .order("diff", { ascending: false }).order("community_count", { ascending: false }).order("game_id")
+      .limit(COMMUNITY_LIST_SHOWN),
+    shared().lt("diff", -COMMUNITY_DISAGREE_GAP)
+      .order("diff", { ascending: true }).order("community_count", { ascending: false }).order("game_id")
+      .limit(COMMUNITY_LIST_SHOWN),
+    // The subject's own top list doesn't need the community to have reviewed it
+    games().not("subject_score", "is", null)
+      .order("subject_score", { ascending: false })
+      .order("community_weighted", { ascending: false, nullsFirst: false })
+      .order("game_id")
+      .limit(COMMUNITY_TOP_SHOWN),
+    games().gte("community_count", COMMUNITY_MIN_REVIEWS)
+      .order("community_weighted", { ascending: false }).order("community_count", { ascending: false }).order("game_id")
+      .limit(COMMUNITY_TOP_SHOWN),
+    games().is("subject_score", null).gte("community_count", COMMUNITY_MIN_REVIEWS)
+      .order("community_weighted", { ascending: false }).order("community_count", { ascending: false }).order("game_id")
+      .limit(COMMUNITY_LIST_SHOWN),
+  ]);
+
+  for (const res of [summaryRes, higherRes, lowerRes, subjectTopRes, communityTopRes, unreviewedRes]) {
+    if (res?.error) console.error("[groupCompare] community error:", JSON.stringify(res.error));
+  }
+
+  const s = summaryRes?.data;
+  if (!s) return { ...empty, communityTop: (communityTopRes?.data ?? []).map(toCommunityGame) };
+
+  const higher = (higherRes?.data ?? []).map(toCommunityGame);
+  const lower = (lowerRes?.data ?? []).map(toCommunityGame);
+  return {
+    ...empty,
+    sharedGames: s.shared_games,
+    subjectAvg: round1(s.subject_avg),
+    communityAvg: round1(s.community_avg),
+    meanAbsDiff: round1(s.mean_abs_diff),
+    agreementPct: agreementPercent(s.within_one, s.shared_games),
+    above: s.above,
+    below: s.below,
+    level: s.level,
+    hottestTake: pickHottestTake(higher, lower),
+    higher,
+    lower,
+    subjectTop: (subjectTopRes?.data ?? []).map(toCommunityGame),
+    communityTop: (communityTopRes?.data ?? []).map(toCommunityGame),
+    unreviewed: (unreviewedRes?.data ?? []).map(toCommunityGame),
   };
 }

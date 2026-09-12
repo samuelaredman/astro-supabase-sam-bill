@@ -290,6 +290,11 @@ supabase/
   Add a stat by putting the query in a `group_compare_*` function and reading it in the loader — the
   compare queries are bounded by the picked set (at most four) or by `COMPARE_GAMES_SHOWN`, which is
   what keeps them clear of the 1000-row cap. The tab's queries only run when it is the tab in the URL.
+- **The Stats tab opens with "vs the community"**: one member (the owner by default, `?vs=` to switch)
+  against everyone else, from `group_compare_community_games` / `_summary` (migration
+  `20260912000002`). The subject's own reviews are left out of the community side, unlike the
+  `vs_group_*` numbers, which include them. Every list is a `.limit()`ed read of the games function.
+  `CommunityCompare.astro` renders it inside `CompareTab.astro`.
 - **The Feed tab (`?tab=feed`) is the group's activity, and members land on it** rather than Overview
   (visitors still land on Overview, which is the group's shop window). `loadGroupFeed()`
   (`src/utils/groupFeed.ts`) builds a page and `FeedTab.astro` renders it; filter changes and further

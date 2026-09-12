@@ -1,11 +1,12 @@
 /**
- * The group Stats tab's controls: the member picker, the sort and the "any pick
- * / all picks" mode.
+ * The group Stats tab's controls: whose "vs the community" block to show, the
+ * member picker, the sort and the "any pick / all picks" mode.
  *
  * Changing any of them re-fetches the tab from /groups/[id]/compare — the same
  * loader and component the page rendered — and swaps it into #compare-panel, so
  * the markup can't drift from the first paint. The chosen members ride in the
- * URL (?with=), so a comparison is a link someone can share.
+ * URL (?with=, and ?vs= when it isn't the owner), so a comparison is a link
+ * someone can share.
  *
  * Every listener is delegated from document and registered once, because the
  * controls themselves are replaced on each swap.
@@ -19,6 +20,10 @@ interface CompareState {
   selected: string[];
   sort: string;
   mode: string;
+  /** The "vs the community" subject; empty when the block isn't rendered. */
+  vs: string;
+  /** Who the server picks without ?vs= — left out of the URL to keep links short. */
+  vsDefault: string;
 }
 
 function panel(): HTMLElement | null {
@@ -37,11 +42,14 @@ function root(): HTMLElement | null {
 function readState(): CompareState | null {
   const el = root();
   if (!el) return null;
+  const community = el.querySelector<HTMLElement>("[data-gc-vs-value]");
   return {
     groupId: el.dataset.gcGroup ?? "",
     selected: (el.dataset.gcSelected ?? "").split(",").filter(Boolean),
     sort: el.dataset.gcSortValue ?? "",
     mode: el.dataset.gcModeValue ?? "any",
+    vs: community?.dataset.gcVsValue ?? "",
+    vsDefault: community?.dataset.gcVsDefault ?? "",
   };
 }
 
@@ -75,12 +83,15 @@ async function render(next: CompareState) {
 
   const params = new URLSearchParams({ sort: next.sort, mode: next.mode });
   if (next.selected.length > 0) params.set("with", next.selected.join(","));
+  const customVs = !!next.vs && next.vs !== next.vsDefault;
+  if (customVs) params.set("vs", next.vs);
 
   // Keep the address bar shareable, without filling up the back button
   const pageUrl = new URL(window.location.href);
   pageUrl.searchParams.set("tab", "compare");
   for (const [key, value] of params) pageUrl.searchParams.set(key, value);
   if (next.selected.length === 0) pageUrl.searchParams.delete("with");
+  if (!customVs) pageUrl.searchParams.delete("vs");
   history.replaceState(null, "", pageUrl);
 
   const seq = ++requestSeq;
@@ -171,6 +182,15 @@ export function initGroupCompare() {
       chip.classList.toggle("gc-chip-on", at < 0);
       chip.setAttribute("aria-pressed", at < 0 ? "true" : "false");
       void render(state);
+      return;
+    }
+
+    const vsBtn = target.closest<HTMLElement>("[data-gc-vs]");
+    if (vsBtn) {
+      const state = readState();
+      const vs = vsBtn.dataset.gcVs;
+      if (!state || !vs || vs === state.vs) return;
+      void render({ ...state, vs });
       return;
     }
 
