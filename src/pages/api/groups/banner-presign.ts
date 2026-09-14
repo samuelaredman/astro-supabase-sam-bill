@@ -1,7 +1,7 @@
 export const prerender = false;
 import type { APIRoute } from 'astro';
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
-import { json } from '../../../utils/api';
+import { json, getGroupAuthority } from '../../../utils/api';
 
 export const POST: APIRoute = async (context) => {
   try {
@@ -23,9 +23,7 @@ export const POST: APIRoute = async (context) => {
       .from('profiles').select('id').eq('auth_user_id', user.id).single();
     if (!profile) return json({ error: 'Profile not found' }, 404);
 
-    const { data: membership } = await db
-      .from('group_members').select('role, custom_role_id')
-      .eq('group_id', groupId).eq('profile_id', profile.id).maybeSingle();
+    const membership = await getGroupAuthority(db, groupId, profile.id);
     if (!membership) return json({ error: 'Not authorized' }, 403);
 
     const isOwnerOrAdmin = ['owner', 'admin'].includes(membership.role);

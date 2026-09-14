@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { landingAfterConfirm } from "../../../utils/groupJoin";
 
 // Bridges client-side-only tokens (delivered via a URL hash fragment, which
 // the server can never see) into a real, server-readable session cookie.
@@ -18,7 +19,7 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  const { error } = await supabase.auth.setSession({ access_token, refresh_token });
+  const { data, error } = await supabase.auth.setSession({ access_token, refresh_token });
 
   if (error) {
     return new Response(JSON.stringify({ error: error.message }), {
@@ -27,7 +28,10 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  return new Response(JSON.stringify({ success: true }), {
+  // Signed up from a group page: join it and tell /auth/confirm to go there
+  const redirect = await landingAfterConfirm(data.user);
+
+  return new Response(JSON.stringify({ success: true, redirect }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
