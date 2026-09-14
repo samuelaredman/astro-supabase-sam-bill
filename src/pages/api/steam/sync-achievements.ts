@@ -200,28 +200,42 @@ export const POST: APIRoute = async (context) => {
       return json({ error: msg }, 502);
     }
 
-    // Delta filter: only skip a game if it (a) hasn't been played since the
-    // last sync AND (b) already has some rows in user_achievements. The
-    // untouched-check makes this self-healing — a game that was skipped or
-    // silently null-ed on a prior run still gets processed on the next one,
-    // because it has no rows. Force bypasses the whole filter for a full pass.
-    const lastSyncSecs = lastSync ? Math.floor(new Date(lastSync).getTime() / 1000) : 0;
-    const shouldDelta = lastSyncSecs > 0 && !force;
+    // Delta filter: compare Steam's rtime_last_played PER GAME against our
+    // last-polled time PER GAME (max synced_at from user_achievements). A game
+    // is skipped only if we've polled it more recently than Steam thinks it
+    // was last launched. Never-synced games (freshness undefined) always pass
+    // so first-time schema pulls happen once per game. force bypasses the
+    // whole filter for a full re-scan.
+    //
+    // This is strictly better than comparing to the profile-wide
+    // achievements_synced_at: that marker moves forward on every completed
+    // sync even if a particular game was silently skipped (Steam returned
+    // null and the cursor advanced past it), leaving that game permanently
+    // stuck as "already up to date" from the profile marker's point of view.
+    const shouldDelta = !!lastSync && !force;
 
-    let syncedAppids = new Set<number>();
+    const freshnessByAppid = new Map<number, number>(); // appid -> synced_at unix seconds
     if (shouldDelta) {
-      const { data: syncedRows } = await (db as any).rpc('user_synced_steam_appids', { p_profile_id: profile.id });
-      syncedAppids = new Set<number>(((syncedRows as { steam_appid: number }[] | null) ?? []).map((r) => r.steam_appid));
+      const { data: syncedRows } = await (db as any)
+        .rpc('steam_appid_last_synced', { p_profile_id: profile.id });
+      for (const r of ((syncedRows as { steam_appid: number; last_synced_at: string }[] | null) ?? [])) {
+        const secs = Math.floor(new Date(r.last_synced_at).getTime() / 1000);
+        if (Number.isFinite(secs)) freshnessByAppid.set(r.steam_appid, secs);
+      }
     }
 
     const filtered: SnapshotGame[] = allOwned
       .filter((g) => {
         if (!shouldDelta) return true;
-        const played = (g.rtime_last_played ?? 0) > lastSyncSecs;
-        const untouched = !syncedAppids.has(g.appid);
-        return played || untouched;
+        const gameFreshness = freshnessByAppid.get(g.appid);
+        if (gameFreshness === undefined) return true; // never polled — include once
+        // Steam usually returns rtime_last_played as an int, but coerce
+        // defensively — the delta is silently wrong if a stringified number
+        // sneaks through the > comparison as NaN.
+        const rtime = Number(g.rtime_last_played) || 0;
+        return rtime > gameFreshness;
       })
-      .map((g) => ({ appid: g.appid, name: g.name, rtime_last_played: g.rtime_last_played ?? 0 }))
+      .map((g) => ({ appid: g.appid, name: g.name, rtime_last_played: Number(g.rtime_last_played) || 0 }))
       .sort((a, b) => a.appid - b.appid);
 
     games = filtered;

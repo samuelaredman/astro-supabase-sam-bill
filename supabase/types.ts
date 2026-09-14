@@ -3906,6 +3906,13 @@ export type Database = {
       }
       show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
+      steam_appid_last_synced: {
+        Args: { p_profile_id: string }
+        Returns: {
+          last_synced_at: string
+          steam_appid: number
+        }[]
+      }
       top_studios_by_reviewed_games: {
         Args: { p_limit?: number }
         Returns: {
