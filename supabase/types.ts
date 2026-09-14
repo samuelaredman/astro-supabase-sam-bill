@@ -278,6 +278,84 @@ export type Database = {
           },
         ]
       }
+      forum_post_reactions: {
+        Row: {
+          created_at: string | null
+          id: string
+          post_id: string
+          profile_id: string
+          reaction_type: string
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          post_id: string
+          profile_id: string
+          reaction_type: string
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          post_id?: string
+          profile_id?: string
+          reaction_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "forum_post_reactions_post_id_fkey"
+            columns: ["post_id"]
+            isOneToOne: false
+            referencedRelation: "forum_posts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "forum_post_reactions_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      forum_post_votes: {
+        Row: {
+          created_at: string | null
+          id: string
+          post_id: string
+          profile_id: string
+          vote: number
+        }
+        Insert: {
+          created_at?: string | null
+          id?: string
+          post_id: string
+          profile_id: string
+          vote: number
+        }
+        Update: {
+          created_at?: string | null
+          id?: string
+          post_id?: string
+          profile_id?: string
+          vote?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "forum_post_votes_post_id_fkey"
+            columns: ["post_id"]
+            isOneToOne: false
+            referencedRelation: "forum_posts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "forum_post_votes_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       forum_posts: {
         Row: {
           body: string
@@ -557,6 +635,112 @@ export type Database = {
           },
         ]
       }
+      game_relationships: {
+        Row: {
+          created_at: string
+          from_game_id: string
+          id: string
+          relation_type: string
+          source: string
+          to_game_id: string
+        }
+        Insert: {
+          created_at?: string
+          from_game_id: string
+          id?: string
+          relation_type: string
+          source?: string
+          to_game_id: string
+        }
+        Update: {
+          created_at?: string
+          from_game_id?: string
+          id?: string
+          relation_type?: string
+          source?: string
+          to_game_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "game_relationships_from_game_id_fkey"
+            columns: ["from_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "game_relationships_to_game_id_fkey"
+            columns: ["to_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      game_revisions: {
+        Row: {
+          created_at: string
+          game_id: string
+          id: string
+          igdb_ref: number | null
+          kind: string
+          label: string | null
+          released_at: string | null
+        }
+        Insert: {
+          created_at?: string
+          game_id: string
+          id?: string
+          igdb_ref?: number | null
+          kind: string
+          label?: string | null
+          released_at?: string | null
+        }
+        Update: {
+          created_at?: string
+          game_id?: string
+          id?: string
+          igdb_ref?: number | null
+          kind?: string
+          label?: string | null
+          released_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "game_revisions_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      game_steam_apps: {
+        Row: {
+          created_at: string
+          game_id: string
+          steam_appid: number
+        }
+        Insert: {
+          created_at?: string
+          game_id: string
+          steam_appid: number
+        }
+        Update: {
+          created_at?: string
+          game_id?: string
+          steam_appid?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "game_steam_apps_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       game_themes: {
         Row: {
           game_id: string
@@ -589,51 +773,73 @@ export type Database = {
       }
       games: {
         Row: {
+          canonical_game_id: string | null
+          canonical_locked: boolean
           cover_img_url: string | null
           date_released: string | null
           game_description: string | null
           id: string
           igdb_category: number | null
           igdb_id: number | null
+          igdb_parent_game: number | null
           igdb_status: number | null
+          igdb_version_parent: number | null
           parent_game_id: string | null
           search_vector: unknown
           slug: string | null
           storyline: string | null
           title: string
           title_search: unknown
+          version_title: string | null
         }
         Insert: {
+          canonical_game_id?: string | null
+          canonical_locked?: boolean
           cover_img_url?: string | null
           date_released?: string | null
           game_description?: string | null
           id?: string
           igdb_category?: number | null
           igdb_id?: number | null
+          igdb_parent_game?: number | null
           igdb_status?: number | null
+          igdb_version_parent?: number | null
           parent_game_id?: string | null
           search_vector?: unknown
           slug?: string | null
           storyline?: string | null
           title: string
           title_search?: unknown
+          version_title?: string | null
         }
         Update: {
+          canonical_game_id?: string | null
+          canonical_locked?: boolean
           cover_img_url?: string | null
           date_released?: string | null
           game_description?: string | null
           id?: string
           igdb_category?: number | null
           igdb_id?: number | null
+          igdb_parent_game?: number | null
           igdb_status?: number | null
+          igdb_version_parent?: number | null
           parent_game_id?: string | null
           search_vector?: unknown
           slug?: string | null
           storyline?: string | null
           title?: string
           title_search?: unknown
+          version_title?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "games_canonical_game_id_fkey"
+            columns: ["canonical_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "games_parent_game_id_fkey"
             columns: ["parent_game_id"]
@@ -1367,6 +1573,13 @@ export type Database = {
             foreignKeyName: "import_job_items_review_id_fkey"
             columns: ["review_id"]
             isOneToOne: false
+            referencedRelation: "current_reviews"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "import_job_items_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
             referencedRelation: "reviews"
             referencedColumns: ["id"]
           },
@@ -1883,6 +2096,13 @@ export type Database = {
             foreignKeyName: "notifications_review_id_fkey"
             columns: ["review_id"]
             isOneToOne: false
+            referencedRelation: "current_reviews"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "notifications_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
             referencedRelation: "reviews"
             referencedColumns: ["id"]
           },
@@ -1966,6 +2186,8 @@ export type Database = {
       profiles: {
         Row: {
           accent_color: string | null
+          achievements_sync_cursor: number
+          achievements_synced_at: string | null
           auth_user_id: string
           avatar_url: string | null
           backloggd_import_done_at: string | null
@@ -1973,34 +2195,50 @@ export type Database = {
           banner_position: string
           banner_url: string | null
           bio: string | null
+          bluesky_url: string | null
           created_at: string
           discord_url: string | null
           dropped_privacy: string
           favorite_game_id: string | null
           featured_group_id: string | null
           id: string
+          instagram_url: string | null
           is_active: boolean
           is_group_admin: boolean
           library_hidden_tabs: string[]
           library_show_hours: boolean
           library_visibility: string
           onboarding_completed_at: string | null
+          psn_url: string | null
+          retroachievements_url: string | null
           search_indexable: boolean
           search_indexable_at: string | null
+          showcase_achievements: Json | null
           showcase_games: Json | null
           steam_id: string | null
           steam_synced_at: string | null
+          steam_url: string | null
           steam_username: string | null
+          tiktok_url: string | null
           twitch_url: string | null
           twitter_url: string | null
           updated_at: string
           username: string
+          username_changed_at: string | null
+          username_locked: boolean
+          username_prev: string | null
+          username_prev_until: string | null
+          username_settling_count: number
+          username_since: string
           want_to_play_privacy: string
           website_url: string | null
+          xbox_url: string | null
           youtube_url: string | null
         }
         Insert: {
           accent_color?: string | null
+          achievements_sync_cursor?: number
+          achievements_synced_at?: string | null
           auth_user_id: string
           avatar_url?: string | null
           backloggd_import_done_at?: string | null
@@ -2008,34 +2246,50 @@ export type Database = {
           banner_position?: string
           banner_url?: string | null
           bio?: string | null
+          bluesky_url?: string | null
           created_at?: string
           discord_url?: string | null
           dropped_privacy?: string
           favorite_game_id?: string | null
           featured_group_id?: string | null
           id?: string
+          instagram_url?: string | null
           is_active?: boolean
           is_group_admin?: boolean
           library_hidden_tabs?: string[]
           library_show_hours?: boolean
           library_visibility?: string
           onboarding_completed_at?: string | null
+          psn_url?: string | null
+          retroachievements_url?: string | null
           search_indexable?: boolean
           search_indexable_at?: string | null
+          showcase_achievements?: Json | null
           showcase_games?: Json | null
           steam_id?: string | null
           steam_synced_at?: string | null
+          steam_url?: string | null
           steam_username?: string | null
+          tiktok_url?: string | null
           twitch_url?: string | null
           twitter_url?: string | null
           updated_at?: string
           username: string
+          username_changed_at?: string | null
+          username_locked?: boolean
+          username_prev?: string | null
+          username_prev_until?: string | null
+          username_settling_count?: number
+          username_since?: string
           want_to_play_privacy?: string
           website_url?: string | null
+          xbox_url?: string | null
           youtube_url?: string | null
         }
         Update: {
           accent_color?: string | null
+          achievements_sync_cursor?: number
+          achievements_synced_at?: string | null
           auth_user_id?: string
           avatar_url?: string | null
           backloggd_import_done_at?: string | null
@@ -2043,30 +2297,44 @@ export type Database = {
           banner_position?: string
           banner_url?: string | null
           bio?: string | null
+          bluesky_url?: string | null
           created_at?: string
           discord_url?: string | null
           dropped_privacy?: string
           favorite_game_id?: string | null
           featured_group_id?: string | null
           id?: string
+          instagram_url?: string | null
           is_active?: boolean
           is_group_admin?: boolean
           library_hidden_tabs?: string[]
           library_show_hours?: boolean
           library_visibility?: string
           onboarding_completed_at?: string | null
+          psn_url?: string | null
+          retroachievements_url?: string | null
           search_indexable?: boolean
           search_indexable_at?: string | null
+          showcase_achievements?: Json | null
           showcase_games?: Json | null
           steam_id?: string | null
           steam_synced_at?: string | null
+          steam_url?: string | null
           steam_username?: string | null
+          tiktok_url?: string | null
           twitch_url?: string | null
           twitter_url?: string | null
           updated_at?: string
           username?: string
+          username_changed_at?: string | null
+          username_locked?: boolean
+          username_prev?: string | null
+          username_prev_until?: string | null
+          username_settling_count?: number
+          username_since?: string
           want_to_play_privacy?: string
           website_url?: string | null
+          xbox_url?: string | null
           youtube_url?: string | null
         }
         Relationships: [
@@ -2463,6 +2731,13 @@ export type Database = {
             foreignKeyName: "review_comments_review_id_fkey"
             columns: ["review_id"]
             isOneToOne: false
+            referencedRelation: "current_reviews"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "review_comments_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
             referencedRelation: "reviews"
             referencedColumns: ["id"]
           },
@@ -2496,6 +2771,50 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "review_media_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
+            referencedRelation: "current_reviews"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "review_media_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
+            referencedRelation: "reviews"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      review_platforms: {
+        Row: {
+          platform_id: string
+          review_id: string
+        }
+        Insert: {
+          platform_id: string
+          review_id: string
+        }
+        Update: {
+          platform_id?: string
+          review_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "review_platforms_platform_id_fkey"
+            columns: ["platform_id"]
+            isOneToOne: false
+            referencedRelation: "platforms"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "review_platforms_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
+            referencedRelation: "current_reviews"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "review_platforms_review_id_fkey"
             columns: ["review_id"]
             isOneToOne: false
             referencedRelation: "reviews"
@@ -2537,6 +2856,13 @@ export type Database = {
             foreignKeyName: "review_reactions_review_id_fkey"
             columns: ["review_id"]
             isOneToOne: false
+            referencedRelation: "current_reviews"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "review_reactions_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
             referencedRelation: "reviews"
             referencedColumns: ["id"]
           },
@@ -2569,6 +2895,13 @@ export type Database = {
             foreignKeyName: "review_votes_review_id_fkey"
             columns: ["review_id"]
             isOneToOne: false
+            referencedRelation: "current_reviews"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "review_votes_review_id_fkey"
+            columns: ["review_id"]
+            isOneToOne: false
             referencedRelation: "reviews"
             referencedColumns: ["id"]
           },
@@ -2590,6 +2923,7 @@ export type Database = {
           play_time_years: number | null
           profile_id: string
           published_at: string | null
+          revision_id: string | null
           score: number | null
           status: string | null
           title: string | null
@@ -2610,6 +2944,7 @@ export type Database = {
           play_time_years?: number | null
           profile_id?: string
           published_at?: string | null
+          revision_id?: string | null
           score?: number | null
           status?: string | null
           title?: string | null
@@ -2630,6 +2965,7 @@ export type Database = {
           play_time_years?: number | null
           profile_id?: string
           published_at?: string | null
+          revision_id?: string | null
           score?: number | null
           status?: string | null
           title?: string | null
@@ -2657,7 +2993,32 @@ export type Database = {
             referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "reviews_revision_id_fkey"
+            columns: ["revision_id"]
+            isOneToOne: false
+            referencedRelation: "game_revisions"
+            referencedColumns: ["id"]
+          },
         ]
+      }
+      reviews_repoint_backup_20260909: {
+        Row: {
+          id: string | null
+          new_game_id: string | null
+          old_game_id: string | null
+        }
+        Insert: {
+          id?: string | null
+          new_game_id?: string | null
+          old_game_id?: string | null
+        }
+        Update: {
+          id?: string | null
+          new_game_id?: string | null
+          old_game_id?: string | null
+        }
+        Relationships: []
       }
       site_admins: {
         Row: {
@@ -2678,6 +3039,27 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      steam_app_schema: {
+        Row: {
+          achievements: Json
+          fetched_at: string
+          global_percents: Json
+          steam_appid: number
+        }
+        Insert: {
+          achievements?: Json
+          fetched_at?: string
+          global_percents?: Json
+          steam_appid: number
+        }
+        Update: {
+          achievements?: Json
+          fetched_at?: string
+          global_percents?: Json
+          steam_appid?: number
+        }
+        Relationships: []
       }
       steam_unmatched_titles: {
         Row: {
@@ -2740,6 +3122,7 @@ export type Database = {
           id: string
           profile_id: string
           steam_appid: number
+          steam_game_title: string | null
           synced_at: string
           unlock_time: string | null
           unlocked: boolean
@@ -2756,6 +3139,7 @@ export type Database = {
           id?: string
           profile_id: string
           steam_appid: number
+          steam_game_title?: string | null
           synced_at?: string
           unlock_time?: string | null
           unlocked?: boolean
@@ -2772,6 +3156,7 @@ export type Database = {
           id?: string
           profile_id?: string
           steam_appid?: number
+          steam_game_title?: string | null
           synced_at?: string
           unlock_time?: string | null
           unlocked?: boolean
@@ -2803,6 +3188,7 @@ export type Database = {
           profile_id: string
           status: string
           steam_appid: number | null
+          steam_last_played_at: string | null
           steam_playtime_minutes: number | null
           updated_at: string
         }
@@ -2815,6 +3201,7 @@ export type Database = {
           profile_id: string
           status: string
           steam_appid?: number | null
+          steam_last_played_at?: string | null
           steam_playtime_minutes?: number | null
           updated_at?: string
         }
@@ -2827,6 +3214,7 @@ export type Database = {
           profile_id?: string
           status?: string
           steam_appid?: number | null
+          steam_last_played_at?: string | null
           steam_playtime_minutes?: number | null
           updated_at?: string
         }
@@ -2840,6 +3228,38 @@ export type Database = {
           },
           {
             foreignKeyName: "user_game_status_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      username_history: {
+        Row: {
+          changed_at: string
+          id: string
+          old_username: string
+          profile_id: string
+          reclaimed_at: string | null
+        }
+        Insert: {
+          changed_at?: string
+          id?: string
+          old_username: string
+          profile_id: string
+          reclaimed_at?: string | null
+        }
+        Update: {
+          changed_at?: string
+          id?: string
+          old_username?: string
+          profile_id?: string
+          reclaimed_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "username_history_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
@@ -2885,9 +3305,133 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      current_reviews: {
+        Row: {
+          body: string | null
+          contains_spoilers: boolean | null
+          created_at: string | null
+          edited: boolean | null
+          game_id: string | null
+          id: string | null
+          platform_played_on: string | null
+          play_time_days: number | null
+          play_time_hours: number | null
+          play_time_months: number | null
+          play_time_weeks: number | null
+          play_time_years: number | null
+          profile_id: string | null
+          published_at: string | null
+          revision_id: string | null
+          score: number | null
+          status: string | null
+          title: string | null
+          updated_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "reviews_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reviews_platform_played_on_fkey"
+            columns: ["platform_played_on"]
+            isOneToOne: false
+            referencedRelation: "platforms"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reviews_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "reviews_revision_id_fkey"
+            columns: ["revision_id"]
+            isOneToOne: false
+            referencedRelation: "game_revisions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      game_review_stats: {
+        Row: {
+          avg_score: number | null
+          game_id: string | null
+          hours_count: number | null
+          hours_sum: number | null
+          review_count: number | null
+          score_sum: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "reviews_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      profile_review_stats: {
+        Row: {
+          profile_id: string | null
+          review_count: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "reviews_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
+      achievement_completion_by_appid: {
+        Args: { p_profile_id: string }
+        Returns: {
+          pct: number
+          steam_appid: number
+        }[]
+      }
+      bulk_update_steam_playtime: {
+        Args: { p_profile_id: string; p_updates: Json }
+        Returns: undefined
+      }
+      game_rank_stats: {
+        Args: { p_game_id: string; p_genre_id: string; p_release_year: number }
+        Returns: {
+          all_time_rank: number
+          all_time_total: number
+          genre_avg_score: number
+          genre_rank: number
+          genre_total: number
+          year_rank: number
+          year_total: number
+        }[]
+      }
+      game_scores_by_slug: {
+        Args: { p_slugs: string[] }
+        Returns: {
+          avg_score: number
+          slug: string
+        }[]
+      }
+      get_achievement_stats: {
+        Args: { p_profile_id: string }
+        Returns: {
+          avg_completion: number
+          perfect_games: number
+          unlocked_count: number
+        }[]
+      }
       get_my_profile_id: { Args: never; Returns: string }
       group_compare_community_games: {
         Args: {
@@ -2962,8 +3506,8 @@ export type Database = {
           hours_sum: number
           profile_id: string
           review_count: number
-          vs_group_abs_diff: number
           vs_group_above: number
+          vs_group_abs_diff: number
           vs_group_below: number
           vs_group_games: number
           vs_group_level: number
@@ -2999,6 +3543,26 @@ export type Database = {
           score: number
         }[]
       }
+      group_consensus_picks: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_limit?: number
+          p_min_reviews?: number
+          p_platform_id?: string
+        }
+        Returns: {
+          avg_score: number
+          cover_img_url: string
+          game_id: string
+          max_score: number
+          min_score: number
+          review_count: number
+          score_variance: number
+          slug: string
+          title: string
+        }[]
+      }
       group_daily_disagreement: {
         Args: {
           p_day: string
@@ -3018,13 +3582,30 @@ export type Database = {
         }[]
       }
       group_disagreement_tally: {
-        Args: {
-          p_day: string
-          p_group_id: string
-        }
+        Args: { p_day: string; p_group_id: string }
         Returns: {
           voted_for: string
           votes: number
+        }[]
+      }
+      group_divergent_picks: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_limit?: number
+          p_min_reviews?: number
+          p_platform_id?: string
+        }
+        Returns: {
+          avg_score: number
+          cover_img_url: string
+          game_id: string
+          max_score: number
+          min_score: number
+          review_count: number
+          score_variance: number
+          slug: string
+          title: string
         }[]
       }
       group_feed: {
@@ -3050,6 +3631,7 @@ export type Database = {
           play_time_years: number | null
           profile_id: string
           published_at: string | null
+          revision_id: string | null
           score: number | null
           status: string | null
           title: string | null
@@ -3083,6 +3665,26 @@ export type Database = {
           max_score: number
           min_score: number
           review_count: number
+          slug: string
+          title: string
+        }[]
+      }
+      group_hidden_gems: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_limit?: number
+          p_max_community_reviews?: number
+          p_min_group_avg?: number
+          p_min_group_reviews?: number
+          p_platform_id?: string
+        }
+        Returns: {
+          community_count: number
+          cover_img_url: string
+          game_id: string
+          group_avg: number
+          group_count: number
           slug: string
           title: string
         }[]
@@ -3147,6 +3749,7 @@ export type Database = {
           play_time_years: number | null
           profile_id: string
           published_at: string | null
+          revision_id: string | null
           score: number | null
           status: string | null
           title: string | null
@@ -3187,8 +3790,34 @@ export type Database = {
           spread: number
         }[]
       }
+      hub_game_review_stats: {
+        Args: {
+          p_company_id?: string
+          p_genre_id?: string
+          p_platform_id?: string
+        }
+        Returns: {
+          game_id: string
+          review_count: number
+          score_sum: number
+        }[]
+      }
       is_group_admin_or_owner: { Args: { gid: string }; Returns: boolean }
       is_group_member: { Args: { gid: string }; Returns: boolean }
+      library_status_counts: {
+        Args: { p_profile_id: string }
+        Returns: {
+          all_count: number
+          completed: number
+          dropped: number
+          hidden: number
+          hundred_percent: number
+          owned: number
+          playing: number
+          unplayed: number
+          want_to_play: number
+        }[]
+      }
       log_unmatched_steam_titles: {
         Args: { titles: string[] }
         Returns: undefined
@@ -3197,10 +3826,65 @@ export type Database = {
         Args: { steam_titles: string[] }
         Returns: {
           id: string
+          steam_title: string
           title: string
         }[]
       }
+      most_reviewed_games: {
+        Args: {
+          p_exclude_profile_id?: string
+          p_genre_id?: string
+          p_limit?: number
+          p_platform_id?: string
+        }
+        Returns: {
+          avg_score: number
+          game_id: string
+          review_count: number
+        }[]
+      }
       normalize_game_title: { Args: { input: string }; Returns: string }
+      profile_game_community_stats: {
+        Args: { p_profile_id: string }
+        Returns: {
+          avg_score: number
+          game_id: string
+          hours_count: number
+          hours_sum: number
+          review_count: number
+        }[]
+      }
+      profile_vote_totals: {
+        Args: { p_profile_id: string }
+        Returns: {
+          downvotes: number
+          upvotes: number
+        }[]
+      }
+      ranked_games: {
+        Args: {
+          p_limit?: number
+          p_min_reviews?: number
+          p_prior_weight?: number
+        }
+        Returns: {
+          avg_score: number
+          bayesian_score: number
+          game_id: string
+          review_count: number
+        }[]
+      }
+      review_score_summary: {
+        Args: never
+        Returns: {
+          avg_score: number
+          review_count: number
+        }[]
+      }
+      reviewer_volume_percentile: {
+        Args: { p_profile_id: string }
+        Returns: number
+      }
       search_games: {
         Args: {
           genre_id?: string
@@ -3219,6 +3903,15 @@ export type Database = {
       }
       show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
+      top_studios_by_reviewed_games: {
+        Args: { p_limit?: number }
+        Returns: {
+          id: string
+          name: string
+          reviewed_game_count: number
+          slug: string
+        }[]
+      }
       unaccent: { Args: { "": string }; Returns: string }
     }
     Enums: {
@@ -3238,12 +3931,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3267,11 +3960,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3292,11 +3985,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3317,11 +4010,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3334,11 +4027,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }

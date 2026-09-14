@@ -152,7 +152,8 @@ const defaultStats = {
   show_top_games: true, show_top_rated: true, show_hot_take: true,
   show_critic_spectrum: true, show_recent_reviews: true,
   show_score_compare: true, show_sessions: true, show_watchlist: true,
-  show_announcements: true, show_polls: true, show_split_decision: true,
+  show_announcements: true, show_polls: true,
+  show_consensus: true, show_divergent: true, show_hidden_gems: true, show_score_distribution: true,
   focus_genre_id: null as string | null, focus_platform_id: null as string | null,
 };
 const statsConf = { ...defaultStats, ...((group.stats_config ?? {}) as Partial<typeof defaultStats>) };
@@ -250,35 +251,56 @@ let summary: { review_count: number; game_count: number; avg_score: number | nul
 let memberStats: { profile_id: string; review_count: number; avg_score: number }[] = [];
 let topGameRows: any[] = [];
 let topRatedRows: any[] = [];
-let splitRow: any = null;
 let hotTakeRow: any = null;
 let activityReviews: any[] = [];
+let consensusRows: any[] = [];
+let divergentRows: any[] = [];
+let hiddenGemRows: any[] = [];
+let scoreDistRows: { score: number; review_count: number }[] = [];
+
+const OVERVIEW_LIST_LIMIT = 5;
 
 if (canViewContent && memberProfileIds.length > 0) {
   const gameStats = () => db.rpc("group_game_review_stats", statArgs);
-  const [summaryRes, memberStatsRows, topGamesRes, topRatedRes, splitRes, hotTakeRes, activityRes] = await Promise.all([
+  const [summaryRes, memberStatsRows, topGamesRes, topRatedRes, hotTakeRes, activityRes,
+         consensusRes, divergentRes, hiddenGemsRes, scoreDistRes] = await Promise.all([
     db.rpc("group_review_summary", statArgs).maybeSingle(),
     fetchAll((from, to) => db.rpc("group_member_review_stats", statArgs).order("profile_id").range(from, to)),
     gameStats().order("review_count", { ascending: false }).order("avg_score", { ascending: false }).order("game_id").limit(7),
     gameStats().gte("review_count", TOP_RATED_MIN_REVIEWS)
       .order("avg_score", { ascending: false }).order("review_count", { ascending: false }).order("game_id").limit(3),
-    db.rpc("group_split_decision", statArgs).maybeSingle(),
     db.rpc("group_hot_take", statArgs).maybeSingle(),
     db.rpc("group_reviews", statArgs)
       .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
       .order("published_at", { ascending: false })
       .limit(50),
+    db.rpc("group_consensus_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
+    db.rpc("group_divergent_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
+    db.rpc("group_hidden_gems", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
+    db.rpc("group_score_distribution", { p_group_id: group.id,
+      p_genre_id: statArgs.p_genre_id, p_platform_id: statArgs.p_platform_id }),
   ]);
-  for (const res of [summaryRes, topGamesRes, topRatedRes, splitRes, hotTakeRes, activityRes]) {
+  for (const res of [summaryRes, topGamesRes, topRatedRes, hotTakeRes, activityRes,
+                     consensusRes, divergentRes, hiddenGemsRes, scoreDistRes]) {
     if (res.error) console.error("[groups/[id]] stats error:", JSON.stringify(res.error));
   }
   summary = summaryRes.data ?? null;
   memberStats = memberStatsRows;
   topGameRows = topGamesRes.data ?? [];
   topRatedRows = topRatedRes.data ?? [];
-  splitRow = splitRes.data ?? null;
   hotTakeRow = hotTakeRes.data ?? null;
   activityReviews = activityRes.data ?? [];
+  consensusRows = consensusRes.data ?? [];
+  divergentRows = divergentRes.data ?? [];
+  hiddenGemRows = hiddenGemsRes.data ?? [];
+  // group_score_distribution returns one row per (profile_id, score); the
+  // group-wide row has profile_id = NULL. Sum by score across the null rows.
+  const distByScore: Record<number, number> = {};
+  for (const row of scoreDistRes.data ?? []) {
+    if ((row as any).profile_id != null) continue;
+    distByScore[(row as any).score] = ((row as any).review_count as number) ?? 0;
+  }
+  scoreDistRows = Array.from({ length: 10 }, (_, i) => ({ score: i + 1, review_count: distByScore[i + 1] ?? 0 }));
 }
 
 const totalReviews = summary?.review_count ?? 0;
@@ -287,7 +309,7 @@ const groupAvgScoreAccurate = summary?.avg_score != null ? +summary.avg_score.to
 const totalHours = summary?.hours_sum ?? 0;
 
 // Second wave: rows that name games or members the first wave only had ids for
-const extraGameIds = [splitRow?.game_id, hotTakeRow?.game_id].filter(Boolean);
+const extraGameIds = [hotTakeRow?.game_id].filter(Boolean);
 const { data: extraGames } = extraGameIds.length
   ? await db.from("games").select("id, title, slug, cover_img_url").in("id", extraGameIds)
   : { data: [] as any[] };
@@ -314,16 +336,6 @@ const { data: sessionsData } = await (supabase as any)
   .eq("group_id", id)
   .order("played_at", { ascending: false })
   .limit(50);
-
-// Split Decision — the game where two members disagree the most
-const splitDecision = splitRow && extraGameById[splitRow.game_id] && memberById[splitRow.high_profile_id] && memberById[splitRow.low_profile_id]
-  ? {
-      game: extraGameById[splitRow.game_id],
-      spread: splitRow.spread,
-      high: { ...memberById[splitRow.high_profile_id], score: splitRow.high_score },
-      low: { ...memberById[splitRow.low_profile_id], score: splitRow.low_score },
-    }
-  : null;
 
 const topGames = topGameRows.map(toGameStat);
 const topRatedGames = topRatedRows.map(toGameStat);
@@ -530,7 +542,6 @@ const groupOgDescription = group.description
   .hot-take-delta{font-size:12px;font-weight:700}
   .delta-up{color:var(--score-great)}
   .delta-down{color:var(--score-low)}
-  .split-decision-delta{color:var(--accent)}
 
   /* ── Critic Spectrum ── */
   .spectrum-wrap{padding-top:4px}
@@ -551,6 +562,28 @@ const groupOgDescription = group.description
   .spectrum-avatar.is-you:hover{box-shadow:0 0 0 2px var(--accent),0 4px 12px rgba(0,0,0,.35)}
   .spectrum-ticks{position:absolute;bottom:-14px;left:0;right:0;pointer-events:none}
   .spectrum-ticks span{position:absolute;font-size:9px;color:var(--text-tertiary);transform:translateX(-50%)}
+
+  /* ── Mini rank list (Consensus / Divisive / Hidden Gems) ── */
+  .mini-card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .mini-rank-list{display:flex;flex-direction:column}
+  .mini-rank-item{display:flex;align-items:center;gap:10px;padding:8px;margin:0 -8px;border-radius:8px;text-decoration:none;color:inherit;border-bottom:1px solid var(--border-subtle);transition:background .15s}
+  .mini-rank-item:last-child{border-bottom:none}
+  .mini-rank-item:hover{background:var(--bg-hover)}
+  .mini-rank-item:hover .mini-rank-title{color:var(--accent)}
+  .mini-rank-num{width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:11px;font-weight:700;flex-shrink:0;background:var(--tag-bg);color:var(--text-tertiary)}
+  .mini-rank-cover{width:30px;height:40px;border-radius:5px;object-fit:cover;flex-shrink:0;display:block}
+  .mini-rank-cover-placeholder{background:var(--tag-bg)}
+  .mini-rank-info{flex:1;min-width:0}
+  .mini-rank-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .15s}
+  .mini-rank-meta{font-size:11px;color:var(--text-tertiary);margin-top:2px}
+
+  /* ── Score Distribution histogram ── */
+  .hist-wrap{display:flex;align-items:flex-end;justify-content:space-between;gap:6px;height:96px;padding-bottom:18px;position:relative}
+  .hist-col{flex:1;display:flex;flex-direction:column;align-items:stretch;height:100%;position:relative}
+  .hist-col-fill{flex:1;display:flex;align-items:flex-end}
+  .hist-bar{width:100%;min-height:0;border-radius:3px 3px 0 0;background:currentColor;transition:filter .15s,transform .15s;transform-origin:bottom}
+  .hist-col:hover .hist-bar{filter:brightness(1.25);transform:scaleY(1.03)}
+  .hist-lbl{position:absolute;bottom:-16px;left:0;right:0;text-align:center;font-size:10px;color:var(--text-tertiary);font-weight:600}
 
   /* ── Two-col layout ── */
   .two-col{display:grid;grid-template-columns:1fr 280px;gap:20px;align-items:start}
@@ -1276,32 +1309,87 @@ const groupOgDescription = group.description
           </div>
         )}
 
-        {statsConf.show_split_decision && splitDecision && (
+        {statsConf.show_consensus && consensusRows.length > 0 && (
           <div class="card" style="margin-top:14px">
-            <div class="card-title">Split Decision</div>
-            <a class="hot-take-inner" href={`/games/${splitDecision.game.slug}`}>
-              {igdbCover(splitDecision.game.cover_img_url, "t_cover_small")
-                ? <img class="hot-take-cover" src={igdbCover(splitDecision.game.cover_img_url, "t_cover_small")!} alt={splitDecision.game.title} loading="lazy" />
-                : <div class="hot-take-cover" />
-              }
-              <div class="hot-take-body">
-                <div class="hot-take-title">{splitDecision.game.title}</div>
-                <div class="hot-take-scores">
-                  <div>
-                    <div class={`score-badge ${scoreClass(Math.round(splitDecision.high.score))}`}>{splitDecision.high.score}</div>
-                    <div class="hot-take-lbl">@{splitDecision.high.username}</div>
-                  </div>
-                  <div class="hot-take-vs">vs</div>
-                  <div>
-                    <div class={`score-badge ${scoreClass(Math.round(splitDecision.low.score))}`}>{splitDecision.low.score}</div>
-                    <div class="hot-take-lbl">@{splitDecision.low.username}</div>
-                  </div>
-                </div>
-                <div class="hot-take-delta split-decision-delta">
-                  {splitDecision.spread} point{splitDecision.spread !== 1 ? "s" : ""} apart
-                </div>
-              </div>
-            </a>
+            <div class="mini-card-header">
+              <div class="card-title" style="margin-bottom:0">Consensus Picks</div>
+              <a class="see-all-link" href={`/groups/${group.id}/consensus`}>See all →</a>
+            </div>
+            <div class="mini-rank-list">
+              {consensusRows.map((r: any, i: number) => {
+                const avg = +r.avg_score.toFixed(1);
+                return (
+                  <a class="mini-rank-item" href={`/games/${r.slug}`}>
+                    <div class="mini-rank-num">{i + 1}</div>
+                    {igdbCover(r.cover_img_url, "t_thumb")
+                      ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
+                      : <div class="mini-rank-cover mini-rank-cover-placeholder" />
+                    }
+                    <div class="mini-rank-info">
+                      <div class="mini-rank-title">{r.title}</div>
+                      <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
+                    </div>
+                    <div class={`score-badge ${scoreClass(Math.round(avg))}`}>{avg}</div>
+                  </a>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {statsConf.show_divergent && divergentRows.length > 0 && (
+          <div class="card" style="margin-top:14px">
+            <div class="mini-card-header">
+              <div class="card-title" style="margin-bottom:0">Most Divisive</div>
+              <a class="see-all-link" href={`/groups/${group.id}/divergent`}>See all →</a>
+            </div>
+            <div class="mini-rank-list">
+              {divergentRows.map((r: any, i: number) => {
+                const avg = +r.avg_score.toFixed(1);
+                return (
+                  <a class="mini-rank-item" href={`/games/${r.slug}`}>
+                    <div class="mini-rank-num">{i + 1}</div>
+                    {igdbCover(r.cover_img_url, "t_thumb")
+                      ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
+                      : <div class="mini-rank-cover mini-rank-cover-placeholder" />
+                    }
+                    <div class="mini-rank-info">
+                      <div class="mini-rank-title">{r.title}</div>
+                      <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
+                    </div>
+                    <div class={`score-badge ${scoreClass(Math.round(avg))}`}>{avg}</div>
+                  </a>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {statsConf.show_hidden_gems && hiddenGemRows.length > 0 && (
+          <div class="card" style="margin-top:14px">
+            <div class="mini-card-header">
+              <div class="card-title" style="margin-bottom:0">Hidden Gems</div>
+              <a class="see-all-link" href={`/groups/${group.id}/hidden-gems`}>See all →</a>
+            </div>
+            <div class="mini-rank-list">
+              {hiddenGemRows.map((r: any, i: number) => {
+                const avg = +r.group_avg.toFixed(1);
+                return (
+                  <a class="mini-rank-item" href={`/games/${r.slug}`}>
+                    <div class="mini-rank-num">{i + 1}</div>
+                    {igdbCover(r.cover_img_url, "t_thumb")
+                      ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
+                      : <div class="mini-rank-cover mini-rank-cover-placeholder" />
+                    }
+                    <div class="mini-rank-info">
+                      <div class="mini-rank-title">{r.title}</div>
+                      <div class="mini-rank-meta">{r.group_count} group review{r.group_count !== 1 ? 's' : ''} · {r.community_count} elsewhere</div>
+                    </div>
+                    <div class={`score-badge ${scoreClass(Math.round(avg))}`}>{avg}</div>
+                  </a>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -1361,6 +1449,25 @@ const groupOgDescription = group.description
                   <span style="left:100%">10</span>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {statsConf.show_score_distribution && scoreDistRows.some((r) => r.review_count > 0) && (
+          <div class="card" style="margin-top:14px">
+            <div class="card-title">Score Distribution</div>
+            <div class="hist-wrap">
+              {(() => {
+                const max = Math.max(...scoreDistRows.map((r) => r.review_count));
+                return scoreDistRows.map((r) => (
+                  <div class="hist-col" title={`Score ${r.score}: ${r.review_count} review${r.review_count !== 1 ? 's' : ''}`}>
+                    <div class="hist-col-fill">
+                      <div class={`hist-bar ${scoreClass(r.score)}`} style={`height:${max ? Math.max((r.review_count / max) * 100, r.review_count > 0 ? 3 : 0) : 0}%`}></div>
+                    </div>
+                    <div class="hist-lbl">{r.score}</div>
+                  </div>
+                ));
+              })()}
             </div>
           </div>
         )}
