@@ -14,6 +14,12 @@ const MAX_GAMES_PER_CALL = 40;
 // changes; global unlock percentages drift slowly.
 const SCHEMA_TTL_MS = 30 * 24 * 3600 * 1000;
 
+// Achievement-sync snapshot lifetime. If the cached owned-games list from
+// GetOwnedGames is older than this on a resume, refetch — the user's library
+// may have grown and we don't want to pretend it hasn't. A single sync session
+// finishes in seconds to minutes, so this only matters for abandoned runs.
+const SNAPSHOT_TTL_MS = 24 * 3600 * 1000;
+
 // Steam's GetSchemaForGame returns icon hashes that only reliably resolve on
 // shared.fastly.steamstatic.com/community_assets/. The old steamcdn-a.akamaihd.net
 // CDN is stale for many achievements. Always extract the filename and rewrite
@@ -107,10 +113,11 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json().catch(() => ({} as any));
+  const force = body.force === true;
 
   const { data: profileData } = await (db as any)
     .from('profiles')
-    .select('steam_id, achievements_synced_at, achievements_sync_cursor')
+    .select('steam_id, achievements_synced_at, achievements_sync_cursor, achievements_sync_snapshot')
     .eq('id', profile.id)
     .single();
 
@@ -126,9 +133,10 @@ export const POST: APIRoute = async (context) => {
   const isFreshStart = cursor === 0;
 
   // 1-hour cooldown applies only to starting a brand-new sync — never to
-  // resuming or continuing one that's already in flight.
+  // resuming or continuing one that's already in flight. force=true skips it
+  // (and also skips the delta filter below, for a full re-scan).
   const lastSync = profileData.achievements_synced_at;
-  if (lastSync && isFreshStart && body.force !== true) {
+  if (lastSync && isFreshStart && !force) {
     const secondsSince = (Date.now() - new Date(lastSync).getTime()) / 1000;
     if (secondsSince < 3600) {
       const mins = Math.ceil((3600 - secondsSince) / 60);
@@ -140,29 +148,110 @@ export const POST: APIRoute = async (context) => {
   const steamApiKey = import.meta.env.STEAM_API_KEY;
   if (!steamApiKey) return json({ error: 'Steam API not configured.' }, 500);
 
-  // Full Steam library — one call, retried since a transient failure here would
-  // otherwise abort the whole sync.
-  const ownedData = await fetchJsonWithRetry(
-    `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=1&include_played_free_games=1&format=json`,
-    2,
-    8000,
-  );
-  const allOwned: Array<{ appid: number; name: string }> = ownedData?.response?.games ?? [];
+  // The snapshot is the pre-filtered work queue for this sync session — the
+  // owned games list already delta-trimmed. Reuse it across every batch so
+  // GetOwnedGames only fires once per session instead of once per batch. On a
+  // fresh start (cursor = 0), or when the snapshot is stale, or when force is
+  // set, rebuild it from scratch.
+  type SnapshotGame = { appid: number; name: string; rtime_last_played: number };
+  type Snapshot = { started_at: string; games: SnapshotGame[]; total_owned: number };
 
-  if (allOwned.length === 0) {
-    // Transient Steam issue or a private profile — 502 so the client retries
-    // without wiping the progress cursor.
-    return json({ error: 'Could not read your Steam library right now. Check that your Steam profile Game Details are Public, then retry.' }, 502);
+  const existingSnapshot = profileData.achievements_sync_snapshot as Snapshot | null;
+  const snapshotFresh = !!existingSnapshot?.started_at &&
+    (Date.now() - new Date(existingSnapshot.started_at).getTime()) < SNAPSHOT_TTL_MS;
+  const canReuseSnapshot = !isFreshStart && !force && snapshotFresh && Array.isArray(existingSnapshot?.games);
+
+  let games: SnapshotGame[];
+  let total: number; // count of games this sync will actually process (not full library)
+
+  if (canReuseSnapshot) {
+    games = existingSnapshot!.games;
+    total = existingSnapshot!.total_owned ?? games.length;
+  } else {
+    // Fetch the full Steam library — the single flaky call we want to avoid
+    // re-hitting on continuations. Retried since a transient failure here
+    // would abort the whole sync.
+    const ownedData = await fetchJsonWithRetry(
+      `https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=${steamApiKey}&steamid=${steamId}&include_appinfo=1&include_played_free_games=1&format=json`,
+      2,
+      8000,
+    );
+
+    if (ownedData === null) {
+      // Fetch actually failed (network / timeout / Steam-side error) after
+      // retries — never a privacy issue. Cursor is preserved so the client's
+      // retry picks up where it left off.
+      const msg = isFreshStart
+        ? 'Steam is temporarily unavailable. Try again in a minute.'
+        : 'Steam is temporarily unavailable — your progress is saved, try again shortly.';
+      return json({ error: msg }, 502);
+    }
+
+    const allOwned: Array<{ appid: number; name: string; rtime_last_played?: number }> =
+      ownedData?.response?.games ?? [];
+
+    if (allOwned.length === 0) {
+      // Steam responded with a valid but empty list. That's either a private
+      // profile or a genuinely empty library. Only blame privacy on fresh
+      // starts — mid-sync we know reads have worked before, so blame Steam.
+      const msg = isFreshStart
+        ? 'Could not read your Steam library. Check that your Steam profile Game details are Public, then retry.'
+        : 'Steam returned no games right now — your progress is saved, try again shortly.';
+      return json({ error: msg }, 502);
+    }
+
+    // Delta filter: only skip a game if it (a) hasn't been played since the
+    // last sync AND (b) already has some rows in user_achievements. The
+    // untouched-check makes this self-healing — a game that was skipped or
+    // silently null-ed on a prior run still gets processed on the next one,
+    // because it has no rows. Force bypasses the whole filter for a full pass.
+    const lastSyncSecs = lastSync ? Math.floor(new Date(lastSync).getTime() / 1000) : 0;
+    const shouldDelta = lastSyncSecs > 0 && !force;
+
+    let syncedAppids = new Set<number>();
+    if (shouldDelta) {
+      const { data: syncedRows } = await (db as any).rpc('user_synced_steam_appids', { p_profile_id: profile.id });
+      syncedAppids = new Set<number>(((syncedRows as { steam_appid: number }[] | null) ?? []).map((r) => r.steam_appid));
+    }
+
+    const filtered: SnapshotGame[] = allOwned
+      .filter((g) => {
+        if (!shouldDelta) return true;
+        const played = (g.rtime_last_played ?? 0) > lastSyncSecs;
+        const untouched = !syncedAppids.has(g.appid);
+        return played || untouched;
+      })
+      .map((g) => ({ appid: g.appid, name: g.name, rtime_last_played: g.rtime_last_played ?? 0 }))
+      .sort((a, b) => a.appid - b.appid);
+
+    games = filtered;
+    total = filtered.length;
+
+    // Persist the snapshot so the next batch reuses it instead of re-hitting
+    // Steam. Only relevant for multi-batch runs; a one-batch sync clears it
+    // again a few lines below.
+    await (db as any)
+      .from('profiles')
+      .update({
+        achievements_sync_snapshot: {
+          started_at: new Date().toISOString(),
+          games: filtered,
+          total_owned: allOwned.length,
+        } satisfies Snapshot,
+      })
+      .eq('id', profile.id);
   }
 
-  const sorted = [...allOwned].sort((a, b) => a.appid - b.appid);
-  const remaining = sorted.filter((g) => g.appid > cursor);
-  const total = allOwned.length;
+  const remaining = games.filter((g) => g.appid > cursor);
 
   if (remaining.length === 0) {
     await (db as any)
       .from('profiles')
-      .update({ achievements_synced_at: new Date().toISOString(), achievements_sync_cursor: 0 })
+      .update({
+        achievements_synced_at: new Date().toISOString(),
+        achievements_sync_cursor: 0,
+        achievements_sync_snapshot: null,
+      })
       .eq('id', profile.id);
     return json({ processed: total, total, syncedThisCall: 0, nextCursor: null, done: true });
   }
@@ -360,13 +449,17 @@ export const POST: APIRoute = async (context) => {
   }
 
   const done = remaining.filter((g) => g.appid > lastProcessedAppid).length === 0;
-  const processedCount = sorted.filter((g) => g.appid <= lastProcessedAppid).length;
+  const processedCount = games.filter((g) => g.appid <= lastProcessedAppid).length;
 
   await (db as any)
     .from('profiles')
     .update(
       done
-        ? { achievements_synced_at: new Date().toISOString(), achievements_sync_cursor: 0 }
+        ? {
+            achievements_synced_at: new Date().toISOString(),
+            achievements_sync_cursor: 0,
+            achievements_sync_snapshot: null,
+          }
         : { achievements_sync_cursor: lastProcessedAppid },
     )
     .eq('id', profile.id);

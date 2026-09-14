@@ -4877,13 +4877,19 @@ async function createNewList(btn) {
     }
 
     // Transient failure (network, Steam hiccup, rate limit, function timeout).
-    // Back off and retry the SAME cursor — progress is never lost.
+    // Back off and retry the SAME cursor — progress is never lost. Mid-sync
+    // (cursor > 0) gets a wider retry budget: we've proven Steam is reachable
+    // and the user has already invested progress, so ride out short outages
+    // instead of giving up in 60s. Jitter avoids all clients retrying in lockstep.
     if (!res || !res.ok || !data) {
       var status = res ? res.status : 0;
       // 429 here is our own "synced recently" cooldown — deterministic, don't retry.
       var transient = !res || status === 0 || status >= 500;
-      if (transient && attempt < 5) {
-        var waitMs = Math.min(30000, 2000 * Math.pow(2, attempt));
+      var maxAttempts = cursor > 0 ? 9 : 5;
+      var maxWaitMs = cursor > 0 ? 60000 : 30000;
+      if (transient && attempt < maxAttempts) {
+        var baseWait = Math.min(maxWaitMs, 2000 * Math.pow(2, attempt));
+        var waitMs = Math.round(baseWait * (0.8 + Math.random() * 0.4));
         btn.textContent = 'Steam is busy — retrying in ' + Math.round(waitMs / 1000) + 's…';
         setTimeout(function () { runBatch(attempt + 1); }, waitMs);
         return;
