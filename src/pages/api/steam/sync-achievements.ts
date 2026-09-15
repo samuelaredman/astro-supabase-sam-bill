@@ -465,15 +465,31 @@ export const POST: APIRoute = async (context) => {
   const done = remaining.filter((g) => g.appid > lastProcessedAppid).length === 0;
   const processedCount = games.filter((g) => g.appid <= lastProcessedAppid).length;
 
+  // A "single-batch total failure" is a fresh-start sync that finished in one
+  // batch, tried to read some games, and wrote zero rows because every
+  // GetPlayerAchievements call came back null. That's a Steam-side blip, not
+  // a real sync — advancing achievements_synced_at would gate the user behind
+  // the one-hour cooldown for a failure they didn't cause. Keep the old
+  // marker so an immediate retry still gets through the cooldown gate. Games
+  // that failed keep their old per-game freshness so the next sync's delta
+  // still includes them.
+  const singleBatchTotalFailure =
+    done && isFreshStart && candidates.length > 0 && rowsSynced === 0 && playerNulls > 0;
+
   await (db as any)
     .from('profiles')
     .update(
       done
-        ? {
-            achievements_synced_at: new Date().toISOString(),
-            achievements_sync_cursor: 0,
-            achievements_sync_snapshot: null,
-          }
+        ? (singleBatchTotalFailure
+            ? {
+                achievements_sync_cursor: 0,
+                achievements_sync_snapshot: null,
+              }
+            : {
+                achievements_synced_at: new Date().toISOString(),
+                achievements_sync_cursor: 0,
+                achievements_sync_snapshot: null,
+              })
         : { achievements_sync_cursor: lastProcessedAppid },
     )
     .eq('id', profile.id);
@@ -486,6 +502,11 @@ export const POST: APIRoute = async (context) => {
     // whose "Game details" privacy is blocking every read.
     hitAchievements: playerHits,
     emptyResponses: playerNulls,
+    // Whether this profile has ever completed a successful achievement sync.
+    // The client uses this to decide whether it's safe to blame profile
+    // privacy for an all-empty batch — if they've synced before, it's not
+    // privacy, so we shouldn't lead with that.
+    everSynced: !!lastSync,
     nextCursor: done ? null : lastProcessedAppid,
     done,
   });
