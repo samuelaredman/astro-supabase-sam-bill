@@ -132,15 +132,19 @@ export const POST: APIRoute = async (context) => {
       : Number(profileData.achievements_sync_cursor ?? 0) || 0;
   const isFreshStart = cursor === 0;
 
-  // 1-hour cooldown applies only to starting a brand-new sync — never to
-  // resuming or continuing one that's already in flight. force=true skips it
-  // (and also skips the delta filter below, for a full re-scan).
+  // Debounce accidental double-clicks on the sync button. With the per-game
+  // freshness delta a routine resync is one Steam call plus a tiny handful of
+  // GetPlayerAchievements, so anything longer than a few seconds would just
+  // get in the way of a user retrying after a Steam blip or wanting to pick
+  // up freshly unlocked achievements. Continuations skip this (cursor > 0),
+  // and force=true skips it too (also bypasses the delta for a full re-scan).
+  const COOLDOWN_SECONDS = 60;
   const lastSync = profileData.achievements_synced_at;
   if (lastSync && isFreshStart && !force) {
     const secondsSince = (Date.now() - new Date(lastSync).getTime()) / 1000;
-    if (secondsSince < 3600) {
-      const mins = Math.ceil((3600 - secondsSince) / 60);
-      return json({ error: `Achievements synced recently. Try again in ${mins} minute${mins !== 1 ? 's' : ''}.` }, 429);
+    if (secondsSince < COOLDOWN_SECONDS) {
+      const wait = Math.max(1, Math.ceil(COOLDOWN_SECONDS - secondsSince));
+      return json({ error: `Just synced — give it ${wait} second${wait !== 1 ? 's' : ''}.` }, 429);
     }
   }
 
