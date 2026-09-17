@@ -241,6 +241,28 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
               </div>
               <div id="steamSyncResults" class="steam-results" style="display:none"></div>
             </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Import your Steam reviews</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Brings your Steam reviews across as Chekpoint <strong>drafts</strong>.
+                Steam reviews don&rsquo;t have scores, so we carry over the review text,
+                the date, and hours-at-review, then you pick a score and publish each one.
+                Games you already reviewed here are skipped. Your Steam profile&rsquo;s reviews
+                must be public (same privacy settings as library sync above).
+              </div>
+              <div id="srStartRow" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="srPreviewBtn" onclick="srPreview()">Preview reviews</button>
+                <button class="settings-save-btn" id="srImportBtn" onclick="srStart()" style="display:none">Import to drafts</button>
+                <span id="srMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="srPreview" class="bl-preview" style="display:none;margin-top:10px"></div>
+              <div id="srProgress" class="bl-progress" style="display:none;margin-top:10px">
+                <div class="bl-bar"><div class="bl-bar-fill" id="srBarFill"></div></div>
+                <div class="bl-progress-text" id="srProgressText"></div>
+              </div>
+              <div id="srResults" class="steam-results" style="display:none"></div>
+            </div>
           </>
         ) : (
           <div class="steam-connect-row">
@@ -1297,6 +1319,128 @@ window.blLibImport = blLibImport;
       blEl("blStartRow")!.style.display = "none";
       blRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
       await blFinish(resumed.job.id);
+    }
+  } catch {
+    /* nothing to resume */
+  }
+})();
+
+// ─── Steam review import ────────────────────────────────────────────────────
+import {
+  previewSteamReviews,
+  startAndDriveSteam,
+  resumeActiveSteam,
+  fetchSteamStatus,
+  mapSteamItem,
+  type ImportProgress as SteamImportProgress,
+} from "../utils/steam-reviews/importClient";
+
+const srEl = (id: string) => document.getElementById(id);
+let srActiveController: AbortController | null = null;
+
+function srSetMsg(text: string, ok = false) {
+  const m = srEl("srMsg");
+  if (!m) return;
+  m.textContent = text;
+  m.style.color = ok ? "var(--score-great, #4ade80)" : "#f87171";
+}
+
+function srRenderProgress(p: SteamImportProgress) {
+  const wrap = srEl("srProgress");
+  const fill = srEl("srBarFill");
+  const txt = srEl("srProgressText");
+  if (!wrap || !fill || !txt) return;
+  wrap.style.display = "block";
+  fill.style.width = p.fraction == null ? "50%" : `${Math.round(p.fraction * 100)}%`;
+  fill.style.opacity = p.phase === "rate-limited" ? "0.5" : "1";
+  txt.textContent = p.message;
+}
+
+function srRenderResults(job: any) {
+  const box = srEl("srResults");
+  if (!box) return;
+  box.style.display = "block";
+  const parts = [
+    `<strong>${job.draft_count}</strong> saved as drafts (assign a score + publish when you&rsquo;re ready)`,
+    job.skipped_count ? `<strong>${job.skipped_count}</strong> skipped (already reviewed here)` : "",
+    job.needs_mapping_count ? `<strong>${job.needs_mapping_count}</strong> couldn&rsquo;t be matched to a Chekpoint game` : "",
+    job.failed_count ? `<strong>${job.failed_count}</strong> failed` : "",
+  ].filter(Boolean);
+  box.innerHTML = parts.join("<br>");
+}
+
+async function srDrive() {
+  srEl("srStartRow")!.style.display = "none";
+  srEl("srPreview")!.style.display = "none";
+  srActiveController?.abort();
+  srActiveController = new AbortController();
+  try {
+    const { job } = await startAndDriveSteam({
+      onProgress: srRenderProgress,
+      signal: srActiveController.signal,
+    });
+    srRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+    try {
+      const status = await fetchSteamStatus(job.id);
+      srRenderResults(status.job);
+      fetch("/api/import/steam/skip-onboarding", { method: "POST" }).catch(() => {});
+    } catch { /* results are best-effort */ }
+  } catch (e: any) {
+    if (e?.name === "AbortError") return;
+    srSetMsg(e?.message ?? "Import failed.");
+    srEl("srStartRow")!.style.display = "flex";
+  }
+}
+window.srStart = srDrive;
+
+async function srPreview() {
+  const btn = srEl("srPreviewBtn") as HTMLButtonElement | null;
+  const importBtn = srEl("srImportBtn") as HTMLButtonElement | null;
+  if (!btn) return;
+  btn.disabled = true;
+  srSetMsg("Checking Steam…", true);
+  try {
+    const p = await previewSteamReviews();
+    srSetMsg("");
+    const box = srEl("srPreview")!;
+    box.style.display = "block";
+    const previewList = p.sample
+      .map((s: any) => {
+        const hrs = s.hours_at_review ? ` — ${s.hours_at_review} hrs` : "";
+        const date = s.review_date ? ` <span style="color:var(--text-tertiary)">${s.review_date}</span>` : "";
+        const snippet = (s.review_text || "").slice(0, 120);
+        return `<li>${snippet || "(no text)"}${hrs}${date}</li>`;
+      })
+      .join("");
+    box.innerHTML = `
+      Found <strong>${p.totalReviews}</strong> Steam review${p.totalReviews === 1 ? "" : "s"}${p.totalPages > 1 ? ` across ${p.totalPages} pages` : ""}.
+      All will import as drafts — you assign a score before publishing.
+      <ul class="bl-sample">${previewList}</ul>`;
+    if (importBtn) importBtn.style.display = "";
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Could not reach Steam.");
+  } finally {
+    btn.disabled = false;
+  }
+}
+window.srPreview = srPreview;
+
+// Reattach to an import that's still running (e.g. after a page reload).
+// Only run when the Steam import section is actually rendered — the whole
+// Steam block is conditional on profile.steam_id, so users without a
+// connected account skip the /status probe entirely.
+(async () => {
+  if (!srEl("srPreviewBtn")) return;
+  try {
+    srActiveController = new AbortController();
+    const resumed = await resumeActiveSteam({
+      onProgress: srRenderProgress,
+      signal: srActiveController.signal,
+    });
+    if (resumed?.job) {
+      srEl("srStartRow")!.style.display = "none";
+      srRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+      srRenderResults(resumed.job);
     }
   } catch {
     /* nothing to resume */
