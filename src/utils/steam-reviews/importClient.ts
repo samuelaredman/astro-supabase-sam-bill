@@ -60,14 +60,64 @@ export async function resumeActiveSteam(handlers: ImportHandlers) {
   return driveSteamJob(data.job.id, handlers);
 }
 
-export async function mapSteamItem(itemId: string, igdbId: number, signal?: AbortSignal) {
-  const { res, data } = await postJson(
-    "/api/import/steam/map",
-    { item_id: itemId, igdb_id: igdbId },
-    signal,
-  );
+export async function mapSteamItem(
+  itemId: string,
+  target: { gameId: string } | { igdbId: number },
+  signal?: AbortSignal,
+) {
+  const body: Record<string, unknown> = { item_id: itemId };
+  if ("gameId" in target) body.game_id = target.gameId;
+  else body.igdb_id = target.igdbId;
+  const { res, data } = await postJson("/api/import/steam/map", body, signal);
   if (!res.ok) throw new Error(data?.error ?? "Could not match that game.");
   return data as { status: string; game: { id: string; title: string; slug: string }; job: any };
+}
+
+export async function discardSteamItem(itemId: string, signal?: AbortSignal) {
+  const { res, data } = await postJson(
+    "/api/import/steam/discard",
+    { item_id: itemId },
+    signal,
+  );
+  if (!res.ok) throw new Error(data?.error ?? "Could not discard that item.");
+  return data as { ok: true; job: any };
+}
+
+export type SteamConflictItem = {
+  item_id: string;
+  kind: "draft" | "published";
+  steam: {
+    appid: number | null;
+    review_text: string;
+    review_date: string | null;
+    hours_at_review: number | null;
+    source_url: string | null;
+  };
+  game: {
+    id: string;
+    title: string;
+    slug: string | null;
+    cover_img_url: string | null;
+  };
+  existing: {
+    id: string;
+    status: string;
+    score: number | null;
+    title: string | null;
+    body: string;
+    published_at: string | null;
+    created_at: string | null;
+  };
+};
+
+export async function replaceDraftFromSteam(itemId: string, signal?: AbortSignal) {
+  const { res, data } = await postJson(
+    "/api/import/steam/replace-draft",
+    { item_id: itemId },
+    signal,
+  );
+  if (!res.ok) throw new Error(data?.error ?? "Could not replace your draft.");
+  return data as { ok: true; review_id: string; job: any };
 }
 
 export async function fetchSteamStatus(jobId: string, signal?: AbortSignal) {
@@ -76,7 +126,7 @@ export async function fetchSteamStatus(jobId: string, signal?: AbortSignal) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error ?? "Could not load import status.");
-  return data as { job: any; needs_mapping: any[] };
+  return data as { job: any; needs_mapping: any[]; skipped_conflicts: SteamConflictItem[] };
 }
 
 /** Run an existing Steam job through scrape (if needed) then process, until done. */

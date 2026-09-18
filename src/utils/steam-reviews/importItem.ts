@@ -85,17 +85,33 @@ export async function importSteamReviewItem(
   }
 
   // ── 2. Skip if this user already has a review for the game ────────────────
-  const { data: existing } = await db
+  // A user can legitimately have multiple drafts for the same game (the
+  // reviews_one_published_per_game unique index is partial — WHERE
+  // status='published'). Rank published-over-draft so the surfaced conflict
+  // is the one the user most likely cares about, then take a single row —
+  // .maybeSingle() would throw the moment there's more than one match.
+  const { data: existingRows } = await db
     .from("reviews")
     .select("id, status")
     .eq("profile_id", profileId)
     .eq("game_id", gameId)
-    .maybeSingle();
+    .order("status", { ascending: false }) // 'published' > 'draft' lexicographically
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const existing = Array.isArray(existingRows) && existingRows.length > 0
+    ? (existingRows[0] as { id: string; status: string | null })
+    : null;
   if (existing) {
+    // The `conflict:<kind>` detail is machine-readable; the status endpoint
+    // parses it to build the "review already exists" UI. review_id points at
+    // the EXISTING conflicting review — not a newly-created one — which is
+    // the same field the UI already links off of for drafted rows.
+    const kind = existing.status === "published" ? "published" : "draft";
     return {
       status: "skipped",
       matched_game_id: gameId,
-      detail: `already has a ${existing.status ?? "existing"} review`,
+      review_id: existing.id,
+      detail: `conflict:${kind}`,
     };
   }
 

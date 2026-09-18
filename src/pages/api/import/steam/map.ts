@@ -7,8 +7,9 @@ import {
 } from "../../../../utils/steam-reviews/importItem";
 import { loadOwnedJob, recountJob } from "../../../../utils/importJob";
 
-// POST { item_id, igdb_id } -> resolve one needs_mapping Steam item: import
-// the chosen IGDB game, then run the normal per-item draft insert against it.
+// POST { item_id, igdb_id? , game_id? } -> resolve one needs_mapping Steam item.
+// Either point at an existing Chekpoint game (game_id) or import from IGDB
+// (igdb_id). One of the two is required. game_id wins if both are provided.
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
@@ -22,9 +23,11 @@ export const POST: APIRoute = async (context) => {
   }
 
   const itemId = String(body?.item_id ?? "");
-  const igdbId = parseInt(String(body?.igdb_id ?? ""), 10);
-  if (!itemId || !igdbId || Number.isNaN(igdbId)) {
-    return json({ error: "Missing item_id or igdb_id." }, 400);
+  const gameIdRaw = body?.game_id != null ? String(body.game_id) : "";
+  const igdbIdRaw = body?.igdb_id != null ? String(body.igdb_id) : "";
+  const igdbId = igdbIdRaw ? parseInt(igdbIdRaw, 10) : NaN;
+  if (!itemId || (!gameIdRaw && (!igdbIdRaw || Number.isNaN(igdbId)))) {
+    return json({ error: "Missing item_id and (game_id or igdb_id)." }, 400);
   }
 
   const { data: item } = await db
@@ -40,9 +43,21 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "This item isn't a Steam import." }, 409);
   }
 
-  const imported = await importGameByIgdbId(db, igdbId);
-  if (!imported.ok) {
-    return json({ error: imported.error || "Could not import that game." }, imported.status || 502);
+  let matchedGame: { id: string; title: string; slug: string };
+  if (gameIdRaw) {
+    const { data: existing } = await db
+      .from("games")
+      .select("id, title, slug")
+      .eq("id", gameIdRaw)
+      .maybeSingle();
+    if (!existing) return json({ error: "That game is no longer in Chekpoint." }, 404);
+    matchedGame = { id: existing.id, title: existing.title, slug: existing.slug ?? "" };
+  } else {
+    const imported = await importGameByIgdbId(db, igdbId);
+    if (!imported.ok) {
+      return json({ error: imported.error || "Could not import that game." }, imported.status || 502);
+    }
+    matchedGame = { id: imported.game.id, title: imported.game.title, slug: imported.game.slug };
   }
 
   const input: SteamImportItemInput = {
@@ -53,7 +68,7 @@ export const POST: APIRoute = async (context) => {
     review_date: item.review_date,
     hours_at_review: item.hours_at_review,
     source_url: item.source_url ?? "",
-    matched_game_id: imported.game.id,
+    matched_game_id: matchedGame.id,
   };
 
   let outcome;
@@ -67,7 +82,7 @@ export const POST: APIRoute = async (context) => {
     .from("import_job_items")
     .update({
       status: outcome.status,
-      matched_game_id: outcome.matched_game_id ?? imported.game.id,
+      matched_game_id: outcome.matched_game_id ?? matchedGame.id,
       review_id: outcome.review_id ?? null,
       detail: outcome.detail ?? null,
       updated_at: new Date().toISOString(),
@@ -78,7 +93,7 @@ export const POST: APIRoute = async (context) => {
 
   return json({
     status: outcome.status,
-    game: { id: imported.game.id, title: imported.game.title, slug: imported.game.slug },
+    game: matchedGame,
     job: fresh,
   });
 };
