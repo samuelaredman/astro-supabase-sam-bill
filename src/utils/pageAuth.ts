@@ -48,7 +48,7 @@ async function loadOnboardingProfile(column: 'id' | 'auth_user_id', value: strin
   try {
     const { data } = await getSupabaseAdmin()
       .from('profiles')
-      .select('id, avatar_url, favorite_game_id, showcase_games, backloggd_import_done_at, onboarding_completed_at, favorite_game:games!favorite_game_id (id, title, slug, cover_img_url)')
+      .select('id, avatar_url, favorite_game_id, showcase_games, backloggd_import_done_at, steam_id, steam_reviews_import_done_at, onboarding_completed_at, favorite_game:games!favorite_game_id (id, title, slug, cover_img_url)')
       .eq(column, value)
       .maybeSingle();
     return data;

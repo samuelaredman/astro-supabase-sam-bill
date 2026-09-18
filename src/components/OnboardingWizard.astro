@@ -28,6 +28,8 @@ interface Props {
   hasFavorite: boolean;
   hasShowcase: boolean;
   hasImportedBackloggd?: boolean;
+  hasSteamConnected?: boolean;
+  hasImportedSteam?: boolean;
   existingFavorite?: FavoriteGame | null;
   existingShowcase?: ShowcaseGame[];
 }
@@ -38,16 +40,25 @@ const {
   hasFavorite,
   hasShowcase,
   hasImportedBackloggd = false,
+  hasSteamConnected = false,
+  hasImportedSteam = false,
   existingFavorite = null,
   existingShowcase = [],
 } = Astro.props;
 
+// Steam step only shown for users who've already connected Steam (via
+// Settings → Steam / OpenID). Users without a connection see Backloggd
+// only — Steam gets a dedicated Settings entry point after onboarding.
+// If both run, Backloggd goes first so its higher-nuance rows (star ratings
+// → 1-10 scores) are already drafts by the time Steam scans for conflicts,
+// and the deterministic "keep existing" rule below makes Backloggd win.
 const pending = [
   'welcome',
   !hasAvatar && 'avatar',
   !hasFavorite && 'favorite',
   !hasShowcase && 'showcase',
   !hasImportedBackloggd && 'backloggd',
+  hasSteamConnected && !hasImportedSteam && 'steam',
   'tour',
 ].filter(Boolean) as string[];
 
@@ -138,6 +149,27 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
       <button class="ob-skip" id="obBlSkip" type="button">Skip — I'll do this later</button>
     </section>
 
+    <section class="ob-step" data-step-key="steam" hidden>
+      <div class="ob-icon">🎮</div>
+      <h2>Bring your Steam reviews too?</h2>
+      <p>We'll import your public Steam reviews as drafts — you assign a score and publish when you're ready.</p>
+      <p class="ob-sr-note" id="obSrDupeNote" hidden>
+        If a game is already reviewed here (from Backloggd or otherwise), your existing version wins and the Steam text is skipped.
+      </p>
+
+      <div class="ob-sr-preview" id="obSrPreview" hidden></div>
+
+      <div class="ob-sr-actions">
+        <button class="ob-continue" id="obSrPreviewBtn" type="button">Preview Steam reviews</button>
+        <button class="ob-continue" id="obSrImportBtn" type="button" hidden>Import to drafts</button>
+      </div>
+
+      <div class="ob-bl-status" id="obSrStatus" hidden></div>
+      <div class="ob-progress-bar" id="obSrBar" hidden style="margin:12px 0 0"><div class="ob-progress-fill" id="obSrBarFill"></div></div>
+
+      <button class="ob-skip" id="obSrSkip" type="button">Skip — I'll do this later</button>
+    </section>
+
     <section class="ob-step" data-step-key="tour" hidden>
       <div class="ob-icon">🧭</div>
       <h2>One last thing — take the tour</h2>
@@ -153,7 +185,9 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     inline) cannot. Exposes the Backloggd import helpers on window for that script. */}
 <script>
   import { previewBackloggd, startAndDrive, importLibraryFile } from '../utils/backloggd/importClient';
+  import { previewSteamReviews, startAndDriveSteam, fetchSteamStatus } from '../utils/steam-reviews/importClient';
   (window as any).__ckBacklogImport = { previewBackloggd, startAndDrive, importLibraryFile };
+  (window as any).__ckSteamImport = { previewSteamReviews, startAndDriveSteam, fetchSteamStatus };
 </script>
 
 <script
@@ -555,6 +589,113 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     }
   });
 
+  // ---- Step: steam import (only present when steam is connected) ----
+  var srPreviewBtn = document.getElementById('obSrPreviewBtn');
+  var srImportBtn = document.getElementById('obSrImportBtn');
+  var srSkipBtn = document.getElementById('obSrSkip');
+  var srStatus = document.getElementById('obSrStatus');
+  var srBar = document.getElementById('obSrBar');
+  var srBarFill = document.getElementById('obSrBarFill');
+  var srPreviewBox = document.getElementById('obSrPreview');
+  var srDupeNote = document.getElementById('obSrDupeNote');
+  var srPhase = 'idle'; // 'idle' -> 'running' -> 'done' | 'failed'
+  var srMarked = false;
+
+  function srMarkStepDone() {
+    if (srMarked) return;
+    srMarked = true;
+    fetch('/api/import/steam/skip-onboarding', { method: 'POST' }).catch(function () {});
+  }
+
+  function srLeaveStep() {
+    srMarkStepDone();
+    advance();
+  }
+
+  function srOnProgress(p) {
+    if (p.fraction != null) srBarFill.style.width = Math.round(p.fraction * 100) + '%';
+    srStatus.textContent = p.message;
+  }
+
+  function srFinish(job, needsMapping, conflicts) {
+    srPhase = 'done';
+    srBarFill.style.width = '100%';
+    var lines = [];
+    lines.push((job.draft_count || 0) + ' Steam review' + ((job.draft_count === 1) ? '' : 's') + ' saved as drafts.');
+    // The Backloggd-first ordering makes overlap look like `skipped` on the
+    // Steam side: our importer flagged the games as already-reviewed. Frame
+    // it that way so it's not read as an error.
+    var dupeCount = (conflicts && conflicts.length) || 0;
+    if (dupeCount > 0) {
+      lines.push(dupeCount + ' skipped — you\'ve already reviewed those games here. Steam text discarded.');
+    } else if (job.skipped_count > 0) {
+      lines.push(job.skipped_count + ' skipped as duplicates.');
+    }
+    if (needsMapping && needsMapping.length) {
+      lines.push(needsMapping.length + ' couldn\'t be matched — resolve them from Settings later.');
+    }
+    if (job.failed_count > 0) {
+      lines.push(job.failed_count + ' failed.');
+    }
+    srStatus.textContent = lines.join(' ');
+    srMarkStepDone();
+    srImportBtn.textContent = 'Continue →';
+    srImportBtn.disabled = false;
+    srImportBtn.hidden = false;
+    srPreviewBtn.hidden = true;
+    srSkipBtn.style.display = 'none';
+  }
+
+  function srFail(btn, e) {
+    srPhase = 'failed';
+    srStatus.textContent = (e && e.message ? e.message : 'Import failed') + ' — you can try again from Settings later.';
+    btn.textContent = 'Skip for now';
+    btn.disabled = false;
+    srSkipBtn.disabled = false;
+  }
+
+  srSkipBtn.addEventListener('click', srLeaveStep);
+
+  srPreviewBtn.addEventListener('click', async function () {
+    if (srPhase !== 'idle') return;
+    var api = window.__ckSteamImport;
+    if (!api) { srStatus.hidden = false; srStatus.textContent = 'Still loading — try again in a second.'; return; }
+    srPreviewBtn.disabled = true;
+    srStatus.hidden = false;
+    srStatus.textContent = 'Checking your Steam profile…';
+    try {
+      var p = await api.previewSteamReviews();
+      srPreviewBox.hidden = false;
+      srPreviewBox.innerHTML = 'Found <strong>' + p.totalReviews + '</strong> Steam review' + (p.totalReviews === 1 ? '' : 's') + '.';
+      srDupeNote.hidden = false;
+      srStatus.textContent = '';
+      srImportBtn.hidden = false;
+      srImportBtn.textContent = 'Import ' + p.totalReviews + ' review' + (p.totalReviews === 1 ? '' : 's');
+      srPreviewBtn.hidden = true;
+    } catch (e) {
+      srStatus.textContent = (e && e.message) ? e.message : 'Could not reach Steam.';
+      srPreviewBtn.disabled = false;
+    }
+  });
+
+  srImportBtn.addEventListener('click', async function () {
+    if (srPhase === 'done' || srPhase === 'failed') { srLeaveStep(); return; }
+    if (srPhase === 'running') return;
+    var api = window.__ckSteamImport;
+    if (!api) { srStatus.hidden = false; srStatus.textContent = 'Still loading — try again in a second.'; return; }
+    srPhase = 'running';
+    srImportBtn.disabled = true;
+    srSkipBtn.disabled = true;
+    srStatus.hidden = false;
+    srBar.hidden = false;
+    try {
+      var result = await api.startAndDriveSteam({ onProgress: srOnProgress });
+      srFinish(result.job, result.needs_mapping, result.skipped_conflicts);
+    } catch (e) {
+      srFail(srImportBtn, e);
+    }
+  });
+
   // ---- kick off ----
   advance();
 </script>
@@ -767,6 +908,32 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   .ob-skip:hover:not(:disabled) { color: var(--text-secondary, #a0a0a0); }
   .ob-skip:disabled { opacity: 0.4; cursor: not-allowed; }
   .ob-bl-status { font-size: 13px; color: var(--text-secondary, #a0a0a0); margin-top: 14px; }
+
+  .ob-sr-note {
+    font-size: 12px !important;
+    color: var(--text-tertiary, #777) !important;
+    background: rgba(96, 80, 200, 0.08);
+    border: 1px solid rgba(96, 80, 200, 0.18);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 8px 0 12px !important;
+    line-height: 1.5;
+  }
+  .ob-sr-preview {
+    font-size: 13px;
+    color: var(--text-secondary, #a0a0a0);
+    background: var(--bg, #0f0f0e);
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+  }
+  .ob-sr-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ob-sr-actions .ob-continue { flex: 1; min-width: 140px; }
 
   .ob-bl-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
   .ob-bl-tab {
