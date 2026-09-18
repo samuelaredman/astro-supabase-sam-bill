@@ -241,6 +241,30 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
               </div>
               <div id="steamSyncResults" class="steam-results" style="display:none"></div>
             </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Import your Steam reviews</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Brings your Steam reviews across as Chekpoint <strong>drafts</strong>.
+                Steam reviews don&rsquo;t have scores, so we carry over the review text,
+                the date, and hours-at-review, then you pick a score and publish each one.
+                Games you already reviewed here are skipped. Your Steam profile&rsquo;s reviews
+                must be public (same privacy settings as library sync above).
+              </div>
+              <div id="srStartRow" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="srPreviewBtn" onclick="srPreview()">Preview reviews</button>
+                <button class="settings-save-btn" id="srImportBtn" onclick="srStart()" style="display:none">Import to drafts</button>
+                <span id="srMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="srPreview" class="bl-preview" style="display:none;margin-top:10px"></div>
+              <div id="srProgress" class="bl-progress" style="display:none;margin-top:10px">
+                <div class="bl-bar"><div class="bl-bar-fill" id="srBarFill"></div></div>
+                <div class="bl-progress-text" id="srProgressText"></div>
+              </div>
+              <div id="srResults" class="steam-results" style="display:none"></div>
+              <div id="srConflicts" class="sr-conflicts" style="display:none;margin-top:10px"></div>
+              <div id="srNeedsMapping" class="bl-needs-mapping" style="display:none;margin-top:10px"></div>
+            </div>
           </>
         ) : (
           <div class="steam-connect-row">
@@ -650,6 +674,15 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
   }
   .bl-preview .bl-sample { margin: 8px 0 10px; padding-left: 16px; }
   .bl-preview .bl-sample li { margin-bottom: 2px; }
+  /* Steam sample: force at most 2 lines with an ellipsis so long reviews
+     don't stretch the preview card. */
+  .bl-preview .sr-sample li {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   .bl-bar {
     height: 8px;
     border-radius: 999px;
@@ -703,6 +736,91 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     cursor: pointer;
   }
   .bl-map-candidate:hover { border-color: var(--accent); color: var(--text-primary); }
+  .sr-conflicts {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .sr-conflict-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .sr-conflict-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .sr-conflict-title {
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  .sr-conflict-kind {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+  }
+  .sr-conflict-kind.published {
+    background: rgba(96,80,200,.12);
+    color: var(--accent);
+  }
+  .sr-conflict-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  @media (max-width: 640px) {
+    .sr-conflict-cols { grid-template-columns: 1fr; }
+  }
+  .sr-conflict-col {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .sr-conflict-col h4 {
+    margin: 0 0 6px 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+  }
+  .sr-conflict-body {
+    color: var(--text-secondary);
+    line-height: 1.5;
+    max-height: 140px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 12px;
+  }
+  .sr-conflict-meta {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .sr-conflict-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .sr-conflict-actions .settings-save-btn,
+  .sr-conflict-actions .settings-ghost-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
   .bl-bookmarklet {
     display: inline-block;
     margin: 4px 0 2px 6px;
@@ -760,6 +878,8 @@ declare global {
     blCopySnippet: () => void;
     blCopyLibSnippet: () => void;
     blLibImport: () => Promise<void>;
+    srStart: () => Promise<void>;
+    srPreview: () => Promise<void>;
   }
 }
 
@@ -1297,6 +1417,357 @@ window.blLibImport = blLibImport;
       blEl("blStartRow")!.style.display = "none";
       blRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
       await blFinish(resumed.job.id);
+    }
+  } catch {
+    /* nothing to resume */
+  }
+})();
+
+// ─── Steam review import ────────────────────────────────────────────────────
+import {
+  previewSteamReviews,
+  startAndDriveSteam,
+  resumeActiveSteam,
+  fetchSteamStatus,
+  mapSteamItem,
+  discardSteamItem,
+  replaceDraftFromSteam,
+  type ImportProgress as SteamImportProgress,
+  type SteamConflictItem,
+} from "../utils/steam-reviews/importClient";
+
+const srEl = (id: string) => document.getElementById(id);
+let srActiveController: AbortController | null = null;
+
+function srSetMsg(text: string, ok = false) {
+  const m = srEl("srMsg");
+  if (!m) return;
+  m.textContent = text;
+  m.style.color = ok ? "var(--score-great, #4ade80)" : "#f87171";
+}
+
+function srRenderProgress(p: SteamImportProgress) {
+  const wrap = srEl("srProgress");
+  const fill = srEl("srBarFill");
+  const txt = srEl("srProgressText");
+  if (!wrap || !fill || !txt) return;
+  wrap.style.display = "block";
+  fill.style.width = p.fraction == null ? "50%" : `${Math.round(p.fraction * 100)}%`;
+  fill.style.opacity = p.phase === "rate-limited" ? "0.5" : "1";
+  txt.textContent = p.message;
+}
+
+function srRenderResults(job: any) {
+  const box = srEl("srResults");
+  if (!box) return;
+  box.style.display = "block";
+  const parts = [
+    `<strong>${job.draft_count}</strong> saved as drafts (assign a score + publish when you&rsquo;re ready)`,
+    job.skipped_count ? `<strong>${job.skipped_count}</strong> skipped (game already has a review from you &mdash; compare below)` : "",
+    job.needs_mapping_count ? `<strong>${job.needs_mapping_count}</strong> couldn&rsquo;t be matched to a Chekpoint game &mdash; match or discard them below.` : "",
+    job.failed_count ? `<strong>${job.failed_count}</strong> failed` : "",
+  ].filter(Boolean);
+  box.innerHTML = parts.join("<br>");
+}
+
+function srDebounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
+  let t: any;
+  return (...a: Parameters<T>) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
+  };
+}
+
+function srEscapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+async function srMatchAndRemove(
+  row: HTMLElement,
+  itemId: string,
+  target: { gameId: string } | { igdbId: number },
+  label: string,
+) {
+  try {
+    const r = await mapSteamItem(itemId, target);
+    row.innerHTML = `<span class="bl-map-title">${srEscapeHtml(r.game.title || label)}</span> <span style="color:var(--score-great,#4ade80)">${r.status === "drafted" ? "drafted" : r.status}</span>`;
+    if (r.job) srRenderResults(r.job);
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Match failed.");
+  }
+}
+
+async function srDiscardAndRemove(row: HTMLElement, itemId: string) {
+  try {
+    const r = await discardSteamItem(itemId);
+    row.innerHTML = `<span class="bl-map-title" style="color:var(--text-tertiary)">Discarded</span>`;
+    if (r.job) srRenderResults(r.job);
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Could not discard.");
+  }
+}
+
+function srRenderNeedsMapping(items: any[]) {
+  const box = srEl("srNeedsMapping");
+  if (!box) return;
+  if (!items || !items.length) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "flex";
+  box.innerHTML = "";
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "bl-map-row";
+    const title = item.game_title || (item.steam_appid ? `Steam app ${item.steam_appid}` : "Untitled Steam review");
+    const steamLink = item.steam_appid
+      ? ` <a href="https://store.steampowered.com/app/${item.steam_appid}/" target="_blank" rel="noopener" style="color:var(--text-tertiary);font-size:11px">Steam ↗</a>`
+      : "";
+    row.innerHTML = `
+      <div style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span class="bl-map-title">${srEscapeHtml(title)}${steamLink}</span>
+        <button type="button" class="settings-ghost-btn sr-discard-btn" style="padding:4px 10px;font-size:12px">Discard</button>
+      </div>
+      <input type="text" placeholder="Search Chekpoint / IGDB…" />
+      <div class="bl-map-candidates"></div>`;
+    const input = row.querySelector("input") as HTMLInputElement;
+    const list = row.querySelector(".bl-map-candidates") as HTMLElement;
+    const discardBtn = row.querySelector(".sr-discard-btn") as HTMLButtonElement;
+    if (item.game_title) input.value = item.game_title;
+    discardBtn.onclick = () => srDiscardAndRemove(row, item.id);
+    const search = srDebounce(async () => {
+      const q = input.value.trim();
+      if (q.length < 2) { list.innerHTML = ""; return; }
+      try {
+        const res = await fetch(`/api/games/search?q=${encodeURIComponent(q)}`);
+        const results = await res.json();
+        list.innerHTML = "";
+        for (const g of (results ?? []).slice(0, 6)) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "bl-map-candidate";
+          const year = g.year ? ` (${g.year})` : "";
+          const src = g.source === "igdb" ? " · IGDB" : "";
+          btn.textContent = `${g.title}${year}${src}`;
+          if (g.source === "igdb") {
+            const igdbId = Number(g.igdb_id ?? g.id);
+            if (!Number.isFinite(igdbId)) continue;
+            btn.onclick = () => srMatchAndRemove(row, item.id, { igdbId }, g.title);
+          } else {
+            const gameId = String(g.id ?? "");
+            if (!gameId) continue;
+            btn.onclick = () => srMatchAndRemove(row, item.id, { gameId }, g.title);
+          }
+          list.appendChild(btn);
+        }
+        if (!list.children.length) {
+          list.innerHTML = `<div style="font-size:12px;color:var(--text-tertiary)">No match — try a different title, or Discard.</div>`;
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 300);
+    input.addEventListener("input", search);
+    // Trigger the initial search so the user sees candidates for the pre-filled title.
+    if (input.value.trim().length >= 2) search();
+    box.appendChild(row);
+  }
+}
+
+function srSnippet(text: string, max = 320): string {
+  const t = (text ?? "").trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max).trim()}…`;
+}
+
+async function srReplaceDraft(card: HTMLElement, itemId: string, gameTitle: string) {
+  if (!confirm(`Replace your existing draft of ${gameTitle} with the Steam version?\n\nYour current draft will be deleted.`)) return;
+  try {
+    const r = await replaceDraftFromSteam(itemId);
+    card.innerHTML = `<div class="sr-conflict-head"><span class="sr-conflict-title">${srEscapeHtml(gameTitle)}</span><span style="color:var(--score-great,#4ade80);font-size:12px">Replaced with Steam draft</span></div>`;
+    if (r.job) srRenderResults(r.job);
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Replace failed.");
+  }
+}
+
+function srDismissConflict(card: HTMLElement) {
+  // Client-side only — the item stays as a skipped row on the job, but we
+  // remove it from view. Refreshing the page after the job completes drops
+  // the whole conflicts panel anyway (loadActiveJob returns null once a job
+  // is complete), so no need for a server-side "dismissed" flag.
+  card.remove();
+  const wrap = srEl("srConflicts");
+  if (wrap && !wrap.querySelector(".sr-conflict-card")) {
+    wrap.style.display = "none";
+    wrap.innerHTML = "";
+  }
+}
+
+function srRenderConflicts(items: SteamConflictItem[] | undefined | null) {
+  const box = srEl("srConflicts");
+  if (!box) return;
+  if (!items || !items.length) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "flex";
+  box.innerHTML = "";
+  for (const c of items) {
+    const card = document.createElement("div");
+    card.className = "sr-conflict-card";
+
+    const gameHref = c.game.slug ? `/games/${c.game.slug}` : `#`;
+    const reviewHref = `/reviews/${c.existing.id}`;
+    const isPublished = c.kind === "published";
+    const kindLabel = isPublished ? "Already published" : "Existing draft";
+    const kindClass = isPublished ? "published" : "";
+
+    const steamMeta = [
+      c.steam.review_date ? c.steam.review_date : "",
+      c.steam.hours_at_review != null ? `${Math.round(c.steam.hours_at_review)} hrs` : "",
+      c.steam.appid ? `<a href="https://store.steampowered.com/app/${c.steam.appid}/" target="_blank" rel="noopener" style="color:inherit">Steam ↗</a>` : "",
+    ].filter(Boolean).join(" · ");
+
+    const existingScore = c.existing.score != null ? `${c.existing.score}/10` : "no score";
+    const existingWhen = c.existing.published_at
+      ? new Date(c.existing.published_at).toLocaleDateString()
+      : c.existing.created_at
+        ? `drafted ${new Date(c.existing.created_at).toLocaleDateString()}`
+        : "";
+    const existingMeta = [existingScore, existingWhen].filter(Boolean).join(" · ");
+
+    const actionsHtml = isPublished
+      ? `<a href="${reviewHref}" class="settings-ghost-btn" style="padding:6px 12px;font-size:12px;text-decoration:none">View my review</a>
+         <button type="button" class="settings-ghost-btn sr-dismiss-btn">Dismiss</button>
+         <span style="font-size:11px;color:var(--text-tertiary)">Steam version discarded — unpublish your review first if you want to replace it.</span>`
+      : `<button type="button" class="settings-save-btn sr-replace-btn">Replace my draft with Steam text</button>
+         <a href="${reviewHref}" class="settings-ghost-btn" style="padding:6px 12px;font-size:12px;text-decoration:none">View my draft</a>
+         <button type="button" class="settings-ghost-btn sr-dismiss-btn">Keep mine</button>`;
+
+    card.innerHTML = `
+      <div class="sr-conflict-head">
+        <span class="sr-conflict-title"><a href="${gameHref}" style="color:inherit;text-decoration:none">${srEscapeHtml(c.game.title)}</a></span>
+        <span class="sr-conflict-kind ${kindClass}">${kindLabel}</span>
+      </div>
+      <div class="sr-conflict-cols">
+        <div class="sr-conflict-col">
+          <h4>Your ${isPublished ? "published review" : "existing draft"}</h4>
+          ${c.existing.title ? `<div style="font-weight:500;margin-bottom:4px">${srEscapeHtml(c.existing.title)}</div>` : ""}
+          <div class="sr-conflict-body">${srEscapeHtml(srSnippet(c.existing.body))}</div>
+          ${existingMeta ? `<div class="sr-conflict-meta">${existingMeta}</div>` : ""}
+        </div>
+        <div class="sr-conflict-col">
+          <h4>Steam review</h4>
+          <div class="sr-conflict-body">${srEscapeHtml(srSnippet(c.steam.review_text))}</div>
+          ${steamMeta ? `<div class="sr-conflict-meta">${steamMeta}</div>` : ""}
+        </div>
+      </div>
+      <div class="sr-conflict-actions"></div>`;
+
+    const actions = card.querySelector(".sr-conflict-actions") as HTMLElement;
+    actions.innerHTML = actionsHtml;
+
+    const replaceBtn = actions.querySelector(".sr-replace-btn") as HTMLButtonElement | null;
+    if (replaceBtn) replaceBtn.onclick = () => srReplaceDraft(card, c.item_id, c.game.title);
+
+    const dismissBtn = actions.querySelector(".sr-dismiss-btn") as HTMLButtonElement | null;
+    if (dismissBtn) dismissBtn.onclick = () => srDismissConflict(card);
+
+    box.appendChild(card);
+  }
+}
+
+async function srDrive() {
+  srEl("srStartRow")!.style.display = "none";
+  srEl("srPreview")!.style.display = "none";
+  srActiveController?.abort();
+  srActiveController = new AbortController();
+  try {
+    const { job } = await startAndDriveSteam({
+      onProgress: srRenderProgress,
+      signal: srActiveController.signal,
+    });
+    srRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+    try {
+      const status = await fetchSteamStatus(job.id);
+      srRenderResults(status.job);
+      srRenderNeedsMapping(status.needs_mapping);
+      srRenderConflicts(status.skipped_conflicts);
+      fetch("/api/import/steam/skip-onboarding", { method: "POST" }).catch(() => {});
+    } catch { /* results are best-effort */ }
+  } catch (e: any) {
+    if (e?.name === "AbortError") return;
+    srSetMsg(e?.message ?? "Import failed.");
+    srEl("srStartRow")!.style.display = "flex";
+  }
+}
+window.srStart = srDrive;
+
+async function srPreview() {
+  const btn = srEl("srPreviewBtn") as HTMLButtonElement | null;
+  const importBtn = srEl("srImportBtn") as HTMLButtonElement | null;
+  if (!btn) return;
+  btn.disabled = true;
+  srSetMsg("Checking Steam…", true);
+  try {
+    const p = await previewSteamReviews();
+    srSetMsg("");
+    const box = srEl("srPreview")!;
+    box.style.display = "block";
+    // Server already caps sample at 5 items and each body at 240 chars, but a
+    // 240-char blob of dense text still wraps to 4-5 lines on desktop and even
+    // more on mobile. Collapse whitespace, trim to ~140 chars with an ellipsis
+    // marker, and let CSS line-clamp the row at 2 lines regardless of width.
+    const previewList = p.sample
+      .slice(0, 5)
+      .map((s: any) => {
+        const hrs = s.hours_at_review ? ` — ${s.hours_at_review} hrs` : "";
+        const date = s.review_date ? ` <span style="color:var(--text-tertiary)">${s.review_date}</span>` : "";
+        const raw = (s.review_text || "").replace(/\s+/g, " ").trim();
+        const snippet = raw.length > 140 ? `${raw.slice(0, 140).trimEnd()}…` : raw;
+        return `<li>${srEscapeHtml(snippet) || "(no text)"}${hrs}${date}</li>`;
+      })
+      .join("");
+    const more = p.totalReviews > 5 ? ` <span style="color:var(--text-tertiary);font-size:11px">(showing 5 of ${p.totalReviews})</span>` : "";
+    box.innerHTML = `
+      Found <strong>${p.totalReviews}</strong> Steam review${p.totalReviews === 1 ? "" : "s"}${p.totalPages > 1 ? ` across ${p.totalPages} pages` : ""}.
+      All will import as drafts — you assign a score before publishing.${more}
+      <ul class="bl-sample sr-sample">${previewList}</ul>`;
+    if (importBtn) importBtn.style.display = "";
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Could not reach Steam.");
+  } finally {
+    btn.disabled = false;
+  }
+}
+window.srPreview = srPreview;
+
+// Reattach to an import that's still running (e.g. after a page reload).
+// Only run when the Steam import section is actually rendered — the whole
+// Steam block is conditional on profile.steam_id, so users without a
+// connected account skip the /status probe entirely.
+(async () => {
+  if (!srEl("srPreviewBtn")) return;
+  try {
+    srActiveController = new AbortController();
+    const resumed = await resumeActiveSteam({
+      onProgress: srRenderProgress,
+      signal: srActiveController.signal,
+    });
+    if (resumed?.job) {
+      srEl("srStartRow")!.style.display = "none";
+      srRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+      srRenderResults(resumed.job);
+      srRenderNeedsMapping(resumed.needs_mapping);
+      srRenderConflicts(resumed.skipped_conflicts);
     }
   } catch {
     /* nothing to resume */

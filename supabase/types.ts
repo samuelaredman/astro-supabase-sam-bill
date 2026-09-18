@@ -1500,6 +1500,7 @@ export type Database = {
           detail: string | null
           game_slug: string
           game_title: string
+          hours_at_review: number | null
           id: string
           job_id: string
           matched_game_id: string | null
@@ -1512,6 +1513,7 @@ export type Database = {
           review_text: string
           source_url: string | null
           status: string
+          steam_appid: number | null
           updated_at: string | null
         }
         Insert: {
@@ -1520,6 +1522,7 @@ export type Database = {
           detail?: string | null
           game_slug: string
           game_title: string
+          hours_at_review?: number | null
           id?: string
           job_id: string
           matched_game_id?: string | null
@@ -1532,14 +1535,16 @@ export type Database = {
           review_text: string
           source_url?: string | null
           status?: string
+          steam_appid?: number | null
           updated_at?: string | null
         }
         Update: {
           contains_spoilers?: boolean
           created_at?: string
           detail?: string | null
-          game_slug?: string
+          game_slug?: string | null
           game_title?: string
+          hours_at_review?: number | null
           id?: string
           job_id?: string
           matched_game_id?: string | null
@@ -1552,6 +1557,7 @@ export type Database = {
           review_text?: string
           source_url?: string | null
           status?: string
+          steam_appid?: number | null
           updated_at?: string | null
         }
         Relationships: [
@@ -2217,6 +2223,7 @@ export type Database = {
           showcase_achievements: Json | null
           showcase_games: Json | null
           steam_id: string | null
+          steam_reviews_import_done_at: string | null
           steam_synced_at: string | null
           steam_url: string | null
           steam_username: string | null
@@ -2269,6 +2276,7 @@ export type Database = {
           showcase_achievements?: Json | null
           showcase_games?: Json | null
           steam_id?: string | null
+          steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
           steam_url?: string | null
           steam_username?: string | null
@@ -2321,6 +2329,7 @@ export type Database = {
           showcase_achievements?: Json | null
           showcase_games?: Json | null
           steam_id?: string | null
+          steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
           steam_url?: string | null
           steam_username?: string | null

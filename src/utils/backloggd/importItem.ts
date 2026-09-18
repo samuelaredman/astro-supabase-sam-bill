@@ -8,6 +8,7 @@
 // directly and do just the one harmless side-effect a normal review has — mark
 // the game "completed" in the author's library.
 
+import { clampImportedDateIso } from "../importJob";
 import { matchOrImportGame } from "./matchGame";
 import { mapBackloggdStatus, type BackloggdRow } from "./parse";
 
@@ -94,7 +95,10 @@ export async function importBacklogItem(
     ? Math.min(10, Math.max(1, Math.round((item.rating as number) * 2)))
     : null;
   const platformId = await resolvePlatformId(db, item.platform_name, opts.platformCache);
-  const dateIso = item.review_date ? `${item.review_date}T12:00:00Z` : null;
+  // Backloggd only gives us a date (no time) — noon UTC on a same-day
+  // review would land a few hours in the future for viewers west of UTC.
+  // Clamp at `now` so imported drafts / reviews never store a future date.
+  const dateIso = clampImportedDateIso(item.review_date);
 
   const insertRow: Record<string, unknown> = {
     profile_id: profileId,
