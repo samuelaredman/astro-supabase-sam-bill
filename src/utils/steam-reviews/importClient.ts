@@ -133,7 +133,7 @@ export async function fetchSteamStatus(jobId: string, signal?: AbortSignal) {
 export async function driveSteamJob(
   jobId: string,
   handlers: ImportHandlers,
-): Promise<{ job: any; needs_mapping: any[] }> {
+): Promise<{ job: any; needs_mapping: any[]; skipped_conflicts: SteamConflictItem[] }> {
   const { onProgress, signal } = handlers;
 
   // ── Scrape phase ────────────────────────────────────────────────────────────
