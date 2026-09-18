@@ -54,44 +54,29 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<any> {
   }
 }
 
-// GetPlayerAchievements-specific fetch: distinguishes "this app has no
-// achievement API at all" from transient Steam failures. The former is a
-// durable verdict we cache; the latter should be retried.
-//
-// Steam is genuinely inconsistent about the shape here: no-stats apps come
-// back as 400 or 500 (and occasionally 200) with a body like
-// {"playerstats":{"success":false,"error":"Requested app has no stats"}}.
-// Privacy is usually 403 with `error: "Profile is not public"` — that's
-// transient-ish (won't fix itself) but not the same as no-stats. Rate
-// limits are 429 with no useful body. We treat any explicit
-// playerstats.success === false with a "no stats" error message as a
-// durable no-stats verdict; everything else is a transient failure.
-// Two "durable non-hit" verdicts:
-//   NO_STATS       — the APP has no achievement API at all (cache globally on
-//                    steam_app_schema.no_achievements so every user skips it).
+// GetPlayerAchievements returns two shapes we want to distinguish from a
+// transient failure:
+//   NO_STATS       — the APP has no achievement API at all. Cached globally
+//                    on steam_app_schema.no_achievements so every user skips
+//                    it. Steam signals this with success:false + "no stats".
 //   USER_NO_STATS  — this USER's stats for this app aren't initialized on
 //                    Steam's side (owns but never launched, or launched
-//                    before Steam tracked stats for the title). Steam returns
-//                    500 "Internal server error" here. It's per-user, so it
-//                    would be wrong to write to the global no_achievements
-//                    flag — we just don't count these as failures and let
-//                    the delta re-poll on future syncs (cheap, fails fast).
+//                    before Steam tracked stats for the title). Steam
+//                    signals this with success:false + "internal server
+//                    error". Per-user, so not globally cacheable — the
+//                    delta just re-polls cheaply until the user plays and
+//                    Steam initializes stats.
+// Steam is inconsistent about the HTTP status here (400/500, occasionally
+// 200), so match on the body shape rather than status. Other failures
+// (privacy 403, rate-limit 429, real 5xx outages) fall through to null.
 const NO_STATS: unique symbol = Symbol('no-stats');
 const USER_NO_STATS: unique symbol = Symbol('user-no-stats');
-type PlayerAchievementsData = any | typeof NO_STATS | typeof USER_NO_STATS | null;
-type PlayerAchievementsResult = { data: PlayerAchievementsData; status: number; note?: string };
+type PlayerAchievementsResult = any | typeof NO_STATS | typeof USER_NO_STATS | null;
 
-async function fetchPlayerAchievements(
-  url: string,
-  appid: number,
-  timeoutMs = 8000,
-): Promise<PlayerAchievementsResult> {
-  let status = 0;
-  let bodyText = '';
+async function fetchPlayerAchievements(url: string, timeoutMs = 8000): Promise<PlayerAchievementsResult> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    status = res.status;
-    bodyText = await res.text().catch(() => '');
+    const bodyText = await res.text().catch(() => '');
     // Steam's edge occasionally returns an HTML error page on 5xx — don't
     // throw, just treat as an unparseable body.
     let body: any = null;
@@ -99,34 +84,17 @@ async function fetchPlayerAchievements(
       try { body = JSON.parse(bodyText); } catch { /* leave body = null */ }
     }
 
-    // Explicit success:false verdicts — Steam is inconsistent about the HTTP
-    // status here (400/500, occasionally 200), so match on the body shape.
     if (body?.playerstats?.success === false) {
       const err = String(body.playerstats.error ?? '').toLowerCase();
-      // "Requested app has no stats" — the app has no achievement API. Cache
-      // globally so no user re-polls it.
-      if (err.includes('no stats')) return { data: NO_STATS, status };
-      // "Internal server error" — per-user stats aren't initialized on
-      // Steam's side (user owns the game but never launched it, or launched
-      // it before Steam tracked stats for the title). It's per-user, so we
-      // can't cache globally. Just don't count it as a real failure.
-      if (err.includes('internal server error')) return { data: USER_NO_STATS, status };
-      // Privacy, VAC ban, other success:false shapes → transient/null.
-      const note = `success:false error=${String(body.playerstats.error ?? '')}`.slice(0, 120);
-      console.warn(`[sync-achievements] appid=${appid} status=${status} ${note}`);
-      return { data: null, status, note };
+      if (err.includes('no stats')) return NO_STATS;
+      if (err.includes('internal server error')) return USER_NO_STATS;
+      return null;
     }
 
-    if (!res.ok) {
-      const snippet = bodyText.slice(0, 120);
-      console.warn(`[sync-achievements] appid=${appid} status=${status} body=${snippet}`);
-      return { data: null, status, note: snippet || `http ${status}` };
-    }
-    return { data: body, status };
-  } catch (e: any) {
-    const note = `fetch-error:${e?.name ?? 'unknown'}`;
-    console.warn(`[sync-achievements] appid=${appid} ${note}`);
-    return { data: null, status, note };
+    if (!res.ok) return null;
+    return body;
+  } catch {
+    return null;
   }
 }
 
@@ -385,14 +353,8 @@ export const POST: APIRoute = async (context) => {
   let rowsSynced = 0;
   let playerHits = 0;   // games where Steam returned achievement data
   let playerNulls = 0;  // games where the player-achievements call failed outright
-  let playerNoStats = 0;     // games we skipped (cached) or newly cached as no-stats
-  let playerUserNoStats = 0; // games where THIS user has no stats initialized (500)
   const schemaUpserts: any[] = [];
   const noStatsUpserts: any[] = [];
-  // Per-batch diagnostics returned to the client for easy debugging. Capped
-  // at 20 entries so the response stays small even with a large batch.
-  const nullResponses: Array<{ appid: number; status: number; note?: string }> = [];
-  const hits: Array<{ appid: number; name: string; total: number; unlocked: number; newestUnlock: string | null }> = [];
 
   for (const { appid, name } of candidates) {
     // Always process at least one game; stop before the timeout after that.
@@ -401,7 +363,6 @@ export const POST: APIRoute = async (context) => {
     // Known no-achievement app (cached from a prior sync) — skip the Steam
     // call entirely. Advance the cursor without counting it against anything.
     if (schemaCache.get(appid)?.no_achievements === true) {
-      playerNoStats++;
       lastProcessedAppid = appid;
       gamesProcessed++;
       continue;
@@ -409,9 +370,8 @@ export const POST: APIRoute = async (context) => {
 
     try {
       // Player achievements — always live (per-user, changes as they play).
-      const { data: playerData, status: playerStatus, note: playerNote } = await fetchPlayerAchievements(
+      const playerData = await fetchPlayerAchievements(
         `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?appid=${appid}&key=${steamApiKey}&steamid=${steamId}&l=en`,
-        appid,
       );
 
       // Steam confirmed this app has no achievement API at all. Cache the
@@ -419,7 +379,6 @@ export const POST: APIRoute = async (context) => {
       // don't count it as a Steam-side failure.
       if (playerData === NO_STATS) {
         noStatsUpserts.push({ steam_appid: appid, no_achievements: true, fetched_at: new Date().toISOString() });
-        playerNoStats++;
         lastProcessedAppid = appid;
         gamesProcessed++;
         continue;
@@ -428,18 +387,12 @@ export const POST: APIRoute = async (context) => {
       // Per-user stats not initialized on Steam's side — not a failure, not
       // globally cacheable. Advance the cursor and move on.
       if (playerData === USER_NO_STATS) {
-        playerUserNoStats++;
         lastProcessedAppid = appid;
         gamesProcessed++;
         continue;
       }
 
-      if (playerData === null) {
-        playerNulls++; // 403 (privacy) or a transient failure
-        if (nullResponses.length < 20) {
-          nullResponses.push({ appid, status: playerStatus, note: playerNote });
-        }
-      }
+      if (playerData === null) playerNulls++; // 403 (privacy) or a transient failure
 
       // Dedupe by apiname — Steam occasionally returns the same achievement twice
       // in one game, which makes the whole ON CONFLICT upsert fail.
@@ -456,25 +409,6 @@ export const POST: APIRoute = async (context) => {
       gamesProcessed++;
       if (playerAchs.length === 0) continue;
       playerHits++;
-
-      if (hits.length < 20) {
-        let unlocked = 0;
-        let newest = 0;
-        for (const pa of playerAchs) {
-          if (pa?.achieved === 1) {
-            unlocked++;
-            const t = Number(pa.unlocktime);
-            if (Number.isFinite(t) && t > newest) newest = t;
-          }
-        }
-        hits.push({
-          appid,
-          name,
-          total: playerAchs.length,
-          unlocked,
-          newestUnlock: newest > 0 ? new Date(newest * 1000).toISOString() : null,
-        });
-      }
 
       // Schema + global percents — cached per app across all users.
       const cached = schemaCache.get(appid);
@@ -666,16 +600,6 @@ export const POST: APIRoute = async (context) => {
     // whose "Game details" privacy is blocking every read.
     hitAchievements: playerHits,
     emptyResponses: playerNulls,
-    // Debug — visible in the browser dev tools' response body. Lets us tell
-    // rate limits (429) from outages (5xx) from privacy (403) from detection
-    // gaps without having to dig through Netlify function logs.
-    debug: {
-      candidatesConsidered: candidates.length,
-      noStats: playerNoStats,
-      userNoStats: playerUserNoStats,
-      hits,
-      nullResponses,
-    },
     // Whether this profile has ever completed a successful achievement sync.
     // The client uses this to decide whether it's safe to blame profile
     // privacy for an all-empty batch — if they've synced before, it's not
