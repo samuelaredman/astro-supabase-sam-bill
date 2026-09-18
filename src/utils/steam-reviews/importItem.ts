@@ -117,7 +117,15 @@ export async function importSteamReviewItem(
 
   // ── 3. Insert as a draft (Steam has no score — user finalizes) ────────────
   const platformId = await resolvePCPlatformId(db, opts.pcPlatformCache);
-  const dateIso = item.review_date ? `${item.review_date}T12:00:00Z` : null;
+  // Steam prints "Posted <Month> <Day>." (no year) when the year matches the
+  // Steam-clock's current year, so a review posted today can resolve to noon
+  // UTC on today — a few hours ahead of `now` for viewers west of UTC. Cap
+  // the stored created_at at now so it never reads as a future timestamp.
+  const dateIso = item.review_date
+    ? new Date(
+        Math.min(Date.now(), new Date(`${item.review_date}T12:00:00Z`).getTime()),
+      ).toISOString()
+    : null;
   const playTimeHours =
     item.hours_at_review != null && Number.isFinite(item.hours_at_review)
       ? Math.max(0, Math.round(item.hours_at_review))

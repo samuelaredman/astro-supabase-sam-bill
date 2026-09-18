@@ -66,7 +66,13 @@ export const POST: APIRoute = async (context) => {
   }
 
   const platformId = await resolvePCPlatformId(db);
-  const dateIso = item.review_date ? `${item.review_date}T12:00:00Z` : null;
+  // Match importItem.ts: cap at `now` so a same-day Steam date doesn't land
+  // in the future for viewers west of UTC.
+  const dateIso = item.review_date
+    ? new Date(
+        Math.min(Date.now(), new Date(`${item.review_date}T12:00:00Z`).getTime()),
+      ).toISOString()
+    : null;
   const playTimeHours =
     item.hours_at_review != null && Number.isFinite(item.hours_at_review)
       ? Math.max(0, Math.round(item.hours_at_review))
