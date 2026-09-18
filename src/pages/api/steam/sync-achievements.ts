@@ -280,19 +280,25 @@ export const POST: APIRoute = async (context) => {
       return json({ error: msg }, 502);
     }
 
-    // Delta filter: compare Steam's rtime_last_played PER GAME against our
-    // last-polled time PER GAME (max synced_at from user_achievements). A game
-    // is skipped only if we've polled it more recently than Steam thinks it
-    // was last launched. Never-synced games (freshness undefined) always pass
-    // so first-time schema pulls happen once per game. force bypasses the
-    // whole filter for a full re-scan.
+    // Delta filter: include a game if
+    //   (a) we've never polled it (first-time schema pull), OR
+    //   (b) Steam's rtime_last_played is newer than our last poll (user
+    //       launched it since), OR
+    //   (c) our last poll is stale beyond FRESHNESS_MAX_AGE (belt-and-
+    //       suspenders re-check).
     //
-    // This is strictly better than comparing to the profile-wide
-    // achievements_synced_at: that marker moves forward on every completed
-    // sync even if a particular game was silently skipped (Steam returned
-    // null and the cursor advanced past it), leaving that game permanently
-    // stuck as "already up to date" from the profile marker's point of view.
+    // (c) exists because Steam's rtime_last_played is unreliable for
+    // detecting achievement changes: unlocks arriving from offline play,
+    // remote play, Family Sharing, or delayed post-quit sync can advance
+    // the achievement state without moving rtime_last_played. Without (c)
+    // those unlocks stay invisible until the user next launches the game.
+    // The re-check cadence caps that lag at FRESHNESS_MAX_AGE.
+    //
+    // force bypasses the whole filter for a full re-scan.
     const shouldDelta = !!lastSync && !force;
+    const FRESHNESS_MAX_AGE_SEC = 6 * 60 * 60; // 6 hours
+    const nowSec = Math.floor(Date.now() / 1000);
+    const staleCutoffSec = nowSec - FRESHNESS_MAX_AGE_SEC;
 
     const freshnessByAppid = new Map<number, number>(); // appid -> synced_at unix seconds
     if (shouldDelta) {
@@ -309,6 +315,7 @@ export const POST: APIRoute = async (context) => {
         if (!shouldDelta) return true;
         const gameFreshness = freshnessByAppid.get(g.appid);
         if (gameFreshness === undefined) return true; // never polled — include once
+        if (gameFreshness < staleCutoffSec) return true; // stale re-check window
         // Steam usually returns rtime_last_played as an int, but coerce
         // defensively — the delta is silently wrong if a stringified number
         // sneaks through the > comparison as NaN.
