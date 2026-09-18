@@ -124,8 +124,21 @@ export const POST: APIRoute = async (context) => {
   if (toInsert.length) {
     const { error: insErr } = await db.from("import_job_items").insert(toInsert);
     if (insErr) {
+      const err = insErr as { message?: string; code?: string; hint?: string; details?: string };
       console.error("[import/steam/scrape] items insert error:", JSON.stringify(insErr));
-      return json({ error: "Could not save scraped reviews.", next_page: fromPage }, 500);
+      return json(
+        {
+          // Surface the DB error so it's visible without needing Netlify logs.
+          error: `Could not save scraped reviews: ${err.message ?? "unknown error"}${err.code ? ` (${err.code})` : ""}.`,
+          next_page: fromPage,
+          debug: {
+            code: err.code ?? null,
+            details: err.details ?? null,
+            hint: err.hint ?? null,
+          },
+        },
+        500,
+      );
     }
   }
 
