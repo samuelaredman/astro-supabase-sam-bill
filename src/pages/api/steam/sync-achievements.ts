@@ -385,6 +385,7 @@ export const POST: APIRoute = async (context) => {
   // Per-batch diagnostics returned to the client for easy debugging. Capped
   // at 20 entries so the response stays small even with a large batch.
   const nullResponses: Array<{ appid: number; status: number; note?: string }> = [];
+  const hits: Array<{ appid: number; name: string; total: number; unlocked: number; newestUnlock: string | null }> = [];
 
   for (const { appid, name } of candidates) {
     // Always process at least one game; stop before the timeout after that.
@@ -448,6 +449,25 @@ export const POST: APIRoute = async (context) => {
       gamesProcessed++;
       if (playerAchs.length === 0) continue;
       playerHits++;
+
+      if (hits.length < 20) {
+        let unlocked = 0;
+        let newest = 0;
+        for (const pa of playerAchs) {
+          if (pa?.achieved === 1) {
+            unlocked++;
+            const t = Number(pa.unlocktime);
+            if (Number.isFinite(t) && t > newest) newest = t;
+          }
+        }
+        hits.push({
+          appid,
+          name,
+          total: playerAchs.length,
+          unlocked,
+          newestUnlock: newest > 0 ? new Date(newest * 1000).toISOString() : null,
+        });
+      }
 
       // Schema + global percents — cached per app across all users.
       const cached = schemaCache.get(appid);
@@ -646,6 +666,7 @@ export const POST: APIRoute = async (context) => {
       candidatesConsidered: candidates.length,
       noStats: playerNoStats,
       userNoStats: playerUserNoStats,
+      hits,
       nullResponses,
     },
     // Whether this profile has ever completed a successful achievement sync.
