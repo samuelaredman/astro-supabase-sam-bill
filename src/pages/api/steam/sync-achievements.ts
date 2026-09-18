@@ -67,7 +67,8 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<any> {
 // playerstats.success === false with a "no stats" error message as a
 // durable no-stats verdict; everything else is a transient failure.
 const NO_STATS: unique symbol = Symbol('no-stats');
-type PlayerAchievementsResult = any | typeof NO_STATS | null;
+type PlayerAchievementsData = any | typeof NO_STATS | null;
+type PlayerAchievementsResult = { data: PlayerAchievementsData; status: number; note?: string };
 
 async function fetchPlayerAchievements(
   url: string,
@@ -95,20 +96,23 @@ async function fetchPlayerAchievements(
       // "Profile is not public" is privacy — leave as transient/null so
       // the fresh-start privacy hint can still surface if it happens on
       // every game.
-      if (err.includes('no stats')) return NO_STATS;
+      if (err.includes('no stats')) return { data: NO_STATS, status };
       // Any other success:false shape (privacy, ban, etc.) → transient/null.
-      console.warn(`[sync-achievements] appid=${appid} status=${status} success:false error=${JSON.stringify(body.playerstats.error ?? null)}`);
-      return null;
+      const note = `success:false error=${String(body.playerstats.error ?? '')}`.slice(0, 120);
+      console.warn(`[sync-achievements] appid=${appid} status=${status} ${note}`);
+      return { data: null, status, note };
     }
 
     if (!res.ok) {
-      console.warn(`[sync-achievements] appid=${appid} status=${status} body=${bodyText.slice(0, 200)}`);
-      return null;
+      const snippet = bodyText.slice(0, 120);
+      console.warn(`[sync-achievements] appid=${appid} status=${status} body=${snippet}`);
+      return { data: null, status, note: snippet || `http ${status}` };
     }
-    return body;
+    return { data: body, status };
   } catch (e: any) {
-    console.warn(`[sync-achievements] appid=${appid} fetch error name=${e?.name} status=${status}`);
-    return null;
+    const note = `fetch-error:${e?.name ?? 'unknown'}`;
+    console.warn(`[sync-achievements] appid=${appid} ${note}`);
+    return { data: null, status, note };
   }
 }
 
@@ -360,8 +364,12 @@ export const POST: APIRoute = async (context) => {
   let rowsSynced = 0;
   let playerHits = 0;   // games where Steam returned achievement data
   let playerNulls = 0;  // games where the player-achievements call failed outright
+  let playerNoStats = 0; // games we skipped (cached) or newly cached as no-stats
   const schemaUpserts: any[] = [];
   const noStatsUpserts: any[] = [];
+  // Per-batch diagnostics returned to the client for easy debugging. Capped
+  // at 20 entries so the response stays small even with a large batch.
+  const nullResponses: Array<{ appid: number; status: number; note?: string }> = [];
 
   for (const { appid, name } of candidates) {
     // Always process at least one game; stop before the timeout after that.
@@ -370,6 +378,7 @@ export const POST: APIRoute = async (context) => {
     // Known no-achievement app (cached from a prior sync) — skip the Steam
     // call entirely. Advance the cursor without counting it against anything.
     if (schemaCache.get(appid)?.no_achievements === true) {
+      playerNoStats++;
       lastProcessedAppid = appid;
       gamesProcessed++;
       continue;
@@ -377,7 +386,7 @@ export const POST: APIRoute = async (context) => {
 
     try {
       // Player achievements — always live (per-user, changes as they play).
-      const playerData = await fetchPlayerAchievements(
+      const { data: playerData, status: playerStatus, note: playerNote } = await fetchPlayerAchievements(
         `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?appid=${appid}&key=${steamApiKey}&steamid=${steamId}&l=en`,
         appid,
       );
@@ -387,12 +396,18 @@ export const POST: APIRoute = async (context) => {
       // don't count it as a Steam-side failure.
       if (playerData === NO_STATS) {
         noStatsUpserts.push({ steam_appid: appid, no_achievements: true, fetched_at: new Date().toISOString() });
+        playerNoStats++;
         lastProcessedAppid = appid;
         gamesProcessed++;
         continue;
       }
 
-      if (playerData === null) playerNulls++; // 403 (privacy) or a transient failure
+      if (playerData === null) {
+        playerNulls++; // 403 (privacy) or a transient failure
+        if (nullResponses.length < 20) {
+          nullResponses.push({ appid, status: playerStatus, note: playerNote });
+        }
+      }
 
       // Dedupe by apiname — Steam occasionally returns the same achievement twice
       // in one game, which makes the whole ON CONFLICT upsert fail.
@@ -600,6 +615,14 @@ export const POST: APIRoute = async (context) => {
     // whose "Game details" privacy is blocking every read.
     hitAchievements: playerHits,
     emptyResponses: playerNulls,
+    // Debug — visible in the browser dev tools' response body. Lets us tell
+    // rate limits (429) from outages (5xx) from privacy (403) from detection
+    // gaps without having to dig through Netlify function logs.
+    debug: {
+      candidatesConsidered: candidates.length,
+      noStats: playerNoStats,
+      nullResponses,
+    },
     // Whether this profile has ever completed a successful achievement sync.
     // The client uses this to decide whether it's safe to blame profile
     // privacy for an all-empty batch — if they've synced before, it's not
