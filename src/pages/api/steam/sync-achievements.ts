@@ -55,24 +55,59 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<any> {
 }
 
 // GetPlayerAchievements-specific fetch: distinguishes "this app has no
-// achievement API at all" (HTTP 400 with playerstats.success=false — e.g.
-// freebies, demos, older games) from transient Steam failures. The former is
-// a durable verdict we cache; the latter should be retried. Privacy is 403,
-// which stays in the transient/null bucket.
+// achievement API at all" from transient Steam failures. The former is a
+// durable verdict we cache; the latter should be retried.
+//
+// Steam is genuinely inconsistent about the shape here: no-stats apps come
+// back as 400 or 500 (and occasionally 200) with a body like
+// {"playerstats":{"success":false,"error":"Requested app has no stats"}}.
+// Privacy is usually 403 with `error: "Profile is not public"` — that's
+// transient-ish (won't fix itself) but not the same as no-stats. Rate
+// limits are 429 with no useful body. We treat any explicit
+// playerstats.success === false with a "no stats" error message as a
+// durable no-stats verdict; everything else is a transient failure.
 const NO_STATS: unique symbol = Symbol('no-stats');
 type PlayerAchievementsResult = any | typeof NO_STATS | null;
 
-async function fetchPlayerAchievements(url: string, timeoutMs = 8000): Promise<PlayerAchievementsResult> {
+async function fetchPlayerAchievements(
+  url: string,
+  appid: number,
+  timeoutMs = 8000,
+): Promise<PlayerAchievementsResult> {
+  let status = 0;
+  let bodyText = '';
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    if (res.status === 400) {
-      const body = await res.json().catch(() => null);
-      if (body?.playerstats?.success === false) return NO_STATS;
+    status = res.status;
+    bodyText = await res.text().catch(() => '');
+    // Steam's edge occasionally returns an HTML error page on 5xx — don't
+    // throw, just treat as an unparseable body.
+    let body: any = null;
+    if (bodyText) {
+      try { body = JSON.parse(bodyText); } catch { /* leave body = null */ }
+    }
+
+    // Explicit no-stats verdict — regardless of HTTP status, since Steam
+    // varies between 400/500 (and rarely 200) for this exact response.
+    if (body?.playerstats?.success === false) {
+      const err = String(body.playerstats.error ?? '').toLowerCase();
+      // "Requested app has no stats" is the definitive no-stats marker.
+      // "Profile is not public" is privacy — leave as transient/null so
+      // the fresh-start privacy hint can still surface if it happens on
+      // every game.
+      if (err.includes('no stats')) return NO_STATS;
+      // Any other success:false shape (privacy, ban, etc.) → transient/null.
+      console.warn(`[sync-achievements] appid=${appid} status=${status} success:false error=${JSON.stringify(body.playerstats.error ?? null)}`);
       return null;
     }
-    if (!res.ok) return null;
-    return await res.json().catch(() => null);
-  } catch {
+
+    if (!res.ok) {
+      console.warn(`[sync-achievements] appid=${appid} status=${status} body=${bodyText.slice(0, 200)}`);
+      return null;
+    }
+    return body;
+  } catch (e: any) {
+    console.warn(`[sync-achievements] appid=${appid} fetch error name=${e?.name} status=${status}`);
     return null;
   }
 }
@@ -344,6 +379,7 @@ export const POST: APIRoute = async (context) => {
       // Player achievements — always live (per-user, changes as they play).
       const playerData = await fetchPlayerAchievements(
         `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?appid=${appid}&key=${steamApiKey}&steamid=${steamId}&l=en`,
+        appid,
       );
 
       // Steam confirmed this app has no achievement API at all. Cache the
