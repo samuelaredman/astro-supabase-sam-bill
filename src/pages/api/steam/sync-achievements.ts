@@ -54,6 +54,29 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<any> {
   }
 }
 
+// GetPlayerAchievements-specific fetch: distinguishes "this app has no
+// achievement API at all" (HTTP 400 with playerstats.success=false — e.g.
+// freebies, demos, older games) from transient Steam failures. The former is
+// a durable verdict we cache; the latter should be retried. Privacy is 403,
+// which stays in the transient/null bucket.
+const NO_STATS: unique symbol = Symbol('no-stats');
+type PlayerAchievementsResult = any | typeof NO_STATS | null;
+
+async function fetchPlayerAchievements(url: string, timeoutMs = 8000): Promise<PlayerAchievementsResult> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (res.status === 400) {
+      const body = await res.json().catch(() => null);
+      if (body?.playerstats?.success === false) return NO_STATS;
+      return null;
+    }
+    if (!res.ok) return null;
+    return await res.json().catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
 // Retry a few times with a short backoff — used for the endpoints that share a
 // stricter per-key rate limit (owned games, schema).
 async function fetchJsonWithRetry(url: string, retries = 1, timeoutMs = 6000): Promise<any> {
@@ -278,9 +301,12 @@ export const POST: APIRoute = async (context) => {
   const candidateAppids = candidates.map((g) => g.appid);
 
   // Cached schemas for this call's candidate apps (one query, bounded set).
+  // no_achievements is a durable "this app has no achievement API" marker set
+  // when Steam returns 400/success:false — cached apps flagged this way are
+  // skipped entirely below.
   const { data: cacheRows } = await (db as any)
     .from('steam_app_schema')
-    .select('steam_appid, achievements, global_percents, fetched_at')
+    .select('steam_appid, achievements, global_percents, fetched_at, no_achievements')
     .in('steam_appid', candidateAppids);
   const schemaCache = new Map<number, any>((cacheRows ?? []).map((r: any) => [r.steam_appid, r]));
 
@@ -300,16 +326,36 @@ export const POST: APIRoute = async (context) => {
   let playerHits = 0;   // games where Steam returned achievement data
   let playerNulls = 0;  // games where the player-achievements call failed outright
   const schemaUpserts: any[] = [];
+  const noStatsUpserts: any[] = [];
 
   for (const { appid, name } of candidates) {
     // Always process at least one game; stop before the timeout after that.
     if (gamesProcessed > 0 && Date.now() - startedAt > TIME_BUDGET_MS) break;
 
+    // Known no-achievement app (cached from a prior sync) — skip the Steam
+    // call entirely. Advance the cursor without counting it against anything.
+    if (schemaCache.get(appid)?.no_achievements === true) {
+      lastProcessedAppid = appid;
+      gamesProcessed++;
+      continue;
+    }
+
     try {
       // Player achievements — always live (per-user, changes as they play).
-      const playerData = await fetchJson(
+      const playerData = await fetchPlayerAchievements(
         `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/?appid=${appid}&key=${steamApiKey}&steamid=${steamId}&l=en`,
       );
+
+      // Steam confirmed this app has no achievement API at all. Cache the
+      // verdict so the freshness RPC filters it out of future syncs, and
+      // don't count it as a Steam-side failure.
+      if (playerData === NO_STATS) {
+        noStatsUpserts.push({ steam_appid: appid, no_achievements: true, fetched_at: new Date().toISOString() });
+        lastProcessedAppid = appid;
+        gamesProcessed++;
+        continue;
+      }
+
       if (playerData === null) playerNulls++; // 403 (privacy) or a transient failure
 
       // Dedupe by apiname — Steam occasionally returns the same achievement twice
@@ -464,6 +510,18 @@ export const POST: APIRoute = async (context) => {
       .from('steam_app_schema')
       .upsert(schemaUpserts, { onConflict: 'steam_appid' });
     if (error) console.error('[sync-achievements] schema cache upsert:', JSON.stringify(error));
+  }
+
+  // Persist the "no achievements" verdict for apps Steam explicitly told us
+  // don't support achievements. Partial upsert — ON CONFLICT DO UPDATE only
+  // sets the columns present here, so an existing schema row's achievements
+  // and global_percents survive untouched. INSERT branch relies on the
+  // table's column defaults for those.
+  if (noStatsUpserts.length > 0) {
+    const { error } = await (db as any)
+      .from('steam_app_schema')
+      .upsert(noStatsUpserts, { onConflict: 'steam_appid' });
+    if (error) console.error('[sync-achievements] no-stats cache upsert:', JSON.stringify(error));
   }
 
   const done = remaining.filter((g) => g.appid > lastProcessedAppid).length === 0;
