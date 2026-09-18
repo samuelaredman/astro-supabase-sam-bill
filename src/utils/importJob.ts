@@ -3,6 +3,21 @@
 // per source differs, so the job lifecycle (load, count, resume) is one
 // implementation used by both.
 
+/**
+ * Turn a scraped review date (YYYY-MM-DD) into an ISO timestamp suitable
+ * for created_at / published_at. Anchors at noon UTC (Backloggd and Steam
+ * only give us the date, not the time) and clamps at now so a same-day
+ * date on a source whose clock is ahead of ours — or noon-UTC being ahead
+ * of a viewer's local now — doesn't land in the future. Returns null when
+ * the input is empty or unparseable.
+ */
+export function clampImportedDateIso(dateStr: string | null | undefined): string | null {
+  if (!dateStr) return null;
+  const t = new Date(`${dateStr}T12:00:00Z`).getTime();
+  if (Number.isNaN(t)) return null;
+  return new Date(Math.min(Date.now(), t)).toISOString();
+}
+
 export type ImportJob = {
   id: string;
   profile_id: string;

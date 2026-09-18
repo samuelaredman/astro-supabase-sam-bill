@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../../utils/api";
-import { loadOwnedJob, recountJob } from "../../../../utils/importJob";
+import { clampImportedDateIso, loadOwnedJob, recountJob } from "../../../../utils/importJob";
 import { resolvePCPlatformId } from "../../../../utils/steam-reviews/importItem";
 
 // POST { item_id } -> for a skipped Steam item whose conflict is a DRAFT,
@@ -66,13 +66,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   const platformId = await resolvePCPlatformId(db);
-  // Match importItem.ts: cap at `now` so a same-day Steam date doesn't land
-  // in the future for viewers west of UTC.
-  const dateIso = item.review_date
-    ? new Date(
-        Math.min(Date.now(), new Date(`${item.review_date}T12:00:00Z`).getTime()),
-      ).toISOString()
-    : null;
+  const dateIso = clampImportedDateIso(item.review_date);
   const playTimeHours =
     item.hours_at_review != null && Number.isFinite(item.hours_at_review)
       ? Math.max(0, Math.round(item.hours_at_review))
