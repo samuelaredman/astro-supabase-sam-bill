@@ -2572,6 +2572,17 @@ const reviewerBreadcrumbJsonLd = {
       })
     }
 
+    // Per-day-section platform label. Steam is always "STEAM"; PSN uses the
+    // specific console the trophy came from (PS5 / PS4 / PS3) when known, so
+    // a user who plays across generations sees them cleanly separated.
+    function _sourceLabel(source, sample) {
+      if (source === 'psn') {
+        var plat = sample && sample.platform_label
+        return plat ? plat : 'PSN'
+      }
+      return 'STEAM'
+    }
+
     function _cardHtml(a) {
       var rare = a.global_percent != null && a.global_percent < 10
       var icon = a.icon_url
@@ -2586,7 +2597,7 @@ const reviewerBreadcrumbJsonLd = {
           '<div class="ach-feed-info">' +
             '<div class="ach-feed-name">' + _esc(a.display_name || a.api_name) + '</div>' +
             (a.description ? '<div class="ach-feed-desc">' + _esc(a.description) + '</div>' : '') +
-            '<div class="ach-feed-game">' + _esc(a.game_title || ('App ' + a.steam_appid)) + '</div>' +
+            '<div class="ach-feed-game">' + _esc(a.game_title || (a.steam_appid ? ('App ' + a.steam_appid) : 'Unknown game')) + '</div>' +
             '<div class="ach-feed-footer">' +
               (when ? '<span class="ach-feed-time">Unlocked on ' + _esc(when) + '</span>' : '') +
               pct +
@@ -2652,15 +2663,36 @@ const reviewerBreadcrumbJsonLd = {
       var groupByDate = _st.sort === 'recent' || _st.sort === 'oldest'
       var html
       if (groupByDate) {
+        // Group by (day, source). A single day with both Steam and PSN unlocks
+        // shows two consecutive sections — same date header, different platform
+        // label. Within a day, Steam sorts before PSN for a stable order (the
+        // user's mental model is "my Steam day + my PSN day").
         var groups = []
         var map = {}
         items.forEach(function(a) {
-          var label = _dayLabel(a.unlock_time)
-          if (!(label in map)) { map[label] = []; groups.push({ label: label, items: map[label] }) }
-          map[label].push(a)
+          var day = _dayLabel(a.unlock_time)
+          var src = a.source || 'steam'
+          var key = day + '::' + src
+          if (!(key in map)) {
+            map[key] = { day: day, source: src, items: [], firstIso: a.unlock_time }
+            groups.push(map[key])
+          }
+          map[key].items.push(a)
+        })
+        // Sort groups: newest day first for 'recent' (oldest first for 'oldest'),
+        // then Steam before PSN within a day.
+        var dayCmp = _st.sort === 'oldest' ? 1 : -1
+        groups.sort(function(a, b) {
+          var da = new Date(a.firstIso).getTime()
+          var db = new Date(b.firstIso).getTime()
+          // Bucket by day boundary using the day label — two items on the same
+          // day but different sources should NOT sort by timestamp.
+          if (a.day !== b.day) return dayCmp * (da - db)
+          return a.source === 'steam' ? -1 : 1
         })
         html = groups.map(function(g) {
-          return '<div class="ach-day"><div class="ach-day-date">' + _esc(g.label) + '</div>' +
+          var label = g.day + ' — ' + _sourceLabel(g.source, g.items[0])
+          return '<div class="ach-day"><div class="ach-day-date">' + _esc(label) + '</div>' +
             '<div class="ach-feed-grid">' + g.items.map(_cardHtml).join('') + '</div></div>'
         }).join('')
       } else {
