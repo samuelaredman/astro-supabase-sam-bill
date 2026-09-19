@@ -73,7 +73,11 @@ export const GET: APIRoute = async (context) => {
   // `review` ("has review first") has no column to sort on here — the caller
   // owns the review map — so it rides the games/title path and is reordered
   // client-side.
-  const ugsBase = sort === 'hours' || sort === 'recent';
+  // 'recent' pivots on user_game_status for its native ORDER BY updated_at.
+  // 'hours' and 'completion' both aggregate across Steam + PSN sources and
+  // pre-rank in JS instead — the base doesn't matter for their scan calls
+  // because they pass an explicit 'games' override to buildQuery.
+  const ugsBase = sort === 'recent';
 
   // Factored out so the id-only "select all" and letter-map paths apply
   // identical filters. `base` overrides the pivot for paths where order is
@@ -133,14 +137,23 @@ export const GET: APIRoute = async (context) => {
     } else if (filter === 'completed') {
       qb = qb.in(c('status'), ['completed', 'hundred_percent']);
     } else if (filter === 'unplayed') {
-      // "no playtime and not finished". The playtime OR must be phrased as a
-      // filter *on* the embedded resource (`user_game_status.or=(…)`), not a
-      // top-level `or=(user_game_status.…)` — the latter is not a valid
-      // PostgREST filter and 500s the request, so the pill loaded nothing.
+      // "no playtime and not finished". Both Steam and PSN playtime must be
+      // absent/zero — a PSN-tracked game with PS5 hours shouldn't be shown as
+      // unplayed just because it has no Steam data.
+      //
+      // The playtime OR must be phrased as a filter *on* the embedded resource
+      // (`user_game_status.or=(…)`), not a top-level `or=(user_game_status.…)`
+      // — the latter is not a valid PostgREST filter and 500s the request.
+      // Two chained .or() calls AND together, matching "steam is unplayed AND
+      // psn is unplayed".
       qb = qb.not(c('status'), 'in', '(completed,hundred_percent)');
-      qb = base === 'ugs'
-        ? qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0')
-        : qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0', { referencedTable: 'user_game_status' });
+      if (base === 'ugs') {
+        qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0');
+        qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0');
+      } else {
+        qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0', { referencedTable: 'user_game_status' });
+        qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0',   { referencedTable: 'user_game_status' });
+      }
     } else if (filter !== 'all') {
       qb = qb.eq(c('status'), filter);
     }
@@ -203,47 +216,88 @@ export const GET: APIRoute = async (context) => {
   // leaving it out keeps the genre *filter*'s inner-join (added in buildQuery)
   // the only game_genres embed, so there's no duplicate-embed ambiguity.
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total';
   const from = (page - 1) * PAGE_SIZE;
 
   let rows: any[] | null;
   let total: number;
 
-  if (sort === 'completion') {
-    // Achievement completion % is an aggregate over user_achievements, not a
-    // column — so rank every matching game id here (highest % first), then
-    // fetch only this page's rows.
-    const { data: complRows, error: complErr } = await db.rpc('achievement_completion_by_appid', {
-      p_profile_id: profile.id,
-    });
-    if (complErr) {
-      console.error('[library API] completion rpc error:', JSON.stringify(complErr));
-      return json({ error: 'Failed to load library' }, 500);
+  if (sort === 'completion' || sort === 'hours') {
+    // Both sorts aggregate a value across two sources (Steam achievements +
+    // PSN trophies, or Steam playtime + PSN playtime). Since PostgREST can't
+    // ORDER BY expressions, we compute the metric per game in JS, sort, and
+    // then fetch only the requested page. Bounded by the profile's tracked-
+    // game count (hundreds to low thousands).
+
+    // Fetch each source's per-game metric map up-front.
+    const pctByAppid = new Map<number, number>();
+    const pctByNpComm = new Map<string, number>();
+    if (sort === 'completion') {
+      const [
+        { data: achRows, error: achErr },
+        { data: trRows, error: trErr },
+      ] = await Promise.all([
+        db.rpc('achievement_completion_by_appid', { p_profile_id: profile.id }),
+        db.rpc('trophy_completion_by_npcommid', { p_profile_id: profile.id }),
+      ]);
+      if (achErr) {
+        console.error('[library API] achievement completion rpc error:', JSON.stringify(achErr));
+        return json({ error: 'Failed to load library' }, 500);
+      }
+      if (trErr) {
+        // Non-fatal — PSN games without trophy sync just fall to the bottom.
+        console.error('[library API] trophy completion rpc error (non-fatal):', JSON.stringify(trErr));
+      }
+      for (const r of (achRows ?? []) as any[]) pctByAppid.set(r.steam_appid, Number(r.pct));
+      for (const r of (trRows  ?? []) as any[]) pctByNpComm.set(r.np_communication_id, Number(r.pct));
     }
-    const pctByAppid = new Map<number, number>(
-      (complRows ?? []).map((r: any) => [r.steam_appid as number, Number(r.pct)]),
-    );
+
+    // Metric extractor. For completion: max(steam pct, psn pct) — the game's
+    // best completion across sources. Detailed view splits mixed games into
+    // two rows so each source's actual pct is still visible; using max for
+    // the aggregate places the game at its highest completion, which is what
+    // "sort by completion %" means to a user. -1 sinks games with no data
+    // below 0%-completed ones. For hours: sum so a game played 20h Steam +
+    // 30h PS5 sorts at 50h.
+    const metricFor = (ugs: any): number => {
+      if (sort === 'completion') {
+        const appid: number | null = ugs?.steam_appid ?? null;
+        const npComm: string | null = ugs?.psn_np_communication_id ?? null;
+        const steamPct = appid != null ? pctByAppid.get(appid) : undefined;
+        const psnPct   = npComm ? pctByNpComm.get(npComm) : undefined;
+        if (steamPct === undefined && psnPct === undefined) return -1;
+        return Math.max(steamPct ?? -1, psnPct ?? -1);
+      }
+      // hours
+      const steamMin = Number(ugs?.steam_playtime_minutes) || 0;
+      const psnMin   = Number(ugs?.psn_playtime_minutes) || 0;
+      const total = steamMin + psnMin;
+      return total > 0 ? total : -1;
+    };
+
+    // Ranking scan pulls only the columns metricFor needs — cheaper page than
+    // pulling SEL_UGS every game only to discard most of it.
+    const SCAN_UGS = sort === 'completion'
+      ? 'steam_appid, psn_np_communication_id'
+      : 'steam_playtime_minutes, psn_playtime_minutes';
 
     const CHUNK = 1000;
-    const ranked: Array<{ id: string; title: string; pct: number }> = [];
+    const ranked: Array<{ id: string; title: string; metric: number }> = [];
     for (let start = 0; ; start += CHUNK) {
-      const { data: idRows, error: idErr } = await buildQuery('id, title', 'steam_appid', undefined, 'games')
+      const { data: idRows, error: idErr } = await buildQuery('id, title', SCAN_UGS, undefined, 'games')
         .order('id', { ascending: true })
         .range(start, start + CHUNK - 1);
       if (idErr) {
-        console.error('[library API] completion scan error:', JSON.stringify(idErr));
+        console.error('[library API] rank scan error:', JSON.stringify(idErr));
         return json({ error: 'Failed to load library' }, 500);
       }
       for (const r of (idRows ?? []) as any[]) {
         const ugs = Array.isArray(r.user_game_status) ? r.user_game_status[0] : r.user_game_status;
-        const appid: number | null = ugs?.steam_appid ?? null;
-        // Games with no synced achievements sink below 0%-completed ones.
-        const pct = appid != null && pctByAppid.has(appid) ? pctByAppid.get(appid)! : -1;
-        ranked.push({ id: r.id, title: r.title ?? '', pct });
+        ranked.push({ id: r.id, title: r.title ?? '', metric: metricFor(ugs) });
       }
       if (!idRows || idRows.length < CHUNK) break;
     }
-    ranked.sort((a, b) => b.pct - a.pct || a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+    ranked.sort((a, b) => b.metric - a.metric || a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
     total = ranked.length;
 
     const pageIds = ranked.slice(from, from + PAGE_SIZE).map((x) => x.id);
@@ -252,7 +306,7 @@ export const GET: APIRoute = async (context) => {
     } else {
       const { data: pageRows, error: prErr } = await buildQuery(SEL_GAMES, SEL_UGS, undefined, 'games').in('id', pageIds);
       if (prErr) {
-        console.error('[library API] completion page error:', JSON.stringify(prErr));
+        console.error('[library API] rank page error:', JSON.stringify(prErr));
         return json({ error: 'Failed to load library' }, 500);
       }
       const byId = new Map((pageRows ?? []).map((r: any) => [r.id, r]));
@@ -262,9 +316,7 @@ export const GET: APIRoute = async (context) => {
     let q = buildQuery(SEL_GAMES, SEL_UGS, { count: 'exact' });
 
     // Sort — native ORDER BY on whichever table buildQuery pivoted onto.
-    if (ugsBase && sort === 'hours') {
-      q = q.order('steam_playtime_minutes', { ascending: false, nullsFirst: false });
-    } else if (ugsBase && sort === 'recent') {
+    if (ugsBase && sort === 'recent') {
       q = q.order('updated_at', { ascending: false });
     } else {
       // games base: alpha (default) + review. review is reordered client-side.
@@ -280,7 +332,11 @@ export const GET: APIRoute = async (context) => {
     total = res.count ?? 0;
   }
 
-  const items = (rows ?? []).map((r: any) => {
+  // Intermediate per-game shape carrying BOTH source's raw fields. The split
+  // pass below emits one display row per source when a game exists on both
+  // Steam and PSN, so the reader can see each platform's own playtime and
+  // achievement/trophy counts.
+  const gameItems = (rows ?? []).map((r: any) => {
     // buildQuery pivots the base table by sort, so a row is either a games row
     // with an embedded user_game_status, or a user_game_status row with an
     // embedded games. Normalise both to { g, ugs }.
@@ -299,20 +355,34 @@ export const GET: APIRoute = async (context) => {
       owned:     ugs?.is_owned ?? false,
       isHidden:  ugs?.is_hidden ?? false,
       updatedAt: ugs?.updated_at ?? '',
-      lastPlayed: ugs?.steam_last_played_at ?? null,
-      playtime:  ugs?.steam_playtime_minutes ?? null,
-      steamAppid: ugs?.steam_appid ?? null,
+      // Per-source raw fields — collapsed into display fields by the split pass.
+      steamAppid:      ugs?.steam_appid ?? null,
+      steamPlaytime:   ugs?.steam_playtime_minutes ?? null,
+      steamLastPlayed: ugs?.steam_last_played_at ?? null,
+      psnNpCommId:     ugs?.psn_np_communication_id ?? null,
+      psnPlatform:     ugs?.psn_platform ?? null,
+      psnPlaytime:     ugs?.psn_playtime_minutes ?? null,
+      psnLastPlayed:   ugs?.psn_last_played_at ?? null,
+      // Trophy counts stored on user_game_status by sync-library — used as a
+      // fallback when user_trophies hasn't been populated yet.
+      psnTrophiesEarned: ugs?.psn_trophies_earned ?? null,
+      psnTrophiesTotal:  ugs?.psn_trophies_total ?? null,
+      // Populated by the count passes below.
+      steamAchUnlocked: null as number | null,
+      steamAchTotal:    null as number | null,
+      psnAchUnlocked:   null as number | null,
+      psnAchTotal:      null as number | null,
     };
   });
 
-  // Per-game achievement progress — drives the Detailed view's progress bar and
-  // the gold "100%" treatment in both views. user_achievements is keyed on
-  // steam_appid, so only Steam-imported games with a synced achievement set get
-  // counts. One page is <=96 games; the query is indexed on
-  // (profile_id, steam_appid) but paginate past the 1000-row cap anyway.
+  // Per-game achievement progress — drives the Detailed view's progress bar
+  // and the gold "100%" cover treatment. user_achievements is keyed on
+  // steam_appid; runs against every Steam-imported game on the page, even the
+  // ones that also have a PSN counterpart (since we split those into two rows
+  // below and each row needs its own count).
   {
     const appids = [...new Set(
-      items.map((i: any) => i.steamAppid).filter((x: any): x is number => typeof x === 'number')
+      gameItems.map((i: any) => i.steamAppid).filter((x: any): x is number => typeof x === 'number')
     )];
     const counts = new Map<number, { unlocked: number; total: number }>();
     if (appids.length > 0) {
@@ -338,12 +408,126 @@ export const GET: APIRoute = async (context) => {
         if (!achRows || achRows.length < CHUNK) break;
       }
     }
-    for (const it of items as any[]) {
+    for (const it of gameItems as any[]) {
       const c = it.steamAppid != null ? counts.get(it.steamAppid) : null;
-      it.achUnlocked = c ? c.unlocked : null;
-      it.achTotal = c ? c.total : null;
+      it.steamAchUnlocked = c ? c.unlocked : null;
+      it.steamAchTotal = c ? c.total : null;
     }
   }
 
-  return json({ items, total: total ?? 0, page, pageSize: PAGE_SIZE, hasMore: items.length === PAGE_SIZE });
+  // Per-game trophy progress — same idea as the Steam pass above, but keyed on
+  // np_communication_id and reading from user_trophies. Runs against every
+  // PSN-tracked game on the page.
+  {
+    const npCommIds = [...new Set(
+      (gameItems as any[])
+        .map((i) => i.psnNpCommId)
+        .filter((x: any): x is string => typeof x === 'string')
+    )];
+    const counts = new Map<string, { earned: number; total: number }>();
+    if (npCommIds.length > 0) {
+      const CHUNK = 1000;
+      for (let start = 0; ; start += CHUNK) {
+        const { data: tRows, error: tErr } = await db
+          .from('user_trophies')
+          .select('np_communication_id, earned')
+          .eq('profile_id', profile.id)
+          .in('np_communication_id', npCommIds)
+          .range(start, start + CHUNK - 1);
+        if (tErr) {
+          console.error('[library API] trophy counts error:', JSON.stringify(tErr));
+          break;
+        }
+        for (const row of tRows ?? []) {
+          const id = (row as any).np_communication_id as string;
+          const cur = counts.get(id) ?? { earned: 0, total: 0 };
+          cur.total++;
+          if ((row as any).earned) cur.earned++;
+          counts.set(id, cur);
+        }
+        if (!tRows || tRows.length < CHUNK) break;
+      }
+    }
+    for (const it of gameItems as any[]) {
+      if (!it.psnNpCommId) continue;
+      const c = counts.get(it.psnNpCommId);
+      // If user_trophies has fresh data (post trophy-sync), use it. Otherwise
+      // fall back to the aggregate counts stored on user_game_status by
+      // sync-library, so a user who's synced their library but not trophies
+      // still sees a progress bar.
+      if (c) {
+        it.psnAchUnlocked = c.earned;
+        it.psnAchTotal = c.total;
+      } else if (typeof it.psnTrophiesTotal === 'number' && it.psnTrophiesTotal > 0) {
+        it.psnAchUnlocked = it.psnTrophiesEarned ?? 0;
+        it.psnAchTotal = it.psnTrophiesTotal;
+      }
+    }
+  }
+
+  // Split pass — a game owned on both Steam and PSN emits TWO display rows
+  // (one per source), each with its own platform chip, playtime, last-played
+  // date, and progress bar. Overview grid dedupes by gameId client-side;
+  // detailed grid renders both.
+  //
+  // Both split rows carry the same gameId — bulk edit and status changes are
+  // still per-game — but a distinct rowKey so client renderers can key their
+  // per-row state on it.
+  const shared = (it: any) => ({
+    gameId: it.gameId, title: it.title, slug: it.slug, cover: it.cover,
+    status: it.status, owned: it.owned, isHidden: it.isHidden,
+    updatedAt: it.updatedAt,
+  });
+  const steamRow = (it: any) => ({
+    ...shared(it),
+    rowKey: `${it.gameId}:steam`,
+    sourcePlatform: 'steam' as const,
+    steamAppid: it.steamAppid,
+    psnNpCommId: null,
+    psnPlatform: null,
+    playtime:    it.steamPlaytime,
+    lastPlayed:  it.steamLastPlayed,
+    achUnlocked: it.steamAchUnlocked,
+    achTotal:    it.steamAchTotal,
+  });
+  const psnRow = (it: any) => ({
+    ...shared(it),
+    rowKey: `${it.gameId}:psn`,
+    sourcePlatform: 'psn' as const,
+    steamAppid: null,
+    psnNpCommId: it.psnNpCommId,
+    psnPlatform: it.psnPlatform,
+    playtime:    it.psnPlaytime,
+    lastPlayed:  it.psnLastPlayed,
+    achUnlocked: it.psnAchUnlocked,
+    achTotal:    it.psnAchTotal,
+  });
+
+  const items: any[] = [];
+  for (const it of gameItems as any[]) {
+    const hasSteam = it.steamAppid != null;
+    const hasPsn = it.psnNpCommId != null;
+    if (hasSteam && hasPsn) {
+      items.push(steamRow(it));
+      items.push(psnRow(it));
+    } else if (hasSteam) {
+      items.push(steamRow(it));
+    } else if (hasPsn) {
+      items.push(psnRow(it));
+    } else {
+      // Manually-tracked game with no external source.
+      items.push({
+        ...shared(it),
+        rowKey: it.gameId,
+        sourcePlatform: null,
+        steamAppid: null, psnNpCommId: null, psnPlatform: null,
+        playtime: null, lastPlayed: null, achUnlocked: null, achTotal: null,
+      });
+    }
+  }
+
+  // total remains the game-level count so pagination stays stable — a page
+  // may render up to 2*PAGE_SIZE detail rows for a heavily-mixed library, but
+  // it always represents PAGE_SIZE games.
+  return json({ items, total: total ?? 0, page, pageSize: PAGE_SIZE, hasMore: gameItems.length === PAGE_SIZE });
 };

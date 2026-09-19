@@ -17,11 +17,12 @@ if (!user) return Astro.redirect('/signin');
 const db = getSupabaseAdmin() as any;
 const { data: profile } = await db
   .from('profiles')
-  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at, username_changed_at, username_locked')
+  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at, psn_account_id, psn_online_id, psn_synced_at, psn_trophies_synced_at, username_changed_at, username_locked')
   .eq('auth_user_id', user.id)
   .single();
 
 const steamStatus = Astro.url.searchParams.get('steam'); // 'connected' | 'error' | 'cancelled' | null
+const psnStatus = Astro.url.searchParams.get('psn');     // 'connected' | 'expired' | null
 
 if (!profile) return Astro.redirect('/signin');
 
@@ -273,6 +274,98 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
               <div class="settings-row-sub">Import your library and playtime to quickly build out your game collection on Chekpoint.</div>
             </div>
             <a href="/api/auth/steam-connect" class="settings-save-btn steam-connect-btn">Connect Steam</a>
+          </div>
+        )}
+
+      </div>
+    </section>
+
+    <!-- PlayStation -->
+    <section class="settings-section" id="psn">
+      <div class="settings-section-label">PlayStation</div>
+      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+
+        {psnStatus === 'connected' && (
+          <div class="steam-banner steam-banner-ok">PlayStation account connected successfully.</div>
+        )}
+        {psnStatus === 'expired' && (
+          <div class="steam-banner steam-banner-err">Your PlayStation connection expired. Paste a fresh NPSSO below to reconnect.</div>
+        )}
+
+        {profile.psn_account_id ? (
+          <>
+            <div class="steam-connected-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Connected as <strong>{profile.psn_online_id ?? profile.psn_account_id}</strong></div>
+                {profile.psn_synced_at || profile.psn_trophies_synced_at ? (
+                  <div class="settings-row-sub">
+                    {profile.psn_synced_at && (
+                      <>Library last synced {new Date(profile.psn_synced_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+                    )}
+                    {profile.psn_synced_at && profile.psn_trophies_synced_at && ' · '}
+                    {profile.psn_trophies_synced_at && (
+                      <>Trophies last synced {new Date(profile.psn_trophies_synced_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+                    )}
+                  </div>
+                ) : (
+                  <div class="settings-row-sub">Nothing synced yet — click the buttons below.</div>
+                )}
+              </div>
+              <button class="settings-ghost-btn steam-disconnect-btn" id="psnDisconnectBtn" onclick="psnDisconnect()">Disconnect</button>
+            </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Sync library</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Imports your PS3, PS4, and PS5 games as <strong>Owned</strong>, with trophy progress and (for PS4/PS5) playtime. Won't overwrite statuses you've set manually.
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="psnSyncBtn" onclick="psnSync()">Sync PlayStation library</button>
+                <span id="psnSyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="psnSyncResults" class="steam-results" style="display:none"></div>
+            </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Sync trophies</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Downloads every trophy for every game you've played on PSN. This can take a minute or two the first time — subsequent syncs only pull new unlocks.
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="psnTrophySyncBtn" onclick="psnSyncTrophies()">Sync PlayStation trophies</button>
+                <span id="psnTrophySyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="psnTrophySyncProgress" class="bl-progress" style="display:none;margin-top:10px">
+                <div class="bl-bar"><div class="bl-bar-fill" id="psnTrophyBarFill"></div></div>
+                <div class="bl-progress-text" id="psnTrophyProgressText"></div>
+              </div>
+              <div id="psnTrophySyncResults" class="steam-results" style="display:none"></div>
+            </div>
+          </>
+        ) : (
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div class="settings-row-text">
+              <div class="settings-row-label">Connect your PlayStation account</div>
+              <div class="settings-row-sub">
+                PlayStation doesn't offer a public sign-in like Steam, so linking takes a few extra steps.
+                We'll use your <strong>NPSSO token</strong> — a short-lived credential you copy from PlayStation's own web session.
+              </div>
+            </div>
+            <ol class="psn-steps">
+              <li>Sign into <a href="https://www.playstation.com" target="_blank" rel="noopener">playstation.com</a> in a new tab.</li>
+              <li>Open <a href="https://ca.account.sony.com/api/v1/ssocookie" target="_blank" rel="noopener">ca.account.sony.com/api/v1/ssocookie</a>. You'll see a small JSON object like <code>&#123;"npsso":"abc123..."&#125;</code>.</li>
+              <li>Copy the value between the quotes — a 64-character string.</li>
+              <li>Paste it below and click Connect.</li>
+            </ol>
+            <div class="psn-privacy-note">
+              We store this token so future syncs work without prompting. It only grants access to your PSN profile and trophies. Sony rotates NPSSOs about every 2 months — you'll be asked to repeat these steps then.
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <input id="psnNpsso" type="text" placeholder="Paste NPSSO here" autocomplete="off" spellcheck={false}
+                style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:monospace" />
+              <button class="settings-save-btn" id="psnConnectBtn" onclick="psnConnect()">Connect PlayStation</button>
+            </div>
+            <div id="psnConnectMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
           </div>
         )}
 
@@ -925,6 +1018,33 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     .steam-connect-row, .steam-connected-row { flex-direction: column; align-items: flex-start; }
     .steam-connect-btn { width: 100%; text-align: center; }
   }
+
+  /* ── PlayStation ── */
+  .psn-steps {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+  .psn-steps li { margin: 4px 0; }
+  .psn-steps a { color: var(--accent); text-decoration: none; }
+  .psn-steps a:hover { text-decoration: underline; }
+  .psn-steps code {
+    background: var(--bg-hover);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .psn-privacy-note {
+    background: var(--bg-hover);
+    border-left: 3px solid var(--accent);
+    padding: 10px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
 </style>
 
 <script>
@@ -938,6 +1058,10 @@ declare global {
     setSearchIndexable: (value: boolean, btn: HTMLElement) => Promise<void>;
     steamSync: () => Promise<void>;
     steamDisconnect: () => Promise<void>;
+    psnConnect: () => Promise<void>;
+    psnSync: () => Promise<void>;
+    psnSyncTrophies: () => Promise<void>;
+    psnDisconnect: () => Promise<void>;
     blPreview: () => Promise<void>;
     blRun: (mode: "username") => Promise<void>;
     blUpload: () => Promise<void>;
@@ -1194,6 +1318,197 @@ async function steamDisconnect() {
   }
 }
 window.steamDisconnect = steamDisconnect;
+
+// ─── PlayStation ────────────────────────────────────────────────────────────
+async function psnConnect() {
+  const input = document.getElementById('psnNpsso') as HTMLInputElement | null;
+  const btn = document.getElementById('psnConnectBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnConnectMsg');
+  if (!input || !btn || !msg) return;
+
+  const npsso = input.value.trim();
+  if (!npsso) {
+    msg.textContent = 'Paste an NPSSO token first.';
+    (msg as HTMLElement).style.color = '#f87171';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  msg.textContent = 'Exchanging token with PlayStation…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+
+  try {
+    const res = await fetch('/api/auth/psn-connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ npsso }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Failed to connect.';
+      (msg as HTMLElement).style.color = '#f87171';
+      btn.disabled = false;
+      btn.textContent = 'Connect PlayStation';
+      return;
+    }
+    window.location.href = '/settings?psn=connected#psn';
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+    btn.disabled = false;
+    btn.textContent = 'Connect PlayStation';
+  }
+}
+window.psnConnect = psnConnect;
+
+async function psnSync() {
+  const btn = document.getElementById('psnSyncBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnSyncMsg');
+  const results = document.getElementById('psnSyncResults');
+  if (!btn || !msg || !results) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.textContent = 'Fetching your PlayStation library…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+  results.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/psn/sync-library', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json();
+
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Something went wrong.';
+      (msg as HTMLElement).style.color = '#f87171';
+      if (data.needsReconnect) {
+        setTimeout(() => { window.location.href = '/settings?psn=expired#psn'; }, 1500);
+      }
+    } else {
+      msg.textContent = '';
+      results.style.display = 'block';
+      results.innerHTML = `
+        <strong>Sync complete</strong><br>
+        ${data.matched} games added as Owned &nbsp;·&nbsp;
+        ${data.updated} entries refreshed &nbsp;·&nbsp;
+        ${data.unmatched} PSN games not yet in Chekpoint's library
+        <br><span style="color:var(--text-tertiary);font-size:11px">${data.total} total games in your PlayStation library</span>
+      `;
+    }
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync PlayStation library';
+  }
+}
+window.psnSync = psnSync;
+
+async function psnSyncTrophies() {
+  const btn = document.getElementById('psnTrophySyncBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnTrophySyncMsg');
+  const results = document.getElementById('psnTrophySyncResults');
+  const progressBox = document.getElementById('psnTrophySyncProgress');
+  const barFill = document.getElementById('psnTrophyBarFill');
+  const progressText = document.getElementById('psnTrophyProgressText');
+  if (!btn || !msg || !results || !progressBox || !barFill || !progressText) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.textContent = 'Starting trophy sync…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+  results.style.display = 'none';
+  progressBox.style.display = 'block';
+
+  let totalSynced = 0;
+  let hitTrophies = 0;
+  let emptyResponses = 0;
+  let everSynced = false;
+  let cursor: string | null = null;
+
+  try {
+    // Drive the cursor-based endpoint in a loop until done. Netlify caps each
+    // call at 10s; the server returns partial progress + nextCursor.
+    // Small hard cap on batches so a stuck sync can't loop forever.
+    for (let batch = 0; batch < 200; batch++) {
+      const bodyPayload: Record<string, unknown> = {};
+      if (cursor !== null) bodyPayload.cursor = cursor;
+      const res = await fetch('/api/psn/sync-trophies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        msg.textContent = data.error ?? 'Something went wrong.';
+        (msg as HTMLElement).style.color = '#f87171';
+        if (data.needsReconnect) {
+          setTimeout(() => { window.location.href = '/settings?psn=expired#psn'; }, 1500);
+        }
+        return;
+      }
+      totalSynced += data.syncedThisCall ?? 0;
+      hitTrophies += data.hitTrophies ?? 0;
+      emptyResponses += data.emptyResponses ?? 0;
+      everSynced = data.everSynced ?? everSynced;
+
+      const pct = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 100;
+      (barFill as HTMLElement).style.width = `${pct}%`;
+      progressText.textContent = `${data.processed} / ${data.total} titles (${pct}%)`;
+
+      if (data.done) {
+        cursor = null;
+        break;
+      }
+      cursor = data.nextCursor;
+    }
+
+    msg.textContent = '';
+    results.style.display = 'block';
+    const emptyWarning = (hitTrophies === 0 && emptyResponses > 0 && !everSynced)
+      ? `<br><span style="color:#f87171;font-size:12px">PlayStation returned no trophy data — check that <strong>My Trophies</strong> is set to <strong>Anyone</strong> in your PSN privacy settings.</span>`
+      : '';
+    results.innerHTML = `
+      <strong>Trophy sync complete</strong><br>
+      ${totalSynced} trophy rows written across ${hitTrophies} titles
+      ${emptyWarning}
+    `;
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync PlayStation trophies';
+  }
+}
+window.psnSyncTrophies = psnSyncTrophies;
+
+async function psnDisconnect() {
+  const btn = document.getElementById('psnDisconnectBtn') as HTMLButtonElement | null;
+  if (!btn) return;
+  if (!confirm('Disconnect your PlayStation account? Your game statuses and trophies will not be removed.')) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Disconnecting…';
+
+  try {
+    const res = await fetch('/api/psn/disconnect', { method: 'POST' });
+    if (res.ok) {
+      window.location.reload();
+    } else {
+      const data = await res.json();
+      alert(data.error ?? 'Failed to disconnect.');
+      btn.disabled = false;
+      btn.textContent = 'Disconnect';
+    }
+  } catch (e) {
+    alert('Could not reach server. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Disconnect';
+  }
+}
+window.psnDisconnect = psnDisconnect;
 
 // ─── Backloggd import ────────────────────────────────────────────────────────
 import {

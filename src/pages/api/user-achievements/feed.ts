@@ -30,17 +30,22 @@ export const GET: APIRoute = async ({ url }) => {
 
   const filtered = !!(q || days > 0);
 
-  // Feed page. count:exact only when filtered — otherwise the profile-wide total
-  // is already known from get_achievement_stats() at no extra cost.
+  // Feed page. Reads from the user_unlocks view, which unions Steam
+  // achievements and PSN trophies into one stream. Column aliases in the view
+  // match the shape the client already renders — display_name, global_percent,
+  // unlock_time, game_title — so only the platform tagging (source,
+  // trophy_type, platform_label) is new. count:exact only when filtered —
+  // otherwise the profile-wide unlock total already came from
+  // get_achievement_stats() (Steam-only right now; trophies are counted
+  // separately in the stream but the top-line stat still reflects Steam
+  // achievements only).
   let feed = db
-    .from("user_achievements")
+    .from("user_unlocks")
     .select(
-      "display_name, description, icon_url, global_percent, unlock_time, steam_appid, api_name, steam_game_title, games(title)",
+      "source, display_name, description, icon_url, global_percent, unlock_time, external_id, api_name, game_title, trophy_type, platform_label",
       filtered ? { count: "exact" } : undefined,
     )
-    .eq("profile_id", profile.id)
-    .eq("unlocked", true)
-    .not("unlock_time", "is", null);
+    .eq("profile_id", profile.id);
 
   if (q) feed = feed.ilike("display_name", `%${q}%`);
   if (days > 0)
@@ -85,9 +90,17 @@ export const GET: APIRoute = async ({ url }) => {
     icon_url: a.icon_url ?? null,
     global_percent: a.global_percent ?? null,
     unlock_time: a.unlock_time ?? null,
-    steam_appid: a.steam_appid ?? null,
+    // Steam-only. Kept for the "App 12345" fallback game title the client
+    // renders when we couldn't resolve the game — Steam rows carry appid as
+    // text via the view.
+    steam_appid: a.source === 'steam' ? a.external_id ?? null : null,
     api_name: a.api_name ?? null,
-    game_title: a.games?.title ?? a.steam_game_title ?? null,
+    game_title: a.game_title ?? null,
+    // New: platform tagging so the client can group by (day, source) and
+    // render a per-day section per platform.
+    source: a.source ?? null,
+    trophy_type: a.trophy_type ?? null,
+    platform_label: a.platform_label ?? null,
   }));
 
   let stats: { unlocked: number; perfectGames: number; avgCompletion: number } | null = null;
