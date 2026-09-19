@@ -37,6 +37,7 @@ const [user, { data: reviewer, error: reviewerError }] = await Promise.all([
     favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
     steam_id, steam_username, steam_synced_at,
     psn_account_id, psn_online_id, psn_synced_at,
+    xbox_xuid, xbox_gamertag, xbox_synced_at,
     twitch_url, youtube_url, twitter_url, discord_url, accent_color,
     favorite_game:games!favorite_game_id (
       id, title, slug, cover_img_url
@@ -1000,6 +1001,8 @@ const reviewerBreadcrumbJsonLd = {
        Same size + geometry so the meta strip lines up whether Steam or PSN
        sources the row. */
     .lib-dt-plat--psn{background:#003791}
+    /* Xbox tile uses Xbox's brand green. Same size + geometry. */
+    .lib-dt-plat--xbox{background:#107C10}
     .lib-dt-sep{opacity:.35}
     .lib-dt-bar-wrap{display:flex;align-items:center;gap:14px;width:100%}
     .lib-dt-bar{flex:1;height:6px;border-radius:3px;background:var(--tag-bg);overflow:hidden}
@@ -1124,6 +1127,7 @@ const reviewerBreadcrumbJsonLd = {
     }
     .lib-sync-row-icon--steam{background:#1b2838}
     .lib-sync-row-icon--psn{background:#003791}
+    .lib-sync-row-icon--xbox{background:#107C10}
 
     .lib-sync-row-body{flex:1;min-width:0}
     .lib-sync-row-title{font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.2}
@@ -2637,14 +2641,21 @@ const reviewerBreadcrumbJsonLd = {
 
     // Per-day-section platform label. Steam is always "STEAM"; PSN uses the
     // specific console the trophy came from (PS5 / PS4 / PS3) when known, so
-    // a user who plays across generations sees them cleanly separated.
+    // a user who plays across generations sees them cleanly separated. Xbox
+    // is "XBOX" — no per-console break since our Xbox integration is all
+    // Xbox Live titles regardless of hardware generation.
     function _sourceLabel(source, sample) {
       if (source === 'psn') {
         var plat = sample && sample.platform_label
         return plat ? plat : 'PSN'
       }
+      if (source === 'xbox') return 'XBOX'
       return 'STEAM'
     }
+    // Group sort order within a single day. Alphabetical would put PSN,
+    // Steam, Xbox in weird order; instead we lock to the launch chronology
+    // of our integrations so headers read the same way every day.
+    var _SOURCE_ORDER = { steam: 0, psn: 1, xbox: 2 }
 
     function _cardHtml(a) {
       var rare = a.global_percent != null && a.global_percent < 10
@@ -2743,7 +2754,7 @@ const reviewerBreadcrumbJsonLd = {
           map[key].items.push(a)
         })
         // Sort groups: newest day first for 'recent' (oldest first for 'oldest'),
-        // then Steam before PSN within a day.
+        // then platform order (Steam → PSN → Xbox) within a day.
         var dayCmp = _st.sort === 'oldest' ? 1 : -1
         groups.sort(function(a, b) {
           var da = new Date(a.firstIso).getTime()
@@ -2751,7 +2762,9 @@ const reviewerBreadcrumbJsonLd = {
           // Bucket by day boundary using the day label — two items on the same
           // day but different sources should NOT sort by timestamp.
           if (a.day !== b.day) return dayCmp * (da - db)
-          return a.source === 'steam' ? -1 : 1
+          var ao = _SOURCE_ORDER[a.source] ?? 99
+          var bo = _SOURCE_ORDER[b.source] ?? 99
+          return ao - bo
         })
         html = groups.map(function(g) {
           var label = g.day + ' — ' + _sourceLabel(g.source, g.items[0])
@@ -3129,6 +3142,10 @@ const reviewerBreadcrumbJsonLd = {
   // PlayStation "PS" glyph (simple-icons). Sized to match Steam icon exactly so
   // the meta strip lines up whether the row is Steam- or PSN-sourced.
   var _DT_PSN = '<svg width="12" height="12" viewBox="0 0 24 24" fill="#fff"><path d="M9.5 6.5v14.72l3.03.98V9.81c0-.57.26-.95.68-.82.55.14.66.68.66 1.25v4.72c1.89.91 3.37 0 3.37-2.41 0-2.47-.87-3.57-3.44-4.45C12.76 7.75 10.9 7.29 9.5 6.5zM13.66 20.13l4.87-1.74c.55-.2.64-.48.19-.63-.45-.15-1.27-.11-1.83.09l-3.23 1.14v-1.87l.19-.06s.93-.33 2.24-.48c1.31-.14 2.92.02 4.18.5 1.42.45 1.58 1.11 1.22 1.57-.36.46-1.25.79-1.25.79l-6.58 2.36v-1.67zM2.87 19.6c-1.46-.41-1.7-1.27-1.03-1.76.61-.46 1.66-.8 1.66-.8l4.32-1.53v1.75l-3.1 1.11c-.55.2-.64.48-.19.63.45.15 1.27.11 1.83-.09l1.46-.53v1.57l-.29.05c-1.5.24-3.09.15-4.66-.4z"/></svg>'
+  // Xbox glyph — stylized "X in circle" using stroke so it stays crisp at
+  // small sizes. Same 12x12 overall footprint as Steam / PSN so the row's
+  // meta strip lines up regardless of source.
+  var _DT_XBOX = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg>'
   var _DT_TROPHY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4a2 2 0 0 1-2-2V5h4M18 9h2a2 2 0 0 0 2-2V5h-4M6 3h12v6a6 6 0 0 1-12 0V3zM9 21h6M12 15v6"/></svg>'
   var _DT_CLOCK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
   var _DT_CAL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18M8 2v4M16 2v4"/></svg>'
@@ -3172,6 +3189,8 @@ const reviewerBreadcrumbJsonLd = {
     } else if (it.sourcePlatform === 'psn' && it.psnNpCommId != null) {
       var plat = it.psnPlatform || 'PSN'
       parts.push('<span class="lib-dt-mi lib-dt-mi--psn"><span class="lib-dt-plat lib-dt-plat--psn">' + _DT_PSN + '</span>' + plat + '</span>')
+    } else if (it.sourcePlatform === 'xbox' && it.xboxTitleId != null) {
+      parts.push('<span class="lib-dt-mi lib-dt-mi--xbox"><span class="lib-dt-plat lib-dt-plat--xbox">' + _DT_XBOX + '</span>Xbox</span>')
     }
     if (it.achTotal != null && it.achTotal > 0)
       parts.push('<span class="lib-dt-mi">' + _DT_TROPHY + it.achUnlocked + '/' + it.achTotal + '</span>')

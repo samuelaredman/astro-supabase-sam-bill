@@ -137,22 +137,24 @@ export const GET: APIRoute = async (context) => {
     } else if (filter === 'completed') {
       qb = qb.in(c('status'), ['completed', 'hundred_percent']);
     } else if (filter === 'unplayed') {
-      // "no playtime and not finished". Both Steam and PSN playtime must be
-      // absent/zero — a PSN-tracked game with PS5 hours shouldn't be shown as
-      // unplayed just because it has no Steam data.
+      // "no playtime and not finished". Steam + PSN playtime must be
+      // absent/zero AND Xbox current_gamerscore must be absent/zero. Xbox
+      // doesn't expose playtime — we use gamerscore > 0 as the "played"
+      // proxy instead.
       //
       // The playtime OR must be phrased as a filter *on* the embedded resource
       // (`user_game_status.or=(…)`), not a top-level `or=(user_game_status.…)`
       // — the latter is not a valid PostgREST filter and 500s the request.
-      // Two chained .or() calls AND together, matching "steam is unplayed AND
-      // psn is unplayed".
+      // Three chained .or() calls AND together.
       qb = qb.not(c('status'), 'in', '(completed,hundred_percent)');
       if (base === 'ugs') {
         qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0');
         qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0');
+        qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0');
       } else {
         qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0', { referencedTable: 'user_game_status' });
         qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0',   { referencedTable: 'user_game_status' });
+        qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0', { referencedTable: 'user_game_status' });
       }
     } else if (filter !== 'all') {
       qb = qb.eq(c('status'), filter);
@@ -216,7 +218,7 @@ export const GET: APIRoute = async (context) => {
   // leaving it out keeps the genre *filter*'s inner-join (added in buildQuery)
   // the only game_genres embed, so there's no duplicate-embed ambiguity.
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at';
   const from = (page - 1) * PAGE_SIZE;
 
   let rows: any[] | null;
@@ -232,24 +234,28 @@ export const GET: APIRoute = async (context) => {
     // Fetch each source's per-game metric map up-front.
     const pctByAppid = new Map<number, number>();
     const pctByNpComm = new Map<string, number>();
+    const pctByXboxTitle = new Map<string, number>();
     if (sort === 'completion') {
       const [
         { data: achRows, error: achErr },
         { data: trRows, error: trErr },
+        { data: xbRows, error: xbErr },
       ] = await Promise.all([
         db.rpc('achievement_completion_by_appid', { p_profile_id: profile.id }),
         db.rpc('trophy_completion_by_npcommid', { p_profile_id: profile.id }),
+        db.rpc('xbox_achievement_completion_by_titleid', { p_profile_id: profile.id }),
       ]);
       if (achErr) {
         console.error('[library API] achievement completion rpc error:', JSON.stringify(achErr));
         return json({ error: 'Failed to load library' }, 500);
       }
-      if (trErr) {
-        // Non-fatal — PSN games without trophy sync just fall to the bottom.
-        console.error('[library API] trophy completion rpc error (non-fatal):', JSON.stringify(trErr));
-      }
+      // PSN + Xbox failures are non-fatal — games from those sources without a
+      // synced achievement/trophy set just fall to the bottom.
+      if (trErr) console.error('[library API] trophy completion rpc error (non-fatal):', JSON.stringify(trErr));
+      if (xbErr) console.error('[library API] xbox completion rpc error (non-fatal):', JSON.stringify(xbErr));
       for (const r of (achRows ?? []) as any[]) pctByAppid.set(r.steam_appid, Number(r.pct));
       for (const r of (trRows  ?? []) as any[]) pctByNpComm.set(r.np_communication_id, Number(r.pct));
+      for (const r of (xbRows  ?? []) as any[]) pctByXboxTitle.set(r.xbox_title_id, Number(r.pct));
     }
 
     // Metric extractor. For completion: max(steam pct, psn pct) — the game's
@@ -263,12 +269,15 @@ export const GET: APIRoute = async (context) => {
       if (sort === 'completion') {
         const appid: number | null = ugs?.steam_appid ?? null;
         const npComm: string | null = ugs?.psn_np_communication_id ?? null;
+        const xTitle: string | null = ugs?.xbox_title_id ?? null;
         const steamPct = appid != null ? pctByAppid.get(appid) : undefined;
         const psnPct   = npComm ? pctByNpComm.get(npComm) : undefined;
-        if (steamPct === undefined && psnPct === undefined) return -1;
-        return Math.max(steamPct ?? -1, psnPct ?? -1);
+        const xboxPct  = xTitle ? pctByXboxTitle.get(xTitle) : undefined;
+        if (steamPct === undefined && psnPct === undefined && xboxPct === undefined) return -1;
+        return Math.max(steamPct ?? -1, psnPct ?? -1, xboxPct ?? -1);
       }
-      // hours
+      // hours — Xbox doesn't expose playtime, so its contribution is 0.
+      // Steam + PSN sum drives the rank.
       const steamMin = Number(ugs?.steam_playtime_minutes) || 0;
       const psnMin   = Number(ugs?.psn_playtime_minutes) || 0;
       const total = steamMin + psnMin;
@@ -278,7 +287,7 @@ export const GET: APIRoute = async (context) => {
     // Ranking scan pulls only the columns metricFor needs — cheaper page than
     // pulling SEL_UGS every game only to discard most of it.
     const SCAN_UGS = sort === 'completion'
-      ? 'steam_appid, psn_np_communication_id'
+      ? 'steam_appid, psn_np_communication_id, xbox_title_id'
       : 'steam_playtime_minutes, psn_playtime_minutes';
 
     const CHUNK = 1000;
@@ -367,11 +376,22 @@ export const GET: APIRoute = async (context) => {
       // fallback when user_trophies hasn't been populated yet.
       psnTrophiesEarned: ugs?.psn_trophies_earned ?? null,
       psnTrophiesTotal:  ugs?.psn_trophies_total ?? null,
+      // Xbox raw fields. No playtime — Xbox doesn't expose hours; we surface
+      // gamerscore instead. xbox_progress is the precomputed
+      // 100 * current / max, useful as a progress-bar fallback when
+      // user_xbox_achievements hasn't been synced yet.
+      xboxTitleId:       ugs?.xbox_title_id ?? null,
+      xboxLastPlayed:    ugs?.xbox_last_played_at ?? null,
+      xboxCurrentScore:  ugs?.xbox_current_gamerscore ?? null,
+      xboxMaxScore:      ugs?.xbox_max_gamerscore ?? null,
+      xboxProgress:      ugs?.xbox_progress ?? null,
       // Populated by the count passes below.
       steamAchUnlocked: null as number | null,
       steamAchTotal:    null as number | null,
       psnAchUnlocked:   null as number | null,
       psnAchTotal:      null as number | null,
+      xboxAchUnlocked:  null as number | null,
+      xboxAchTotal:     null as number | null,
     };
   });
 
@@ -465,12 +485,64 @@ export const GET: APIRoute = async (context) => {
     }
   }
 
-  // Split pass — a game owned on both Steam and PSN emits TWO display rows
-  // (one per source), each with its own platform chip, playtime, last-played
-  // date, and progress bar. Overview grid dedupes by gameId client-side;
-  // detailed grid renders both.
+  // Per-game Xbox achievement progress — same pattern as Steam + PSN, keyed
+  // on xbox_title_id. Populates xboxAchUnlocked/xboxAchTotal for every
+  // Xbox-tracked game on the page.
+  {
+    const titleIds = [...new Set(
+      (gameItems as any[])
+        .map((i) => i.xboxTitleId)
+        .filter((x: any): x is string => typeof x === 'string')
+    )];
+    const counts = new Map<string, { unlocked: number; total: number }>();
+    if (titleIds.length > 0) {
+      const CHUNK = 1000;
+      for (let start = 0; ; start += CHUNK) {
+        const { data: xRows, error: xErr } = await db
+          .from('user_xbox_achievements')
+          .select('xbox_title_id, unlocked')
+          .eq('profile_id', profile.id)
+          .in('xbox_title_id', titleIds)
+          .range(start, start + CHUNK - 1);
+        if (xErr) {
+          console.error('[library API] xbox achievement counts error:', JSON.stringify(xErr));
+          break;
+        }
+        for (const row of xRows ?? []) {
+          const id = (row as any).xbox_title_id as string;
+          const cur = counts.get(id) ?? { unlocked: 0, total: 0 };
+          cur.total++;
+          if ((row as any).unlocked) cur.unlocked++;
+          counts.set(id, cur);
+        }
+        if (!xRows || xRows.length < CHUNK) break;
+      }
+    }
+    for (const it of gameItems as any[]) {
+      if (!it.xboxTitleId) continue;
+      const c = counts.get(it.xboxTitleId);
+      // Same fallback pattern as PSN — if user_xbox_achievements hasn't
+      // been synced yet, fall back to the gamerscore ratio stored on
+      // user_game_status by sync-library, so a user who's synced their
+      // library but not achievements still sees a progress bar.
+      if (c) {
+        it.xboxAchUnlocked = c.unlocked;
+        it.xboxAchTotal = c.total;
+      } else if (typeof it.xboxMaxScore === 'number' && it.xboxMaxScore > 0) {
+        // Use gamerscore ratio as achievement proxy — approximation, but
+        // matches what the user sees on their Xbox dashboard for the title.
+        it.xboxAchUnlocked = it.xboxCurrentScore ?? 0;
+        it.xboxAchTotal = it.xboxMaxScore;
+      }
+    }
+  }
+
+  // Split pass — a game owned on multiple platforms (Steam + PSN + Xbox)
+  // emits one display row PER platform, each with its own chip, playtime
+  // (where available), last-played date, and progress bar. Overview grid
+  // dedupes by gameId client-side; detailed grid renders every row.
   //
-  // Both split rows carry the same gameId — bulk edit and status changes are
+  // All split rows carry the same gameId — bulk edit and status changes are
   // still per-game — but a distinct rowKey so client renderers can key their
   // per-row state on it.
   const shared = (it: any) => ({
@@ -478,13 +550,18 @@ export const GET: APIRoute = async (context) => {
     status: it.status, owned: it.owned, isHidden: it.isHidden,
     updatedAt: it.updatedAt,
   });
+  const emptyPlatformFields = {
+    steamAppid: null,
+    psnNpCommId: null,
+    psnPlatform: null,
+    xboxTitleId: null,
+  };
   const steamRow = (it: any) => ({
     ...shared(it),
+    ...emptyPlatformFields,
     rowKey: `${it.gameId}:steam`,
     sourcePlatform: 'steam' as const,
     steamAppid: it.steamAppid,
-    psnNpCommId: null,
-    psnPlatform: null,
     playtime:    it.steamPlaytime,
     lastPlayed:  it.steamLastPlayed,
     achUnlocked: it.steamAchUnlocked,
@@ -492,9 +569,9 @@ export const GET: APIRoute = async (context) => {
   });
   const psnRow = (it: any) => ({
     ...shared(it),
+    ...emptyPlatformFields,
     rowKey: `${it.gameId}:psn`,
     sourcePlatform: 'psn' as const,
-    steamAppid: null,
     psnNpCommId: it.psnNpCommId,
     psnPlatform: it.psnPlatform,
     playtime:    it.psnPlaytime,
@@ -502,25 +579,36 @@ export const GET: APIRoute = async (context) => {
     achUnlocked: it.psnAchUnlocked,
     achTotal:    it.psnAchTotal,
   });
+  const xboxRow = (it: any) => ({
+    ...shared(it),
+    ...emptyPlatformFields,
+    rowKey: `${it.gameId}:xbox`,
+    sourcePlatform: 'xbox' as const,
+    xboxTitleId: it.xboxTitleId,
+    // Xbox doesn't expose playtime; leaving playtime null keeps the row
+    // consistent with the "no hours" state manual/PS3-only games already
+    // render.
+    playtime:    null,
+    lastPlayed:  it.xboxLastPlayed,
+    achUnlocked: it.xboxAchUnlocked,
+    achTotal:    it.xboxAchTotal,
+  });
 
   const items: any[] = [];
   for (const it of gameItems as any[]) {
     const hasSteam = it.steamAppid != null;
     const hasPsn = it.psnNpCommId != null;
-    if (hasSteam && hasPsn) {
-      items.push(steamRow(it));
-      items.push(psnRow(it));
-    } else if (hasSteam) {
-      items.push(steamRow(it));
-    } else if (hasPsn) {
-      items.push(psnRow(it));
-    } else {
+    const hasXbox = it.xboxTitleId != null;
+    if (hasSteam) items.push(steamRow(it));
+    if (hasPsn) items.push(psnRow(it));
+    if (hasXbox) items.push(xboxRow(it));
+    if (!hasSteam && !hasPsn && !hasXbox) {
       // Manually-tracked game with no external source.
       items.push({
         ...shared(it),
+        ...emptyPlatformFields,
         rowKey: it.gameId,
         sourcePlatform: null,
-        steamAppid: null, psnNpCommId: null, psnPlatform: null,
         playtime: null, lastPlayed: null, achUnlocked: null, achTotal: null,
       });
     }
