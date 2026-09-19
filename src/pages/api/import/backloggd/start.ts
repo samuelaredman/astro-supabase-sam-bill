@@ -8,7 +8,7 @@ import {
   fetchReviewsPage,
   normalizeUsername,
 } from "../../../../utils/backloggd/fetchPage";
-import { loadActiveJob } from "../../../../utils/backloggd/job";
+import { loadActiveJob, reapStaleJobs } from "../../../../utils/backloggd/job";
 
 const MAX_UPLOAD_ROWS = 5000;
 
@@ -25,6 +25,11 @@ export const POST: APIRoute = async (context) => {
   } catch {
     return json({ error: "Invalid request body." }, 400);
   }
+
+  // Clear any dead jobs first — a crashed / abandoned run stays in
+  // 'scraping' or 'importing' forever and would otherwise 409 every future
+  // start attempt (see reapStaleJobs for the full rationale).
+  await reapStaleJobs(db, profile.id);
 
   // One live job per user.
   const active = await loadActiveJob(db, profile.id);

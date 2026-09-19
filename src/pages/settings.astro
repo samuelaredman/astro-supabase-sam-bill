@@ -821,6 +821,72 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     padding: 6px 12px;
     font-size: 12px;
   }
+  .sr-published-summary {
+    background: var(--bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sr-published-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .sr-published-label {
+    color: var(--text-secondary);
+  }
+  .sr-published-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .sr-published-toggle:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+  .sr-published-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 8px;
+  }
+  .sr-published-list[hidden] { display: none; }
+  .sr-published-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+    font-size: 12.5px;
+  }
+  .sr-published-title {
+    color: var(--text-primary);
+    text-decoration: none;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sr-published-title:hover { color: var(--accent); }
+  .sr-published-link {
+    color: var(--text-tertiary);
+    text-decoration: none;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .sr-published-link:hover { color: var(--accent); }
   .bl-bookmarklet {
     display: inline-block;
     margin: 4px 0 2px 6px;
@@ -1432,8 +1498,11 @@ import {
   mapSteamItem,
   discardSteamItem,
   replaceDraftFromSteam,
+  dismissSteamConflict,
   type ImportProgress as SteamImportProgress,
   type SteamConflictItem,
+  type SteamDraftConflict,
+  type SteamSummaryConflict,
 } from "../utils/steam-reviews/importClient";
 
 const srEl = (id: string) => document.getElementById(id);
@@ -1597,14 +1666,27 @@ async function srReplaceDraft(card: HTMLElement, itemId: string, gameTitle: stri
   }
 }
 
-function srDismissConflict(card: HTMLElement) {
-  // Client-side only — the item stays as a skipped row on the job, but we
-  // remove it from view. Refreshing the page after the job completes drops
-  // the whole conflicts panel anyway (loadActiveJob returns null once a job
-  // is complete), so no need for a server-side "dismissed" flag.
+async function srDismissConflict(card: HTMLElement, itemId: string) {
+  // Persist the decision — next Steam import won't re-surface this appid.
+  // Only remove the DOM card after the server confirms; on failure, leave
+  // the card in place with an error so the user isn't quietly lied to.
+  const dismissBtn = card.querySelector(".sr-dismiss-btn") as HTMLButtonElement | null;
+  const replaceBtn = card.querySelector(".sr-replace-btn") as HTMLButtonElement | null;
+  if (dismissBtn) dismissBtn.disabled = true;
+  if (replaceBtn) replaceBtn.disabled = true;
+  try {
+    await dismissSteamConflict(itemId);
+  } catch (e: any) {
+    if (dismissBtn) dismissBtn.disabled = false;
+    if (replaceBtn) replaceBtn.disabled = false;
+    srSetMsg(e?.message ?? "Could not dismiss this conflict.");
+    return;
+  }
   card.remove();
   const wrap = srEl("srConflicts");
-  if (wrap && !wrap.querySelector(".sr-conflict-card")) {
+  // Keep the panel open as long as ANYTHING remains (e.g. the published
+  // summary), not just draft cards.
+  if (wrap && wrap.children.length === 0) {
     wrap.style.display = "none";
     wrap.innerHTML = "";
   }
@@ -1620,15 +1702,28 @@ function srRenderConflicts(items: SteamConflictItem[] | undefined | null) {
   }
   box.style.display = "flex";
   box.innerHTML = "";
-  for (const c of items) {
+
+  // Three UX shapes:
+  //   - draft conflicts w/ different text: real decision (Replace vs Keep) → full compare card
+  //   - published conflicts w/ different text: informational (only Dismiss/View) → summary row
+  //   - identical text: user pasted their Steam review verbatim into Chekpoint —
+  //     zero decision, zero surprise, just tell them it already exists → summary row
+  // Type predicates so TypeScript narrows to the trimmed summary shape (no body/steam)
+  // for the non-draft paths — matching the bandwidth-trimmed status.ts response.
+  const drafts = items.filter((c): c is SteamDraftConflict => c.kind === "draft");
+  const published = items.filter(
+    (c): c is SteamSummaryConflict => c.kind === "published",
+  );
+  const identical = items.filter(
+    (c): c is SteamSummaryConflict => c.kind === "identical",
+  );
+
+  for (const c of drafts) {
     const card = document.createElement("div");
     card.className = "sr-conflict-card";
 
     const gameHref = c.game.slug ? `/games/${c.game.slug}` : `#`;
     const reviewHref = `/reviews/${c.existing.id}`;
-    const isPublished = c.kind === "published";
-    const kindLabel = isPublished ? "Already published" : "Existing draft";
-    const kindClass = isPublished ? "published" : "";
 
     const steamMeta = [
       c.steam.review_date ? c.steam.review_date : "",
@@ -1637,29 +1732,19 @@ function srRenderConflicts(items: SteamConflictItem[] | undefined | null) {
     ].filter(Boolean).join(" · ");
 
     const existingScore = c.existing.score != null ? `${c.existing.score}/10` : "no score";
-    const existingWhen = c.existing.published_at
-      ? new Date(c.existing.published_at).toLocaleDateString()
-      : c.existing.created_at
-        ? `drafted ${new Date(c.existing.created_at).toLocaleDateString()}`
-        : "";
+    const existingWhen = c.existing.created_at
+      ? `drafted ${new Date(c.existing.created_at).toLocaleDateString()}`
+      : "";
     const existingMeta = [existingScore, existingWhen].filter(Boolean).join(" · ");
-
-    const actionsHtml = isPublished
-      ? `<a href="${reviewHref}" class="settings-ghost-btn" style="padding:6px 12px;font-size:12px;text-decoration:none">View my review</a>
-         <button type="button" class="settings-ghost-btn sr-dismiss-btn">Dismiss</button>
-         <span style="font-size:11px;color:var(--text-tertiary)">Steam version discarded — unpublish your review first if you want to replace it.</span>`
-      : `<button type="button" class="settings-save-btn sr-replace-btn">Replace my draft with Steam text</button>
-         <a href="${reviewHref}" class="settings-ghost-btn" style="padding:6px 12px;font-size:12px;text-decoration:none">View my draft</a>
-         <button type="button" class="settings-ghost-btn sr-dismiss-btn">Keep mine</button>`;
 
     card.innerHTML = `
       <div class="sr-conflict-head">
         <span class="sr-conflict-title"><a href="${gameHref}" style="color:inherit;text-decoration:none">${srEscapeHtml(c.game.title)}</a></span>
-        <span class="sr-conflict-kind ${kindClass}">${kindLabel}</span>
+        <span class="sr-conflict-kind">Existing draft</span>
       </div>
       <div class="sr-conflict-cols">
         <div class="sr-conflict-col">
-          <h4>Your ${isPublished ? "published review" : "existing draft"}</h4>
+          <h4>Your existing draft</h4>
           ${c.existing.title ? `<div style="font-weight:500;margin-bottom:4px">${srEscapeHtml(c.existing.title)}</div>` : ""}
           <div class="sr-conflict-body">${srEscapeHtml(srSnippet(c.existing.body))}</div>
           ${existingMeta ? `<div class="sr-conflict-meta">${existingMeta}</div>` : ""}
@@ -1670,19 +1755,74 @@ function srRenderConflicts(items: SteamConflictItem[] | undefined | null) {
           ${steamMeta ? `<div class="sr-conflict-meta">${steamMeta}</div>` : ""}
         </div>
       </div>
-      <div class="sr-conflict-actions"></div>`;
+      <div class="sr-conflict-actions">
+        <button type="button" class="settings-save-btn sr-replace-btn">Replace my draft with Steam text</button>
+        <a href="${reviewHref}" class="settings-ghost-btn" style="padding:6px 12px;font-size:12px;text-decoration:none">View my draft</a>
+        <button type="button" class="settings-ghost-btn sr-dismiss-btn">Keep mine</button>
+      </div>`;
 
-    const actions = card.querySelector(".sr-conflict-actions") as HTMLElement;
-    actions.innerHTML = actionsHtml;
-
-    const replaceBtn = actions.querySelector(".sr-replace-btn") as HTMLButtonElement | null;
+    const replaceBtn = card.querySelector(".sr-replace-btn") as HTMLButtonElement | null;
     if (replaceBtn) replaceBtn.onclick = () => srReplaceDraft(card, c.item_id, c.game.title);
 
-    const dismissBtn = actions.querySelector(".sr-dismiss-btn") as HTMLButtonElement | null;
-    if (dismissBtn) dismissBtn.onclick = () => srDismissConflict(card);
+    const dismissBtn = card.querySelector(".sr-dismiss-btn") as HTMLButtonElement | null;
+    if (dismissBtn) dismissBtn.onclick = () => srDismissConflict(card, c.item_id);
 
     box.appendChild(card);
   }
+
+  // Identical first — most benign, least surprising to the user. Then published
+  // (informational) below it. Drafts (the ones with real decisions) render
+  // above these summary blocks.
+  if (identical.length) {
+    const n = identical.length;
+    box.appendChild(
+      srBuildSkippedSummary(
+        identical,
+        `${n} Steam review${n === 1 ? " is" : "s are"} already on Chekpoint (identical text) — skipped.`,
+      ),
+    );
+  }
+  if (published.length) {
+    const n = published.length;
+    box.appendChild(
+      srBuildSkippedSummary(
+        published,
+        `${n} Steam review${n === 1 ? "" : "s"} skipped — you've already published these on Chekpoint.`,
+      ),
+    );
+  }
+}
+
+function srBuildSkippedSummary(items: SteamSummaryConflict[], label: string): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "sr-published-summary";
+  wrap.innerHTML = `
+    <div class="sr-published-head">
+      <span class="sr-published-label">${label}</span>
+      <button type="button" class="sr-published-toggle" aria-expanded="false">Show ▾</button>
+    </div>
+    <div class="sr-published-list" hidden></div>`;
+
+  const list = wrap.querySelector(".sr-published-list") as HTMLElement;
+  for (const c of items) {
+    const row = document.createElement("div");
+    row.className = "sr-published-row";
+    const gameHref = c.game.slug ? `/games/${c.game.slug}` : `#`;
+    const reviewHref = `/reviews/${c.existing.id}`;
+    row.innerHTML = `
+      <a class="sr-published-title" href="${gameHref}">${srEscapeHtml(c.game.title)}</a>
+      <a class="sr-published-link" href="${reviewHref}">View my review →</a>`;
+    list.appendChild(row);
+  }
+
+  const btn = wrap.querySelector(".sr-published-toggle") as HTMLButtonElement;
+  btn.onclick = () => {
+    const open = btn.getAttribute("aria-expanded") === "true";
+    btn.setAttribute("aria-expanded", open ? "false" : "true");
+    btn.textContent = open ? "Show ▾" : "Hide ▴";
+    list.hidden = open;
+  };
+  return wrap;
 }
 
 async function srDrive() {

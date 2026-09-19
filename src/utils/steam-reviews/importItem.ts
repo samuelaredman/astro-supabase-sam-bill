@@ -11,6 +11,20 @@
 import { clampImportedDateIso } from "../importJob";
 import { matchSteamReviewGame } from "./matchGame";
 
+// Collapse every run of whitespace to a single space and trim. Copy-paste
+// between Steam and Chekpoint routinely picks up NBSPs, trailing newlines,
+// or a stray double-space — we don't want any of those to make the same
+// text register as "different".
+function normalizeBodyForCompare(text: string | null | undefined): string {
+  return (text ?? "").replace(/\s+/g, " ").trim();
+}
+
+function isSameReviewBody(a: string | null | undefined, b: string | null | undefined): boolean {
+  const na = normalizeBodyForCompare(a);
+  const nb = normalizeBodyForCompare(b);
+  return na.length > 0 && na === nb;
+}
+
 export type SteamImportItemInput = {
   id: string;
   steam_appid: number | null;
@@ -29,6 +43,29 @@ export type SteamImportItemOutcome = {
   review_id?: string | null;
   detail?: string | null;
 };
+
+/**
+ * Fetch the full set of appids this user has dismissed once per batch, then
+ * serve subsequent lookups from the cache. A user with 100 Steam reviews and
+ * 30 dismissals would otherwise do 100 separate table lookups per import —
+ * the cache turns that into one SELECT per batch of ~6 items.
+ */
+export async function loadDismissedAppids(
+  db: any,
+  profileId: string,
+  cache?: { dismissedAppids?: Set<number> },
+): Promise<Set<number>> {
+  if (cache?.dismissedAppids) return cache.dismissedAppids;
+  const { data } = await db
+    .from("steam_import_dismissals")
+    .select("steam_appid")
+    .eq("profile_id", profileId);
+  const set = new Set<number>(
+    ((data ?? []) as Array<{ steam_appid: number }>).map((r) => r.steam_appid),
+  );
+  if (cache) cache.dismissedAppids = set;
+  return set;
+}
 
 /** Resolve the PC platform id once per run — Steam reviews are always PC. */
 export async function resolvePCPlatformId(
@@ -61,8 +98,24 @@ export async function importSteamReviewItem(
   db: any,
   profileId: string,
   item: SteamImportItemInput,
-  opts: { pcPlatformCache?: { pcPlatformId?: string | null } } = {},
+  opts: {
+    pcPlatformCache?: { pcPlatformId?: string | null };
+    dismissedAppidsCache?: { dismissedAppids?: Set<number> };
+  } = {},
 ): Promise<SteamImportItemOutcome> {
+  // ── 0. Skip if the user has already dismissed this appid ──────────────────
+  // Populated when the user clicks "Keep mine" on a draft compare card
+  // (see /api/import/steam/dismiss.ts). Detail deliberately has no
+  // `conflict:` prefix so status.ts's `.like("detail", "conflict:%")` filter
+  // excludes it — the user never sees this appid surface again after they
+  // dismissed it, even across re-imports.
+  if (item.steam_appid) {
+    const dismissed = await loadDismissedAppids(db, profileId, opts.dismissedAppidsCache);
+    if (dismissed.has(item.steam_appid)) {
+      return { status: "skipped", detail: "dismissed" };
+    }
+  }
+
   // ── 1. Match game (appid -> steam-title RPC -> IGDB search) ────────────────
   let gameId: string | null = item.matched_game_id ?? null;
   let matchMethod = item.matched_game_id ? "manual" : "";
@@ -93,21 +146,37 @@ export async function importSteamReviewItem(
   // .maybeSingle() would throw the moment there's more than one match.
   const { data: existingRows } = await db
     .from("reviews")
-    .select("id, status")
+    .select("id, status, body")
     .eq("profile_id", profileId)
     .eq("game_id", gameId)
     .order("status", { ascending: false }) // 'published' > 'draft' lexicographically
     .order("created_at", { ascending: false })
     .limit(1);
   const existing = Array.isArray(existingRows) && existingRows.length > 0
-    ? (existingRows[0] as { id: string; status: string | null })
+    ? (existingRows[0] as { id: string; status: string | null; body: string | null })
     : null;
   if (existing) {
+    // Soft-delete is an implicit dismissal: the user already chose to remove
+    // this review from Chekpoint, don't bring it back on the next import. Skip
+    // silently (no `conflict:` prefix so status.ts's filter drops it).
+    if (existing.status === "deleted") {
+      return { status: "skipped", matched_game_id: gameId, detail: "dismissed" };
+    }
     // The `conflict:<kind>` detail is machine-readable; the status endpoint
     // parses it to build the "review already exists" UI. review_id points at
     // the EXISTING conflicting review — not a newly-created one — which is
     // the same field the UI already links off of for drafted rows.
-    const kind = existing.status === "published" ? "published" : "draft";
+    // Users sometimes copy-paste their Steam review verbatim into Chekpoint —
+    // treat that as `identical` so we can show it as "already exists, nothing
+    // to do" instead of asking the user to reconcile the same text with itself.
+    let kind: "identical" | "published" | "draft";
+    if (isSameReviewBody(existing.body, item.review_text)) {
+      kind = "identical";
+    } else if (existing.status === "published") {
+      kind = "published";
+    } else {
+      kind = "draft";
+    }
     return {
       status: "skipped",
       matched_game_id: gameId,

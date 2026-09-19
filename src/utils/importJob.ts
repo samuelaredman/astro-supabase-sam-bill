@@ -53,6 +53,73 @@ export async function loadOwnedJob(
 }
 
 /**
+ * Force-fail any of this user's import jobs that are still marked
+ * scraping/importing but haven't been touched in `thresholdMinutes` minutes.
+ *
+ * Why this exists: `import_jobs_one_active_per_profile` is a partial unique
+ * index on (profile_id) WHERE status IN ('scraping', 'importing'). If a job
+ * dies mid-flight (function timeout, tab closed mid-scrape, network drop
+ * during the polling loop) it stays in one of those statuses forever, and
+ * the user can never start a new import — start.ts always 409s them.
+ *
+ * The client polls process/scrape in a tight loop (150ms between batches;
+ * rate-limit sleeps top out around 60s in importClient.ts). Any gap longer
+ * than a few minutes means the driver is dead — 5 minutes is a wide margin
+ * that avoids racing an in-flight rate-limit sleep.
+ *
+ * Best-effort: any error is logged but never thrown. If the reap fails, the
+ * caller falls through to `loadActiveJob` and 409s the user the same as
+ * before — no regression compared to not having the reaper at all.
+ */
+export async function reapStaleJobs(
+  db: any,
+  profileId: string,
+  thresholdMinutes = 5,
+): Promise<number> {
+  try {
+    const { data: active } = await db
+      .from("import_jobs")
+      .select("id, status, created_at, updated_at")
+      .eq("profile_id", profileId)
+      .in("status", ["scraping", "importing"]);
+    if (!active || active.length === 0) return 0;
+
+    const cutoff = Date.now() - thresholdMinutes * 60_000;
+    const stale = (active as Array<{
+      id: string;
+      status: string;
+      created_at: string;
+      updated_at: string | null;
+    }>).filter((j) => {
+      // updated_at is null on brand-new jobs that never made it past insert
+      // (crashed before the first recountJob call). Fall back to created_at
+      // so those get reaped too.
+      const lastActivity = j.updated_at ?? j.created_at;
+      const t = new Date(lastActivity).getTime();
+      return Number.isFinite(t) && t < cutoff;
+    });
+    if (stale.length === 0) return 0;
+
+    const { error } = await db
+      .from("import_jobs")
+      .update({
+        status: "failed",
+        error: `Import timed out — no activity for ${thresholdMinutes}+ minutes.`,
+        updated_at: new Date().toISOString(),
+      })
+      .in("id", stale.map((j) => j.id));
+    if (error) {
+      console.error("[reapStaleJobs] update error:", JSON.stringify(error));
+      return 0;
+    }
+    return stale.length;
+  } catch (e) {
+    console.error("[reapStaleJobs] unexpected:", e);
+    return 0;
+  }
+}
+
+/**
  * The caller's most recent unfinished job (any source). The `one active per
  * profile` unique index means at most one row matches — same rule applies
  * across Backloggd and Steam, so a user can't start a Steam import while a
