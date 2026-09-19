@@ -3073,6 +3073,35 @@ export type Database = {
         }
         Relationships: []
       }
+      steam_import_dismissals: {
+        Row: {
+          dismissed_at: string
+          dismissed_via: string
+          profile_id: string
+          steam_appid: number
+        }
+        Insert: {
+          dismissed_at?: string
+          dismissed_via: string
+          profile_id: string
+          steam_appid: number
+        }
+        Update: {
+          dismissed_at?: string
+          dismissed_via?: string
+          profile_id?: string
+          steam_appid?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "steam_import_dismissals_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       steam_unmatched_titles: {
         Row: {
           dismissed: boolean

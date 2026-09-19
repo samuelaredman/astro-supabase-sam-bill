@@ -3,4 +3,4 @@
 // ../importJob.ts and is used by both Backloggd and Steam.
 
 export type { ImportJob } from "../importJob";
-export { loadOwnedJob, loadActiveJob, recountJob } from "../importJob";
+export { loadOwnedJob, loadActiveJob, recountJob, reapStaleJobs } from "../importJob";

@@ -83,9 +83,21 @@ export async function discardSteamItem(itemId: string, signal?: AbortSignal) {
   return data as { ok: true; job: any };
 }
 
-export type SteamConflictItem = {
+// Discriminated union — the status endpoint deliberately ships less data for
+// non-draft conflicts because the UI renders them as a one-line summary that
+// doesn't need bodies/titles/scores/dates. Wire savings on that path are
+// roughly `total_non_draft_conflicts × 4KB` compared to shipping the full
+// shape for every kind (see status.ts's bandwidth note).
+type SteamConflictGame = {
+  id: string;
+  title: string;
+  slug: string | null;
+  cover_img_url: string | null;
+};
+
+export type SteamDraftConflict = {
   item_id: string;
-  kind: "draft" | "published";
+  kind: "draft";
   steam: {
     appid: number | null;
     review_text: string;
@@ -93,22 +105,25 @@ export type SteamConflictItem = {
     hours_at_review: number | null;
     source_url: string | null;
   };
-  game: {
-    id: string;
-    title: string;
-    slug: string | null;
-    cover_img_url: string | null;
-  };
+  game: SteamConflictGame;
   existing: {
     id: string;
     status: string;
     score: number | null;
     title: string | null;
     body: string;
-    published_at: string | null;
     created_at: string | null;
   };
 };
+
+export type SteamSummaryConflict = {
+  item_id: string;
+  kind: "identical" | "published";
+  game: SteamConflictGame;
+  existing: { id: string };
+};
+
+export type SteamConflictItem = SteamDraftConflict | SteamSummaryConflict;
 
 export async function replaceDraftFromSteam(itemId: string, signal?: AbortSignal) {
   const { res, data } = await postJson(
@@ -118,6 +133,21 @@ export async function replaceDraftFromSteam(itemId: string, signal?: AbortSignal
   );
   if (!res.ok) throw new Error(data?.error ?? "Could not replace your draft.");
   return data as { ok: true; review_id: string; job: any };
+}
+
+/**
+ * "Keep mine" on a Steam draft conflict — persists the decision so future
+ * re-imports don't re-surface this appid. See /api/import/steam/dismiss for
+ * the guardrails.
+ */
+export async function dismissSteamConflict(itemId: string, signal?: AbortSignal) {
+  const { res, data } = await postJson(
+    "/api/import/steam/dismiss",
+    { item_id: itemId },
+    signal,
+  );
+  if (!res.ok) throw new Error(data?.error ?? "Could not dismiss this conflict.");
+  return data as { ok: true; job?: any; warning?: string };
 }
 
 export async function fetchSteamStatus(jobId: string, signal?: AbortSignal) {

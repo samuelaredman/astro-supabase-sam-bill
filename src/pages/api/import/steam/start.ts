@@ -7,7 +7,7 @@ import {
   SteamRateLimited,
 } from "../../../../utils/steam-reviews/fetchPage";
 import { parseRecommendationsPage } from "../../../../utils/steam-reviews/parse";
-import { loadActiveJob } from "../../../../utils/importJob";
+import { loadActiveJob, reapStaleJobs } from "../../../../utils/importJob";
 
 // POST {} -> { job_id, status, total_pages, total_reviews }
 // Creates an import job for the caller's connected Steam account.
@@ -17,6 +17,11 @@ export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
+
+  // Clear any dead jobs first — a crashed / abandoned run stays in
+  // 'scraping' or 'importing' forever and would otherwise 409 every future
+  // start attempt (see reapStaleJobs for the full rationale).
+  await reapStaleJobs(db, profile.id);
 
   const active = await loadActiveJob(db, profile.id);
   if (active) {

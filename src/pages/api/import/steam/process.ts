@@ -50,6 +50,8 @@ export const POST: APIRoute = async (context) => {
 
   const started = Date.now();
   const pcPlatformCache: { pcPlatformId?: string | null } = {};
+  // One dismissals fetch per batch instead of per item — see loadDismissedAppids.
+  const dismissedAppidsCache: { dismissedAppids?: Set<number> } = {};
   let processed = 0;
 
   for (const item of items ?? []) {
@@ -67,7 +69,10 @@ export const POST: APIRoute = async (context) => {
         source_url: item.source_url ?? "",
         matched_game_id: item.matched_game_id,
       };
-      outcome = await importSteamReviewItem(db, profile.id, input, { pcPlatformCache });
+      outcome = await importSteamReviewItem(db, profile.id, input, {
+        pcPlatformCache,
+        dismissedAppidsCache,
+      });
     } catch (e) {
       outcome = { status: "failed" as const, detail: e instanceof Error ? e.message : "error" };
     }
