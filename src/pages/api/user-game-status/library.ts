@@ -252,17 +252,21 @@ export const GET: APIRoute = async (context) => {
       for (const r of (trRows  ?? []) as any[]) pctByNpComm.set(r.np_communication_id, Number(r.pct));
     }
 
-    // Metric extractor. For completion: prefer Steam pct if the row has one,
-    // fall back to PSN pct. -1 sinks games with no data below 0%-completed
-    // ones. For hours: sum both platforms so a game played 20h Steam + 30h
-    // PS5 sorts at 50h.
+    // Metric extractor. For completion: max(steam pct, psn pct) — the game's
+    // best completion across sources. Detailed view splits mixed games into
+    // two rows so each source's actual pct is still visible; using max for
+    // the aggregate places the game at its highest completion, which is what
+    // "sort by completion %" means to a user. -1 sinks games with no data
+    // below 0%-completed ones. For hours: sum so a game played 20h Steam +
+    // 30h PS5 sorts at 50h.
     const metricFor = (ugs: any): number => {
       if (sort === 'completion') {
         const appid: number | null = ugs?.steam_appid ?? null;
-        if (appid != null && pctByAppid.has(appid)) return pctByAppid.get(appid)!;
         const npComm: string | null = ugs?.psn_np_communication_id ?? null;
-        if (npComm && pctByNpComm.has(npComm)) return pctByNpComm.get(npComm)!;
-        return -1;
+        const steamPct = appid != null ? pctByAppid.get(appid) : undefined;
+        const psnPct   = npComm ? pctByNpComm.get(npComm) : undefined;
+        if (steamPct === undefined && psnPct === undefined) return -1;
+        return Math.max(steamPct ?? -1, psnPct ?? -1);
       }
       // hours
       const steamMin = Number(ugs?.steam_playtime_minutes) || 0;
@@ -328,7 +332,11 @@ export const GET: APIRoute = async (context) => {
     total = res.count ?? 0;
   }
 
-  const items = (rows ?? []).map((r: any) => {
+  // Intermediate per-game shape carrying BOTH source's raw fields. The split
+  // pass below emits one display row per source when a game exists on both
+  // Steam and PSN, so the reader can see each platform's own playtime and
+  // achievement/trophy counts.
+  const gameItems = (rows ?? []).map((r: any) => {
     // buildQuery pivots the base table by sort, so a row is either a games row
     // with an embedded user_game_status, or a user_game_status row with an
     // embedded games. Normalise both to { g, ugs }.
@@ -338,21 +346,6 @@ export const GET: APIRoute = async (context) => {
     const ugs = r.games
       ? r
       : (Array.isArray(r.user_game_status) ? r.user_game_status[0] : r.user_game_status);
-    // Source platform is Steam if the row has a steam_appid, PSN if only PSN
-    // identifiers exist. When both are present we prefer Steam (that's how the
-    // Steam-first library grew up, and picking one keeps the row single-icon).
-    const hasSteam = ugs?.steam_appid != null;
-    const hasPsn = !hasSteam && !!ugs?.psn_np_communication_id;
-    const sourcePlatform: 'steam' | 'psn' | null = hasSteam ? 'steam' : hasPsn ? 'psn' : null;
-    // Coalesced playtime + last-played so the client renders the same clock /
-    // calendar cells whichever platform sourced the row. PSN's psn_playtime is
-    // PS4/PS5-only (PS3 has no playtime API), so a PSN game may still be null.
-    const playtime = hasSteam
-      ? (ugs?.steam_playtime_minutes ?? null)
-      : (ugs?.psn_playtime_minutes ?? null);
-    const lastPlayed = hasSteam
-      ? (ugs?.steam_last_played_at ?? null)
-      : (ugs?.psn_last_played_at ?? null);
     return {
       gameId:    g?.id ?? '',
       title:     g?.title ?? '',
@@ -362,31 +355,34 @@ export const GET: APIRoute = async (context) => {
       owned:     ugs?.is_owned ?? false,
       isHidden:  ugs?.is_hidden ?? false,
       updatedAt: ugs?.updated_at ?? '',
-      lastPlayed,
-      playtime,
-      steamAppid: ugs?.steam_appid ?? null,
-      // PSN identifiers — the client renders a PS icon + platform label when
-      // sourcePlatform is 'psn'. psnPlatform is the human-readable chip label
-      // (PS3 / PS4 / PS5), stored by sync-library.
-      psnNpCommId: ugs?.psn_np_communication_id ?? null,
-      psnPlatform: ugs?.psn_platform ?? null,
-      // Trophy counts stored on user_game_status by sync-library. Used as a
-      // progress-bar fallback when the user has synced their library but not
-      // yet trophies (user_trophies is empty for this game).
+      // Per-source raw fields — collapsed into display fields by the split pass.
+      steamAppid:      ugs?.steam_appid ?? null,
+      steamPlaytime:   ugs?.steam_playtime_minutes ?? null,
+      steamLastPlayed: ugs?.steam_last_played_at ?? null,
+      psnNpCommId:     ugs?.psn_np_communication_id ?? null,
+      psnPlatform:     ugs?.psn_platform ?? null,
+      psnPlaytime:     ugs?.psn_playtime_minutes ?? null,
+      psnLastPlayed:   ugs?.psn_last_played_at ?? null,
+      // Trophy counts stored on user_game_status by sync-library — used as a
+      // fallback when user_trophies hasn't been populated yet.
       psnTrophiesEarned: ugs?.psn_trophies_earned ?? null,
-      psnTrophiesTotal: ugs?.psn_trophies_total ?? null,
-      sourcePlatform,
+      psnTrophiesTotal:  ugs?.psn_trophies_total ?? null,
+      // Populated by the count passes below.
+      steamAchUnlocked: null as number | null,
+      steamAchTotal:    null as number | null,
+      psnAchUnlocked:   null as number | null,
+      psnAchTotal:      null as number | null,
     };
   });
 
-  // Per-game achievement progress — drives the Detailed view's progress bar and
-  // the gold "100%" treatment in both views. user_achievements is keyed on
-  // steam_appid, so only Steam-imported games with a synced achievement set get
-  // counts. One page is <=96 games; the query is indexed on
-  // (profile_id, steam_appid) but paginate past the 1000-row cap anyway.
+  // Per-game achievement progress — drives the Detailed view's progress bar
+  // and the gold "100%" cover treatment. user_achievements is keyed on
+  // steam_appid; runs against every Steam-imported game on the page, even the
+  // ones that also have a PSN counterpart (since we split those into two rows
+  // below and each row needs its own count).
   {
     const appids = [...new Set(
-      items.map((i: any) => i.steamAppid).filter((x: any): x is number => typeof x === 'number')
+      gameItems.map((i: any) => i.steamAppid).filter((x: any): x is number => typeof x === 'number')
     )];
     const counts = new Map<number, { unlocked: number; total: number }>();
     if (appids.length > 0) {
@@ -412,22 +408,19 @@ export const GET: APIRoute = async (context) => {
         if (!achRows || achRows.length < CHUNK) break;
       }
     }
-    for (const it of items as any[]) {
+    for (const it of gameItems as any[]) {
       const c = it.steamAppid != null ? counts.get(it.steamAppid) : null;
-      it.achUnlocked = c ? c.unlocked : null;
-      it.achTotal = c ? c.total : null;
+      it.steamAchUnlocked = c ? c.unlocked : null;
+      it.steamAchTotal = c ? c.total : null;
     }
   }
 
-  // Per-game trophy progress for PSN-sourced rows — same idea as the Steam
-  // achievement pass above, but keyed on np_communication_id and reading from
-  // user_trophies. A game shows up here only when sourcePlatform is 'psn' AND
-  // sync-trophies has populated user_trophies for it. Steam-sourced rows keep
-  // whatever achUnlocked/achTotal Steam gave them.
+  // Per-game trophy progress — same idea as the Steam pass above, but keyed on
+  // np_communication_id and reading from user_trophies. Runs against every
+  // PSN-tracked game on the page.
   {
     const npCommIds = [...new Set(
-      (items as any[])
-        .filter((i) => i.sourcePlatform === 'psn')
+      (gameItems as any[])
         .map((i) => i.psnNpCommId)
         .filter((x: any): x is string => typeof x === 'string')
     )];
@@ -455,22 +448,86 @@ export const GET: APIRoute = async (context) => {
         if (!tRows || tRows.length < CHUNK) break;
       }
     }
-    for (const it of items as any[]) {
-      if (it.sourcePlatform !== 'psn') continue;
-      const c = it.psnNpCommId ? counts.get(it.psnNpCommId) : null;
+    for (const it of gameItems as any[]) {
+      if (!it.psnNpCommId) continue;
+      const c = counts.get(it.psnNpCommId);
       // If user_trophies has fresh data (post trophy-sync), use it. Otherwise
       // fall back to the aggregate counts stored on user_game_status by
       // sync-library, so a user who's synced their library but not trophies
       // still sees a progress bar.
       if (c) {
-        it.achUnlocked = c.earned;
-        it.achTotal = c.total;
+        it.psnAchUnlocked = c.earned;
+        it.psnAchTotal = c.total;
       } else if (typeof it.psnTrophiesTotal === 'number' && it.psnTrophiesTotal > 0) {
-        it.achUnlocked = it.psnTrophiesEarned ?? 0;
-        it.achTotal = it.psnTrophiesTotal;
+        it.psnAchUnlocked = it.psnTrophiesEarned ?? 0;
+        it.psnAchTotal = it.psnTrophiesTotal;
       }
     }
   }
 
-  return json({ items, total: total ?? 0, page, pageSize: PAGE_SIZE, hasMore: items.length === PAGE_SIZE });
+  // Split pass — a game owned on both Steam and PSN emits TWO display rows
+  // (one per source), each with its own platform chip, playtime, last-played
+  // date, and progress bar. Overview grid dedupes by gameId client-side;
+  // detailed grid renders both.
+  //
+  // Both split rows carry the same gameId — bulk edit and status changes are
+  // still per-game — but a distinct rowKey so client renderers can key their
+  // per-row state on it.
+  const shared = (it: any) => ({
+    gameId: it.gameId, title: it.title, slug: it.slug, cover: it.cover,
+    status: it.status, owned: it.owned, isHidden: it.isHidden,
+    updatedAt: it.updatedAt,
+  });
+  const steamRow = (it: any) => ({
+    ...shared(it),
+    rowKey: `${it.gameId}:steam`,
+    sourcePlatform: 'steam' as const,
+    steamAppid: it.steamAppid,
+    psnNpCommId: null,
+    psnPlatform: null,
+    playtime:    it.steamPlaytime,
+    lastPlayed:  it.steamLastPlayed,
+    achUnlocked: it.steamAchUnlocked,
+    achTotal:    it.steamAchTotal,
+  });
+  const psnRow = (it: any) => ({
+    ...shared(it),
+    rowKey: `${it.gameId}:psn`,
+    sourcePlatform: 'psn' as const,
+    steamAppid: null,
+    psnNpCommId: it.psnNpCommId,
+    psnPlatform: it.psnPlatform,
+    playtime:    it.psnPlaytime,
+    lastPlayed:  it.psnLastPlayed,
+    achUnlocked: it.psnAchUnlocked,
+    achTotal:    it.psnAchTotal,
+  });
+
+  const items: any[] = [];
+  for (const it of gameItems as any[]) {
+    const hasSteam = it.steamAppid != null;
+    const hasPsn = it.psnNpCommId != null;
+    if (hasSteam && hasPsn) {
+      items.push(steamRow(it));
+      items.push(psnRow(it));
+    } else if (hasSteam) {
+      items.push(steamRow(it));
+    } else if (hasPsn) {
+      items.push(psnRow(it));
+    } else {
+      // Manually-tracked game with no external source.
+      items.push({
+        ...shared(it),
+        rowKey: it.gameId,
+        sourcePlatform: null,
+        steamAppid: null, psnNpCommId: null, psnPlatform: null,
+        playtime: null, lastPlayed: null, achUnlocked: null, achTotal: null,
+      });
+    }
+  }
+
+  // total remains the game-level count so pagination stays stable — a page
+  // may render up to 2*PAGE_SIZE detail rows for a heavily-mixed library, but
+  // it always represents PAGE_SIZE games.
+  return json({ items, total: total ?? 0, page, pageSize: PAGE_SIZE, hasMore: gameItems.length === PAGE_SIZE });
 };
