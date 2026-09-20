@@ -23,7 +23,7 @@ const { data: profile } = await db
 
 const steamStatus = Astro.url.searchParams.get('steam'); // 'connected' | 'error' | 'cancelled' | null
 const psnStatus = Astro.url.searchParams.get('psn');     // 'connected' | 'expired' | null
-const xboxStatus = Astro.url.searchParams.get('xbox');   // 'connected' | 'expired' | null
+const xboxStatus = Astro.url.searchParams.get('xbox');   // 'connected' | 'expired' | 'duplicate' | 'error' | null
 
 if (!profile) return Astro.redirect('/signin');
 
@@ -400,7 +400,13 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           <div class="steam-banner steam-banner-ok">Xbox account connected successfully.</div>
         )}
         {xboxStatus === 'expired' && (
-          <div class="steam-banner steam-banner-err">Your Xbox API key was rejected. Paste a fresh one below to reconnect.</div>
+          <div class="steam-banner steam-banner-err">Your Xbox connection was rejected. Click Connect Xbox below to reauthorize.</div>
+        )}
+        {xboxStatus === 'duplicate' && (
+          <div class="steam-banner steam-banner-err">That Xbox account is already linked to another Chekpoint profile.</div>
+        )}
+        {xboxStatus === 'error' && (
+          <div class="steam-banner steam-banner-err">Something went wrong connecting to Xbox. Try again in a moment.</div>
         )}
 
         {profile.xbox_xuid ? (
@@ -459,21 +465,13 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
               <div class="settings-row-label">Connect your Xbox account</div>
               <div class="settings-row-sub">
                 Microsoft doesn't offer a direct sign-in for hobby apps, so we use <a href="https://xbl.io" target="_blank" rel="noopener">OpenXBL</a> —
-                a community proxy where you sign in with your Microsoft account once and get an <strong>API key</strong> to paste here.
+                a community proxy. Clicking Connect Xbox opens a Microsoft sign-in window; after you approve, you'll be sent back here automatically.
               </div>
             </div>
-            <ol class="psn-steps">
-              <li>Open <a href="https://xbl.io" target="_blank" rel="noopener">xbl.io</a> and click <strong>Sign in with Microsoft</strong>.</li>
-              <li>After signing in, visit <a href="https://xbl.io/profile" target="_blank" rel="noopener">xbl.io/profile</a>.</li>
-              <li>Copy the API key shown at the top of that page.</li>
-              <li>Paste it below and click Connect.</li>
-            </ol>
             <div class="psn-privacy-note">
-              We store this key so future syncs work without prompting. It only grants read access to your Xbox profile, games, and achievements — no writes or purchases. You can revoke it any time from xbl.io/profile.
+              We only get read access to your Xbox profile, games, and achievements — no writes or purchases. You can revoke access any time from <a href="https://xbl.io/profile" target="_blank" rel="noopener">xbl.io/profile</a>.
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-              <input id="xboxApiKey" type="text" placeholder="Paste OpenXBL API key" autocomplete="off" spellcheck={false}
-                style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:monospace" />
               <button class="settings-save-btn" id="xboxConnectBtn" onclick="xboxConnect()">Connect Xbox</button>
             </div>
             <div id="xboxConnectMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
@@ -1229,7 +1227,7 @@ declare global {
     psnSync: () => Promise<void>;
     psnSyncTrophies: () => Promise<void>;
     psnDisconnect: () => Promise<void>;
-    xboxConnect: () => Promise<void>;
+    xboxConnect: () => void;
     xboxSync: () => Promise<void>;
     xboxSyncAchievements: () => Promise<void>;
     xboxDisconnect: () => Promise<void>;
@@ -1720,44 +1718,17 @@ window.psnDisconnect = psnDisconnect;
 
 // ─── Xbox ───────────────────────────────────────────────────────────────────
 async function xboxConnect() {
-  const input = document.getElementById('xboxApiKey') as HTMLInputElement | null;
   const btn = document.getElementById('xboxConnectBtn') as HTMLButtonElement | null;
   const msg = document.getElementById('xboxConnectMsg');
-  if (!input || !btn || !msg) return;
-
-  const apiKey = input.value.trim();
-  if (!apiKey) {
-    msg.textContent = 'Paste an API key first.';
-    (msg as HTMLElement).style.color = '#f87171';
-    return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Redirecting…';
   }
-
-  btn.disabled = true;
-  btn.textContent = 'Connecting…';
-  msg.textContent = 'Validating with Xbox Live…';
-  (msg as HTMLElement).style.color = 'var(--text-secondary)';
-
-  try {
-    const res = await fetch('/api/auth/xbox-connect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      msg.textContent = data.error ?? 'Failed to connect.';
-      (msg as HTMLElement).style.color = '#f87171';
-      btn.disabled = false;
-      btn.textContent = 'Connect Xbox';
-      return;
-    }
-    window.location.href = '/settings?xbox=connected#xbox';
-  } catch (e) {
-    msg.textContent = 'Could not reach server. Please try again.';
-    (msg as HTMLElement).style.color = '#f87171';
-    btn.disabled = false;
-    btn.textContent = 'Connect Xbox';
+  if (msg) {
+    msg.textContent = 'Opening Xbox sign-in…';
+    (msg as HTMLElement).style.color = 'var(--text-secondary)';
   }
+  window.location.href = '/api/auth/xbox-connect';
 }
 window.xboxConnect = xboxConnect;
 

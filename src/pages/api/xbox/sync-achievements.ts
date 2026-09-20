@@ -138,19 +138,61 @@ export const POST: APIRoute = async (context) => {
       return json({ error: msg }, 502);
     }
 
-    // Delta filter: on a resync, skip titles where the user has ALREADY
-    // earned every achievement (currentAchievements === totalAchievements)
-    // AND the schema hasn't been refreshed recently. Xbox's titleHistory
-    // gives us current/total counts up-front — cheaper delta than pulling
-    // the per-title achievement list to compare.
+    // Delta filter — three cheap skips before we spend any OpenXBL calls.
+    // Every skipped title saves one /achievements/player fetch, which is
+    // the dominant cost on a resync of a big library (per-key rate limit
+    // is 150/hr on the free OpenXBL tier).
     //
-    // Also skip titles with 0 total achievements (apps).
+    //   1. Titles with 0 total achievements are apps, not games — skip.
+    //   2. On resync, titles the user has never played AND never earned
+    //      anything in are guaranteed no-ops — skip.
+    //   3. On resync, titles whose stored gamerscore (from the last
+    //      library sync) matches the current gamerscore reported by
+    //      titleHistory can't have gained new unlocks — skip. Only applied
+    //      to titles we've synced achievements for at least once, so a
+    //      failed prior ach-sync doesn't get skipped forever.
     const shouldDelta = !!lastSync && !force;
+
+    const syncedTitleIds = new Set<string>();
+    const storedGamerscoreByTitleId = new Map<string, number>();
+    if (shouldDelta) {
+      const { data: syncedRows, error: syncedErr } = await (db as any)
+        .rpc('xbox_synced_title_ids', { p_profile_id: profile.id });
+      if (!syncedErr) {
+        for (const r of (syncedRows ?? []) as Array<{ xbox_title_id: string }>) {
+          syncedTitleIds.add(r.xbox_title_id);
+        }
+      }
+
+      // Paginate: a user can have many hundreds of ownership rows and the
+      // 1000-row default cap would silently truncate.
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await (db as any)
+          .from('user_game_status')
+          .select('xbox_title_id, xbox_current_gamerscore')
+          .eq('profile_id', profile.id)
+          .not('xbox_title_id', 'is', null)
+          .range(from, from + PAGE - 1);
+        if (error || !data || data.length === 0) break;
+        for (const r of data as Array<{ xbox_title_id: string | null; xbox_current_gamerscore: number | null }>) {
+          if (r.xbox_title_id != null && r.xbox_current_gamerscore != null) {
+            storedGamerscoreByTitleId.set(r.xbox_title_id, r.xbox_current_gamerscore);
+          }
+        }
+        if (data.length < PAGE) break;
+      }
+    }
 
     const filtered: SnapshotTitle[] = [];
     for (const t of allTitles) {
       if (t.totalAchievements === 0) continue;
       if (shouldDelta && t.currentAchievements === 0 && !t.lastPlayed) continue;
+      if (
+        shouldDelta &&
+        syncedTitleIds.has(t.titleId) &&
+        storedGamerscoreByTitleId.get(t.titleId) === t.currentGamerscore
+      ) continue;
       filtered.push({
         titleId: t.titleId,
         name: t.name,

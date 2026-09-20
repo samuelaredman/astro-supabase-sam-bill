@@ -1,55 +1,42 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../utils/api";
-import { fetchAccount, isXboxAuthInvalid, looksLikeApiKey } from "../../../utils/xbox";
+import { createSupabaseServerClientFromContext } from "../../../utils/database";
 
-// User pastes an OpenXBL API key from xbl.io/profile. We validate it by
-// calling /account (which also returns the XUID + gamertag), then save
-// the key + identity to the profile. Unlike Steam (OpenID redirect) or
-// PSN (NPSSO exchange), no server-side token exchange is needed —
-// OpenXBL's key IS the credential.
-export const POST: APIRoute = async (context) => {
-  const { auth, response } = await requireAuth(context);
-  if (!auth) return response;
-  const { profile, db } = auth;
+// Starts the OpenXBL "Sign in with Xbox" flow. The user is redirected to
+// xbl.io/app/auth/<APP_KEY>, signs in with their Microsoft account there,
+// and OpenXBL redirects them back to this app's configured redirect URL
+// (set in the OpenXBL app dashboard on xbl.io/profile) with `?code=`.
+// The callback then POSTs to xbl.io/app/claim to exchange that code for
+// the persistent per-user API key + XUID + gamertag.
+//
+// OpenXBL doesn't preserve a state query param across the flow, so we
+// set an HttpOnly `xbox_oauth_state` cookie here as a simple proof-of-
+// start signal. The callback requires it to be present, which prevents
+// a drive-by CSRF where an attacker sends a user directly to the
+// callback URL with an attacker-controlled code.
+export const GET: APIRoute = async (context) => {
+  const userClient = createSupabaseServerClientFromContext(context);
+  const { data: { user } } = await userClient.auth.getUser();
+  if (!user) return context.redirect('/signin');
 
-  const body = await context.request.json().catch(() => ({} as any));
-  const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
-
-  if (!looksLikeApiKey(apiKey)) {
-    return json({
-      error: "That doesn't look like a valid OpenXBL API key. Copy it from https://xbl.io/profile — it should be a 30–80 character alphanumeric string.",
-    }, 400);
+  const appKey = import.meta.env.OPENXBL_APP_KEY;
+  if (!appKey) {
+    console.error('[xbox-connect] OPENXBL_APP_KEY is not set');
+    return context.redirect('/settings?xbox=error#xbox');
   }
 
-  let account;
-  try {
-    account = await fetchAccount(apiKey);
-  } catch (e) {
-    if (isXboxAuthInvalid(e)) {
-      return json({ error: 'Xbox Live rejected that key. Make sure you copied it from xbl.io/profile.' }, 400);
-    }
-    console.error('[xbox-connect] fetchAccount error:', e);
-    return json({ error: 'Xbox Live is temporarily unavailable. Try again in a minute.' }, 502);
-  }
+  const stateBytes = new Uint8Array(24);
+  crypto.getRandomValues(stateBytes);
+  const state = Array.from(stateBytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
-  if (!account) {
-    return json({ error: 'Could not read your Xbox profile. Double-check the key or try again in a minute.' }, 502);
-  }
+  // 10-min TTL covers any realistic time on the Microsoft login screen.
+  // SameSite=Lax so it survives the top-level cross-site redirect back.
+  context.cookies.set('xbox_oauth_state', state, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 60 * 10,
+  });
 
-  // Cast until supabase/types.ts is regenerated post-migration.
-  const { error } = await (db as any).from('profiles').update({
-    xbox_xuid: account.xuid,
-    xbox_gamertag: account.gamertag,
-    xbox_api_key: apiKey,
-  }).eq('id', profile.id);
-
-  if (error) {
-    if ((error as any).code === '23505') {
-      return json({ error: 'That Xbox account is already linked to another Chekpoint profile.' }, 409);
-    }
-    console.error('[xbox-connect] profile update error:', JSON.stringify(error));
-    return json({ error: 'Failed to save Xbox connection.' }, 500);
-  }
-
-  return json({ success: true, gamertag: account.gamertag });
+  return context.redirect(`https://xbl.io/app/auth/${encodeURIComponent(appKey)}`);
 };
