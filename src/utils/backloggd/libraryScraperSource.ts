@@ -169,6 +169,39 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
 
     var libraryTotal = Object.keys(librarySlugs).length || baseCount;
 
+    // Baseline-only slugs: games in the library that no status filter picked
+    // up. Backloggd's /games/ view is a union of everything the user has
+    // rated, reviewed, journalled, or listed — a game that's rated but not
+    // explicitly marked with a play state (Played / Playing / Backlog /
+    // Wishlist / etc.) is in this set. For a heavy Backloggd user this can
+    // be hundreds of games and previously all fell on the floor.
+    var unassignedSlugs = [];
+    for (var uSlug in librarySlugs) { if (!assigned[uSlug]) unassignedSlugs.push(uSlug); }
+
+    // Ask the user how to import the unclassified games. Default choice is
+    // "played" — for most Backloggd users these are rated games, and rating
+    // implies at least a play attempt — but we won't presume that
+    // silently. Cancel-out skips them (existing behavior).
+    var fallbackStatus = null;
+    if (unassignedSlugs.length > 0) {
+      var promptMsg =
+        "Chekpoint found " + libraryTotal + " games in your Backloggd library.\n\n" +
+        Object.keys(assigned).length + " have an explicit status (Played / Playing / Backlog / Wishlist / Retired).\n\n" +
+        "The other " + unassignedSlugs.length + " are in your library but have no play state (usually games you rated without marking as played).\n\n" +
+        "Import those " + unassignedSlugs.length + " games as: type played / backlog / wishlist / skip";
+      var answer = (prompt(promptMsg, "played") || "").trim().toLowerCase();
+      if (answer === "played" || answer === "completed") fallbackStatus = "played";
+      else if (answer === "backlog" || answer === "want" || answer === "want_to_play") fallbackStatus = "backlog";
+      else if (answer === "wishlist") fallbackStatus = "wishlist";
+      // Anything else (including empty / "skip" / cancel) → skip.
+    }
+
+    if (fallbackStatus) {
+      for (var ui = 0; ui < unassignedSlugs.length; ui++) {
+        assigned[unassignedSlugs[ui]] = fallbackStatus;
+      }
+    }
+
     var rows = [];
     for (var slug in assigned) {
       rows.push({ game_slug: slug, game_title: titleBySlug[slug] || slug.replace(/-/g, " "),
@@ -193,9 +226,12 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     a.href = URL.createObjectURL(blob);
     a.download = "backloggd-chekpoint-library.json";
     document.body.appendChild(a); a.click(); a.remove();
-    box.textContent = "Chekpoint: done — " + rows.length + " games with a status (" +
+    var skipped = unassignedSlugs.length && !fallbackStatus
+      ? " (skipped " + unassignedSlugs.length + " unclassified)"
+      : "";
+    box.textContent = "Chekpoint: done — " + rows.length + " of " + libraryTotal + " games (" +
       counts.played + " played, " + counts.playing + " playing, " + counts.dropped + " dropped, " +
-      counts.backlog + " backlog, " + counts.wishlist + " wishlist). Upload the file on Chekpoint.";
+      counts.backlog + " backlog, " + counts.wishlist + " wishlist)" + skipped + ". Upload the file on Chekpoint.";
   } catch (e) {
     box.textContent = "Chekpoint library importer: failed — " + (e && e.message ? e.message : e);
     throw e;
