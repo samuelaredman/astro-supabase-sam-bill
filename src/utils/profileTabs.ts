@@ -13,6 +13,7 @@
  */
 import { getVoteCounts, igdbImage as igdbCover } from './format';
 import { REC_SELECT, shapeRec } from './recommendationsFeed';
+import { queryLibraryPage, LIBRARY_PAGE_SIZE, type LibraryPageResult } from './libraryQuery';
 
 export const LAZY_PROFILE_TABS = ['reviews', 'recommendations', 'lists', 'library'] as const;
 export type LazyProfileTab = (typeof LAZY_PROFILE_TABS)[number];
@@ -351,14 +352,39 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
   let libGenres: string[] = [];
   let libPlatforms: string[] = [];
   let libDevs: string[] = [];
+  // Page 1 of the grid, run in parallel with the counts + dim queries. Inlined
+  // into the tab HTML so the client can hydrate without a second round-trip;
+  // filter / sort / pagination changes still hit /api/user-game-status/library.
+  let initialLibraryPage: LibraryPageResult = {
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: LIBRARY_PAGE_SIZE,
+    hasMore: false,
+  };
   if (!libraryIsPrivate) {
-    const [{ data: countRows }, dims] = await Promise.all([
+    const [{ data: countRows }, dims, gridPage] = await Promise.all([
       db.rpc('library_status_counts', { p_profile_id: reviewer.id }),
       Promise.all([
         libDimNames('game_genres', 'genres(name)'),
         libDimNames('game_platforms', 'platforms(name)'),
         libDimNames('game_companies', 'developers(name)', 'developer'),
       ]),
+      queryLibraryPage(db, {
+        profileId: reviewer.id,
+        isOwn: isOwnProfile,
+        canSeeWantToPlay,
+        canSeeDropped,
+      }).catch((e) => {
+        console.error('[profile library] initial page query failed:', e);
+        return {
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: LIBRARY_PAGE_SIZE,
+          hasMore: false,
+        } satisfies LibraryPageResult;
+      }),
     ]);
     const c = (countRows as any)?.[0] ?? {};
     libCounts.all             = Number(c.all_count ?? 0);
@@ -372,8 +398,9 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     libCounts.hidden          = isOwnProfile ? Number(c.hidden ?? 0) : 0;
     libCounts.unplayed        = Number(c.unplayed ?? 0);
     [libGenres, libPlatforms, libDevs] = dims;
+    initialLibraryPage = gridPage;
   }
-  return { librarySettings, libraryIsPrivate, libCounts, libGenres, libPlatforms, libDevs };
+  return { librarySettings, libraryIsPrivate, libCounts, libGenres, libPlatforms, libDevs, initialLibraryPage };
 }
 export type LibraryTabData = Awaited<ReturnType<typeof loadLibraryTab>>;
 
