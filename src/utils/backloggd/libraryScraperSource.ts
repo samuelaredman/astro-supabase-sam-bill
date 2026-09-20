@@ -49,15 +49,10 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     }
     return out;
   }
-  function lastPage(html){
-    var nav = html.match(/<nav[^>]*class="[^"]*\bpagy\b[^"]*"[^>]*>([\s\S]*?)<\/nav>/i);
-    if (!nav) return 1;
-    var mx = 1, y, r = /[?&]page=(\d+)/g;
-    while ((y = r.exec(nav[1]))) { var n = parseInt(y[1],10); if (n>mx) mx = n; }
-    return mx;
-  }
   function getText(url){ return fetch(url, { credentials: "include" }).then(function(r){ return r.text(); }); }
   var sleep = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
+  // 3000 games at 40/page = 75 pages. Safety cap.
+  var MAX_PAGES = 100;
 
   var um = location.pathname.match(/\/u\/([^\/]+)/);
   if (!um) { alert("Open your own Backloggd games tab first (backloggd.com/u/yourname/games/), then run this."); return; }
@@ -80,20 +75,28 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
   box.textContent = "Chekpoint library importer: starting…";
   document.body.appendChild(box);
 
-  // Walk every page of a given library URL, return the full card list.
+  // Walk every page of a given library URL until we hit empty or repeat.
+  // Doesn't rely on parsing Backloggd's pagy nav — that markup has drifted
+  // and left users seeing only page 1 of each shelf (a real 1013-game
+  // library was truncated to 239 rows before this rewrite). We just page
+  // forward; the stop condition is "this page added zero new slugs" which
+  // covers both empty pages past the end and Backloggd's habit of
+  // silently returning page 1 for out-of-range ?page= values.
   async function crawl(pathBase, label){
-    var first = await getText(pathBase + "?page=1");
-    if (/anubis|not a bot/i.test(first)) throw new Error("Backloggd is showing a bot check — reload the page and try again.");
-    var pages = lastPage(first);
-    var cards = parseCards(first);
-    for (var p = 2; p <= pages; p++) {
-      box.textContent = "Chekpoint: " + label + " — page " + p + "/" + pages + " (" + cards.length + ")";
-      cards = cards.concat(parseCards(await getText(pathBase + "?page=" + p)));
-      await sleep(300);
-    }
-    // de-dupe by slug across pages
     var seen = {}, uniq = [];
-    for (var i = 0; i < cards.length; i++) { if (!seen[cards[i].slug]) { seen[cards[i].slug] = 1; uniq.push(cards[i]); } }
+    for (var p = 1; p <= MAX_PAGES; p++) {
+      var html = await getText(pathBase + (pathBase.indexOf("?") === -1 ? "?" : "&") + "page=" + p);
+      if (/anubis|not a bot/i.test(html)) throw new Error("Backloggd is showing a bot check — reload the page and try again.");
+      var cards = parseCards(html);
+      var added = 0;
+      for (var i = 0; i < cards.length; i++) {
+        if (!seen[cards[i].slug]) { seen[cards[i].slug] = 1; uniq.push(cards[i]); added++; }
+      }
+      // Empty page OR "page N returned only slugs we already saw" — end of shelf.
+      if (added === 0) break;
+      box.textContent = "Chekpoint: " + label + " — page " + p + " (" + uniq.length + ")";
+      if (p < MAX_PAGES) await sleep(300);
+    }
     return uniq;
   }
 
@@ -113,9 +116,10 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
       return;
     }
 
-    // The default /games/ view is played+playing only — backlog & wishlist games
-    // aren't in it — so this is a lower bound on the library, used for titles and
-    // as a sanity ceiling, not as "the total".
+    // /games/ is the union of everything the user has touched: rated,
+    // reviewed, journalled, listed. Baseline-only slugs (games in this
+    // set that no explicit status shelf picks up — typically rated
+    // without a play state) are recovered later via the fallback prompt.
     var baseline = await crawl(base, "your library");
     var baseCount = baseline.length;
 
