@@ -9,6 +9,21 @@ import { json } from "../../../utils/api";
 
 const PER_PAGE = 50;
 
+// Client platform-filter values and how they map onto (source, platform_label)
+// in the user_unlocks view. Matches the naming used by the Library tab's
+// platform filter so users see the same labels in both places.
+const PSN_CONSOLES = new Set(["PS3", "PS4", "PS5"]);
+const XBOX_CONSOLES = new Set(["Xbox 360", "Xbox One", "Xbox Series X|S"]);
+
+// Fixed display order for the dropdown — Steam, PSN oldest-to-newest,
+// Xbox oldest-to-newest, generic Xbox fallback last.
+const PLATFORM_ORDER: Record<string, number> = {
+  Steam: 0,
+  PS3: 1, PS4: 2, PS5: 3,
+  "Xbox 360": 4, "Xbox One": 5, "Xbox Series X|S": 6,
+  Xbox: 7,
+};
+
 export const GET: APIRoute = async ({ url }) => {
   const db = getSupabaseAdmin() as any;
   const p = url.searchParams;
@@ -18,6 +33,7 @@ export const GET: APIRoute = async ({ url }) => {
   const q = (p.get("q") || "").trim();
   const sort = p.get("sort") || "recent";
   const days = parseInt(p.get("days") || "0") || 0;
+  const platform = (p.get("platform") || "").trim();
 
   if (!username) return json({ error: "username required" }, 400);
 
@@ -28,7 +44,7 @@ export const GET: APIRoute = async ({ url }) => {
     .maybeSingle();
   if (!profile) return json({ error: "Not found" }, 404);
 
-  const filtered = !!(q || days > 0);
+  const filtered = !!(q || days > 0 || platform);
 
   // Feed page. Reads from the user_unlocks view, which unions Steam
   // achievements and PSN trophies into one stream. Column aliases in the view
@@ -53,6 +69,15 @@ export const GET: APIRoute = async ({ url }) => {
       "unlock_time",
       new Date(Date.now() - days * 86400000).toISOString(),
     );
+  // Platform filter — same mapping as libraryQuery.ts's applyPlatformFilter
+  // but keyed off the view's source + platform_label columns.
+  if (platform === "Steam") feed = feed.eq("source", "steam");
+  else if (PSN_CONSOLES.has(platform))
+    feed = feed.eq("source", "psn").eq("platform_label", platform);
+  else if (XBOX_CONSOLES.has(platform))
+    feed = feed.eq("source", "xbox").eq("platform_label", platform);
+  else if (platform === "Xbox")
+    feed = feed.eq("source", "xbox").is("platform_label", null);
 
   if (sort === "oldest") feed = feed.order("unlock_time", { ascending: true });
   else if (sort === "rarest")
@@ -67,17 +92,23 @@ export const GET: APIRoute = async ({ url }) => {
 
   feed = feed.range((page - 1) * PER_PAGE, page * PER_PAGE - 1);
 
-  // Summary stats are profile-wide and filter-independent, so only fetch them on
-  // page 1 — the client caches them across pagination.
+  // Summary stats + platform-filter options are profile-wide and filter-
+  // independent, so only fetch them on page 1 — the client caches them
+  // across pagination.
   const statsPromise =
     page === 1
       ? db.rpc("get_achievement_stats", { p_profile_id: profile.id })
       : Promise.resolve({ data: null });
+  const platformsPromise =
+    page === 1
+      ? db.rpc("user_unlock_platforms", { p_profile_id: profile.id })
+      : Promise.resolve({ data: null });
 
-  const [{ data: rows, count, error }, { data: statsRows }] = await Promise.all([
-    feed,
-    statsPromise,
-  ]);
+  const [
+    { data: rows, count, error },
+    { data: statsRows },
+    { data: platformRows },
+  ] = await Promise.all([feed, statsPromise, platformsPromise]);
 
   if (error) {
     console.error("[ach feed] error:", JSON.stringify(error));
@@ -105,6 +136,7 @@ export const GET: APIRoute = async ({ url }) => {
 
   let stats: { unlocked: number; perfectGames: number; avgCompletion: number } | null = null;
   let total: number | null = null;
+  let platforms: string[] | null = null;
 
   if (page === 1) {
     const s = statsRows?.[0] ?? {
@@ -118,9 +150,22 @@ export const GET: APIRoute = async ({ url }) => {
       avgCompletion: Number(s.avg_completion ?? 0),
     };
     total = filtered ? count ?? 0 : stats.unlocked;
+
+    // Reduce (source, platform_label) pairs to the label the client shows.
+    // Xbox rows with a NULL platform_label — synced before xbox_platform
+    // existed — collapse into the generic "Xbox" fallback.
+    const set = new Set<string>();
+    for (const r of (platformRows ?? []) as Array<{ source: string; platform_label: string | null }>) {
+      if (r.source === "steam") set.add("Steam");
+      else if (r.source === "psn" && r.platform_label) set.add(r.platform_label);
+      else if (r.source === "xbox") set.add(r.platform_label ?? "Xbox");
+    }
+    platforms = [...set].sort(
+      (a, b) => (PLATFORM_ORDER[a] ?? 99) - (PLATFORM_ORDER[b] ?? 99),
+    );
   } else if (filtered) {
     total = count ?? 0;
   }
 
-  return json({ stats, items, page, perPage: PER_PAGE, total });
+  return json({ stats, platforms, items, page, perPage: PER_PAGE, total });
 };

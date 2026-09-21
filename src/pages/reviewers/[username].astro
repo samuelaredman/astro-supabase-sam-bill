@@ -1650,6 +1650,11 @@ const reviewerBreadcrumbJsonLd = {
             <option value="180">Last 6 months</option>
             <option value="365">Last year</option>
           </select>
+          {/* Populated by the feed script on page 1 from the API's platforms
+              list — only shows options the profile actually has unlocks in. */}
+          <select id="achPlatformFilter" class="ach-date-select" style="display:none">
+            <option value="">All platforms</option>
+          </select>
         </div>
 
         <div class="ach-feed" id="achFeed"></div>
@@ -2550,19 +2555,21 @@ const reviewerBreadcrumbJsonLd = {
     var searchEl  = document.getElementById('achSearch')
     var sortEl    = document.getElementById('achSortSelect')
     var dateEl    = document.getElementById('achDateFilter')
+    var platEl    = document.getElementById('achPlatformFilter')
     var username  = content.dataset.username
 
     var PER = 50
-    var _st = { page: 1, q: '', sort: 'recent', days: 0 }
+    var _st = { page: 1, q: '', sort: 'recent', days: 0, platform: '' }
     var _built = false
     var _loading = false
     var _hasAny = true             // set from stats.unlocked on the first response
+    var _platsBuilt = false        // dropdown populated once on the first page-1 response
     var _cache = {}                 // page-key -> response
     var _totalByFilter = {}         // filter-key -> total (carried across pages)
     var _nowYear = new Date().getUTCFullYear()
 
-    function _pageKey()   { return _st.page + '|' + _st.q + '|' + _st.sort + '|' + _st.days }
-    function _filterKey() { return _st.q + '|' + _st.sort + '|' + _st.days }
+    function _pageKey()   { return _st.page + '|' + _st.q + '|' + _st.sort + '|' + _st.days + '|' + _st.platform }
+    function _filterKey() { return _st.q + '|' + _st.sort + '|' + _st.days + '|' + _st.platform }
 
     function _esc(s) {
       return String(s == null ? '' : s).replace(/[&<>"]/g, function(ch) {
@@ -2696,6 +2703,23 @@ const reviewerBreadcrumbJsonLd = {
         document.getElementById('achStatPerfect').textContent = data.stats.perfectGames.toLocaleString()
         _hasAny = data.stats.unlocked > 0
       }
+      // First time the API returns the platform list (page 1, any request),
+      // populate the dropdown. Only shown if the profile has unlocks on more
+      // than one platform — a Steam-only user doesn't need a filter that
+      // only offers "Steam".
+      if (!_platsBuilt && Array.isArray(data.platforms)) {
+        _platsBuilt = true
+        if (platEl && data.platforms.length > 1) {
+          var frag = document.createDocumentFragment()
+          data.platforms.forEach(function(p) {
+            var o = document.createElement('option')
+            o.value = p; o.textContent = p
+            frag.appendChild(o)
+          })
+          platEl.appendChild(frag)
+          platEl.style.display = ''
+        }
+      }
       if (data.total != null) _totalByFilter[_filterKey()] = data.total
       var total = _totalByFilter[_filterKey()]
       if (total == null) total = (data.items || []).length
@@ -2779,6 +2803,7 @@ const reviewerBreadcrumbJsonLd = {
       if (_st.q) params.set('q', _st.q)
       if (_st.sort !== 'recent') params.set('sort', _st.sort)
       if (_st.days) params.set('days', String(_st.days))
+      if (_st.platform) params.set('platform', _st.platform)
       fetch('/api/user-achievements/feed?' + params.toString())
         .then(function(r) { return r.ok ? r.json() : Promise.reject(r) })
         .then(function(d) { _cache[k] = d; _render(d) })
@@ -2793,8 +2818,18 @@ const reviewerBreadcrumbJsonLd = {
     // direct load of ?tab=achievements.
     window.__achEnsure = function() { if (!_built) { _built = true; fetchAch() } }
     // Called after a sync completes — blow away the cache and reload page 1.
+    // Also re-arm the platform dropdown so a fresh sync that added a new
+    // platform (e.g. first PSN sync) re-renders the options next fetch.
     window.__achReload = function() {
       _cache = {}; _totalByFilter = {}; _built = true; _st.page = 1
+      _platsBuilt = false
+      if (platEl) {
+        // Keep the "All platforms" option, drop the rest.
+        while (platEl.options.length > 1) platEl.remove(1)
+        platEl.value = ''
+        platEl.style.display = 'none'
+      }
+      _st.platform = ''
       fetchAch({ force: true })
     }
     window.achGoPage = function(n) {
@@ -2810,6 +2845,7 @@ const reviewerBreadcrumbJsonLd = {
     })
     if (sortEl) sortEl.addEventListener('change', function() { _st.sort = sortEl.value; _st.page = 1; fetchAch() })
     if (dateEl) dateEl.addEventListener('change', function() { _st.days = parseInt(dateEl.value) || 0; _st.page = 1; fetchAch() })
+    if (platEl) platEl.addEventListener('change', function() { _st.platform = platEl.value; _st.page = 1; fetchAch() })
 
     if (activeTab === 'achievements') window.__achEnsure()
   })()
