@@ -11,6 +11,7 @@ import {
   type TrophyTitle,
   type AuthorizationPayload,
 } from "../../../utils/psn";
+import { getServiceAuth } from "../../../utils/psnService";
 
 // Netlify 10s timeout — stop processing titles at 7s and return the cursor.
 // Client immediately calls back to continue. Same pattern as sync-achievements.
@@ -104,9 +105,14 @@ export const POST: APIRoute = async (context) => {
     .eq('id', profile.id)
     .single();
 
-  if (!profileData?.psn_account_id || !profileData.psn_refresh_token) {
+  if (!profileData?.psn_account_id) {
     return json({ error: 'No PlayStation account connected.' }, 400);
   }
+
+  // See sync-library.ts for the two auth-mode explainer. Same pattern here:
+  // service auth for username-only users (public data only), user tokens for
+  // NPSSO users.
+  const useServiceAuth = !profileData.psn_refresh_token;
 
   // Cursor is a jsonb envelope: { npCommId } — the last npCommunicationId
   // fully processed. Explicit cursor from client wins over stored progress.
@@ -128,25 +134,32 @@ export const POST: APIRoute = async (context) => {
   }
 
   let authPayload: AuthorizationPayload;
-  let tokens: PsnTokens;
-  try {
-    const fresh = await getFreshAuth({
-      access_token: profileData.psn_access_token,
-      refresh_token: profileData.psn_refresh_token,
-      expires_at: profileData.psn_token_expires_at,
-    });
-    authPayload = fresh.auth;
-    tokens = fresh.tokens;
-    if (fresh.refreshed) await persistTokens(db, profile.id, tokens);
-  } catch (e) {
-    if (isPsnAuthExpired(e)) {
-      return json({
-        error: 'Your PlayStation connection expired. Reconnect by pasting a fresh NPSSO token.',
-        needsReconnect: true,
-      }, 401);
+  if (useServiceAuth) {
+    try {
+      authPayload = await getServiceAuth();
+    } catch (e) {
+      console.error('[psn/sync-trophies] service auth unavailable:', e);
+      return json({ error: 'PlayStation trophy sync is temporarily unavailable. Try again in a minute.' }, 502);
     }
-    console.error('[psn/sync-trophies] token refresh error:', e);
-    return json({ error: 'PlayStation is temporarily unavailable. Try again in a minute.' }, 502);
+  } else {
+    try {
+      const fresh = await getFreshAuth({
+        access_token: profileData.psn_access_token,
+        refresh_token: profileData.psn_refresh_token,
+        expires_at: profileData.psn_token_expires_at,
+      });
+      authPayload = fresh.auth;
+      if (fresh.refreshed) await persistTokens(db, profile.id, fresh.tokens);
+    } catch (e) {
+      if (isPsnAuthExpired(e)) {
+        return json({
+          error: 'Your PlayStation connection expired. Reconnect by pasting a fresh NPSSO token.',
+          needsReconnect: true,
+        }, 401);
+      }
+      console.error('[psn/sync-trophies] token refresh error:', e);
+      return json({ error: 'PlayStation is temporarily unavailable. Try again in a minute.' }, 502);
+    }
   }
 
   // Build or reuse the sync snapshot — the pre-filtered work queue for the

@@ -9,6 +9,7 @@ import {
   type PsnTokens,
   type TrophyTitle,
 } from "../../../utils/psn";
+import { getServiceAuth } from "../../../utils/psnService";
 
 const IN_CHUNK = 100;
 const WRITE_CHUNK = 500;
@@ -44,9 +45,18 @@ export const POST: APIRoute = async (context) => {
     .eq('id', profile.id)
     .single();
 
-  if (!profileData?.psn_account_id || !profileData.psn_refresh_token) {
+  if (!profileData?.psn_account_id) {
     return json({ error: 'No PlayStation account connected.' }, 400);
   }
+
+  // Two auth modes:
+  //   - "user tokens" (NPSSO paste flow) — psn_refresh_token is present. We
+  //     refresh the access token on demand and persist any rotation.
+  //   - "service token" (username-only connect flow) — psn_refresh_token is
+  //     NULL. We use the shared Chekpoint service token and only read PUBLIC
+  //     data (no playtime, no private games). getServiceAuth handles its own
+  //     refresh cycle against psn_service_auth.
+  const useServiceAuth = !profileData.psn_refresh_token;
 
   // Same 1-minute cooldown as Steam import — protects against accidental
   // double-clicks that would burn Sony API rate limit for no benefit.
@@ -58,28 +68,33 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  // Refresh access token if it's near expiry. If Sony rejects the refresh
-  // token itself, the user must re-paste NPSSO.
   let authPayload;
-  let tokens: PsnTokens;
-  try {
-    const fresh = await getFreshAuth({
-      access_token: profileData.psn_access_token,
-      refresh_token: profileData.psn_refresh_token,
-      expires_at: profileData.psn_token_expires_at,
-    });
-    authPayload = fresh.auth;
-    tokens = fresh.tokens;
-    if (fresh.refreshed) await persistTokens(db, profile.id, tokens);
-  } catch (e) {
-    if (isPsnAuthExpired(e)) {
-      return json({
-        error: 'Your PlayStation connection expired. Reconnect by pasting a fresh NPSSO token.',
-        needsReconnect: true,
-      }, 401);
+  if (useServiceAuth) {
+    try {
+      authPayload = await getServiceAuth();
+    } catch (e) {
+      console.error('[psn/sync-library] service auth unavailable:', e);
+      return json({ error: 'PlayStation sync is temporarily unavailable. Try again in a minute.' }, 502);
     }
-    console.error('[psn/sync-library] token refresh error:', e);
-    return json({ error: 'PlayStation is temporarily unavailable. Try again in a minute.' }, 502);
+  } else {
+    try {
+      const fresh = await getFreshAuth({
+        access_token: profileData.psn_access_token,
+        refresh_token: profileData.psn_refresh_token,
+        expires_at: profileData.psn_token_expires_at,
+      });
+      authPayload = fresh.auth;
+      if (fresh.refreshed) await persistTokens(db, profile.id, fresh.tokens);
+    } catch (e) {
+      if (isPsnAuthExpired(e)) {
+        return json({
+          error: 'Your PlayStation connection expired. Reconnect by pasting a fresh NPSSO token.',
+          needsReconnect: true,
+        }, 401);
+      }
+      console.error('[psn/sync-library] token refresh error:', e);
+      return json({ error: 'PlayStation is temporarily unavailable. Try again in a minute.' }, 502);
+    }
   }
 
   // Full trophy-title list (games with at least one trophy earned) across all
@@ -103,18 +118,22 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0 });
   }
 
-  // Playtime is best-effort (PS4/PS5 only, ~50 recent titles). Failures here
-  // are non-fatal — the library still syncs.
-  const recent = await fetchRecentPlayedGames(authPayload);
+  // Playtime is best-effort (PS4/PS5 only, ~50 recent titles). Sony only
+  // returns playtime for the AUTHENTICATED account, so username-only users
+  // (service auth) get an empty map here — no error, just no playtime data.
+  // Failures under user auth are non-fatal — the library still syncs.
   const playtimeByLowerName = new Map<string, { minutes: number; lastPlayed: string | null }>();
-  for (const r of recent) {
-    if (!r.name) continue;
-    const key = r.name.toLowerCase().trim();
-    // If the same game shows up twice (rare — PS4+PS5 remaster), keep the
-    // entry with more minutes.
-    const prev = playtimeByLowerName.get(key);
-    if (!prev || r.playDurationMinutes > prev.minutes) {
-      playtimeByLowerName.set(key, { minutes: r.playDurationMinutes, lastPlayed: r.lastPlayedDateTime });
+  if (!useServiceAuth) {
+    const recent = await fetchRecentPlayedGames(authPayload);
+    for (const r of recent) {
+      if (!r.name) continue;
+      const key = r.name.toLowerCase().trim();
+      // If the same game shows up twice (rare — PS4+PS5 remaster), keep the
+      // entry with more minutes.
+      const prev = playtimeByLowerName.get(key);
+      if (!prev || r.playDurationMinutes > prev.minutes) {
+        playtimeByLowerName.set(key, { minutes: r.playDurationMinutes, lastPlayed: r.lastPlayedDateTime });
+      }
     }
   }
 

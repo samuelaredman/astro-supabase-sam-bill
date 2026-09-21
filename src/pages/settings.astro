@@ -356,29 +356,43 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
             </div>
           </>
         ) : (
-          <div style="display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;flex-direction:column;gap:14px">
             <div class="settings-row-text">
               <div class="settings-row-label">Connect your PlayStation account</div>
               <div class="settings-row-sub">
-                PlayStation doesn't offer a public sign-in like Steam, so linking takes a few extra steps.
-                We'll use your <strong>NPSSO token</strong> — a short-lived credential you copy from PlayStation's own web session.
+                Enter your PSN username and Chekpoint imports your trophies. Your profile has to be set to Public in PlayStation privacy settings (that's the default).
               </div>
             </div>
-            <ol class="psn-steps">
-              <li>Sign into <a href="https://www.playstation.com" target="_blank" rel="noopener">playstation.com</a> in a new tab.</li>
-              <li>Open <a href="https://ca.account.sony.com/api/v1/ssocookie" target="_blank" rel="noopener">ca.account.sony.com/api/v1/ssocookie</a>. You'll see a small JSON object like <code>&#123;"npsso":"abc123..."&#125;</code>.</li>
-              <li>Copy the value between the quotes — a 64-character string.</li>
-              <li>Paste it below and click Connect.</li>
-            </ol>
-            <div class="psn-privacy-note">
-              We store this token so future syncs work without prompting. It only grants access to your PSN profile and trophies. Sony rotates NPSSOs about every 2 months — you'll be asked to repeat these steps then.
-            </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-              <input id="psnNpsso" type="text" placeholder="Paste NPSSO here" autocomplete="off" spellcheck={false}
-                style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:monospace" />
-              <button class="settings-save-btn" id="psnConnectBtn" onclick="psnConnect()">Connect PlayStation</button>
+              <input id="psnUsername" type="text" placeholder="Your PSN username" autocomplete="off" spellcheck={false}
+                style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px" />
+              <button class="settings-save-btn" id="psnConnectUsernameBtn" onclick="psnConnectByUsername()">Connect PlayStation</button>
             </div>
-            <div id="psnConnectMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
+            <div id="psnConnectUsernameMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
+
+            <details class="psn-advanced">
+              <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary)">Advanced — add playtime &amp; private-profile support (paste NPSSO)</summary>
+              <div style="margin-top:12px;display:flex;flex-direction:column;gap:12px">
+                <div class="settings-row-sub">
+                  PSN's public API returns trophies but not playtime. To also import playtime (PS4/PS5) and get access if your profile is private, paste an <strong>NPSSO token</strong> from your own PlayStation session.
+                </div>
+                <ol class="psn-steps">
+                  <li>Sign into <a href="https://www.playstation.com" target="_blank" rel="noopener">playstation.com</a> in a new tab.</li>
+                  <li>Open <a href="https://ca.account.sony.com/api/v1/ssocookie" target="_blank" rel="noopener">ca.account.sony.com/api/v1/ssocookie</a>. You'll see a small JSON object like <code>&#123;"npsso":"abc123..."&#125;</code>.</li>
+                  <li>Copy the value between the quotes — a 64-character string.</li>
+                  <li>Paste it below and click Connect.</li>
+                </ol>
+                <div class="psn-privacy-note">
+                  We store this token so future syncs work without prompting. Sony rotates NPSSOs about every 2 months — you'll be asked to repeat these steps then.
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                  <input id="psnNpsso" type="text" placeholder="Paste NPSSO here" autocomplete="off" spellcheck={false}
+                    style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:monospace" />
+                  <button class="settings-save-btn" id="psnConnectBtn" onclick="psnConnect()">Connect with NPSSO</button>
+                </div>
+                <div id="psnConnectMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
+              </div>
+            </details>
           </div>
         )}
 
@@ -1224,6 +1238,7 @@ declare global {
     steamSync: () => Promise<void>;
     steamDisconnect: () => Promise<void>;
     psnConnect: () => Promise<void>;
+    psnConnectByUsername: () => Promise<void>;
     psnSync: () => Promise<void>;
     psnSyncTrophies: () => Promise<void>;
     psnDisconnect: () => Promise<void>;
@@ -1526,6 +1541,48 @@ async function steamDisconnect() {
 window.steamDisconnect = steamDisconnect;
 
 // ─── PlayStation ────────────────────────────────────────────────────────────
+async function psnConnectByUsername() {
+  const input = document.getElementById('psnUsername') as HTMLInputElement | null;
+  const btn = document.getElementById('psnConnectUsernameBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnConnectUsernameMsg');
+  if (!input || !btn || !msg) return;
+
+  const username = input.value.trim();
+  if (!username) {
+    msg.textContent = 'Enter your PSN username first.';
+    (msg as HTMLElement).style.color = '#f87171';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  msg.textContent = 'Looking up your PlayStation profile…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+
+  try {
+    const res = await fetch('/api/auth/psn-connect-username', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Failed to connect.';
+      (msg as HTMLElement).style.color = '#f87171';
+      btn.disabled = false;
+      btn.textContent = 'Connect PlayStation';
+      return;
+    }
+    window.location.href = '/settings?psn=connected#psn';
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+    btn.disabled = false;
+    btn.textContent = 'Connect PlayStation';
+  }
+}
+window.psnConnectByUsername = psnConnectByUsername;
+
 async function psnConnect() {
   const input = document.getElementById('psnNpsso') as HTMLInputElement | null;
   const btn = document.getElementById('psnConnectBtn') as HTMLButtonElement | null;
