@@ -139,14 +139,21 @@ export async function queryLibraryPage(
     } else if (filter === 'completed') {
       qb = qb.in(c('status'), ['completed', 'hundred_percent']);
     } else if (filter === 'unplayed') {
+      // A game is unplayed only when NO source shows evidence of play.
+      // PSN's playtime is often null even for heavily-played titles, so
+      // psn_trophies_earned stands in as definitive proof of play there.
+      // Xbox's gamerscore (= unlocked achievement points) plays the same
+      // role on that side. Mirrored in library_status_counts DB fn.
       qb = qb.not(c('status'), 'in', '(completed,hundred_percent)');
       if (base === 'ugs') {
         qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0');
         qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0');
+        qb = qb.or('psn_trophies_earned.is.null,psn_trophies_earned.eq.0');
         qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0');
       } else {
         qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0', { referencedTable: 'user_game_status' });
         qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0',   { referencedTable: 'user_game_status' });
+        qb = qb.or('psn_trophies_earned.is.null,psn_trophies_earned.eq.0',     { referencedTable: 'user_game_status' });
         qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0', { referencedTable: 'user_game_status' });
       }
     } else if (filter !== 'all') {

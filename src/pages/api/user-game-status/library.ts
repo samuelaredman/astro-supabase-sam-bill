@@ -164,14 +164,19 @@ function buildFilteredQuery(
   } else if (filter === 'completed') {
     qb = qb.in(c('status'), ['completed', 'hundred_percent']);
   } else if (filter === 'unplayed') {
+    // Mirrors queryLibraryPage — psn_trophies_earned counts as evidence of
+    // play alongside playtime, since Sony often omits playtime on titles
+    // where trophies were clearly earned.
     qb = qb.not(c('status'), 'in', '(completed,hundred_percent)');
     if (base === 'ugs') {
       qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0');
       qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0');
+      qb = qb.or('psn_trophies_earned.is.null,psn_trophies_earned.eq.0');
       qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0');
     } else {
       qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0', { referencedTable: 'user_game_status' });
       qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0',   { referencedTable: 'user_game_status' });
+      qb = qb.or('psn_trophies_earned.is.null,psn_trophies_earned.eq.0',     { referencedTable: 'user_game_status' });
       qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0', { referencedTable: 'user_game_status' });
     }
   } else if (filter !== 'all') {
