@@ -320,10 +320,10 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     || !(reviewer.dropped_privacy === 'private'
          || (reviewer.dropped_privacy === 'friends' && !isMutualFollow));
 
-  // Distinct genre / platform / developer names across the visible library —
-  // the filter dropdowns. Queried FROM each game↔X junction with a two-level
-  // inner join down to user_game_status; one row per (game, value) pair, so
-  // paginate past the 1000-row cap.
+  // Distinct genre / developer names across the visible library — the filter
+  // dropdowns. Queried FROM each game↔X junction with a two-level inner join
+  // down to user_game_status; one row per (game, value) pair, so paginate
+  // past the 1000-row cap.
   async function libDimNames(junction: string, dimEmbed: string, roleFilter?: string): Promise<string[]> {
     const CHUNK = 1000;
     const key = dimEmbed.split('(')[0];
@@ -348,6 +348,47 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     return [...names].sort();
   }
 
+  // Platform-filter options are source-driven, not IGDB-driven: one bucket per
+  // import origin the profile actually has rows for. Scans user_game_status
+  // once and reduces to the labels the client should show. Paginated past the
+  // 1000-row cap so a huge library doesn't silently drop options.
+  async function libPlatformOptions(): Promise<string[]> {
+    const CHUNK = 1000;
+    let hasSteam = false, hasOther = false, hasGenericXbox = false;
+    const psn = new Set<string>();
+    const xbox = new Set<string>();
+    for (let start = 0; ; start += CHUNK) {
+      const { data, error } = await db
+        .from('user_game_status')
+        .select('steam_appid, psn_np_communication_id, psn_platform, xbox_title_id, xbox_platform')
+        .eq('profile_id', reviewer.id)
+        .eq('is_hidden', false)
+        .range(start, start + CHUNK - 1);
+      if (error) {
+        console.error('[profile library] platform-option scan failed:', JSON.stringify(error));
+        break;
+      }
+      for (const r of (data ?? []) as any[]) {
+        if (r.steam_appid != null) hasSteam = true;
+        if (r.psn_platform) psn.add(r.psn_platform);
+        if (r.xbox_platform) xbox.add(r.xbox_platform);
+        else if (r.xbox_title_id != null) hasGenericXbox = true;
+        if (r.steam_appid == null && r.psn_np_communication_id == null && r.xbox_title_id == null) {
+          hasOther = true;
+        }
+      }
+      if (!data || data.length < CHUNK) break;
+    }
+    // Canonical display order: Steam → PS3/4/5 → Xbox 360/One/Series → generic Xbox → Other.
+    const opts: string[] = [];
+    if (hasSteam) opts.push('Steam');
+    for (const p of ['PS3', 'PS4', 'PS5']) if (psn.has(p)) opts.push(p);
+    for (const c of ['Xbox 360', 'Xbox One', 'Xbox Series X|S']) if (xbox.has(c)) opts.push(c);
+    if (hasGenericXbox) opts.push('Xbox');
+    if (hasOther) opts.push('Other');
+    return opts;
+  }
+
   const libCounts = { all: 0, playing: 0, want_to_play: 0, owned: 0, completed: 0, hundred_percent: 0, dropped: 0, unplayed: 0, hidden: 0 };
   let libGenres: string[] = [];
   let libPlatforms: string[] = [];
@@ -367,7 +408,7 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
       db.rpc('library_status_counts', { p_profile_id: reviewer.id }),
       Promise.all([
         libDimNames('game_genres', 'genres(name)'),
-        libDimNames('game_platforms', 'platforms(name)'),
+        libPlatformOptions(),
         libDimNames('game_companies', 'developers(name)', 'developer'),
       ]),
       queryLibraryPage(db, {

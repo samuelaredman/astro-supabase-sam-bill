@@ -34,6 +34,39 @@ export type LibraryPageResult = {
   hasMore: boolean;
 };
 
+// Library platform filter — driven by the source columns on
+// user_game_status, NOT by the IGDB game_platforms junction:
+//
+//   'Steam'            → steam_appid IS NOT NULL
+//   'PS3'/'PS4'/'PS5'  → psn_platform = value
+//   'Xbox 360'/'Xbox One'/'Xbox Series X|S' → xbox_platform = value
+//   'Xbox'             → xbox_title_id IS NOT NULL AND xbox_platform IS NULL
+//                        (pre-migration rows synced before we captured
+//                        console; disappears after the user re-syncs)
+//   'Other'            → all three source columns NULL (a manually added
+//                        game, not imported from any connected service)
+//
+// `c(col)` disambiguates whether the query is rooted on user_game_status
+// (base='ugs') or on games (base='games') — column prefixes differ.
+const PSN_CONSOLES = new Set(['PS3', 'PS4', 'PS5']);
+const XBOX_CONSOLES = new Set(['Xbox 360', 'Xbox One', 'Xbox Series X|S']);
+
+export function applyPlatformFilter(qb: any, value: string, c: (col: string) => string): any {
+  if (value === 'Steam') return qb.not(c('steam_appid'), 'is', null);
+  if (PSN_CONSOLES.has(value)) return qb.eq(c('psn_platform'), value);
+  if (XBOX_CONSOLES.has(value)) return qb.eq(c('xbox_platform'), value);
+  if (value === 'Xbox') {
+    return qb.not(c('xbox_title_id'), 'is', null).is(c('xbox_platform'), null);
+  }
+  if (value === 'Other') {
+    return qb
+      .is(c('steam_appid'), null)
+      .is(c('psn_np_communication_id'), null)
+      .is(c('xbox_title_id'), null);
+  }
+  return qb; // unknown value — no-op
+}
+
 export async function queryLibraryPage(
   db: any,
   opts: LibraryQueryOptions,
@@ -64,10 +97,12 @@ export async function queryLibraryPage(
     countOpts?: any,
     base: 'games' | 'ugs' = ugsBase ? 'ugs' : 'games',
   ) => {
+    // Platform filter is a source-column check on user_game_status (see
+    // applyPlatformFilter below), not a join on the IGDB game_platforms
+    // table. Genre and developer still join through games.
     const dimJoins: string[] = [];
-    if (genre)    dimJoins.push('game_genres!inner(genres!inner(name))');
-    if (platform) dimJoins.push('game_platforms!inner(platforms!inner(name))');
-    if (dev)      dimJoins.push('game_companies!inner(role,developers!inner(name))');
+    if (genre) dimJoins.push('game_genres!inner(genres!inner(name))');
+    if (dev)   dimJoins.push('game_companies!inner(role,developers!inner(name))');
     const gamesSel = dimJoins.length ? `${gamesSelect}, ${dimJoins.join(', ')}` : gamesSelect;
 
     let qb =
@@ -84,12 +119,12 @@ export async function queryLibraryPage(
     const c = (col: string) => (base === 'ugs' ? col : `user_game_status.${col}`);
     const g = (path: string) => (base === 'ugs' ? `games.${path}` : path);
 
-    if (genre)    qb = qb.eq(g('game_genres.genres.name'), genre);
-    if (platform) qb = qb.eq(g('game_platforms.platforms.name'), platform);
+    if (genre) qb = qb.eq(g('game_genres.genres.name'), genre);
     if (dev) {
       qb = qb.eq(g('game_companies.role'), 'developer');
       qb = qb.eq(g('game_companies.developers.name'), dev);
     }
+    if (platform) qb = applyPlatformFilter(qb, platform, c);
 
     if (showHidden && isOwn) {
       qb = qb.eq(c('is_hidden'), true);
