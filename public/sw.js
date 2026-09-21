@@ -1,9 +1,27 @@
-// Chekpoint service worker — v1
-// Strategy: network-first for navigation (SSR pages always fresh),
-// cache-first for static assets (fonts, images, etc.)
+// Chekpoint service worker — v2
+// Strategy: cache-first ONLY for known-immutable static assets. Every other
+// request (including SSR HTML — pages AND on-demand tab fragments fetched by
+// the profile page's tab loader) passes through to the network, so counts,
+// reviews, and library data are always fresh.
+//
+// v1 treated any non-/api/ GET as cacheable, which meant fragments like
+// /reviewers/<user>/tab/library got cached indefinitely on first fetch. The
+// tab loader in reviewers/[username].astro uses fetch() (request.mode='cors',
+// not 'navigate'), so the "bypass for navigations" clause didn't cover it,
+// and users saw stale library counts until they hard-refreshed. Bumping the
+// cache name also purges those stale entries on the next visit.
 
-const CACHE = 'chekpoint-v1';
+const CACHE = 'chekpoint-v2';
 const PRECACHE = ['/favicon.svg', '/manifest.json'];
+
+// Only cache what's genuinely immutable:
+//   - Astro's content-hashed bundles under /_astro/
+//   - Font/image/CSS/JS by extension (covers /public/ static files)
+// Anything else — including HTML — is dynamic and must reach the network.
+function isCacheableStatic(url) {
+  if (url.pathname.startsWith('/_astro/')) return true;
+  return /\.(css|js|mjs|svg|png|jpg|jpeg|webp|gif|ico|woff2?|ttf|otf|eot)$/i.test(url.pathname);
+}
 
 self.addEventListener('install', function(e) {
   self.skipWaiting();
@@ -25,14 +43,13 @@ self.addEventListener('activate', function(e) {
 self.addEventListener('fetch', function(e) {
   if (e.request.method !== 'GET') return;
 
-  // Always go to network for page navigations — we're SSR, pages must be fresh
-  if (e.request.mode === 'navigate') return;
-
-  // For API routes, always network — never cache
   var url = new URL(e.request.url);
-  if (url.pathname.startsWith('/api/')) return;
 
-  // Static assets: try cache first, fall back to network and cache the result
+  // Same-origin static assets only — pass everything else (HTML pages, tab
+  // fragments, /api/, cross-origin) straight through to the network.
+  if (url.origin !== self.location.origin) return;
+  if (!isCacheableStatic(url)) return;
+
   e.respondWith(
     caches.match(e.request).then(function(cached) {
       if (cached) return cached;

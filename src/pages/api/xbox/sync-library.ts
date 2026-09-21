@@ -117,6 +117,7 @@ export const POST: APIRoute = async (context) => {
 
     const row: Record<string, unknown> = {
       xbox_title_id: xt.titleId,
+      xbox_platform: xt.platform,
       xbox_current_gamerscore: xt.currentGamerscore,
       xbox_max_gamerscore: xt.maxGamerscore,
       xbox_progress: progress,
