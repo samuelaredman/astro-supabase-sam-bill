@@ -206,7 +206,7 @@ export async function loadListsTab(ctx: ProfileTabContext) {
     supabase.from('list_saves')
       .select('list_id, is_hidden, lists(id, title, is_ranked, visibility, cover_image_url, updated_at, profiles(id, username, avatar_url))')
       .eq('profile_id', reviewer.id)
-      .order('created_at', { ascending: false }),
+      .order('saved_at', { ascending: false }),
   ]);
 
   // Owners see all saves; others only see non-hidden ones.
