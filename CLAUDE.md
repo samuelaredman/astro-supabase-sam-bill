@@ -157,6 +157,7 @@ supabase/
 | | `platform_played_on` | uuid FK→platforms | YES | Column is `platform_played_on`, not `platform_id` |
 | | `play_time_hours` | int | YES | |
 | | `contains_spoilers` | bool | NO | |
+| | `youtube_video_id` | text | YES | Optional attached video. 11-char YouTube id only (CHECK `reviews_youtube_video_id_format`) — parse links with `src/utils/youtube.ts` |
 | | `published_at` | timestamptz | YES | |
 | | `created_at` | timestamptz | YES | |
 | `review_votes` | `id` | uuid PK | NO | gen_random_uuid() |

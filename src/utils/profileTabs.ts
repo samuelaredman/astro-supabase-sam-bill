@@ -25,7 +25,7 @@ export function isLazyProfileTab(tab: string): tab is LazyProfileTab {
 /** The reviewer's reviews, as the Reviews tab (cards + filters) needs them. */
 export const PROFILE_REVIEWS_SELECT = `
   id, score, title, body, published_at, created_at,
-  contains_spoilers, play_time_hours, status,
+  contains_spoilers, youtube_video_id, play_time_hours, status,
   played_on:platform_played_on ( id, name, slug ),
   games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) ),
   review_votes ( vote, profile_id ),

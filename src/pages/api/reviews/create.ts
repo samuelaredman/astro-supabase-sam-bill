@@ -3,6 +3,7 @@ import { requireAuth, json } from "../../../utils/api";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
+import { readYouTubeField } from "../../../utils/youtube";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -14,6 +15,10 @@ export const POST: APIRoute = async (context) => {
   const isDraft = body.status === "draft";
 
   if (!game_id) return json({ error: "Missing game." }, 400);
+
+  const youtube = readYouTubeField(body);
+  if ("error" in youtube) return json({ error: youtube.error }, 400);
+  const youtubeColumn = youtube.present ? { youtube_video_id: youtube.id } : {};
 
   // ── Draft path: only a body is required; score/title can come later at publish. ──
   if (isDraft) {
@@ -30,6 +35,7 @@ export const POST: APIRoute = async (context) => {
         platform_played_on: platform_played_on || null,
         play_time_hours: play_time_hours || null,
         contains_spoilers: contains_spoilers ?? false,
+        ...youtubeColumn,
         status: "draft",
         published_at: null,
       })
@@ -69,6 +75,7 @@ export const POST: APIRoute = async (context) => {
       platform_played_on: platform_played_on || null,
       play_time_hours: play_time_hours || null,
       contains_spoilers: contains_spoilers ?? false,
+      ...youtubeColumn,
       status: "published",
       published_at: new Date().toISOString(),
     })

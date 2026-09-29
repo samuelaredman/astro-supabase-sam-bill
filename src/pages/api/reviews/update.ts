@@ -3,16 +3,23 @@ import { requireAuth, json } from "../../../utils/api";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
+import { readYouTubeField } from "../../../utils/youtube";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
+  const requestBody = await context.request.json();
   const { review_id, score, title, body: reviewBody, platform_played_on, play_time_hours, contains_spoilers, status } =
-    await context.request.json();
+    requestBody;
 
   if (!review_id) return json({ error: "Missing review id." }, 400);
+
+  // Absent key (e.g. an older client) leaves the stored video untouched.
+  const youtube = readYouTubeField(requestBody);
+  if ("error" in youtube) return json({ error: youtube.error }, 400);
+  const youtubeColumn = youtube.present ? { youtube_video_id: youtube.id } : {};
 
   // Verify ownership + current state
   const { data: review } = await db
@@ -37,6 +44,7 @@ export const POST: APIRoute = async (context) => {
         platform_played_on: platform_played_on || null,
         play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
         contains_spoilers: contains_spoilers ?? false,
+        ...youtubeColumn,
         status: "draft",
       })
       .eq("id", review_id);
@@ -75,6 +83,7 @@ export const POST: APIRoute = async (context) => {
     platform_played_on: platform_played_on || null,
     play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
     contains_spoilers: contains_spoilers ?? false,
+    ...youtubeColumn,
   };
   if (publishing) {
     updatePayload.status = "published";

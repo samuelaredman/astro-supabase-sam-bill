@@ -114,6 +114,30 @@ if (!window.__rcInit) {
       return;
     }
 
+    // ── Attached video: first click on a spoiler review reveals it; otherwise
+    // swap the thumbnail for the player (loaded only now, on demand). ──
+    var video = e.target.closest('.rc-video[data-video-id]');
+    if (video) {
+      if (video.classList.contains('spoiler-hidden')) {
+        video.classList.remove('spoiler-hidden');
+        return;
+      }
+      var videoId = video.dataset.videoId;
+      if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return;
+      var iframe = document.createElement('iframe');
+      iframe.src = 'https://www.youtube-nocookie.com/embed/' + videoId + '?autoplay=1&rel=0';
+      iframe.title = 'YouTube video';
+      iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+      iframe.allowFullscreen = true;
+      iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+      // An iframe can't live inside a <button>, so the player gets its own box.
+      var player = document.createElement('div');
+      player.className = 'rc-video rc-video-playing';
+      player.appendChild(iframe);
+      video.replaceWith(player);
+      return;
+    }
+
     // Review body click → navigate to full review + comments
     var bodyEl = e.target.closest('.rc-body[data-href]');
     if (bodyEl && !bodyEl.classList.contains('spoiler-hidden')) {
@@ -259,6 +283,7 @@ if (!window.__rcInit) {
           platformId:  d.platformId,
           hours:       d.hours,
           spoilers:    d.spoilers === 'true',
+          youtubeUrl:  d.youtubeUrl || '',
         });
       }
       return;
