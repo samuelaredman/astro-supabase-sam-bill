@@ -10,6 +10,7 @@ import RecommendationFeedCard from "../components/RecommendationFeedCard.astro";
 import RecommendationComposer from "../components/RecommendationComposer.astro";
 import { igdbImage, timeAgo, scoreClass } from '../utils/format';
 import { getSiteStats } from '../utils/siteStats';
+import { attachReviewVideos } from '../utils/reviewVideos';
 import { REC_SELECT, shapeRec } from '../utils/recommendationsFeed';
 import { setPageCacheHeaders } from '../utils/cache';
 import { getPageUser } from '../utils/pageAuth';
@@ -200,7 +201,7 @@ const recentRecs = (recentRecsRaw ?? []).map((r: any) => shapeRec(r, currentProf
 type Platform = { id: string; name: string; slug: string; };
 type Review = {
   id: string; score: number; title: string; body: string;
-  play_time_hours: number; contains_spoilers: boolean; status: string;
+  play_time_hours: number; contains_spoilers: boolean; youtube_video_id?: string | null; status: string;
   published_at: string; created_at: string; played_on: Platform | null;
   games: { id: string; title: string; slug: string; cover_img_url: string | null } | null;
   profiles: { id: string; username: string; avatar_url: string | null } | null;
@@ -331,6 +332,12 @@ if (currentProfile) {
   followingRecs = (fRecsRaw ?? []).map((r: any) => shapeRec(r, currentProfile.id))
   followingLists = fLists as any[]
 }
+// Videos come from a separate fail-soft lookup, so the feed renders exactly as before if it errors.
+await attachReviewVideos(db, [
+  ...feedItems.filter((i: any) => i._isListItem === false),
+  ...followingReviews,
+  ...(htFull ?? []),
+])
 {
   // Re-apply the ranking order the light pass produced, and attach the numbers
   // the card renders.
@@ -476,6 +483,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       <button class="feed-tab" data-tab="reviews">Reviews</button>
       <button class="feed-tab" data-tab="lists">Lists</button>
       <button class="feed-tab" data-tab="recs">Recs</button>
+      <button class="feed-tab" data-tab="videos">Videos</button>
     </div>
 
     <div id="tab-recent">
@@ -543,6 +551,18 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       <div id="sentinel-recent" style="height:1px;margin:0"></div>
       <div id="loader-recent" style="display:none;padding:20px;text-align:center;font-size:13px;color:var(--text-tertiary)">Loading more…</div>
       <div id="end-recent" style="display:none;padding:16px 20px;text-align:center;font-size:13px;color:var(--text-tertiary)">You're all caught up ✓</div>
+    </div>
+
+    {/* Reviews with an attached video — loaded from /api/reviews/feed?tab=videos the
+        first time the Videos pill is opened (its sentinel only intersects once visible). */}
+    <div id="tab-videos" style="display:none">
+      <div id="empty-videos" class="empty-state" style="display:none">
+        <div class="empty-state-title">No video reviews yet</div>
+        <p>Add a YouTube link when you write a review to show up here.</p>
+      </div>
+      <div id="sentinel-videos" style="height:1px;margin:0"></div>
+      <div id="loader-videos" style="display:none;padding:20px;text-align:center;font-size:13px;color:var(--text-tertiary)">Loading videos…</div>
+      <div id="end-videos" style="display:none;padding:16px 20px;text-align:center;font-size:13px;color:var(--text-tertiary)">You're all caught up ✓</div>
     </div>
 
     {isLoggedIn && (
@@ -724,6 +744,10 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
       </div>
     </div>
+    <div class="composer-field" style="margin-top:12px">
+      <label class="composer-label" for="youtubeUrl">YouTube video <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
+      <input type="url" id="youtubeUrl" class="composer-input" placeholder="https://youtube.com/watch?v=..." maxlength="300" />
+    </div>
     <div class="composer-actions" style="margin-top:14px">
       <label class="spoiler-toggle">
         <input type="checkbox" id="spoilerCheck" />
@@ -772,6 +796,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       document.getElementById('scoreVal').value = ''
       document.getElementById('platformSelect').value = ''
       document.getElementById('spoilerCheck').checked = false
+      document.getElementById('youtubeUrl').value = ''
       document.getElementById('composerError').textContent = ''
       document.getElementById('charCount').textContent = '0 / 5000'
       document.getElementById('charCount').style.color = 'var(--text-tertiary)'
@@ -833,7 +858,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         var tab = btn.dataset.tab;
         var isTypeFilter = !!typeFilterMap[tab];
         // Show/hide content sections
-        ;['recent', 'following', 'hot-takes'].forEach(function(name) {
+        ;['recent', 'following', 'hot-takes', 'videos'].forEach(function(name) {
           var el = document.getElementById('tab-' + name);
           if (el) el.style.display = (tab === name || (isTypeFilter && name === 'recent')) ? '' : 'none';
         });
@@ -952,6 +977,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       const platformId = document.getElementById('platformSelect').value
       const hours = document.getElementById('hoursPlayed').value
       const spoilers = document.getElementById('spoilerCheck').checked
+      const youtubeUrl = document.getElementById('youtubeUrl').value.trim()
       const errorEl = document.getElementById('composerError')
       errorEl.textContent = ''
       if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
@@ -972,6 +998,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
             platform_played_on: platformId || null,
             play_time_hours: hours ? parseInt(hours) : null,
             contains_spoilers: spoilers,
+            youtube_url: youtubeUrl,
             status: 'draft',
           }),
         })
@@ -994,6 +1021,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       const platformId = document.getElementById('platformSelect').value
       const hours = document.getElementById('hoursPlayed').value
       const spoilers = document.getElementById('spoilerCheck').checked
+      const youtubeUrl = document.getElementById('youtubeUrl').value.trim()
       const errorEl = document.getElementById('composerError')
       errorEl.textContent = ''
       if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
@@ -1015,6 +1043,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
           platform_played_on: platformId || null,
           play_time_hours: hours ? parseInt(hours) : null,
           contains_spoilers: spoilers,
+          youtube_url: youtubeUrl,
         }),
       })
       const data = await res.json()
@@ -1179,6 +1208,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         return { type: type, display: type, count: rxCountMap[type].count, active: rxCountMap[type].active };
       });
       var commentCount = Array.isArray(r.review_comments) ? r.review_comments.length : 0;
+      var ytId = /^[A-Za-z0-9_-]{11}$/.test(r.youtube_video_id || '') ? r.youtube_video_id : null;
 
       var h = '<div data-feed-type="review"><article class="rc" data-score="' + esc(r.score) + '" data-date="' + esc(ts) + '" data-upvotes="' + up + '">';
 
@@ -1196,7 +1226,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
          + '<span class="share-btn-toast">Link copied</span>'
          + '</button>';
       if (isLoggedIn && isOwn) {
-        h += '<button class="rc-edit-btn" data-review-id="' + esc(r.id) + '" data-game-id="' + esc(g.id||'') + '" data-game-title="' + esc(g.title||'') + '" data-score="' + esc(r.score) + '" data-review-title="' + esc(r.title||'') + '" data-body="' + esc(r.body) + '" data-platform-id="' + esc((r.played_on||{}).id||'') + '" data-hours="' + esc(r.play_time_hours||'') + '" data-spoilers="' + (r.contains_spoilers?'true':'false') + '" title="Edit review">'
+        h += '<button class="rc-edit-btn" data-review-id="' + esc(r.id) + '" data-game-id="' + esc(g.id||'') + '" data-game-title="' + esc(g.title||'') + '" data-score="' + esc(r.score) + '" data-review-title="' + esc(r.title||'') + '" data-body="' + esc(r.body) + '" data-platform-id="' + esc((r.played_on||{}).id||'') + '" data-hours="' + esc(r.play_time_hours||'') + '" data-spoilers="' + (r.contains_spoilers?'true':'false') + '" data-youtube-url="' + (ytId ? 'https://www.youtube.com/watch?v=' + ytId : '') + '" title="Edit review">'
            + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
            + '</button>'
            + '<button class="rc-delete-btn" data-review-id="' + esc(r.id) + '" title="Delete review">'
@@ -1237,6 +1267,21 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
          + esc(r.body)
          + '</div>';
 
+      if (ytId) {
+        h += '<div class="rc-video' + (r.contains_spoilers ? ' spoiler-hidden' : '') + '" data-video-id="' + ytId + '">'
+           + '<button type="button" class="rc-video-thumb" aria-label="Play video">'
+           + '<img src="https://i.ytimg.com/vi/' + ytId + '/mqdefault.jpg" alt="" loading="lazy" width="320" height="180" />'
+           + '<span class="rc-video-play" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>'
+           + '<span class="rc-video-duration" hidden></span>'
+           + '</button>'
+           + '<a class="rc-video-info" href="https://www.youtube.com/watch?v=' + ytId + '" target="_blank" rel="noopener noreferrer">'
+           + '<span class="rc-video-title">YouTube video</span>'
+           + '<span class="rc-video-meta">youtube.com</span>'
+           + '<span class="rc-video-stats" hidden></span>'
+           + '<span class="rc-video-desc" hidden></span>'
+           + '</a></div>';
+      }
+
       h += '<div class="rc-footer"><div class="rc-chips">';
       if (r.played_on) h += '<span class="rc-chip">' + esc(r.played_on.name) + '</span>';
       if ((r.play_time_hours || 0) > 0) h += '<span class="rc-chip">' + esc(r.play_time_hours) + 'h</span>';
@@ -1263,7 +1308,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
 
       h += '<button class="rc-reaction-toggle" data-toggle-review-id="' + esc(r.id) + '" data-logged-in="' + li + '" title="React">+</button>'
          + '</div>'
-         + '<span class="rc-vote-ts">' + esc(timeAgo(ts)) + '</span>'
+         // No .rc-vote-ts here: like ReviewCard.astro, feed cards show the time in the reviewer row only.
          + '</div>'
          + '</div></div>'
          + '</article></div>';
@@ -1509,7 +1554,8 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     // ── Per-tab state ──────────────────────────────────────────────────────────
     var state = {
       recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
-      following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone }
+      following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone },
+      videos:    { cursor: null,                   loading: false, done: false, count: 0 }
     };
 
     async function loadMore(tab) {
@@ -1521,18 +1567,23 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       var endEl    = document.getElementById('end-' + tab);
       if (loader) loader.style.display = 'block';
       try {
-        var feedUrl = tab === 'following'
-          ? '/api/reviews/feed?tab=following&limit=20' + (s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '')
-          : '/api/feed/recent?limit=20' + (s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '');
+        var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
+        var feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
+                    : tab === 'videos'    ? '/api/reviews/feed?tab=videos&limit=20' + cursorParam
+                    : '/api/feed/recent?limit=20' + cursorParam;
         var res = await fetch(feedUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var items = await res.json();
         if (!Array.isArray(items) || items.length === 0) {
           s.done = true;
-          if (endEl) endEl.style.display = 'block';
+          // A tab with nothing at all gets its empty state instead of "all caught up".
+          var emptyEl = document.getElementById('empty-' + tab);
+          if (emptyEl && !s.count) emptyEl.style.display = 'block';
+          else if (endEl) endEl.style.display = 'block';
           if (sentinel) sentinel.remove();
           return;
         }
+        s.count = (s.count || 0) + items.length;
         var tmp = document.createElement('div');
         items.forEach(function(item) {
           tmp.innerHTML = item._type === 'rec' ? buildRecCard(item)
@@ -1560,7 +1611,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     var observer = new IntersectionObserver(function(entries) {
       entries.forEach(function(entry) {
         if (!entry.isIntersecting) return;
-        var tab = entry.target.id === 'sentinel-recent' ? 'recent' : 'following';
+        var tab = entry.target.id.replace('sentinel-', '');
         loadMore(tab);
       });
     }, { rootMargin: '300px' });
@@ -1569,6 +1620,8 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     var sentinelFollowing = document.getElementById('sentinel-following');
     if (sentinelRecent    && !initialRecentDone)    observer.observe(sentinelRecent);
     if (sentinelFollowing && !initialFollowingDone) observer.observe(sentinelFollowing);
+    var sentinelVideos = document.getElementById('sentinel-videos');
+    if (sentinelVideos) observer.observe(sentinelVideos); // fires once the Videos tab is shown
     if (initialRecentDone    && document.getElementById('end-recent'))    document.getElementById('end-recent').style.display = 'block';
     if (initialFollowingDone && document.getElementById('end-following')) document.getElementById('end-following').style.display = 'block';
   })();

@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
 import { igdbImage } from "../../../utils/format";
 import { cdnCacheHeaders } from "../../../utils/cache";
+import { attachReviewVideos } from "../../../utils/reviewVideos";
 
 const REVIEW_FIELDS = `
   id, score, title, body, play_time_hours,
@@ -75,6 +76,7 @@ export const GET: APIRoute = async (context) => {
     _type: "review",
     _date: r.published_at || r.created_at,
   }));
+  await attachReviewVideos(db, reviews);
 
   const recs = (recsRes.data ?? []).map((r: any) => ({
     ...r,
