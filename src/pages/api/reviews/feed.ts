@@ -2,10 +2,11 @@ import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
 import { cdnCacheHeaders } from "../../../utils/cache";
+import { attachReviewVideos } from "../../../utils/reviewVideos";
 
 const REVIEW_FIELDS = `
   id, score, title, body, play_time_hours,
-  contains_spoilers, youtube_video_id, status, published_at, created_at,
+  contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
   games ( id, title, slug, cover_img_url ),
   profiles ( id, username, avatar_url ),
@@ -52,7 +53,7 @@ export const GET: APIRoute = async (context) => {
       console.error("[feed] following error:", JSON.stringify(error));
       return json({ error: "Failed to load reviews." }, 500);
     }
-    return json(data ?? []);
+    return json(await attachReviewVideos(db, data));
   }
 
   // ── Recent tab — public, CDN-cacheable ────────────────────────────────────
@@ -72,7 +73,7 @@ export const GET: APIRoute = async (context) => {
   }
 
   // Cache at the edge for 2 min — protects Supabase from repeated/bot hits.
-  return new Response(JSON.stringify(data ?? []), {
+  return new Response(JSON.stringify(await attachReviewVideos(db, data)), {
     status: 200,
     headers: {
       "Content-Type": "application/json",

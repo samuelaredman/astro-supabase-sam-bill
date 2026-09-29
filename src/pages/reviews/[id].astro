@@ -10,6 +10,7 @@ import ShareButton from '../../components/ShareButton.astro';
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
 import { youTubeEmbedUrl, youTubeWatchUrl } from '../../utils/youtube';
+import { attachReviewVideos } from '../../utils/reviewVideos';
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
@@ -26,7 +27,7 @@ const { data: review, error } = await (supabase as any)
   .from('reviews')
   .select(`
     id, score, title, body, play_time_hours,
-    contains_spoilers, youtube_video_id, status, published_at, created_at,
+    contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
     games ( id, title, slug, cover_img_url ),
     profiles ( id, username, avatar_url, search_indexable ),
@@ -39,6 +40,9 @@ const { data: review, error } = await (supabase as any)
 
 if (error || !review) return Astro.redirect('/404');
 
+// Attached video (fail-soft lookup), overlapped with the comments query below.
+const videoLookup = attachReviewVideos(supabase, [review]);
+
 const { data: commentsRaw, error: commentsError } = await (supabase as any)
   .from('review_comments')
   .select('id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url ), comment_votes ( vote, profile_id ), comment_reactions ( reaction_type, profile_id )')
@@ -46,6 +50,7 @@ const { data: commentsRaw, error: commentsError } = await (supabase as any)
   .order('created_at', { ascending: true });
 
 if (commentsError) console.error('[reviews/[id]] comments query error:', commentsError);
+await videoLookup;
 const allComments = commentsRaw ?? [];
 function renderBody(text: string): string {
   const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

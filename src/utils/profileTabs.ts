@@ -14,6 +14,7 @@
 import { getVoteCounts, igdbImage as igdbCover } from './format';
 import { REC_SELECT, shapeRec } from './recommendationsFeed';
 import { queryLibraryPage, LIBRARY_PAGE_SIZE, type LibraryPageResult } from './libraryQuery';
+import { attachReviewVideos } from './reviewVideos';
 
 export const LAZY_PROFILE_TABS = ['reviews', 'recommendations', 'lists', 'library'] as const;
 export type LazyProfileTab = (typeof LAZY_PROFILE_TABS)[number];
@@ -25,7 +26,7 @@ export function isLazyProfileTab(tab: string): tab is LazyProfileTab {
 /** The reviewer's reviews, as the Reviews tab (cards + filters) needs them. */
 export const PROFILE_REVIEWS_SELECT = `
   id, score, title, body, published_at, created_at,
-  contains_spoilers, youtube_video_id, play_time_hours, status,
+  contains_spoilers, play_time_hours, status,
   played_on:platform_played_on ( id, name, slug ),
   games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) ),
   review_votes ( vote, profile_id ),
@@ -70,13 +71,17 @@ export async function loadReviewsTab(ctx: ProfileTabContext) {
   const { db, publishedReviews } = ctx;
   const reviewGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))] as string[];
 
-  // Developer names per reviewed game — for the dev filter.
-  const { data: revCompanyRows } = reviewGameIds.length > 0
-    ? await db.from('game_companies')
-        .select('game_id, developers(name)')
-        .eq('role', 'developer')
-        .in('game_id', reviewGameIds)
-    : { data: [] };
+  // Developer names per reviewed game — for the dev filter. Attached videos are
+  // looked up alongside (fail-soft: cards just render without them on error).
+  const [{ data: revCompanyRows }] = await Promise.all([
+    reviewGameIds.length > 0
+      ? db.from('game_companies')
+          .select('game_id, developers(name)')
+          .eq('role', 'developer')
+          .in('game_id', reviewGameIds)
+      : Promise.resolve({ data: [] }),
+    attachReviewVideos(db, publishedReviews),
+  ]);
   const devsByGameId: Record<string, string[]> = {};
   for (const row of (revCompanyRows ?? []) as any[]) {
     if (row.developers?.name) (devsByGameId[row.game_id] ||= []).push(row.developers.name);

@@ -4,6 +4,7 @@ import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
 import { readYouTubeField } from "../../../utils/youtube";
+import { attachReviewVideos } from "../../../utils/reviewVideos";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -19,7 +20,15 @@ export const POST: APIRoute = async (context) => {
   // Absent key (e.g. an older client) leaves the stored video untouched.
   const youtube = readYouTubeField(requestBody);
   if ("error" in youtube) return json({ error: youtube.error }, 400);
-  const youtubeColumn = youtube.present ? { youtube_video_id: youtube.id } : {};
+  // Clearing (empty field) only writes the column when the review actually has a
+  // video, so edits of video-less reviews never touch it.
+  let youtubeColumn: { youtube_video_id?: string | null } = {};
+  if (youtube.present && youtube.id) {
+    youtubeColumn = { youtube_video_id: youtube.id };
+  } else if (youtube.present) {
+    const [current] = await attachReviewVideos(db, [{ id: review_id as string }]);
+    if ((current as any)?.youtube_video_id) youtubeColumn = { youtube_video_id: null };
+  }
 
   // Verify ownership + current state
   const { data: review } = await db

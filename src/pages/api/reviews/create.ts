@@ -18,7 +18,8 @@ export const POST: APIRoute = async (context) => {
 
   const youtube = readYouTubeField(body);
   if ("error" in youtube) return json({ error: youtube.error }, 400);
-  const youtubeColumn = youtube.present ? { youtube_video_id: youtube.id } : {};
+  // Only written when there's a video, so reviews without one never touch the column.
+  const youtubeColumn = youtube.present && youtube.id ? { youtube_video_id: youtube.id } : {};
 
   // ── Draft path: only a body is required; score/title can come later at publish. ──
   if (isDraft) {
