@@ -844,6 +844,7 @@ SUPABASE_ANON_KEY            Public anon key (safe for SSR, never expose client-
 SUPABASE_SERVICE_ROLE_KEY    Service role — server only, bypasses all RLS
 IGDB_CLIENT_ID               IGDB API credentials
 IGDB_CLIENT_SECRET           IGDB API credentials
+YOUTUBE_API_KEY              Optional. YouTube Data API v3 — review-video description/duration/views
 ```
 
 Local: `.env` file. Production: Netlify environment settings.

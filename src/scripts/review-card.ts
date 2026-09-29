@@ -46,6 +46,42 @@ if (!window.__rcPickerInit) {
 if (!window.__rcInit) {
   window.__rcInit = true;
 
+  // ── Attached-video details (title / channel / description) ──────────────
+  // Cards render a placeholder; this fills it from /api/youtube/meta (CDN-cached
+  // per video). Also runs for cards inserted later (feed load-more, profile tabs).
+  var rcVideoMeta = {};
+  function fillVideoMeta(el) {
+    if (el.dataset.metaLoaded) return;
+    el.dataset.metaLoaded = '1';
+    var id = el.dataset.videoId;
+    if (!/^[A-Za-z0-9_-]{11}$/.test(id)) return;
+    rcVideoMeta[id] = rcVideoMeta[id] || fetch('/api/youtube/meta?id=' + id)
+      .then(function(res) { return res.ok ? res.json() : null; })
+      .catch(function() { return null; });
+    rcVideoMeta[id].then(function(meta) {
+      if (!meta || !meta.title) return;
+      var title = el.querySelector('.rc-video-title');
+      var info  = el.querySelector('.rc-video-meta');
+      var desc  = el.querySelector('.rc-video-desc');
+      var dur   = el.querySelector('.rc-video-duration');
+      var thumb = el.querySelector('.rc-video-thumb');
+      if (title) title.textContent = meta.title;
+      if (thumb) thumb.setAttribute('aria-label', 'Play video: ' + meta.title);
+      if (info) info.textContent = [meta.channel, meta.views].filter(Boolean).join(' · ') || 'YouTube';
+      if (desc && meta.description) { desc.textContent = meta.description; desc.hidden = false; }
+      if (dur && meta.duration) { dur.textContent = meta.duration; dur.hidden = false; }
+    });
+  }
+  function fillAllVideoMeta(root) {
+    (root || document).querySelectorAll('.rc-video[data-video-id]:not([data-meta-loaded])').forEach(fillVideoMeta);
+  }
+  fillAllVideoMeta();
+  new MutationObserver(function(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      if (mutations[i].addedNodes.length) { fillAllVideoMeta(); return; }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+
   // ── Close all floating panels/dropdowns ──────────────────────────────────
   function closeAllRcPanels() {
     var picker = document.getElementById('rc-emoji-picker');
@@ -114,14 +150,16 @@ if (!window.__rcInit) {
       return;
     }
 
-    // ── Attached video: first click on a spoiler review reveals it; otherwise
-    // swap the thumbnail for the player (loaded only now, on demand). ──
+    // ── Attached video: first click on a spoiler review reveals it; a click on
+    // the thumbnail swaps the preview for the player (loaded only now). ──
     var video = e.target.closest('.rc-video[data-video-id]');
     if (video) {
       if (video.classList.contains('spoiler-hidden')) {
+        e.preventDefault(); // don't follow the title link while it's still blurred
         video.classList.remove('spoiler-hidden');
         return;
       }
+      if (!e.target.closest('.rc-video-thumb')) return; // title link opens YouTube normally
       var videoId = video.dataset.videoId;
       if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return;
       var iframe = document.createElement('iframe');
@@ -130,9 +168,8 @@ if (!window.__rcInit) {
       iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
       iframe.allowFullscreen = true;
       iframe.referrerPolicy = 'strict-origin-when-cross-origin';
-      // An iframe can't live inside a <button>, so the player gets its own box.
       var player = document.createElement('div');
-      player.className = 'rc-video rc-video-playing';
+      player.className = 'rc-video-player';
       player.appendChild(iframe);
       video.replaceWith(player);
       return;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseYouTubeId, readYouTubeField } from './youtube';
+import { parseYouTubeId, readYouTubeField, formatYouTubeDuration, formatViewCount } from './youtube';
 
 describe('parseYouTubeId', () => {
   const id = 'dQw4w9WgXcQ';
@@ -55,5 +55,35 @@ describe('readYouTubeField', () => {
   it('errors on a non-YouTube link', () => {
     expect(readYouTubeField({ youtube_url: 'https://vimeo.com/123' })).toHaveProperty('error');
     expect(readYouTubeField({ youtube_url: 42 })).toHaveProperty('error');
+  });
+});
+
+describe('formatYouTubeDuration', () => {
+  it.each([
+    ['PT4M5S', '4:05'],
+    ['PT1H2M3S', '1:02:03'],
+    ['PT45S', '0:45'],
+    ['PT10M', '10:00'],
+    ['P1DT2H', '26:00:00'],
+  ])('%s → %s', (iso, out) => expect(formatYouTubeDuration(iso)).toBe(out));
+
+  it.each(['P0D', 'PT0S', '', null, 'garbage'])('returns null for %s', (iso) => {
+    expect(formatYouTubeDuration(iso as any)).toBeNull();
+  });
+});
+
+describe('formatViewCount', () => {
+  it.each([
+    ['1', '1 view'],
+    ['999', '999 views'],
+    ['1234', '1.2K views'],
+    ['56789', '57K views'],
+    ['1234567', '1.2M views'],
+    ['2500000000', '2.5B views'],
+  ])('%s → %s', (raw, out) => expect(formatViewCount(raw)).toBe(out));
+
+  it('returns null for missing values', () => {
+    expect(formatViewCount(undefined)).toBeNull();
+    expect(formatViewCount('abc')).toBeNull();
   });
 });

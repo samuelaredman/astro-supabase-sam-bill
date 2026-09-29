@@ -55,6 +55,26 @@ export function readYouTubeField(body: Record<string, unknown>): YouTubeField {
   return id ? { present: true, id } : { present: true, error: "That doesn't look like a YouTube video link." };
 }
 
+/** ISO 8601 duration from the Data API ("PT1H2M3S") → "1:02:03" / "4:05". */
+export function formatYouTubeDuration(iso: string | null | undefined): string | null {
+  const m = (iso ?? '').match(/^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!m || iso === 'P0D') return null;
+  const [d, h, min, s] = m.slice(1).map((v) => parseInt(v ?? '0', 10));
+  const hours = d * 24 + h;
+  if (hours + min + s === 0) return null; // live streams report P0D / PT0S
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return hours > 0 ? `${hours}:${pad(min)}:${pad(s)}` : `${min}:${pad(s)}`;
+}
+
+/** "1234567" → "1.2M views". */
+export function formatViewCount(raw: string | number | null | undefined): string | null {
+  const n = typeof raw === 'string' ? parseInt(raw, 10) : raw ?? NaN;
+  if (!Number.isFinite(n) || n < 0) return null;
+  const fmt = (v: number, unit: string) => `${v >= 10 ? Math.round(v) : Math.round(v * 10) / 10}${unit}`;
+  const label = n >= 1e9 ? fmt(n / 1e9, 'B') : n >= 1e6 ? fmt(n / 1e6, 'M') : n >= 1e3 ? fmt(n / 1e3, 'K') : String(n);
+  return `${label} ${n === 1 ? 'view' : 'views'}`;
+}
+
 export function youTubeWatchUrl(id: string): string {
   return `https://www.youtube.com/watch?v=${id}`;
 }
