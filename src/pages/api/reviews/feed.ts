@@ -56,6 +56,32 @@ export const GET: APIRoute = async (context) => {
     return json(await attachReviewVideos(db, data));
   }
 
+  // ── Videos tab — published reviews with an attached YouTube video. Public,
+  // CDN-cacheable. If the lookup fails (e.g. the column's migration isn't
+  // applied), it returns an empty list so the tab just shows its empty state. ──
+  if (tab === "videos") {
+    let videoQuery = db
+      .from("reviews")
+      .select(REVIEW_FIELDS)
+      .eq("status", "published")
+      .not("youtube_video_id", "is", null)
+      .order("published_at", { ascending: false })
+      .limit(limit);
+    if (cursor) videoQuery = videoQuery.lt("published_at", cursor);
+
+    const { data: videoData, error: videoError } = await videoQuery;
+    if (videoError) console.error("[feed] videos error:", JSON.stringify(videoError));
+
+    return new Response(JSON.stringify(await attachReviewVideos(db, videoError ? [] : videoData)), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ...cdnCacheHeaders(120, 300),
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
   // ── Recent tab — public, CDN-cacheable ────────────────────────────────────
   let query = db
     .from("reviews")

@@ -483,6 +483,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       <button class="feed-tab" data-tab="reviews">Reviews</button>
       <button class="feed-tab" data-tab="lists">Lists</button>
       <button class="feed-tab" data-tab="recs">Recs</button>
+      <button class="feed-tab" data-tab="videos">Videos</button>
     </div>
 
     <div id="tab-recent">
@@ -550,6 +551,18 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       <div id="sentinel-recent" style="height:1px;margin:0"></div>
       <div id="loader-recent" style="display:none;padding:20px;text-align:center;font-size:13px;color:var(--text-tertiary)">Loading more…</div>
       <div id="end-recent" style="display:none;padding:16px 20px;text-align:center;font-size:13px;color:var(--text-tertiary)">You're all caught up ✓</div>
+    </div>
+
+    {/* Reviews with an attached video — loaded from /api/reviews/feed?tab=videos the
+        first time the Videos pill is opened (its sentinel only intersects once visible). */}
+    <div id="tab-videos" style="display:none">
+      <div id="empty-videos" class="empty-state" style="display:none">
+        <div class="empty-state-title">No video reviews yet</div>
+        <p>Add a YouTube link when you write a review to show up here.</p>
+      </div>
+      <div id="sentinel-videos" style="height:1px;margin:0"></div>
+      <div id="loader-videos" style="display:none;padding:20px;text-align:center;font-size:13px;color:var(--text-tertiary)">Loading videos…</div>
+      <div id="end-videos" style="display:none;padding:16px 20px;text-align:center;font-size:13px;color:var(--text-tertiary)">You're all caught up ✓</div>
     </div>
 
     {isLoggedIn && (
@@ -845,7 +858,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         var tab = btn.dataset.tab;
         var isTypeFilter = !!typeFilterMap[tab];
         // Show/hide content sections
-        ;['recent', 'following', 'hot-takes'].forEach(function(name) {
+        ;['recent', 'following', 'hot-takes', 'videos'].forEach(function(name) {
           var el = document.getElementById('tab-' + name);
           if (el) el.style.display = (tab === name || (isTypeFilter && name === 'recent')) ? '' : 'none';
         });
@@ -1541,7 +1554,8 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     // ── Per-tab state ──────────────────────────────────────────────────────────
     var state = {
       recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
-      following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone }
+      following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone },
+      videos:    { cursor: null,                   loading: false, done: false, count: 0 }
     };
 
     async function loadMore(tab) {
@@ -1553,18 +1567,23 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       var endEl    = document.getElementById('end-' + tab);
       if (loader) loader.style.display = 'block';
       try {
-        var feedUrl = tab === 'following'
-          ? '/api/reviews/feed?tab=following&limit=20' + (s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '')
-          : '/api/feed/recent?limit=20' + (s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '');
+        var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
+        var feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
+                    : tab === 'videos'    ? '/api/reviews/feed?tab=videos&limit=20' + cursorParam
+                    : '/api/feed/recent?limit=20' + cursorParam;
         var res = await fetch(feedUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var items = await res.json();
         if (!Array.isArray(items) || items.length === 0) {
           s.done = true;
-          if (endEl) endEl.style.display = 'block';
+          // A tab with nothing at all gets its empty state instead of "all caught up".
+          var emptyEl = document.getElementById('empty-' + tab);
+          if (emptyEl && !s.count) emptyEl.style.display = 'block';
+          else if (endEl) endEl.style.display = 'block';
           if (sentinel) sentinel.remove();
           return;
         }
+        s.count = (s.count || 0) + items.length;
         var tmp = document.createElement('div');
         items.forEach(function(item) {
           tmp.innerHTML = item._type === 'rec' ? buildRecCard(item)
@@ -1592,7 +1611,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     var observer = new IntersectionObserver(function(entries) {
       entries.forEach(function(entry) {
         if (!entry.isIntersecting) return;
-        var tab = entry.target.id === 'sentinel-recent' ? 'recent' : 'following';
+        var tab = entry.target.id.replace('sentinel-', '');
         loadMore(tab);
       });
     }, { rootMargin: '300px' });
@@ -1601,6 +1620,8 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     var sentinelFollowing = document.getElementById('sentinel-following');
     if (sentinelRecent    && !initialRecentDone)    observer.observe(sentinelRecent);
     if (sentinelFollowing && !initialFollowingDone) observer.observe(sentinelFollowing);
+    var sentinelVideos = document.getElementById('sentinel-videos');
+    if (sentinelVideos) observer.observe(sentinelVideos); // fires once the Videos tab is shown
     if (initialRecentDone    && document.getElementById('end-recent'))    document.getElementById('end-recent').style.display = 'block';
     if (initialFollowingDone && document.getElementById('end-following')) document.getElementById('end-following').style.display = 'block';
   })();
