@@ -36,6 +36,35 @@ export const POST: APIRoute = async (context) => {
     return json({ error: msg }, 500);
   }
 
+  // ── Notify the review author, and (for replies) the parent comment's author.
+  // Deduped so nobody is notified twice or about their own comment. Non-blocking. ──
+  try {
+    const { data: review } = await db
+      .from('reviews').select('profile_id').eq('id', review_id).maybeSingle();
+    const recipients = new Set<string>();
+    if (review?.profile_id && review.profile_id !== profile.id) recipients.add(review.profile_id);
+
+    if (parent_id) {
+      const { data: parent } = await db
+        .from('review_comments').select('profile_id').eq('id', parent_id).maybeSingle();
+      if (parent?.profile_id && parent.profile_id !== profile.id) recipients.add(parent.profile_id);
+    }
+
+    const rows = [...recipients].map((rid) => ({
+      profile_id: rid,
+      actor_profile_id: profile.id,
+      review_id,
+      comment_id: inserted.id,
+      type: rid === review?.profile_id ? 'review_comment' : 'comment_reply',
+    }));
+    if (rows.length > 0) {
+      const { error: notifError } = await db.from('notifications').insert(rows);
+      if (notifError) console.error('[comments/create] notification error (non-fatal):', JSON.stringify(notifError));
+    }
+  } catch (e) {
+    console.error('[comments/create] notification error (non-fatal):', e);
+  }
+
   // ── Screen the text for explicit content — never fails the request, but must be
   // awaited: on serverless the function freezes once the response is sent, so a
   // detached promise would be killed before the report is filed. There's no other
