@@ -75,6 +75,56 @@ export function formatViewCount(raw: string | number | null | undefined): string
   return `${label} ${n === 1 ? 'view' : 'views'}`;
 }
 
+/** Collapses whitespace and caps length; null when empty. */
+export function cleanDescription(text: string | null | undefined): string | null {
+  const t = (text ?? '').replace(/\s+/g, ' ').trim();
+  return t ? t.slice(0, 300) : null;
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+function metaContent(html: string, attr: 'name' | 'itemprop', key: string): string | null {
+  const m = html.match(new RegExp(`<meta ${attr}="${key}" content="([^"]*)"`));
+  return m ? decodeEntities(m[1]) : null;
+}
+
+export interface WatchPageMeta {
+  description: string | null;
+  duration: string | null;
+  views: string | null;
+  /** ISO timestamp. */
+  published: string | null;
+  category: string | null;
+}
+
+/**
+ * Reads the public metadata from a YouTube watch page's HTML. Returns null when
+ * none is present (e.g. a consent interstitial instead of the video page).
+ */
+export function parseWatchPage(html: string): WatchPageMeta | null {
+  // The embedded player JSON has the full description; the meta tag (truncated) is the fallback.
+  let description: string | null = null;
+  const short = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
+  if (short) {
+    try { description = JSON.parse(`"${short[1]}"`); } catch { /* use the meta tag */ }
+  }
+  const views = html.match(/"viewCount":"(\d+)"/)?.[1] ?? metaContent(html, 'itemprop', 'interactionCount');
+  const found: WatchPageMeta = {
+    description: cleanDescription(description ?? metaContent(html, 'name', 'description')),
+    duration: formatYouTubeDuration(metaContent(html, 'itemprop', 'duration')),
+    views: formatViewCount(views),
+    published: metaContent(html, 'itemprop', 'datePublished') ?? metaContent(html, 'itemprop', 'uploadDate'),
+    category: metaContent(html, 'itemprop', 'genre'),
+  };
+  return Object.values(found).some(Boolean) ? found : null;
+}
+
 export function youTubeWatchUrl(id: string): string {
   return `https://www.youtube.com/watch?v=${id}`;
 }

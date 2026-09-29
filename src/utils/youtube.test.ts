@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseYouTubeId, readYouTubeField, formatYouTubeDuration, formatViewCount } from './youtube';
+import { parseYouTubeId, readYouTubeField, formatYouTubeDuration, formatViewCount, parseWatchPage } from './youtube';
 
 describe('parseYouTubeId', () => {
   const id = 'dQw4w9WgXcQ';
@@ -85,5 +85,33 @@ describe('formatViewCount', () => {
   it('returns null for missing values', () => {
     expect(formatViewCount(undefined)).toBeNull();
     expect(formatViewCount('abc')).toBeNull();
+  });
+});
+
+describe('parseWatchPage', () => {
+  // Trimmed from a real watch page.
+  const html = `<meta name="description" content="Truncated desc &amp; more...">
+    <meta itemprop="duration" content="PT3M34S">
+    <meta itemprop="datePublished" content="2009-10-24T23:57:33-07:00">
+    <meta itemprop="genre" content="Gaming">
+    <script>var ytInitialPlayerResponse = {"videoDetails":{"viewCount":"1821400717","shortDescription":"Full \\"quoted\\" description.\\n\\nSecond line."}};</script>`;
+
+  it('reads description, duration, views, date and category', () => {
+    expect(parseWatchPage(html)).toEqual({
+      description: 'Full "quoted" description. Second line.',
+      duration: '3:34',
+      views: '1.8B views',
+      published: '2009-10-24T23:57:33-07:00',
+      category: 'Gaming',
+    });
+  });
+
+  it('falls back to the meta description and decodes entities', () => {
+    const noJson = html.replace(/<script>.*<\/script>/, '');
+    expect(parseWatchPage(noJson)?.description).toBe('Truncated desc & more...');
+  });
+
+  it('returns null for a page with no video metadata (consent screen)', () => {
+    expect(parseWatchPage('<html><body>Before you continue to YouTube</body></html>')).toBeNull();
   });
 });

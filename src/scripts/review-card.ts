@@ -62,12 +62,19 @@ if (!window.__rcInit) {
       if (!meta || !meta.title) return;
       var title = el.querySelector('.rc-video-title');
       var info  = el.querySelector('.rc-video-meta');
+      var stats = el.querySelector('.rc-video-stats');
       var desc  = el.querySelector('.rc-video-desc');
       var dur   = el.querySelector('.rc-video-duration');
       var thumb = el.querySelector('.rc-video-thumb');
       if (title) title.textContent = meta.title;
       if (thumb) thumb.setAttribute('aria-label', 'Play video: ' + meta.title);
-      if (info) info.textContent = [meta.channel, meta.views].filter(Boolean).join(' · ') || 'YouTube';
+      if (info) info.textContent = meta.channel || 'YouTube';
+      var published = meta.published ? new Date(meta.published) : null;
+      var dateLabel = published && !isNaN(published.getTime())
+        ? published.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        : null;
+      var statsText = [meta.views, dateLabel, meta.category].filter(Boolean).join(' · ');
+      if (stats && statsText) { stats.textContent = statsText; stats.hidden = false; }
       if (desc && meta.description) { desc.textContent = meta.description; desc.hidden = false; }
       if (dur && meta.duration) { dur.textContent = meta.duration; dur.hidden = false; }
     });
