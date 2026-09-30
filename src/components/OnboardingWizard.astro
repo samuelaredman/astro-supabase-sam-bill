@@ -30,6 +30,7 @@ interface Props {
   hasImportedBackloggd?: boolean;
   hasSteamConnected?: boolean;
   hasImportedSteam?: boolean;
+  steamUsername?: string | null;
   existingFavorite?: FavoriteGame | null;
   existingShowcase?: ShowcaseGame[];
 }
@@ -42,23 +43,23 @@ const {
   hasImportedBackloggd = false,
   hasSteamConnected = false,
   hasImportedSteam = false,
+  steamUsername = null,
   existingFavorite = null,
   existingShowcase = [],
 } = Astro.props;
 
-// Steam step only shown for users who've already connected Steam (via
-// Settings → Steam / OpenID). Users without a connection see Backloggd
-// only — Steam gets a dedicated Settings entry point after onboarding.
-// If both run, Backloggd goes first so its higher-nuance rows (star ratings
-// → 1-10 scores) are already drafts by the time Steam scans for conflicts,
-// and the deterministic "keep existing" rule below makes Backloggd win.
+// Steam step (skippable): connect Steam if needed, then sync the library and
+// import Steam reviews. Shown until done or skipped (steam_reviews_import_done_at).
+// Backloggd goes first so its higher-nuance rows (star ratings → 1-10 scores)
+// are already drafts by the time Steam scans for conflicts, and the
+// deterministic "keep existing" rule makes Backloggd win.
 const pending = [
   'welcome',
   !hasAvatar && 'avatar',
   !hasFavorite && 'favorite',
   !hasShowcase && 'showcase',
   !hasImportedBackloggd && 'backloggd',
-  hasSteamConnected && !hasImportedSteam && 'steam',
+  !hasImportedSteam && 'steam',
   'tour',
 ].filter(Boolean) as string[];
 
@@ -151,22 +152,45 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
 
     <section class="ob-step" data-step-key="steam" hidden>
       <div class="ob-icon">🎮</div>
-      <h2>Bring your Steam reviews too?</h2>
-      <p>We'll import your public Steam reviews as drafts — you assign a score and publish when you're ready.</p>
-      <p class="ob-sr-note" id="obSrDupeNote" hidden>
-        If a game is already reviewed here (from Backloggd or otherwise), your existing version wins and the Steam text is skipped.
-      </p>
+      <h2>Connect your Steam account</h2>
+      <p>Sync your Steam library and bring over your Steam reviews — or skip this and do it later from Settings.</p>
 
-      <div class="ob-sr-preview" id="obSrPreview" hidden></div>
-
-      <div class="ob-sr-actions">
-        <button class="ob-continue" id="obSrPreviewBtn" type="button">Preview Steam reviews</button>
-        <button class="ob-continue" id="obSrImportBtn" type="button" hidden>Import to drafts</button>
+      {/* Not connected yet: Steam sign-in (OpenID) leaves the page and returns here with
+          ?steam=connected|cancelled|error; the script below reopens the wizard on this step. */}
+      <div id="obSteamConnectBox" hidden={hasSteamConnected}>
+        <a class="ob-continue ob-steam-connect" id="obSteamConnectBtn" href="/api/auth/steam-connect">Connect Steam</a>
+        <p class="ob-bl-sub ob-steam-fineprint">You'll sign in on Steam's own site — Chekpoint never sees your password.</p>
       </div>
 
-      <div class="ob-bl-status" id="obSrStatus" hidden></div>
-      <div class="ob-progress-bar" id="obSrBar" hidden style="margin:12px 0 0"><div class="ob-progress-fill" id="obSrBarFill"></div></div>
+      <div id="obSteamConnectedBox" hidden={!hasSteamConnected}>
+        <div class="ob-steam-account">✓ Connected{steamUsername ? <> as <strong>{steamUsername}</strong></> : ' to Steam'}</div>
 
+        <div class="ob-steam-block">
+          <div class="ob-steam-block-title">1. Library</div>
+          <p class="ob-bl-sub">Add the games you own on Steam to your library, with playtime.</p>
+          <button class="ob-continue ob-steam-action" id="obSteamLibBtn" type="button">Sync my library</button>
+          <div class="ob-bl-status" id="obSteamLibStatus" hidden></div>
+        </div>
+
+        <div class="ob-steam-block">
+          <div class="ob-steam-block-title">2. Reviews</div>
+          <p class="ob-bl-sub">Import your public Steam reviews as drafts — you add a score and publish when you're ready.</p>
+          <p class="ob-sr-note" id="obSrDupeNote" hidden>
+            If a game is already reviewed here (from Backloggd or otherwise), your existing version wins and the Steam text is skipped.
+          </p>
+          <div class="ob-sr-preview" id="obSrPreview" hidden></div>
+          <div class="ob-sr-actions">
+            <button class="ob-continue ob-steam-action" id="obSrPreviewBtn" type="button">Preview Steam reviews</button>
+            <button class="ob-continue ob-steam-action" id="obSrImportBtn" type="button" hidden>Import to drafts</button>
+          </div>
+          <div class="ob-bl-status" id="obSrStatus" hidden></div>
+          <div class="ob-progress-bar" id="obSrBar" hidden style="margin:12px 0 0"><div class="ob-progress-fill" id="obSrBarFill"></div></div>
+        </div>
+
+        <button class="ob-continue" id="obSteamDone" type="button">Continue →</button>
+      </div>
+
+      <div class="ob-bl-status" id="obSteamConnectStatus" hidden></div>
       <button class="ob-skip" id="obSrSkip" type="button">Skip — I'll do this later</button>
     </section>
 
@@ -195,6 +219,7 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     pending,
     existingFavorite,
     existingShowcase,
+    hasSteamConnected,
   }}
 >
   window.__lockScroll && window.__lockScroll();
@@ -591,7 +616,7 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     }
   });
 
-  // ---- Step: steam import (only present when steam is connected) ----
+  // ---- Step: Steam (connect → library sync → review import; skippable) ----
   var srPreviewBtn = document.getElementById('obSrPreviewBtn');
   var srImportBtn = document.getElementById('obSrImportBtn');
   var srSkipBtn = document.getElementById('obSrSkip');
@@ -600,8 +625,20 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   var srBarFill = document.getElementById('obSrBarFill');
   var srPreviewBox = document.getElementById('obSrPreview');
   var srDupeNote = document.getElementById('obSrDupeNote');
+  var steamConnectBtn = document.getElementById('obSteamConnectBtn');
+  var steamConnectStatus = document.getElementById('obSteamConnectStatus');
+  var steamLibBtn = document.getElementById('obSteamLibBtn');
+  var steamLibStatus = document.getElementById('obSteamLibStatus');
+  var steamDoneBtn = document.getElementById('obSteamDone');
   var srPhase = 'idle'; // 'idle' -> 'running' -> 'done' | 'failed'
+  var libRunning = false;
   var srMarked = false;
+
+  // Once connected, "Continue" is the way out; the skip link is only for not connecting at all.
+  if (hasSteamConnected) srSkipBtn.style.display = 'none';
+
+  // Steam sign-in returns to this same page; the callback only accepts a same-site path.
+  steamConnectBtn.href = '/api/auth/steam-connect?from=' + encodeURIComponent(window.location.pathname);
 
   function srMarkStepDone() {
     if (srMarked) return;
@@ -614,6 +651,50 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     advance();
   }
 
+  function setSteamBusy(busy) {
+    steamDoneBtn.disabled = busy;
+    srSkipBtn.disabled = busy;
+  }
+
+  srSkipBtn.addEventListener('click', srLeaveStep);
+  steamDoneBtn.addEventListener('click', function () {
+    if (libRunning || srPhase === 'running') return;
+    srLeaveStep();
+  });
+
+  // 1. Library sync — same endpoint as Settings → Steam → Sync.
+  steamLibBtn.addEventListener('click', async function () {
+    if (libRunning) return;
+    libRunning = true;
+    setSteamBusy(true);
+    steamLibBtn.disabled = true;
+    steamLibBtn.textContent = 'Syncing…';
+    steamLibStatus.hidden = false;
+    steamLibStatus.textContent = 'Fetching your Steam library…';
+    try {
+      var res = await fetch('/api/steam/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playedOnly: false }),
+      });
+      var data = await res.json().catch(function () { return {}; });
+      if (!res.ok) throw new Error(data.error || 'Sync failed.');
+      var parts = [data.matched + ' game' + (data.matched === 1 ? '' : 's') + ' added to your library'];
+      if (data.updated) parts.push(data.updated + ' playtime' + (data.updated === 1 ? '' : 's') + ' updated');
+      if (data.unmatched) parts.push(data.unmatched + ' not in Chekpoint yet');
+      steamLibStatus.textContent = '✓ ' + parts.join(' · ') + '.';
+      steamLibBtn.textContent = 'Library synced';
+    } catch (e) {
+      steamLibStatus.textContent = ((e && e.message) || 'Sync failed.') + ' You can sync any time from Settings.';
+      steamLibBtn.textContent = 'Try again';
+      steamLibBtn.disabled = false;
+    } finally {
+      libRunning = false;
+      setSteamBusy(false);
+    }
+  });
+
+  // 2. Review import.
   function srOnProgress(p) {
     if (p.fraction != null) srBarFill.style.width = Math.round(p.fraction * 100) + '%';
     srStatus.textContent = p.message;
@@ -641,22 +722,15 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     }
     srStatus.textContent = lines.join(' ');
     srMarkStepDone();
-    srImportBtn.textContent = 'Continue →';
-    srImportBtn.disabled = false;
-    srImportBtn.hidden = false;
+    srImportBtn.hidden = true;
     srPreviewBtn.hidden = true;
-    srSkipBtn.style.display = 'none';
   }
 
-  function srFail(btn, e) {
+  function srFail(e) {
     srPhase = 'failed';
     srStatus.textContent = (e && e.message ? e.message : 'Import failed') + ' — you can try again from Settings later.';
-    btn.textContent = 'Skip for now';
-    btn.disabled = false;
-    srSkipBtn.disabled = false;
+    srImportBtn.hidden = true;
   }
-
-  srSkipBtn.addEventListener('click', srLeaveStep);
 
   srPreviewBtn.addEventListener('click', async function () {
     if (srPhase !== 'idle') return;
@@ -669,11 +743,13 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
       var p = await api.previewSteamReviews();
       srPreviewBox.hidden = false;
       srPreviewBox.innerHTML = 'Found <strong>' + p.totalReviews + '</strong> Steam review' + (p.totalReviews === 1 ? '' : 's') + '.';
-      srDupeNote.hidden = false;
       srStatus.textContent = '';
-      srImportBtn.hidden = false;
-      srImportBtn.textContent = 'Import ' + p.totalReviews + ' review' + (p.totalReviews === 1 ? '' : 's');
       srPreviewBtn.hidden = true;
+      if (p.totalReviews > 0) {
+        srDupeNote.hidden = false;
+        srImportBtn.hidden = false;
+        srImportBtn.textContent = 'Import ' + p.totalReviews + ' review' + (p.totalReviews === 1 ? '' : 's');
+      }
     } catch (e) {
       srStatus.textContent = (e && e.message) ? e.message : 'Could not reach Steam.';
       srPreviewBtn.disabled = false;
@@ -681,24 +757,41 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   });
 
   srImportBtn.addEventListener('click', async function () {
-    if (srPhase === 'done' || srPhase === 'failed') { srLeaveStep(); return; }
-    if (srPhase === 'running') return;
+    if (srPhase !== 'idle') return;
     var api = window.__ckSteamImport;
     if (!api) { srStatus.hidden = false; srStatus.textContent = 'Still loading — try again in a second.'; return; }
     srPhase = 'running';
     srImportBtn.disabled = true;
-    srSkipBtn.disabled = true;
+    setSteamBusy(true);
     srStatus.hidden = false;
     srBar.hidden = false;
     try {
       var result = await api.startAndDriveSteam({ onProgress: srOnProgress });
       srFinish(result.job, result.needs_mapping, result.skipped_conflicts);
     } catch (e) {
-      srFail(srImportBtn, e);
+      srFail(e);
+    } finally {
+      setSteamBusy(false);
     }
   });
 
   // ---- kick off ----
+  // Coming back from Steam sign-in (?steam=connected|cancelled|error): reopen on the
+  // Steam step instead of restarting at "Welcome", and say what happened.
+  var steamReturn = new URLSearchParams(window.location.search).get('steam');
+  var steamStepIndex = flow.indexOf('steam');
+  if (steamReturn && steamStepIndex !== -1) {
+    var cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete('steam');
+    history.replaceState(null, '', cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+    if (steamReturn === 'cancelled' || steamReturn === 'error') {
+      steamConnectStatus.hidden = false;
+      steamConnectStatus.textContent = steamReturn === 'cancelled'
+        ? 'Steam sign-in was cancelled. You can try again or skip for now.'
+        : 'Couldn\'t connect to Steam. Please try again, or skip and connect later from Settings.';
+    }
+    flowIndex = steamStepIndex - 1;
+  }
   advance();
 </script>
 
@@ -936,6 +1029,49 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     flex-wrap: wrap;
   }
   .ob-sr-actions .ob-continue { flex: 1; min-width: 140px; }
+
+  /* ── Steam step ── */
+  a.ob-continue.ob-steam-connect {
+    display: block;
+    box-sizing: border-box;
+    text-align: center;
+    text-decoration: none;
+    background: linear-gradient(180deg, #2a475e, #1b2838); /* Steam blue-slate */
+    border: 1px solid rgba(102, 192, 244, 0.45);
+    color: #fff;
+  }
+  .ob-steam-fineprint { margin: 8px 0 0 !important; font-size: 12px !important; color: var(--text-tertiary, #777) !important; text-align: center; }
+  .ob-steam-account {
+    font-size: 13px;
+    color: var(--text-secondary, #a0a0a0);
+    background: rgba(74, 222, 128, 0.08);
+    border: 1px solid rgba(74, 222, 128, 0.25);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    text-align: left;
+  }
+  .ob-steam-account strong { color: var(--text-primary, #fff); font-weight: 600; }
+  .ob-steam-block {
+    text-align: left;
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .ob-steam-block .ob-bl-status { margin-top: 10px; }
+  .ob-steam-block-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #fff); margin-bottom: 4px; }
+  .ob-continue.ob-steam-action {
+    width: auto;
+    padding: 8px 18px;
+    font-size: 13px;
+    background: transparent;
+    color: var(--text-primary, #fff);
+    border: 1px solid var(--border, #2a2a2a);
+  }
+  .ob-continue.ob-steam-action:hover:not(:disabled) { border-color: var(--accent, #7c3aed); opacity: 1; }
+  .ob-steam-block .ob-sr-actions .ob-continue { flex: 0 0 auto; min-width: 0; }
+  #obSteamDone { margin-top: 4px; }
 
   .ob-bl-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
   .ob-bl-tab {

@@ -8,7 +8,10 @@ export const GET: APIRoute = async (context) => {
 
   const params = context.url.searchParams;
 
-  const from = params.get('from') ?? '';
+  // Only same-site paths ("/settings", "/?x=1") — never "//evil.com" or a full
+  // URL, which would turn this into an open redirect off chekpoint.gg.
+  const rawFrom = params.get('from') ?? '';
+  const from = /^\/(?![\/\\])/.test(rawFrom) ? rawFrom : '';
   function appendParam(base: string, kv: string) {
     return base ? `${base}${base.includes('?') ? '&' : '?'}${kv}` : '';
   }
