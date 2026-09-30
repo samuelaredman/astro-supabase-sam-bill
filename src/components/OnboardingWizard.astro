@@ -163,7 +163,8 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
       </div>
 
       <div id="obSteamConnectedBox" hidden={!hasSteamConnected}>
-        <div class="ob-steam-account">✓ Connected{steamUsername ? <> as <strong>{steamUsername}</strong></> : ' to Steam'}</div>
+        {/* Same spot and shape as the Connect button, so it visibly "turns into" Connected. */}
+        <div class="ob-continue ob-steam-connected" role="status">✓ Connected{steamUsername ? <> as <strong>{steamUsername}</strong></> : ' to Steam'}</div>
 
         <div class="ob-steam-block">
           <div class="ob-steam-block-title">1. Library</div>
@@ -178,10 +179,8 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
           <p class="ob-sr-note" id="obSrDupeNote" hidden>
             If a game is already reviewed here (from Backloggd or otherwise), your existing version wins and the Steam text is skipped.
           </p>
-          <div class="ob-sr-preview" id="obSrPreview" hidden></div>
           <div class="ob-sr-actions">
-            <button class="ob-continue ob-steam-action" id="obSrPreviewBtn" type="button">Preview Steam reviews</button>
-            <button class="ob-continue ob-steam-action" id="obSrImportBtn" type="button" hidden>Import to drafts</button>
+            <button class="ob-continue ob-steam-action" id="obSrImportBtn" type="button">Import Steam reviews</button>
           </div>
           <div class="ob-bl-status" id="obSrStatus" hidden></div>
           <div class="ob-progress-bar" id="obSrBar" hidden style="margin:12px 0 0"><div class="ob-progress-fill" id="obSrBarFill"></div></div>
@@ -617,13 +616,11 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   });
 
   // ---- Step: Steam (connect → library sync → review import; skippable) ----
-  var srPreviewBtn = document.getElementById('obSrPreviewBtn');
   var srImportBtn = document.getElementById('obSrImportBtn');
   var srSkipBtn = document.getElementById('obSrSkip');
   var srStatus = document.getElementById('obSrStatus');
   var srBar = document.getElementById('obSrBar');
   var srBarFill = document.getElementById('obSrBarFill');
-  var srPreviewBox = document.getElementById('obSrPreview');
   var srDupeNote = document.getElementById('obSrDupeNote');
   var steamConnectBtn = document.getElementById('obSteamConnectBtn');
   var steamConnectStatus = document.getElementById('obSteamConnectStatus');
@@ -722,54 +719,45 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     }
     srStatus.textContent = lines.join(' ');
     srMarkStepDone();
-    srImportBtn.hidden = true;
-    srPreviewBtn.hidden = true;
+    srImportBtn.textContent = 'Reviews imported';
+    srImportBtn.disabled = true;
   }
 
   function srFail(e) {
     srPhase = 'failed';
     srStatus.textContent = (e && e.message ? e.message : 'Import failed') + ' — you can try again from Settings later.';
-    srImportBtn.hidden = true;
+    srImportBtn.textContent = 'Import Steam reviews';
+    srImportBtn.disabled = true;
   }
 
-  srPreviewBtn.addEventListener('click', async function () {
-    if (srPhase !== 'idle') return;
-    var api = window.__ckSteamImport;
-    if (!api) { srStatus.hidden = false; srStatus.textContent = 'Still loading — try again in a second.'; return; }
-    srPreviewBtn.disabled = true;
-    srStatus.hidden = false;
-    srStatus.textContent = 'Checking your Steam profile…';
-    try {
-      var p = await api.previewSteamReviews();
-      srPreviewBox.hidden = false;
-      srPreviewBox.innerHTML = 'Found <strong>' + p.totalReviews + '</strong> Steam review' + (p.totalReviews === 1 ? '' : 's') + '.';
-      srStatus.textContent = '';
-      srPreviewBtn.hidden = true;
-      if (p.totalReviews > 0) {
-        srDupeNote.hidden = false;
-        srImportBtn.hidden = false;
-        srImportBtn.textContent = 'Import ' + p.totalReviews + ' review' + (p.totalReviews === 1 ? '' : 's');
-      }
-    } catch (e) {
-      srStatus.textContent = (e && e.message) ? e.message : 'Could not reach Steam.';
-      srPreviewBtn.disabled = false;
-    }
-  });
-
+  // One click: find the user's public Steam reviews, then import them as drafts.
   srImportBtn.addEventListener('click', async function () {
     if (srPhase !== 'idle') return;
     var api = window.__ckSteamImport;
     if (!api) { srStatus.hidden = false; srStatus.textContent = 'Still loading — try again in a second.'; return; }
     srPhase = 'running';
     srImportBtn.disabled = true;
+    srImportBtn.textContent = 'Importing…';
     setSteamBusy(true);
     srStatus.hidden = false;
-    srBar.hidden = false;
+    srStatus.textContent = 'Checking your Steam profile…';
     try {
+      var preview = await api.previewSteamReviews();
+      if (!preview || !preview.totalReviews) {
+        // Nothing to import (or the profile/reviews are private) — let them retry after fixing it.
+        srPhase = 'idle';
+        srStatus.textContent = 'No public Steam reviews found. If your reviews are private, make them public on Steam and try again — or continue without them.';
+        srImportBtn.textContent = 'Try again';
+        srImportBtn.disabled = false;
+        return;
+      }
+      srDupeNote.hidden = false;
+      srStatus.textContent = 'Found ' + preview.totalReviews + ' review' + (preview.totalReviews === 1 ? '' : 's') + ' — importing…';
+      srBar.hidden = false;
       var result = await api.startAndDriveSteam({ onProgress: srOnProgress });
       srFinish(result.job, result.needs_mapping, result.skipped_conflicts);
     } catch (e) {
-      srFail(e);
+      if (srPhase === 'running') srFail(e);
     } finally {
       setSteamBusy(false);
     }
@@ -1017,15 +1005,6 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     margin: 8px 0 12px !important;
     line-height: 1.5;
   }
-  .ob-sr-preview {
-    font-size: 13px;
-    color: var(--text-secondary, #a0a0a0);
-    background: var(--bg, #0f0f0e);
-    border: 1px solid var(--border, #2a2a2a);
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 12px;
-  }
   .ob-sr-actions {
     display: flex;
     gap: 8px;
@@ -1044,17 +1023,16 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     color: #fff;
   }
   .ob-steam-fineprint { margin: 8px 0 0 !important; font-size: 12px !important; color: var(--text-tertiary, #777) !important; text-align: center; }
-  .ob-steam-account {
-    font-size: 13px;
-    color: var(--text-secondary, #a0a0a0);
-    background: rgba(74, 222, 128, 0.08);
-    border: 1px solid rgba(74, 222, 128, 0.25);
-    border-radius: 8px;
-    padding: 8px 12px;
+  .ob-continue.ob-steam-connected {
+    box-sizing: border-box;
+    text-align: center;
+    cursor: default;
+    background: rgba(74, 222, 128, 0.12);
+    border: 1px solid rgba(74, 222, 128, 0.45);
+    color: #4ade80;
     margin-bottom: 12px;
-    text-align: left;
   }
-  .ob-steam-account strong { color: var(--text-primary, #fff); font-weight: 600; }
+  .ob-continue.ob-steam-connected strong { color: inherit; font-weight: 700; }
   .ob-steam-block {
     text-align: left;
     border: 1px solid var(--border, #2a2a2a);
