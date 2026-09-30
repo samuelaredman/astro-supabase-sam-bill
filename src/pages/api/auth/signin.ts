@@ -15,7 +15,12 @@ export const POST: APIRoute = async (context) => {
   const { error } = await supabase.auth.signInWithPassword({ email, password });
 
   if (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
+    // `code` lets the page offer "resend confirmation email" for email_not_confirmed.
+    const notConfirmed = error.code === "email_not_confirmed" || /email not confirmed/i.test(error.message);
+    return new Response(JSON.stringify({
+      error: notConfirmed ? "Please confirm your email before signing in. Check your inbox (and spam folder) for the link." : error.message,
+      code: notConfirmed ? "email_not_confirmed" : error.code ?? null,
+    }), {
       status: 401,
       headers: { "Content-Type": "application/json" },
     });
