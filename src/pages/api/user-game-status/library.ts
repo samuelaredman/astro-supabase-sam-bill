@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin, createSupabaseServerClientFromContext } from "../../../utils/database";
 import { json } from "../../../utils/api";
-import { queryLibraryPage, LIBRARY_PAGE_SIZE } from "../../../utils/libraryQuery";
+import { queryLibraryPage, LIBRARY_PAGE_SIZE, applyPlatformFilter } from "../../../utils/libraryQuery";
 
 // Thin HTTP wrapper around queryLibraryPage. The reviewer profile's Library
 // tab SSR calls the same function directly (via loadLibraryTab in
@@ -131,10 +131,12 @@ function buildFilteredQuery(
   p: FilterParams,
 ) {
   const { isOwn, canSeeWantToPlay, canSeeDropped, filter, search, genre, platform, dev, showHidden } = p;
+  // Platform filter is a source-column check on user_game_status
+  // (applyPlatformFilter) rather than an IGDB game_platforms join — same
+  // rule as queryLibraryPage's own builder.
   const dimJoins: string[] = [];
-  if (genre)    dimJoins.push('game_genres!inner(genres!inner(name))');
-  if (platform) dimJoins.push('game_platforms!inner(platforms!inner(name))');
-  if (dev)      dimJoins.push('game_companies!inner(role,developers!inner(name))');
+  if (genre) dimJoins.push('game_genres!inner(genres!inner(name))');
+  if (dev)   dimJoins.push('game_companies!inner(role,developers!inner(name))');
   const gamesSel = dimJoins.length ? `${gamesSelect}, ${dimJoins.join(', ')}` : gamesSelect;
 
   let qb = base === 'ugs'
@@ -144,12 +146,12 @@ function buildFilteredQuery(
   const c = (col: string) => (base === 'ugs' ? col : `user_game_status.${col}`);
   const g = (path: string) => (base === 'ugs' ? `games.${path}` : path);
 
-  if (genre)    qb = qb.eq(g('game_genres.genres.name'), genre);
-  if (platform) qb = qb.eq(g('game_platforms.platforms.name'), platform);
+  if (genre) qb = qb.eq(g('game_genres.genres.name'), genre);
   if (dev) {
     qb = qb.eq(g('game_companies.role'), 'developer');
     qb = qb.eq(g('game_companies.developers.name'), dev);
   }
+  if (platform) qb = applyPlatformFilter(qb, platform, c);
   if (showHidden && isOwn) {
     qb = qb.eq(c('is_hidden'), true);
   } else {
@@ -162,14 +164,19 @@ function buildFilteredQuery(
   } else if (filter === 'completed') {
     qb = qb.in(c('status'), ['completed', 'hundred_percent']);
   } else if (filter === 'unplayed') {
+    // Mirrors queryLibraryPage — psn_trophies_earned counts as evidence of
+    // play alongside playtime, since Sony often omits playtime on titles
+    // where trophies were clearly earned.
     qb = qb.not(c('status'), 'in', '(completed,hundred_percent)');
     if (base === 'ugs') {
       qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0');
       qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0');
+      qb = qb.or('psn_trophies_earned.is.null,psn_trophies_earned.eq.0');
       qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0');
     } else {
       qb = qb.or('steam_playtime_minutes.is.null,steam_playtime_minutes.eq.0', { referencedTable: 'user_game_status' });
       qb = qb.or('psn_playtime_minutes.is.null,psn_playtime_minutes.eq.0',   { referencedTable: 'user_game_status' });
+      qb = qb.or('psn_trophies_earned.is.null,psn_trophies_earned.eq.0',     { referencedTable: 'user_game_status' });
       qb = qb.or('xbox_current_gamerscore.is.null,xbox_current_gamerscore.eq.0', { referencedTable: 'user_game_status' });
     }
   } else if (filter !== 'all') {

@@ -57,6 +57,8 @@ export function isXboxAuthInvalid(err: unknown): boolean {
 // Full played-titles list. Xbox's /player/titleHistory endpoint returns
 // every title the account has ever touched, with cached progress + last-
 // played date at the top level — the same shape PSN's getUserTitles gives.
+export type XboxConsole = 'Xbox 360' | 'Xbox One' | 'Xbox Series X|S';
+
 export type XboxTitleSummary = {
   titleId: string;
   name: string;
@@ -66,7 +68,39 @@ export type XboxTitleSummary = {
   totalAchievements: number;
   currentGamerscore: number;
   maxGamerscore: number;
+  // Primary console this title is played on for this user. OpenXBL's
+  // titleHistory returns a `devices` array like ["XboxSeries"] or
+  // ["XboxOne","XboxSeries"] for cross-gen titles. We collapse it to the
+  // newest generation the account has touched — same "one label per game"
+  // rule the PSN sync uses for psn_platform. Null when devices is absent
+  // (old cached rows / unusual OpenXBL responses).
+  platform: XboxConsole | null;
 };
+
+// Map an OpenXBL device string to our display label. Values seen in the
+// wild: "Xbox360", "XboxOne", "XboxSeries", "XboxSeriesX", "XboxSeriesS",
+// "Xbox_Durango" (dev sku). Anything unrecognised → null so unknowns don't
+// masquerade as a specific console in the filter.
+function normalizeXboxDevice(raw: string): XboxConsole | null {
+  const d = raw.toLowerCase().replace(/[\s_]/g, '');
+  if (d.includes('series')) return 'Xbox Series X|S';
+  if (d.includes('one') || d === 'durango') return 'Xbox One';
+  if (d.includes('360')) return 'Xbox 360';
+  return null;
+}
+
+// Pick the newest console generation from a title's devices array.
+export function primaryXboxConsole(devices: unknown): XboxConsole | null {
+  if (!Array.isArray(devices)) return null;
+  const rank: Record<XboxConsole, number> = { 'Xbox Series X|S': 3, 'Xbox One': 2, 'Xbox 360': 1 };
+  let best: XboxConsole | null = null;
+  for (const d of devices) {
+    if (typeof d !== 'string') continue;
+    const c = normalizeXboxDevice(d);
+    if (c && (!best || rank[c] > rank[best])) best = c;
+  }
+  return best;
+}
 
 export async function fetchAllTitles(apiKey: string, xuid: string): Promise<XboxTitleSummary[]> {
   const data = await xblFetch(`/player/titleHistory/${xuid}`, apiKey);
@@ -83,6 +117,7 @@ export async function fetchAllTitles(apiKey: string, xuid: string): Promise<Xbox
       totalAchievements: Number(ach.totalAchievements ?? 0),
       currentGamerscore: Number(ach.currentGamerscore ?? 0),
       maxGamerscore: Number(ach.totalGamerscore ?? 0),
+      platform: primaryXboxConsole(t.devices),
     });
   }
   return out;

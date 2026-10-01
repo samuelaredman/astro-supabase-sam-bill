@@ -215,17 +215,23 @@ const savedListsCount = (savedListRows ?? []).filter((s: any) => isOwnProfile ||
 const listsTabCount = (ownListsCount ?? 0) + savedListsCount;
 const recsTabCount = Math.min(recsCount ?? 0, 100);
 
-// How far a previous (possibly interrupted) achievement sync got, so the owner's
-// Sync button resumes instead of restarting. Its own query so a not-yet-run
-// migration can't take out anything else on the page.
-let achSyncCursor = 0;
+// How far a previous (possibly interrupted) achievement sync got, per service,
+// so the owner's Sync button resumes instead of restarting. Each connected
+// platform tracks its own cursor server-side; the button below stitches them
+// together. One query for all three so a not-yet-run migration can't take out
+// anything else on the page.
+let achSyncCursor = 0;                         // steam — number (last appid)
+let psnSyncCursor: string | null = null;       // psn — { npCommId } jsonb
+let xboxSyncCursor: string | null = null;      // xbox — { titleId } jsonb
 if (isOwnProfile) {
   const { data: _achCursorRow } = await db
     .from('profiles')
-    .select('achievements_sync_cursor')
+    .select('achievements_sync_cursor, psn_sync_cursor, xbox_sync_cursor')
     .eq('id', reviewer.id)
     .maybeSingle();
   achSyncCursor = Number((_achCursorRow as any)?.achievements_sync_cursor ?? 0) || 0;
+  psnSyncCursor = ((_achCursorRow as any)?.psn_sync_cursor as any)?.npCommId ?? null;
+  xboxSyncCursor = ((_achCursorRow as any)?.xbox_sync_cursor as any)?.titleId ?? null;
 }
 
 // Contextual nudge: prompt logged-in users who have content but haven't opted
@@ -469,16 +475,24 @@ const libraryIsOwn = JSON.stringify(isOwnProfile)
 // CDN cache — anonymous visitors share a cached response; auth users get a fresh render
 setPageCacheHeaders(Astro.response.headers, !!user);
 
+// Which platforms this reviewer has connected. Any of them means the owner
+// gets a sync button, and any of them means non-owners get to see the tab.
+const hasSteam = !!(reviewer as any).steam_id;
+const hasPsn   = !!(reviewer as any).psn_account_id;
+const hasXbox  = !!(reviewer as any).xbox_xuid;
+const hasAnyPlatform = hasSteam || hasPsn || hasXbox;
+
 // ── Achievements ──
 // Does this profile have any synced achievements? Only needed to decide whether
-// to show the tab, and only when steam_id / ownership haven't already decided it.
-// An existence check (LIMIT 1) — never `count: 'exact'`, which scans every row
-// and is brutal on a large library (500 games × 50 achievements = 25k+ rows).
+// to show the tab, and only when no service is connected and it's not the owner
+// — a niche case where every service was later disconnected but old rows survive.
+// An existence check (LIMIT 1) against the union view — never `count: 'exact'`,
+// which scans every row and is brutal on a large library.
 let _achHasRows = false;
-if (!(reviewer as any).steam_id && !isOwnProfile) {
+if (!hasAnyPlatform && !isOwnProfile) {
   const { data: _achProbe } = await db
-    .from('user_achievements')
-    .select('id')
+    .from('user_unlocks')
+    .select('profile_id')
     .eq('profile_id', reviewer.id)
     .limit(1);
   _achHasRows = (_achProbe?.length ?? 0) > 0;
@@ -489,9 +503,9 @@ if (!(reviewer as any).steam_id && !isOwnProfile) {
 // Keeping it off the SSR path is what makes switching to this tab instant
 // instead of a full page navigation that also re-runs get_achievement_stats().
 
-// Check if this reviewer has Steam connected (for showing sync button to owner)
-const hasSteam = !!(reviewer as any).steam_id;
-const showAchievementsTab = hasSteam || isOwnProfile || _achHasRows;
+const showAchievementsTab = hasAnyPlatform || isOwnProfile || _achHasRows;
+// Any service mid-sync → button resumes instead of starting fresh.
+const anySyncResumable = achSyncCursor > 0 || psnSyncCursor != null || xboxSyncCursor != null;
 
 const activeTabData = await activeTabDataPromise;
 
@@ -915,9 +929,9 @@ const reviewerBreadcrumbJsonLd = {
     .lib-az-btn:disabled{opacity:.3;cursor:default}
     .lib-pag{display:flex;align-items:center;justify-content:center;gap:4px;flex-wrap:wrap;padding:16px 0 4px}
     .lib-item{display:block;text-decoration:none;position:relative}
-    .lib-cover{width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15);position:relative}
+    .lib-cover{width:100%;aspect-ratio:3/4;border-radius:8px;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:24px;transition:transform .15s,box-shadow .15s;box-shadow:0 2px 8px rgba(0,0,0,.15);position:relative}
     .lib-item:hover .lib-cover{transform:translateY(-3px);box-shadow:0 8px 20px rgba(0,0,0,.3)}
-    .lib-cover img{width:100%;height:100%;object-fit:cover;display:block}
+    .lib-cover img{width:100%;height:100%;object-fit:cover;display:block;border-radius:inherit}
     .lib-title{font-size:11px;font-weight:500;color:var(--text-secondary);margin-top:6px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .lib-check-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:4px;margin-top:-4px}
     .lib-check-item{display:flex;align-items:center;gap:7px;cursor:pointer;font-size:12px;color:var(--text-tertiary);user-select:none;padding:3px 0}
@@ -983,14 +997,32 @@ const reviewerBreadcrumbJsonLd = {
     /* hours badge */
     .lib-hours-badge{position:absolute;top:5px;left:5px;font-size:10px;font-weight:600;background:rgba(0,0,0,.65);color:rgba(255,255,255,.85);border-radius:4px;padding:2px 5px;line-height:1.3;z-index:1;backdrop-filter:blur(4px)}
     /* hidden indicator on card */
+    /* Covers don't clip (no overflow:hidden; the img inherits the radius) so
+       the ribbon can hang off the left and bottom edges like Steam's. */
+    .lib-perfect-ribbon{position:absolute;left:-13px;bottom:-9px;width:36px;height:42px;z-index:2;pointer-events:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,.55))}
+    .lib-perfect-ribbon svg{width:100%;height:100%;display:block}
+    .lib-dt-cover .lib-perfect-ribbon{left:-10px;bottom:-8px;width:26px;height:30px}
+    .lib-plat-badge{position:absolute;left:-13px;bottom:4px;width:32px;height:40px;z-index:2;pointer-events:none}
+    .lib-plat-badge .ach-plat-svg{width:100%;height:100%}
+    .lib-dt-cover .lib-plat-badge{left:-10px;bottom:3px;width:25px;height:31px}
+    .lib-xbox-badge{position:absolute;left:-13px;bottom:4px;width:34px;height:34px;z-index:2;pointer-events:none;filter:drop-shadow(0 1px 3px rgba(0,0,0,.5)) drop-shadow(0 0 4px rgba(16,124,16,.45))}
+    .lib-xbox-badge svg{width:100%;height:100%;display:block}
+    .lib-dt-cover .lib-xbox-badge{left:-10px;bottom:3px;width:26px;height:26px}
+    /* Xbox 100% — Xbox-green border + glow, same treatment as the platinum one. */
+    .lib-cover-xbox{border:2px solid #107c10;box-shadow:0 0 0 1px rgba(111,230,168,.15),0 0 12px rgba(16,124,16,.55),0 0 24px rgba(16,124,16,.25)}
+    .lib-item:hover .lib-cover.lib-cover-xbox{box-shadow:0 8px 20px rgba(0,0,0,.3),0 0 16px rgba(16,124,16,.7),0 0 30px rgba(16,124,16,.3)}
+    /* PSN 100% — platinum border (silver gradient via padding-box/border-box
+       sandwich) + cyan halo, matching the achievements platinum card. */
+    .lib-cover-platinum{border:2px solid transparent;background:linear-gradient(var(--tag-bg),var(--tag-bg)) padding-box,linear-gradient(135deg,#e8ecf0 0%,#a8b3c0 45%,#e8ecf0 100%) border-box;box-shadow:0 0 0 1px rgba(183,236,255,.15),0 0 12px rgba(78,180,240,.45),0 0 24px rgba(30,96,196,.25)}
+    .lib-item:hover .lib-cover.lib-cover-platinum{box-shadow:0 8px 20px rgba(0,0,0,.3),0 0 16px rgba(78,180,240,.6),0 0 30px rgba(30,96,196,.3)}
     .lib-hidden-badge{position:absolute;top:5px;right:5px;font-size:12px;z-index:2;opacity:.8;line-height:1}
     .lib-item-hidden{opacity:.7}
     /* library — detailed view */
     .lib-dt-list{display:flex;flex-direction:column;padding:8px 0}
     .lib-dt-row{display:flex;gap:18px;padding:18px 6px;border-bottom:1px solid var(--border-subtle)}
     .lib-dt-row:last-child{border-bottom:none}
-    .lib-dt-cover{flex-shrink:0;width:58px;height:77px;border-radius:6px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;text-decoration:none}
-    .lib-dt-cover img{width:100%;height:100%;object-fit:cover;display:block}
+    .lib-dt-cover{position:relative;flex-shrink:0;width:58px;height:77px;border-radius:6px;background:var(--tag-bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;text-decoration:none}
+    .lib-dt-cover img{width:100%;height:100%;object-fit:cover;display:block;border-radius:inherit}
     /* 100% achievement completion — gold ring + glow (both library views) */
     .lib-cover-perfect{border:2px solid #fbbf24;box-shadow:0 0 12px 1px rgba(251,191,36,.55)}
     .lib-item:hover .lib-cover.lib-cover-perfect{box-shadow:0 8px 20px rgba(0,0,0,.3),0 0 14px 2px rgba(251,191,36,.75)}
@@ -1091,79 +1123,6 @@ const reviewerBreadcrumbJsonLd = {
     /* Library: Overview/Detailed pills share this row with the sync dropdown */
     .lib-view-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
     .lib-view-row .sort-tabs{margin-bottom:0}
-
-    /* ── Unified sync dropdown (Steam + PSN, later Xbox) ──
-       Replaces the two per-platform sync bars. Trigger sits in the library
-       view-row; the menu drops beneath, aligned to the trigger's right edge. */
-    .lib-sync{position:relative;flex-shrink:0}
-    .lib-sync-trigger{
-      display:inline-flex;align-items:center;gap:6px;
-      background:var(--bg-card);border:1px solid var(--border);
-      color:var(--text-primary);
-      padding:6px 12px;border-radius:8px;
-      font-size:12.5px;font-weight:500;cursor:pointer;
-      transition:background .15s,border-color .15s;
-    }
-    .lib-sync-trigger:hover{background:var(--bg-hover);border-color:color-mix(in srgb,var(--accent) 40%,var(--border))}
-    .lib-sync-trigger svg{opacity:.85;flex-shrink:0}
-    .lib-sync-caret{transition:transform .2s ease}
-    .lib-sync[data-open="true"] .lib-sync-caret{transform:rotate(180deg)}
-
-    .lib-sync-menu{
-      position:absolute;top:calc(100% + 6px);right:0;z-index:20;
-      min-width:340px;
-      background:var(--bg-card);border:1px solid var(--border);border-radius:10px;
-      box-shadow:0 8px 24px rgba(0,0,0,.35);
-      overflow:hidden;
-    }
-    .lib-sync-menu[hidden]{display:none}
-    .lib-sync-row{
-      display:flex;align-items:center;gap:12px;
-      padding:10px 12px;
-      border-bottom:1px solid var(--border-subtle);
-      color:var(--text-primary);text-decoration:none;
-    }
-    .lib-sync-row:last-child{border-bottom:none}
-    a.lib-sync-row{cursor:pointer;transition:background .12s}
-    a.lib-sync-row:hover{background:var(--bg-hover)}
-
-    /* Colored square holds the platform mark. Same 32px tile for every
-       platform so rows line up; the icon itself varies (Steam 16px,
-       PS 20px — user asked for a slightly larger PS mark). */
-    .lib-sync-row-icon{
-      width:32px;height:32px;border-radius:6px;
-      display:inline-flex;align-items:center;justify-content:center;
-      flex-shrink:0;
-    }
-    .lib-sync-row-icon--steam{background:#1b2838}
-    .lib-sync-row-icon--psn{background:#003791}
-    .lib-sync-row-icon--xbox{background:#107C10}
-
-    .lib-sync-row-body{flex:1;min-width:0}
-    .lib-sync-row-title{font-size:13px;font-weight:600;color:var(--text-primary);line-height:1.2}
-    .lib-sync-row-sub{
-      font-size:11.5px;color:var(--text-secondary);
-      margin-top:2px;
-      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-    }
-
-    .lib-sync-row-actions{display:flex;align-items:center;gap:10px;flex-shrink:0}
-    .lib-sync-played{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-tertiary);cursor:pointer;white-space:nowrap}
-    .lib-sync-played input{accent-color:var(--accent)}
-    .lib-sync-action{
-      background:transparent;border:1px solid var(--border);
-      color:var(--text-secondary);
-      padding:4px 10px;border-radius:6px;
-      font-size:11px;font-weight:500;cursor:pointer;text-decoration:none;
-      transition:border-color .12s,color .12s;
-    }
-    .lib-sync-action:hover{border-color:var(--accent);color:var(--accent)}
-    .lib-sync-action:disabled{opacity:.5;cursor:default}
-    a.lib-sync-row:hover .lib-sync-action{border-color:var(--accent);color:var(--accent)}
-
-    @media(max-width:560px){
-      .lib-sync-menu{min-width:0;width:calc(100vw - 32px);max-width:360px}
-    }
 
     @media(max-width:600px){
       .profile-username{font-size:22px}
@@ -1658,29 +1617,34 @@ const reviewerBreadcrumbJsonLd = {
 
     {/* These render unconditionally so client-side tab switching shows them immediately */}
 
-    {isOwnProfile && !hasSteam && (
+    {isOwnProfile && !hasAnyPlatform && (
       <div class="empty-state">
-        <div class="empty-title">Connect your Steam account</div>
-        <p style="font-size:14px;color:var(--text-tertiary)">Link your Steam account in settings, then come back to sync your achievements.</p>
+        <div class="empty-title">Connect a gaming account</div>
+        <p style="font-size:14px;color:var(--text-tertiary)">Link Steam, PlayStation, or Xbox in settings, then come back to sync your achievements.</p>
         <a href="/settings" class="write-btn-empty" style="display:inline-block;margin-top:16px">Go to Settings</a>
       </div>
     )}
 
-    {isOwnProfile && hasSteam && (
+    {isOwnProfile && hasAnyPlatform && (
       <div class="ach-sync-bar">
-        <div>
-          <div class="ach-sync-title">Steam Achievements</div>
-          <div class="ach-sync-sub">Import your achievement progress from Steam</div>
+        <div class="ach-sync-info">
+          <div class="ach-sync-title">Achievements</div>
+          <div class="ach-sync-sub">Import your progress from connected services</div>
+          <div class="ach-sync-chips">
+            {hasSteam && <span class="ach-sync-chip ach-sync-chip--steam">Steam</span>}
+            {hasPsn   && <span class="ach-sync-chip ach-sync-chip--psn">PlayStation</span>}
+            {hasXbox  && <span class="ach-sync-chip ach-sync-chip--xbox">Xbox</span>}
+          </div>
         </div>
-        <button class="ach-sync-btn" id="achSyncBtn">{achSyncCursor > 0 ? 'Resume achievement sync' : 'Sync Achievements'}</button>
+        <button class="ach-sync-btn" id="achSyncBtn">{anySyncResumable ? 'Resume achievement sync' : 'Sync Achievements'}</button>
       </div>
     )}
 
     {/* Feed is fetched client-side from /api/user-achievements/feed the first
         time this tab is opened (see the ACHIEVEMENTS FEED script). Everything
         below is a static shell the script fills in. Skipped for an owner with
-        no Steam linked — the "Connect your Steam account" card above covers it. */}
-    {!(isOwnProfile && !hasSteam) && (
+        no service linked — the "Connect a gaming account" card above covers it. */}
+    {!(isOwnProfile && !hasAnyPlatform) && (
       <div id="achContent" data-username={reviewer.username}>
         <div class="ach-summary" id="achSummary" style="display:none">
           <div class="ach-summary-stat">
@@ -1698,7 +1662,7 @@ const reviewerBreadcrumbJsonLd = {
         </div>
 
         <div class="ach-filter-bar" id="achFilterBar" style="display:none">
-          <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements…" autocomplete="off" />
+          <input type="search" id="achSearch" class="ach-search" placeholder="Search achievements or games…" autocomplete="off" />
           <select id="achSortSelect" class="ach-date-select">
             <option value="recent">Recent</option>
             <option value="oldest">Oldest</option>
@@ -1714,6 +1678,20 @@ const reviewerBreadcrumbJsonLd = {
             <option value="180">Last 6 months</option>
             <option value="365">Last year</option>
           </select>
+          {/* Populated by the feed script on page 1 from the API's platforms
+              list — only shows options the profile actually has unlocks in. */}
+          <select id="achPlatformFilter" class="ach-date-select" style="display:none">
+            <option value="">All platforms</option>
+          </select>
+          {/* PSN trophy tiers — only revealed by the feed script when the
+              profile has PSN unlocks. */}
+          <select id="achTrophyFilter" class="ach-date-select" style="display:none">
+            <option value="">All trophies</option>
+            <option value="bronze">Bronze</option>
+            <option value="silver">Silver</option>
+            <option value="gold">Gold</option>
+            <option value="platinum">Platinum</option>
+          </select>
         </div>
 
         <div class="ach-feed" id="achFeed"></div>
@@ -1722,7 +1700,7 @@ const reviewerBreadcrumbJsonLd = {
           <div class="empty-title">No achievements synced yet</div>
           <p style="font-size:14px;color:var(--text-tertiary)">
             {isOwnProfile
-              ? 'Click "Sync Achievements" above to import your Steam achievement progress.'
+              ? 'Click "Sync Achievements" above to import your progress from your connected services.'
               : `@${reviewer.username} hasn't synced their achievements yet.`}
           </p>
         </div>
@@ -1834,6 +1812,21 @@ const reviewerBreadcrumbJsonLd = {
 <div class="toast" id="toast"></div>
 
 </div><!-- /#accentScope -->
+
+<!-- Shared SVG gradients for the platinum trophy (_PLAT_SVG) and Xbox Mythic
+     badge (_LIB_XBOX_BADGE). Defined once, outside every tab: copies of those
+     badges render in several places (achievements feed, library overview +
+     detailed), and url(#id) resolves to the first element with that id —
+     if that one sits in a display:none tab the gradient doesn't paint. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <radialGradient id="achPlatOrb" cx="38%" cy="32%" r="70%"><stop offset="0" stop-color="#7fb4ff"/><stop offset=".45" stop-color="#2556c9"/><stop offset="1" stop-color="#0a1f63"/></radialGradient>
+    <linearGradient id="achPlatSilver" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f7f9fb"/><stop offset=".45" stop-color="#aab4bf"/><stop offset=".7" stop-color="#e4e8ec"/><stop offset="1" stop-color="#7c8792"/></linearGradient>
+    <radialGradient id="xbMythDisc" cx="40%" cy="30%" r="75%"><stop offset="0" stop-color="#6fe6a8"/><stop offset=".55" stop-color="#1f9d5c"/><stop offset="1" stop-color="#0a5a32"/></radialGradient>
+    <linearGradient id="xbMythHi" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c4f0d8"/></linearGradient>
+    <linearGradient id="xbMythLo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a9dcc0"/><stop offset="1" stop-color="#6fb894"/></linearGradient>
+  </defs>
+</svg>
 
 <script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
 
@@ -2600,6 +2593,32 @@ const reviewerBreadcrumbJsonLd = {
     if (gameEl)   gameEl.addEventListener('change', filterAchPicker)
   })()
 
+  // Shared by the Achievements feed (tier badge under platinum unlocks) and the
+  // Library (badge on 100%-trophy PSN covers).
+  // Platinum gets its own small vector trophy under the achievement art,
+  // modeled on Sony's physical platinum: a deep-blue orb with the face-button
+  // glyphs, cradled by silver blade "hands" rising from a round base. Smooth
+  // vector (not pixel-art) so the gradients read as polished metal.
+  var _PLAT_SVG =
+    '<svg class="ach-plat-svg" viewBox="0 0 24 30" aria-hidden="true">' +
+      '<circle cx="12" cy="9.5" r="7.5" fill="url(#achPlatOrb)"/>' +
+      '<g fill="none" stroke="#fff" stroke-width=".7" stroke-linecap="round" stroke-linejoin="round" opacity=".92">' +
+        '<rect x="7.6" y="5.6" width="2.6" height="2.6"/>' +
+        '<path d="M13.9 5.5l1.5 2.7h-3z"/>' +
+        '<path d="M7.7 10.4l2.4 2.4M10.1 10.4l-2.4 2.4"/>' +
+        '<circle cx="14.4" cy="11.6" r="1.3"/>' +
+      '</g>' +
+      '<g fill="url(#achPlatSilver)">' +
+        '<path d="M11.6 23.2C5.6 20.8 2.6 14.2 3.4 6.4 4.9 11.4 7.6 15.6 12 18.6z"/>' +
+        '<path d="M12.4 23.2c6-2.4 9-9 8.2-16.8-1.5 5-4.2 9.2-8.6 12.2z"/>' +
+        '<path d="M11.7 23.4C8.2 21.8 6.1 18.4 5.8 13.8 7.6 16.8 9.6 18.8 12 19.9z"/>' +
+        '<path d="M12.3 23.4c3.5-1.6 5.6-5 5.9-9.6-1.8 3-3.8 5-6.2 6.1z"/>' +
+        '<path d="M8.6 23.6h6.8l1.2 1.9H7.4z"/>' +
+        '<rect x="6.2" y="25.3" width="11.6" height="3.4" rx="1.2"/>' +
+      '</g>' +
+      '<rect x="6.8" y="25.9" width="10.4" height=".5" rx=".25" fill="#fff" opacity=".55"/>' +
+    '</svg>'
+
   // ── ACHIEVEMENTS FEED — fetched from /api/user-achievements/feed on tab open,
   //    so switching to this tab is instant instead of a full page navigation. ──
   ;(function() {
@@ -2614,19 +2633,22 @@ const reviewerBreadcrumbJsonLd = {
     var searchEl  = document.getElementById('achSearch')
     var sortEl    = document.getElementById('achSortSelect')
     var dateEl    = document.getElementById('achDateFilter')
+    var platEl    = document.getElementById('achPlatformFilter')
+    var trophyEl  = document.getElementById('achTrophyFilter')
     var username  = content.dataset.username
 
     var PER = 50
-    var _st = { page: 1, q: '', sort: 'recent', days: 0 }
+    var _st = { page: 1, q: '', sort: 'recent', days: 0, platform: '', trophy: '' }
     var _built = false
     var _loading = false
     var _hasAny = true             // set from stats.unlocked on the first response
+    var _platsBuilt = false        // dropdown populated once on the first page-1 response
     var _cache = {}                 // page-key -> response
     var _totalByFilter = {}         // filter-key -> total (carried across pages)
     var _nowYear = new Date().getUTCFullYear()
 
-    function _pageKey()   { return _st.page + '|' + _st.q + '|' + _st.sort + '|' + _st.days }
-    function _filterKey() { return _st.q + '|' + _st.sort + '|' + _st.days }
+    function _pageKey()   { return _st.page + '|' + _filterKey() }
+    function _filterKey() { return _st.q + '|' + _st.sort + '|' + _st.days + '|' + _st.platform + '|' + _st.trophy }
 
     function _esc(s) {
       return String(s == null ? '' : s).replace(/[&<>"]/g, function(ch) {
@@ -2667,17 +2689,74 @@ const reviewerBreadcrumbJsonLd = {
     // of our integrations so headers read the same way every day.
     var _SOURCE_ORDER = { steam: 0, psn: 1, xbox: 2 }
 
+    // 12x12 pixel-art trophy — shape is identical across tiers; tier color
+    // comes from the parent .ach-trophy--<tier> class via currentColor. Used
+    // only for PSN rows since Steam has no trophy tiers and Xbox reuses
+    // trophy_type for gamerscore (see the user_unlocks view).
+    var _TROPHY_SVG =
+      '<svg class="ach-trophy-svg" viewBox="0 0 12 12" shape-rendering="crispEdges" fill="currentColor" aria-hidden="true">' +
+        '<rect x="2" y="1" width="8" height="1"/>' +
+        '<rect x="1" y="2" width="1" height="1"/><rect x="3" y="2" width="6" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/>' +
+        '<rect x="0" y="3" width="1" height="1"/><rect x="3" y="3" width="6" height="1"/><rect x="11" y="3" width="1" height="1"/>' +
+        '<rect x="0" y="4" width="1" height="1"/><rect x="3" y="4" width="6" height="1"/><rect x="11" y="4" width="1" height="1"/>' +
+        '<rect x="1" y="5" width="1" height="1"/><rect x="3" y="5" width="6" height="1"/><rect x="10" y="5" width="1" height="1"/>' +
+        '<rect x="2" y="6" width="8" height="1"/>' +
+        '<rect x="3" y="7" width="6" height="1"/>' +
+        '<rect x="4" y="8" width="4" height="1"/>' +
+        '<rect x="4" y="9" width="4" height="1"/>' +
+        '<rect x="3" y="10" width="6" height="1"/>' +
+        '<rect x="2" y="11" width="8" height="1"/>' +
+      '</svg>'
+    var _TROPHY_LABEL = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' }
+    function _trophyBadge(a) {
+      if (a.source !== 'psn') return ''
+      var t = a.trophy_type
+      if (!t || !_TROPHY_LABEL[t]) return ''
+      if (t === 'platinum') {
+        return '<span class="ach-plat" title="Platinum trophy">' +
+          _PLAT_SVG +
+          '<span class="ach-plat-label">Platinum</span>' +
+        '</span>'
+      }
+      return '<span class="ach-trophy ach-trophy--' + t + '" title="' + _TROPHY_LABEL[t] + ' trophy">' +
+        _TROPHY_SVG +
+        '<span class="ach-trophy-label">' + _TROPHY_LABEL[t] + '</span>' +
+      '</span>'
+    }
+
+    // Corner badge SVGs — the same brand marks used in the library sync
+    // dropdown so the platform recognition is consistent across the app.
+    // Wrapped once here rather than pasted per-card to keep _cardHtml lean.
+    var _SOURCE_BADGE = {
+      steam: '<span class="ach-feed-src ach-feed-src--steam" title="Steam"><svg width="12" height="12" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg></span>',
+      psn:   '<span class="ach-feed-src ach-feed-src--psn" title="PlayStation"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M9.5 6.5v14.72l3.03.98V9.81c0-.57.26-.95.68-.82.55.14.66.68.66 1.25v4.72c1.89.91 3.37 0 3.37-2.41 0-2.47-.87-3.57-3.44-4.45C12.76 7.75 10.9 7.29 9.5 6.5zM13.66 20.13l4.87-1.74c.55-.2.64-.48.19-.63-.45-.15-1.27-.11-1.83.09l-3.23 1.14v-1.87l.19-.06s.93-.33 2.24-.48c1.31-.14 2.92.02 4.18.5 1.42.45 1.58 1.11 1.22 1.57-.36.46-1.25.79-1.25.79l-6.58 2.36v-1.67zM2.87 19.6c-1.46-.41-1.7-1.27-1.03-1.76.61-.46 1.66-.8 1.66-.8l4.32-1.53v1.75l-3.1 1.11c-.55.2-.64.48-.19.63.45.15 1.27.11 1.83-.09l1.46-.53v1.57l-.29.05c-1.5.24-3.09.15-4.66-.4z"/></svg></span>',
+      xbox:  '<span class="ach-feed-src ach-feed-src--xbox" title="Xbox"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg></span>',
+    }
+
     function _cardHtml(a) {
       var rare = a.global_percent != null && a.global_percent < 10
+      var isPlat = a.source === 'psn' && a.trophy_type === 'platinum'
+      var showRare = rare && !isPlat
       var icon = a.icon_url
-        ? '<img src="' + _esc(a.icon_url) + '" alt="' + _esc(a.display_name || '') + '" class="ach-feed-icon' + (rare ? ' ach-feed-icon--rare' : '') + '" loading="lazy"/>'
-        : '<div class="ach-feed-icon ach-feed-icon-ph' + (rare ? ' ach-feed-icon--rare' : '') + '">🏆</div>'
+        ? '<img src="' + _esc(a.icon_url) + '" alt="' + _esc(a.display_name || '') + '" class="ach-feed-icon' + (showRare ? ' ach-feed-icon--rare' : '') + '" loading="lazy"/>'
+        : '<div class="ach-feed-icon ach-feed-icon-ph' + (showRare ? ' ach-feed-icon--rare' : '') + '">🏆</div>'
       var when = _unlockLabel(a.unlock_time)
       var pct = a.global_percent != null
         ? '<span class="ach-feed-pct' + (rare ? ' ach-feed-pct--rare' : '') + '">' + a.global_percent.toFixed(1) + '% of players</span>'
         : ''
-      return '<div class="ach-feed-card' + (rare ? ' ach-feed-card--rare' : '') + '">' +
-          '<div class="ach-feed-icon-wrap' + (rare ? ' ach-feed-icon-wrap--rare' : '') + '">' + icon + '</div>' +
+      var srcBadge = _SOURCE_BADGE[a.source] || ''
+      var trophy = _trophyBadge(a)
+      // Platinum trumps the rare-styling: a plat that also happens to be
+      // <10% global is just … a platinum. Don't stack the gold sunbeams
+      // on top of the platinum border / glow.
+      var cardCls = 'ach-feed-card' + (isPlat ? ' ach-feed-card--platinum' : (rare ? ' ach-feed-card--rare' : ''))
+      var wrapCls = 'ach-feed-icon-wrap' + (isPlat ? '' : (rare ? ' ach-feed-icon-wrap--rare' : ''))
+      return '<div class="' + cardCls + '">' +
+          srcBadge +
+          '<div class="ach-feed-left">' +
+            '<div class="' + wrapCls + '">' + icon + '</div>' +
+            trophy +
+          '</div>' +
           '<div class="ach-feed-info">' +
             '<div class="ach-feed-name">' + _esc(a.display_name || a.api_name) + '</div>' +
             (a.description ? '<div class="ach-feed-desc">' + _esc(a.description) + '</div>' : '') +
@@ -2715,6 +2794,26 @@ const reviewerBreadcrumbJsonLd = {
         document.getElementById('achStatAvg').textContent = data.stats.avgCompletion.toFixed(1) + '%'
         document.getElementById('achStatPerfect').textContent = data.stats.perfectGames.toLocaleString()
         _hasAny = data.stats.unlocked > 0
+      }
+      // First time the API returns the platform list (page 1, any request),
+      // populate the dropdown. Only shown if the profile has unlocks on more
+      // than one platform — a Steam-only user doesn't need a filter that
+      // only offers "Steam".
+      if (!_platsBuilt && Array.isArray(data.platforms)) {
+        _platsBuilt = true
+        if (platEl && data.platforms.length > 1) {
+          var frag = document.createDocumentFragment()
+          data.platforms.forEach(function(p) {
+            var o = document.createElement('option')
+            o.value = p; o.textContent = p
+            frag.appendChild(o)
+          })
+          platEl.appendChild(frag)
+          platEl.style.display = ''
+        }
+        // Trophy tiers only mean something for PSN — hide the filter for
+        // Steam/Xbox-only profiles.
+        if (trophyEl && data.hasPsn) trophyEl.style.display = ''
       }
       if (data.total != null) _totalByFilter[_filterKey()] = data.total
       var total = _totalByFilter[_filterKey()]
@@ -2799,6 +2898,8 @@ const reviewerBreadcrumbJsonLd = {
       if (_st.q) params.set('q', _st.q)
       if (_st.sort !== 'recent') params.set('sort', _st.sort)
       if (_st.days) params.set('days', String(_st.days))
+      if (_st.platform) params.set('platform', _st.platform)
+      if (_st.trophy) params.set('trophy', _st.trophy)
       fetch('/api/user-achievements/feed?' + params.toString())
         .then(function(r) { return r.ok ? r.json() : Promise.reject(r) })
         .then(function(d) { _cache[k] = d; _render(d) })
@@ -2813,8 +2914,23 @@ const reviewerBreadcrumbJsonLd = {
     // direct load of ?tab=achievements.
     window.__achEnsure = function() { if (!_built) { _built = true; fetchAch() } }
     // Called after a sync completes — blow away the cache and reload page 1.
+    // Also re-arm the platform dropdown so a fresh sync that added a new
+    // platform (e.g. first PSN sync) re-renders the options next fetch.
     window.__achReload = function() {
       _cache = {}; _totalByFilter = {}; _built = true; _st.page = 1
+      _platsBuilt = false
+      if (platEl) {
+        // Keep the "All platforms" option, drop the rest.
+        while (platEl.options.length > 1) platEl.remove(1)
+        platEl.value = ''
+        platEl.style.display = 'none'
+      }
+      _st.platform = ''
+      if (trophyEl) {
+        trophyEl.value = ''
+        trophyEl.style.display = 'none'
+      }
+      _st.trophy = ''
       fetchAch({ force: true })
     }
     window.achGoPage = function(n) {
@@ -2830,6 +2946,8 @@ const reviewerBreadcrumbJsonLd = {
     })
     if (sortEl) sortEl.addEventListener('change', function() { _st.sort = sortEl.value; _st.page = 1; fetchAch() })
     if (dateEl) dateEl.addEventListener('change', function() { _st.days = parseInt(dateEl.value) || 0; _st.page = 1; fetchAch() })
+    if (platEl) platEl.addEventListener('change', function() { _st.platform = platEl.value; _st.page = 1; fetchAch() })
+    if (trophyEl) trophyEl.addEventListener('change', function() { _st.trophy = trophyEl.value; _st.page = 1; fetchAch() })
 
     if (activeTab === 'achievements') window.__achEnsure()
   })()
@@ -3178,6 +3296,80 @@ const reviewerBreadcrumbJsonLd = {
     return mm + '/' + dd + '/' + String(d.getFullYear()).slice(2)
   }
 
+  // Steam-style "perfect game" ribbon — blue rosette with a gold center and
+  // two notched tails, pinned to the bottom-left of the cover. Only for
+  // Steam-sourced rows at 100% achievements, mirroring Steam's own library.
+  var _LIB_PERFECT_RIBBON =
+    '<span class="lib-perfect-ribbon" title="100% achievements on Steam">' +
+      '<svg viewBox="0 0 24 28" aria-hidden="true">' +
+        '<path fill="#2f6fc4" d="M6.4 15l4.6 2-1.4 7.6-2-2.1-3 1.5z"/>' +
+        '<path fill="#2f6fc4" d="M17.6 15l-4.6 2 1.4 7.6 2-2.1 3 1.5z"/>' +
+        '<path fill="#4a90e2" d="M12.00 1.00L13.65 2.79L15.90 1.89L16.61 4.21L19.04 4.39L18.67 6.79L20.77 8.00L19.40 10.00L20.77 12.00L18.67 13.21L19.04 15.61L16.61 15.79L15.90 18.11L13.65 17.21L12.00 19.00L10.35 17.21L8.10 18.11L7.39 15.79L4.96 15.61L5.33 13.21L3.23 12.00L4.60 10.00L3.23 8.00L5.33 6.79L4.96 4.39L7.39 4.21L8.10 1.89L10.35 2.79Z"/>' +
+        '<circle cx="12" cy="10" r="5.6" fill="#fcd462"/>' +
+        '<circle cx="12" cy="10" r="5.6" fill="none" stroke="#e8b43a" stroke-width=".6"/>' +
+      '</svg>' +
+    '</span>'
+  function _libSteamPerfect(it) {
+    return it.sourcePlatform === 'steam' && it.achTotal > 0 && it.achUnlocked === it.achTotal
+  }
+  // PSN counterpart — every trophy earned gets the platinum trophy badge in the
+  // same corner and a platinum (silver + cyan glow) border instead of gold.
+  var _LIB_PLAT_BADGE = '<span class="lib-plat-badge" title="100% trophies on PlayStation">' + _PLAT_SVG + '</span>'
+  // Xbox counterpart — modeled on Xbox's Mythic achievement badge: green disc,
+  // faceted four-point star with a diagonal star behind it, laurel wreath
+  // hugging the bottom. Paired with an Xbox-green border.
+  var _LIB_XBOX_BADGE =
+    '<span class="lib-xbox-badge" title="100% achievements on Xbox">' +
+      '<svg viewBox="0 0 28 28" aria-hidden="true">' +
+        '<circle cx="14" cy="12.5" r="9.4" fill="url(#xbMythDisc)"/>' +
+        '<circle cx="14" cy="12.5" r="9" fill="none" stroke="#9af5c8" stroke-opacity=".5" stroke-width=".5"/>' +
+        '<path fill="#58c08c" d="M18.53 7.97L16.40 12.50L18.53 17.03L14.00 14.90L9.47 17.03L11.60 12.50L9.47 7.97L14.00 10.10Z"/>' +
+        '<path fill="url(#xbMythHi)" d="M14.00 4.10L11.81 10.31L14 12.5Z"/>' +
+        '<path fill="url(#xbMythLo)" d="M14.00 4.10L16.19 10.31L14 12.5Z"/>' +
+        '<path fill="url(#xbMythHi)" d="M22.40 12.50L16.19 10.31L14 12.5Z"/>' +
+        '<path fill="url(#xbMythLo)" d="M22.40 12.50L16.19 14.69L14 12.5Z"/>' +
+        '<path fill="url(#xbMythHi)" d="M14.00 20.90L16.19 14.69L14 12.5Z"/>' +
+        '<path fill="url(#xbMythLo)" d="M14.00 20.90L11.81 14.69L14 12.5Z"/>' +
+        '<path fill="url(#xbMythHi)" d="M5.60 12.50L11.81 14.69L14 12.5Z"/>' +
+        '<path fill="url(#xbMythLo)" d="M5.60 12.50L11.81 10.31L14 12.5Z"/>' +
+        '<path fill="#fff" d="M14 10.4L16.1 12.5 14 14.6 11.9 12.5Z"/>' +
+        '<path fill="none" stroke="#8fe0b8" stroke-width=".55" stroke-linecap="round" d="M24.73 14.39A10.9 10.9 0 0 1 14.76 23.37"/>' +
+        '<path fill="#a6ecc8" transform="translate(24.66 14.77) rotate(-48.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(23.62 17.62) rotate(-32.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(21.84 20.07) rotate(-16.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(19.45 21.94) rotate(0.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(16.64 23.08) rotate(16.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="none" stroke="#8fe0b8" stroke-width=".55" stroke-linecap="round" d="M3.27 14.39A10.9 10.9 0 0 0 13.24 23.37"/>' +
+        '<path fill="#a6ecc8" transform="translate(3.34 14.77) rotate(228.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(4.38 17.62) rotate(212.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(6.16 20.07) rotate(196.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(8.55 21.94) rotate(180.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+        '<path fill="#a6ecc8" transform="translate(11.36 23.08) rotate(164.0)" d="M-2 0Q0-1.1 2 0Q0 1.1-2 0Z"/>' +
+      '</svg>' +
+    '</span>'
+  function _libXboxPerfect(it) {
+    return it.sourcePlatform === 'xbox' && it.achTotal > 0 && it.achUnlocked === it.achTotal
+  }
+  function _libPsnPerfect(it) {
+    return it.sourcePlatform === 'psn' && it.achTotal > 0 && it.achUnlocked === it.achTotal
+  }
+  function _libPerfectCls(it) {
+    if (!(it.achTotal && it.achUnlocked === it.achTotal)) return ''
+    if (_libPsnPerfect(it)) return ' lib-cover-platinum'
+    if (_libXboxPerfect(it)) return ' lib-cover-xbox'
+    return ' lib-cover-perfect'
+  }
+  function _libPerfectTitle(it) {
+    if (!(it.achTotal && it.achUnlocked === it.achTotal)) return ''
+    return ' title="' + (_libPsnPerfect(it) ? '100% trophies' : (_libXboxPerfect(it) ? '100% achievements on Xbox' : '100% achievements')) + '"'
+  }
+  function _libCornerBadge(it) {
+    if (_libSteamPerfect(it)) return _LIB_PERFECT_RIBBON
+    if (_libPsnPerfect(it)) return _LIB_PLAT_BADGE
+    if (_libXboxPerfect(it)) return _LIB_XBOX_BADGE
+    return ''
+  }
+
   function _libDetailedRowHtml(it) {
     var coverUrl = it.cover
       ? it.cover.replace(/^\/\//, 'https://').replace(/t_[a-z0-9_]+/, 't_cover_big')
@@ -3220,11 +3412,11 @@ const reviewerBreadcrumbJsonLd = {
         '<span class="lib-dt-pct">' + pct + '%</span>' +
       '</div>'
     }
-    var perfectAch = it.achTotal && it.achUnlocked === it.achTotal
     return '<div class="lib-dt-row" data-game-id="' + it.gameId + '">' +
-      '<a class="lib-dt-cover' + (perfectAch ? ' lib-cover-perfect' : '') + '" href="/games/' + it.slug + '"' +
-        (perfectAch ? ' title="100% achievements"' : '') + '>' +
+      '<a class="lib-dt-cover' + _libPerfectCls(it) + '" href="/games/' + it.slug + '"' +
+        _libPerfectTitle(it) + '>' +
         (coverUrl ? '<img src="' + coverUrl + '" alt="" loading="lazy"/>' : '<span>🎮</span>') +
+        _libCornerBadge(it) +
       '</a>' +
       '<div class="lib-dt-main">' +
         '<div class="lib-dt-head">' +
@@ -3470,11 +3662,11 @@ const reviewerBreadcrumbJsonLd = {
       var hiddenBadge = (it.isHidden && _libIsOwn)
         ? '<div class="lib-hidden-badge" title="Hidden from others">🫥</div>'
         : ''
-      var perfectAch = it.achTotal && it.achUnlocked === it.achTotal
       return '<' + 'a href="/games/' + it.slug + '" class="lib-item' + (_libEditMode ? ' lib-edit-active' : '') + (it.isHidden && _libIsOwn ? ' lib-item-hidden' : '') + '" data-status="' + it.status + '" data-game-id="' + it.gameId + '">' +
-        '<div class="lib-cover' + (perfectAch ? ' lib-cover-perfect' : '') + '"' + (perfectAch ? ' title="100% achievements"' : '') + '>' +
+        '<div class="lib-cover' + _libPerfectCls(it) + '"' + _libPerfectTitle(it) + '>' +
         (coverUrl ? '<img src="' + coverUrl + '" alt="" loading="lazy"/>' : '<span>🎮</span>') +
         hoursHtml + hiddenBadge + scoreHtml +
+        _libCornerBadge(it) +
         (_libEditMode ? '<div class="lib-checkbox' + (checked ? ' checked' : '') + '"><div class="lib-check-inner"></div></div>' : '') +
         '</div>' +
         '<div class="lib-title">' + it.title.replace(/</g,'&lt;') + '</div>' +
@@ -5050,109 +5242,169 @@ async function createNewList(btn) {
 </script>
 
 
-{isOwnProfile && hasSteam && (
-<script is:inline define:vars={{ achSyncCursor }}>
+{isOwnProfile && (hasSteam || hasPsn || hasXbox) && (
+<script is:inline define:vars={{ hasSteam, hasPsn, hasXbox, achSyncCursor, psnSyncCursor, xboxSyncCursor }}>
 (function () {
   var btn = document.getElementById('achSyncBtn');
   if (!btn) return;
 
-  // Resume from wherever the last (possibly interrupted) sync left off. The
-  // server also persists this, so a plain page reload continues too.
-  var cursor = Number(achSyncCursor) || 0;
-  var total = 0;
-  var hits = 0;         // games that returned achievement data
-  var empties = 0;      // games whose achievement read failed (often privacy)
-  var everSynced = false; // set from server; suppresses privacy-blaming messages
-  var running = false;
+  // Build the list of services to sync — one entry per connected platform.
+  // Each service's endpoint owns its own cursor + delta filter server-side,
+  // so the driver just resumes wherever the last (possibly interrupted) run
+  // left off and loops batches until done. Sequential across services keeps
+  // concurrent Netlify function invocations to one at a time and lets each
+  // third-party's own rate limits govern themselves.
+  var services = [];
+  if (hasSteam) services.push({
+    key: 'steam', label: 'Steam',
+    endpoint: '/api/steam/sync-achievements',
+    cursor: Number(achSyncCursor) || 0,
+    resetCursor: 0,
+    // Steam's per-batch progress carries "hitAchievements" — same shape name
+    // as PSN's/Xbox's "hitTrophies"/"hitAchievements". Normalize below.
+  });
+  if (hasPsn) services.push({
+    key: 'psn', label: 'PlayStation',
+    endpoint: '/api/psn/sync-trophies',
+    cursor: psnSyncCursor || null,
+    resetCursor: null,
+  });
+  if (hasXbox) services.push({
+    key: 'xbox', label: 'Xbox',
+    endpoint: '/api/xbox/sync-achievements',
+    cursor: xboxSyncCursor || null,
+    resetCursor: null,
+  });
 
-  function pct(processed) {
+  var running = false;
+  var finalMessages = []; // per-service end-state text, joined at the end
+
+  function pct(processed, total) {
     if (!total) return '';
     return ' ' + Math.min(99, Math.round((processed / total) * 100)) + '%';
   }
 
-  async function runBatch(attempt) {
-    attempt = attempt || 0;
-    btn.disabled = true;
+  // Run one service to completion (or terminal failure), returning a summary
+  // the outer loop can join into the button's final text.
+  async function runService(svc) {
+    var cursor = svc.cursor;
+    var total = 0;
+    var hits = 0;
+    var empties = 0;
+    var everSynced = false;
 
-    var res, data;
-    try {
-      res = await fetch('/api/steam/sync-achievements', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cursor: cursor }),
+    function runBatch(attempt) {
+      attempt = attempt || 0;
+      return new Promise(function (resolve) {
+        (async function loop() {
+          btn.disabled = true;
+
+          var res, data;
+          try {
+            res = await fetch(svc.endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cursor: cursor }),
+            });
+            data = await res.json().catch(function () { return {}; });
+          } catch (e) {
+            data = null;
+          }
+
+          // Transient failure (network, upstream hiccup, function timeout).
+          // Back off and retry the SAME cursor — progress is never lost.
+          // Mid-sync (cursor already advanced) gets a wider retry budget:
+          // the third-party has been reachable, so ride out short outages
+          // instead of giving up. Jitter avoids lockstep retries.
+          if (!res || !res.ok || !data) {
+            var status = res ? res.status : 0;
+            // 401 needsReconnect and 429 cooldown are deterministic — don't retry.
+            var isConnRevoked = data && data.needsReconnect === true;
+            var transient = !isConnRevoked && (!res || status === 0 || status >= 500);
+            var mid = svc.key === 'steam' ? cursor > 0 : cursor != null;
+            var maxAttempts = mid ? 9 : 5;
+            var maxWaitMs = mid ? 60000 : 30000;
+            if (transient && attempt < maxAttempts) {
+              var baseWait = Math.min(maxWaitMs, 2000 * Math.pow(2, attempt));
+              var waitMs = Math.round(baseWait * (0.8 + Math.random() * 0.4));
+              btn.textContent = svc.label + ' is busy — retrying in ' + Math.round(waitMs / 1000) + 's…';
+              setTimeout(function () { attempt++; loop(); }, waitMs);
+              return;
+            }
+            resolve({
+              ok: false,
+              message: (data && data.error) ? svc.label + ': ' + data.error : svc.label + ' sync failed',
+            });
+            return;
+          }
+
+          total = data.total || total;
+          hits += (data.hitAchievements || data.hitTrophies || 0);
+          empties += (data.emptyResponses || 0);
+          if (data.everSynced) everSynced = true;
+
+          if (!data.done && data.nextCursor != null) {
+            cursor = data.nextCursor;
+            btn.textContent = 'Syncing ' + svc.label + '…' + pct(data.processed, total);
+            setTimeout(function () { attempt = 0; loop(); }, 300); // gentle pacing between batches
+            return;
+          }
+
+          // Service done.
+          var msg;
+          if (total === 0) {
+            msg = svc.label + ': nothing to sync';
+          } else if (hits === 0 && empties > 0) {
+            // Every read came back empty. If this service has ever succeeded
+            // before, it's a third-party blip, not a privacy issue. Only
+            // surface the privacy angle for a truly first-time sync.
+            if (everSynced) {
+              msg = svc.label + ' didn’t return data this time';
+            } else if (svc.key === 'steam') {
+              msg = 'Steam returned nothing — check Profile → Privacy → Game details is Public';
+            } else {
+              msg = svc.label + ' returned no data — try again shortly';
+            }
+          } else {
+            msg = svc.label + ' synced';
+          }
+          resolve({ ok: true, message: msg, syncedSomething: hits > 0 });
+        })();
       });
-      data = await res.json().catch(function () { return {}; });
-    } catch (e) {
-      data = null;
     }
 
-    // Transient failure (network, Steam hiccup, rate limit, function timeout).
-    // Back off and retry the SAME cursor — progress is never lost. Mid-sync
-    // (cursor > 0) gets a wider retry budget: we've proven Steam is reachable
-    // and the user has already invested progress, so ride out short outages
-    // instead of giving up in 60s. Jitter avoids all clients retrying in lockstep.
-    if (!res || !res.ok || !data) {
-      var status = res ? res.status : 0;
-      // 429 here is our own "synced recently" cooldown — deterministic, don't retry.
-      var transient = !res || status === 0 || status >= 500;
-      var maxAttempts = cursor > 0 ? 9 : 5;
-      var maxWaitMs = cursor > 0 ? 60000 : 30000;
-      if (transient && attempt < maxAttempts) {
-        var baseWait = Math.min(maxWaitMs, 2000 * Math.pow(2, attempt));
-        var waitMs = Math.round(baseWait * (0.8 + Math.random() * 0.4));
-        btn.textContent = 'Steam is busy — retrying in ' + Math.round(waitMs / 1000) + 's…';
-        setTimeout(function () { runBatch(attempt + 1); }, waitMs);
-        return;
-      }
-      btn.textContent = (data && data.error)
-        ? data.error + ' — click to retry'
-        : 'Sync failed — click to retry';
-      btn.disabled = false;
-      running = false;
-      return;
+    return await runBatch(0);
+  }
+
+  async function runAll() {
+    running = true;
+    finalMessages = [];
+    var anySynced = false;
+
+    for (var i = 0; i < services.length; i++) {
+      var summary = await runService(services[i]);
+      finalMessages.push(summary.message);
+      if (summary.syncedSomething) anySynced = true;
+      // A terminal failure on one service (auth revoked, hard error after
+      // retry budget) doesn't block the rest — the others still run.
     }
 
-    total = data.total || total;
-    hits += data.hitAchievements || 0;
-    empties += data.emptyResponses || 0;
-    if (data.everSynced) everSynced = true;
-
-    if (!data.done && data.nextCursor != null) {
-      cursor = data.nextCursor;
-      btn.textContent = 'Syncing…' + pct(data.processed);
-      setTimeout(function () { runBatch(0); }, 300); // gentle pacing between batches
-      return;
-    }
-
-    // Done
-    cursor = 0;
     running = false;
-    if (total === 0) {
-      btn.textContent = 'No Steam games found — sync your library first';
-    } else if (hits === 0 && empties > 0) {
-      // Every achievement read came back empty. If the profile has ever
-      // successfully synced before, we KNOW it isn't privacy — it's a
-      // Steam-side blip. Only surface the privacy angle for a truly first-
-      // time sync where we can't rule it out.
-      btn.textContent = everSynced
-        ? 'Steam didn’t return achievement data this time — try again in a few minutes.'
-        : 'Steam returned no achievement data. If your Steam profile is private, set Profile → Privacy → Game details to Public. Otherwise try again in a moment.';
-    } else {
-      btn.textContent = 'Done!';
-      // Feed is client-rendered now — refresh it in place instead of asking
-      // the user to reload the page.
+    btn.disabled = false;
+    btn.textContent = finalMessages.length === 1 ? finalMessages[0] : 'Done — ' + finalMessages.join(' · ');
+
+    // Refresh the feed in place if anything got imported. Otherwise leave the
+    // status text visible so the user can read what happened.
+    if (anySynced) {
       if (window.__achReload) window.__achReload();
       else location.reload();
     }
-    btn.disabled = false;
   }
 
   btn.addEventListener('click', function () {
     if (running) return;
-    running = true;
-    hits = 0;
-    empties = 0;
-    runBatch(0);
+    if (services.length === 0) return;
+    runAll();
   });
 })();
 </script>
@@ -5165,8 +5417,17 @@ async function createNewList(btn) {
     background: var(--bg-card); border: 1px solid var(--border);
     border-radius: 12px; padding: 16px 20px; margin-bottom: 24px;
   }
-  .ach-sync-title { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
+  .ach-sync-info  { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .ach-sync-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
   .ach-sync-sub   { font-size: 12px; color: var(--text-tertiary); }
+  .ach-sync-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .ach-sync-chip {
+    font-size: 11px; font-weight: 600; padding: 2px 8px;
+    border-radius: 999px; color: #fff; letter-spacing: 0.02em;
+  }
+  .ach-sync-chip--steam { background: #1b2838; }
+  .ach-sync-chip--psn   { background: #003791; }
+  .ach-sync-chip--xbox  { background: #107C10; }
   .ach-sync-btn {
     background: var(--accent); color: var(--accent-text);
     border: none; border-radius: 20px; padding: 8px 18px;
@@ -5264,13 +5525,100 @@ async function createNewList(btn) {
     gap: 8px;
   }
   .ach-feed-card {
+    position: relative;
     display: flex; gap: 12px; align-items: flex-start;
     background: var(--bg-card); border: 1px solid var(--border);
     border-radius: 10px; padding: 12px;
     transition: border-color .15s;
   }
   .ach-feed-card:hover { border-color: rgba(96,80,200,.4); }
-  .ach-feed-info { min-width: 0; flex: 1; }
+  /* Corner source badge — top-right of every card, colored per platform.
+     Info column reserves the width so the name/description never tuck
+     under it. */
+  .ach-feed-src {
+    position: absolute; top: 8px; right: 8px;
+    width: 20px; height: 20px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0; pointer-events: none;
+  }
+  .ach-feed-src--steam { background: #1b2838; }
+  .ach-feed-src--psn   { background: #003791; }
+  .ach-feed-src--xbox  { background: #107C10; }
+  /* Icon column — stacks the achievement art and (for PSN) the tier badge
+     underneath. flex-shrink:0 so the wide platinum label doesn't get clipped. */
+  .ach-feed-left { display: flex; flex-direction: column; align-items: center; gap: 6px; flex-shrink: 0; }
+  /* Trophy tier badge — pixel-art trophy + arcade-font label, one color per
+     tier via currentColor so a single SVG paints all four tiers. Only rendered
+     on PSN cards (see _trophyBadge). */
+  .ach-trophy {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 7px; line-height: 1;
+    letter-spacing: 0.04em;
+    padding: 3px 5px 2px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.10);
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .ach-trophy-svg { width: 11px; height: 11px; flex-shrink: 0; }
+  .ach-trophy--bronze   { color: #c68642; }
+  .ach-trophy--silver   { color: #c5c5c5; }
+  .ach-trophy--gold     { color: #ffcc33; }
+  .ach-trophy--platinum { color: #4dd4e6; }
+
+  /* ── Platinum trophy card ──
+     PSN platinum unlocks are a big deal — the whole card gets a silver
+     gradient border, a cyan halo that gently pulses to mimic the platinum
+     orb's glow, and the icon slot swaps to a pixel-art platinum trophy.
+     The card is a `background` gradient sandwich so the border can carry
+     its own gradient without pulling in a separate frame element. */
+  .ach-feed-card--platinum {
+    border: 2px solid transparent;
+    background:
+      linear-gradient(var(--bg-card), var(--bg-card)) padding-box,
+      linear-gradient(135deg, #e8ecf0 0%, #a8b3c0 45%, #e8ecf0 100%) border-box;
+    box-shadow:
+      0 0 0 1px rgba(183, 236, 255, 0.15),
+      0 0 20px rgba(78, 180, 240, 0.35),
+      0 0 40px rgba(30, 96, 196, 0.20);
+    animation: ach-plat-glow 3.5s ease-in-out infinite alternate;
+  }
+  .ach-feed-card--platinum:hover {
+    border-color: transparent;
+    box-shadow:
+      0 0 0 1px rgba(183, 236, 255, 0.25),
+      0 0 28px rgba(78, 180, 240, 0.55),
+      0 0 56px rgba(30, 96, 196, 0.30);
+  }
+  @keyframes ach-plat-glow {
+    from { box-shadow: 0 0 0 1px rgba(183, 236, 255, 0.15), 0 0 20px rgba(78, 180, 240, 0.35), 0 0 40px rgba(30, 96, 196, 0.20); }
+    to   { box-shadow: 0 0 0 1px rgba(183, 236, 255, 0.25), 0 0 32px rgba(78, 180, 240, 0.55), 0 0 60px rgba(30, 96, 196, 0.30); }
+  }
+  /* Platinum badge — small vector trophy stacked over a silver label, sized
+     to sit inside the 52px icon column rather than widening it. */
+  .ach-plat {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    width: 52px;
+  }
+  .ach-plat-svg {
+    width: 20px; height: 25px; display: block;
+    filter: drop-shadow(0 0 4px rgba(78, 160, 240, 0.55));
+  }
+  .ach-plat-label {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 5.5px; line-height: 1; letter-spacing: 0.06em;
+    text-transform: uppercase; white-space: nowrap;
+    background: linear-gradient(180deg, #f4f7fa 0%, #a9b4c0 55%, #dfe5eb 100%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+  }
+  [data-theme="light"] .ach-plat-label {
+    background: linear-gradient(180deg, #8995a2 0%, #4f5a66 55%, #76828f 100%);
+    -webkit-background-clip: text; background-clip: text;
+  }
+  .ach-feed-info { min-width: 0; flex: 1; padding-right: 24px; }
   .ach-feed-name {
     font-size: 13px; font-weight: 600; color: var(--text-primary);
     margin-bottom: 3px; line-height: 1.3;
@@ -5431,7 +5779,7 @@ async function createNewList(btn) {
     margin-bottom: 20px;
   }
   .ach-search {
-    flex: 1; min-width: 180px;
+    flex: 0 1 240px; min-width: 160px;
     background: var(--bg-card); border: 1px solid var(--border);
     border-radius: 8px; padding: 7px 12px;
     font-size: 13px; color: var(--text-primary); font-family: inherit;
