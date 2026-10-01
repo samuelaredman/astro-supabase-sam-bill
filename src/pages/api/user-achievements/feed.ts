@@ -69,7 +69,12 @@ export const GET: APIRoute = async ({ url }) => {
     )
     .eq("profile_id", profile.id);
 
-  if (q) feed = feed.ilike("display_name", `%${q}%`);
+  // Search matches the achievement name or the game it belongs to. Values are
+  // double-quoted so commas/parens in the query don't break PostgREST's or().
+  if (q) {
+    const pat = `"%${q.replace(/["\\]/g, "\\$&")}%"`;
+    feed = feed.or(`display_name.ilike.${pat},game_title.ilike.${pat}`);
+  }
   if (days > 0)
     feed = feed.gte(
       "unlock_time",
