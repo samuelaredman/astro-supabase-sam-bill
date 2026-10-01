@@ -52,7 +52,7 @@ export const POST: APIRoute = async (context) => {
   const emailRedirectTo = new URL("/auth/confirm", context.site ?? context.url.origin).toString();
 
 
-  const { error } = await supabase.auth.signUp({
+  const { data, error } = await supabase.auth.signUp({
     email,
     password,
     options: {
@@ -66,6 +66,21 @@ export const POST: APIRoute = async (context) => {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
+  }
+
+  // An email that already belongs to a confirmed account gets a fake success from
+  // Supabase (no error, no email sent) — the returned user has no identities.
+  // Without this check the page says "we sent a confirmation email" and the user
+  // waits for one that never comes. (Unconfirmed accounts do have identities;
+  // Supabase re-sends their confirmation, so they fall through to success.)
+  if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+    return new Response(
+      JSON.stringify({
+        error: "An account with this email already exists. Sign in instead, or reset your password if you've forgotten it.",
+        code: "email_exists",
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
   }
 
   return new Response(JSON.stringify({ success: true }), {

@@ -95,6 +95,26 @@ if (newFollowerActorIds.length > 0) {
   for (const f of followBacks ?? []) followingBackIds.add(f.following_id);
 }
 
+// Lists without a custom cover show their first game's cover, like everywhere else lists render.
+// One limit(1) query per list: the page caps at 50 notifications, so this stays small.
+const coverlessListIds = [...new Set(notifications
+  .filter((n: any) => n.lists?.id && !n.lists.cover_image_url)
+  .map((n: any) => n.lists.id))] as string[];
+const listFallbackCovers: Record<string, string> = {};
+await Promise.all(coverlessListIds.map(async (listId) => {
+  const { data: entry } = await db
+    .from('list_entries')
+    .select('games!inner(cover_img_url)')
+    .eq('list_id', listId)
+    .not('games.cover_img_url', 'is', null)
+    .order('position', { ascending: true, nullsFirst: false })
+    .order('added_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  const thumb = igdbThumb(entry?.games?.cover_img_url);
+  if (thumb) listFallbackCovers[listId] = thumb;
+}));
+
 // Mark all unread as read now that the user is viewing the page
 await db.from('notifications')
   .update({ read: true })
@@ -177,6 +197,8 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
           const isCommentDownvote = n.type === 'comment_downvote';
           const isReaction = n.type === 'review_reaction';
           const isCommentReaction = n.type === 'comment_reaction';
+          const isReviewComment = n.type === 'review_comment';
+          const isCommentReply = n.type === 'comment_reply';
           // ── Recommendation notification types ──
           const rec = n.recommendation;
           const recPair = rec ? `${rec.source_game?.title ?? 'a game'} → ${rec.target_game?.title ?? 'another'}` : 'a recommendation';
@@ -233,8 +255,8 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                 ) : isGroupInvite || isGroupJoinAccepted || isGroupJoinRejected ? (
                   <span>👥</span>
                 ) : isListType ? (
-                  list?.cover_image_url
-                    ? <img src={list.cover_image_url} alt={list.title} />
+                  list?.cover_image_url || listFallbackCovers[list?.id]
+                    ? <img src={list.cover_image_url || listFallbackCovers[list.id]} alt={list.title} />
                     : <span>📋</span>
                 ) : thumb ? (
                   <img src={thumb} alt={game?.title ?? ''} />
@@ -309,6 +331,16 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                   ) : isCommentDownvote ? (
                     <>
                       <strong>@{actor?.username ?? 'Someone'}</strong> downvoted your comment
+                      {game && <> on <strong>{game.title}</strong></>}
+                    </>
+                  ) : isReviewComment ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> commented on your review
+                      {game && <> of <strong>{game.title}</strong></>}
+                    </>
+                  ) : isCommentReply ? (
+                    <>
+                      <strong>@{actor?.username ?? 'Someone'}</strong> replied to your comment
                       {game && <> on <strong>{game.title}</strong></>}
                     </>
                   ) : isGroupInvite ? (
@@ -413,8 +445,8 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                   )}
                 </div>
                 <div class="notif-meta">
-                  <span class={`notif-type-badge ${isNewFollower ? 'badge-new-follower' : (isUpvote || isListUpvote || isRecUpvote) ? 'badge-upvote' : (isDownvote || isListDownvote || isRecDownvote) ? 'badge-downvote' : (isCommentUpvote || isListCommentUpvote || isRecCommentUpvote) ? 'badge-upvote' : (isCommentDownvote || isListCommentDownvote || isRecCommentDownvote) ? 'badge-downvote' : (isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected) ? 'badge-group' : isWatchlist ? 'badge-watchlist' : (isReaction || isCommentReaction || isListReaction || isListCommentReaction || isRecReaction || isRecCommentReaction) ? 'badge-reaction' : (isListComment || isRecComment || isForum) ? 'badge-list' : 'badge-follow'}`}>
-                    {isNewFollower ? 'New Follower' : isUpvote ? 'Upvote' : isDownvote ? 'Downvote' : isCommentUpvote ? 'Comment Upvote' : isCommentDownvote ? 'Comment Downvote' : isGroupInvite ? 'Group Invite' : isGroupJoinRequest ? 'Join Request' : isGroupJoinAccepted ? 'Joined!' : isGroupJoinRejected ? 'Not Accepted' : isWatchlist ? 'Watchlist' : isForumComment ? 'Update Comment' : isForumReply ? 'Update Reply' : isReaction ? 'Reaction' : isCommentReaction ? 'Comment Reaction' : isFollowRec ? 'Recommendation' : isRecUpvote ? 'Upvote' : isRecDownvote ? 'Downvote' : isRecReaction ? 'Reaction' : isRecComment ? 'Rec Comment' : isRecCommentUpvote ? 'Comment Upvote' : isRecCommentDownvote ? 'Comment Downvote' : isRecCommentReaction ? 'Comment Reaction' : isListComment ? 'List Comment' : isListReaction ? 'List Reaction' : isListUpvote ? 'List Upvote' : isListDownvote ? 'List Downvote' : isListCommentReaction ? 'List Comment Reaction' : isListCommentUpvote ? 'List Comment Upvote' : isListCommentDownvote ? 'List Comment Downvote' : 'Following'}
+                  <span class={`notif-type-badge ${isNewFollower ? 'badge-new-follower' : (isUpvote || isListUpvote || isRecUpvote) ? 'badge-upvote' : (isDownvote || isListDownvote || isRecDownvote) ? 'badge-downvote' : (isCommentUpvote || isListCommentUpvote || isRecCommentUpvote) ? 'badge-upvote' : (isCommentDownvote || isListCommentDownvote || isRecCommentDownvote) ? 'badge-downvote' : (isGroupInvite || isGroupJoinRequest || isGroupJoinAccepted || isGroupJoinRejected) ? 'badge-group' : isWatchlist ? 'badge-watchlist' : (isReaction || isCommentReaction || isListReaction || isListCommentReaction || isRecReaction || isRecCommentReaction) ? 'badge-reaction' : (isListComment || isRecComment || isForum || isReviewComment || isCommentReply) ? 'badge-list' : 'badge-follow'}`}>
+                    {isNewFollower ? 'New Follower' : isUpvote ? 'Upvote' : isDownvote ? 'Downvote' : isCommentUpvote ? 'Comment Upvote' : isCommentDownvote ? 'Comment Downvote' : isGroupInvite ? 'Group Invite' : isGroupJoinRequest ? 'Join Request' : isGroupJoinAccepted ? 'Joined!' : isGroupJoinRejected ? 'Not Accepted' : isWatchlist ? 'Watchlist' : isForumComment ? 'Update Comment' : isForumReply ? 'Update Reply' : isReaction ? 'Reaction' : isCommentReaction ? 'Comment Reaction' : isReviewComment ? 'Comment' : isCommentReply ? 'Reply' : isFollowRec ? 'Recommendation' : isRecUpvote ? 'Upvote' : isRecDownvote ? 'Downvote' : isRecReaction ? 'Reaction' : isRecComment ? 'Rec Comment' : isRecCommentUpvote ? 'Comment Upvote' : isRecCommentDownvote ? 'Comment Downvote' : isRecCommentReaction ? 'Comment Reaction' : isListComment ? 'List Comment' : isListReaction ? 'List Reaction' : isListUpvote ? 'List Upvote' : isListDownvote ? 'List Downvote' : isListCommentReaction ? 'List Comment Reaction' : isListCommentUpvote ? 'List Comment Upvote' : isListCommentDownvote ? 'List Comment Downvote' : 'Following'}
                   </span>
                   <span class="notif-time">{timeAgo(n.created_at)}</span>
                 </div>

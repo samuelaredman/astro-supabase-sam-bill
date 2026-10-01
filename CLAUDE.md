@@ -157,6 +157,7 @@ supabase/
 | | `platform_played_on` | uuid FK→platforms | YES | Column is `platform_played_on`, not `platform_id` |
 | | `play_time_hours` | int | YES | |
 | | `contains_spoilers` | bool | NO | |
+| | `youtube_video_id` | text | YES | Optional attached video. 11-char YouTube id only (CHECK `reviews_youtube_video_id_format`) — parse links with `src/utils/youtube.ts` |
 | | `published_at` | timestamptz | YES | |
 | | `created_at` | timestamptz | YES | |
 | `review_votes` | `id` | uuid PK | NO | gen_random_uuid() |
@@ -843,6 +844,7 @@ SUPABASE_ANON_KEY            Public anon key (safe for SSR, never expose client-
 SUPABASE_SERVICE_ROLE_KEY    Service role — server only, bypasses all RLS
 IGDB_CLIENT_ID               IGDB API credentials
 IGDB_CLIENT_SECRET           IGDB API credentials
+YOUTUBE_API_KEY              Optional. YouTube Data API v3 — review-video description/duration/views
 ```
 
 Local: `.env` file. Production: Netlify environment settings.
