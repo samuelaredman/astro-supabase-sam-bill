@@ -24,6 +24,10 @@ const PLATFORM_ORDER: Record<string, number> = {
   Xbox: 7,
 };
 
+// PSN trophy tiers the client can filter on. Gated to source='psn' because
+// Xbox reuses trophy_type for gamerscore in the user_unlocks view.
+const TROPHY_TIERS = new Set(["bronze", "silver", "gold", "platinum"]);
+
 export const GET: APIRoute = async ({ url }) => {
   const db = getSupabaseAdmin() as any;
   const p = url.searchParams;
@@ -34,6 +38,8 @@ export const GET: APIRoute = async ({ url }) => {
   const sort = p.get("sort") || "recent";
   const days = parseInt(p.get("days") || "0") || 0;
   const platform = (p.get("platform") || "").trim();
+  const trophyParam = (p.get("trophy") || "").trim();
+  const trophy = TROPHY_TIERS.has(trophyParam) ? trophyParam : "";
 
   if (!username) return json({ error: "username required" }, 400);
 
@@ -44,7 +50,7 @@ export const GET: APIRoute = async ({ url }) => {
     .maybeSingle();
   if (!profile) return json({ error: "Not found" }, 404);
 
-  const filtered = !!(q || days > 0 || platform);
+  const filtered = !!(q || days > 0 || platform || trophy);
 
   // Feed page. Reads from the user_unlocks view, which unions Steam
   // achievements and PSN trophies into one stream. Column aliases in the view
@@ -78,6 +84,7 @@ export const GET: APIRoute = async ({ url }) => {
     feed = feed.eq("source", "xbox").eq("platform_label", platform);
   else if (platform === "Xbox")
     feed = feed.eq("source", "xbox").is("platform_label", null);
+  if (trophy) feed = feed.eq("source", "psn").eq("trophy_type", trophy);
 
   if (sort === "oldest") feed = feed.order("unlock_time", { ascending: true });
   else if (sort === "rarest")
@@ -137,6 +144,7 @@ export const GET: APIRoute = async ({ url }) => {
   let stats: { unlocked: number; perfectGames: number; avgCompletion: number } | null = null;
   let total: number | null = null;
   let platforms: string[] | null = null;
+  let hasPsn: boolean | null = null;
 
   if (page === 1) {
     const s = statsRows?.[0] ?? {
@@ -160,6 +168,7 @@ export const GET: APIRoute = async ({ url }) => {
       else if (r.source === "psn" && r.platform_label) set.add(r.platform_label);
       else if (r.source === "xbox") set.add(r.platform_label ?? "Xbox");
     }
+    hasPsn = ((platformRows ?? []) as Array<{ source: string }>).some((r) => r.source === "psn");
     platforms = [...set].sort(
       (a, b) => (PLATFORM_ORDER[a] ?? 99) - (PLATFORM_ORDER[b] ?? 99),
     );
@@ -167,5 +176,5 @@ export const GET: APIRoute = async ({ url }) => {
     total = count ?? 0;
   }
 
-  return json({ stats, platforms, items, page, perPage: PER_PAGE, total });
+  return json({ stats, platforms, hasPsn, items, page, perPage: PER_PAGE, total });
 };
