@@ -16,11 +16,13 @@ const { username = null } = Astro.props;
   const me = document.getElementById('ck-tour-root')?.dataset.username || '';
   const profilePath = me ? `/reviewers/${me}` : '/';
 
-  // Each tour is an array of steps. step = { selector?, onBeforeHighlight?, page, popover }.
-  // No selector ⇒ centered "concept" popover. `onBeforeHighlight` runs just before driver.js
-  // measures the target — use it to reveal something (e.g. switch tabs) that `selector`
-  // sits inside of but that isn't visible/positioned until then.
-  const TOURS: Record<string, { selector?: string; onBeforeHighlight?: () => void; page: string; popover: any }[]> = {
+  // Each tour is an array of steps. step = { selector?, reveal?, page, popover }.
+  // No selector ⇒ centered "concept" popover. `reveal` is for a target that isn't in
+  // the DOM until something happens (e.g. a lazily-loaded profile tab): it runs when
+  // the user clicks Next on the previous step, and the tour waits for `selector` to
+  // appear before moving on.
+  type Step = { selector?: string; reveal?: () => void; page: string; popover: any };
+  const TOURS: Record<string, Step[]> = {
     // One guided sequence covering the whole profile setup.
     profile: [
       { selector: '#editProfileBtn', page: profilePath, popover: { title: 'Edit your profile', description: 'This is how you edit all the elements of your profile — click it to make changes, then Save when you’re done.' } },
@@ -31,7 +33,8 @@ const { username = null } = Astro.props;
       { selector: 'a[href$="?tab=library"]', page: profilePath, popover: { title: 'Your library', description: 'You can track and manage all the games you have played, are currently playing, and want to play — click the Library tab to check it out.' } },
       {
         selector: '.steam-cta-btn, .lib-sync-trigger',
-        onBeforeHighlight: () => { (document.querySelector('a[href$="?tab=library"]') as HTMLElement | null)?.click(); },
+        // Lives in the Library tab, which loads on first open — click the tab, then wait.
+        reveal: () => { (document.querySelector('a[href$="?tab=library"]') as HTMLElement | null)?.click(); },
         page: profilePath,
         popover: { title: 'Import from Steam', description: 'Already have a Steam library? Click Connect Steam to automatically bring in your owned games and playtime. Before importing, make sure Profile and Game Details are set to public and "Always keep my total playtime private" is unchecked under Privacy Settings — you can switch them back right after.' },
       },
@@ -44,22 +47,28 @@ const { username = null } = Astro.props;
     ],
   };
 
-  // A tour's steps whose target element (if any) is present on the CURRENT page.
-  // Each tour is single-page, so we drive whatever is here rather than trusting an
-  // exact page match (usernames/paths can drift) — EXCEPT for steps with no selector
-  // (centered "concept" popovers), which have nothing on the page to confirm against.
-  // Those must instead check the step's own `page` against the current path, or they'd
-  // false-positive as "present" on every page and short-circuit the tour before it
-  // ever navigates to where the rest of its steps actually live.
-  function existingSteps(name: string) {
-    return (TOURS[name] || [])
-      .filter((s) => s.selector ? document.querySelector(s.selector) : window.location.pathname === s.page)
-      .map((s) => ({
-        element: s.onBeforeHighlight
-          ? () => { s.onBeforeHighlight!(); return s.selector ? document.querySelector(s.selector) : null; }
-          : (s.selector || undefined),
-        popover: s.popover,
-      }));
+  // Paths compare case-insensitively without a trailing slash — usernames in URLs
+  // can differ in case from the stored one.
+  const normPath = (p: string) => decodeURIComponent(p).toLowerCase().replace(/\/+$/, '') || '/';
+  const onPage = (s: Step) => normPath(window.location.pathname) === normPath(s.page);
+
+  // First match that's actually rendered. querySelector alone can return an element
+  // that's display:none — the desktop sidebar's links on a phone, or a target inside
+  // an inactive profile tab — and driver.js then anchors the popover to nothing.
+  function visibleMatch(selector: string): Element | null {
+    return Array.from(document.querySelectorAll(selector)).find((el) => el.getClientRects().length > 0) ?? null;
+  }
+
+  // Resolves with the first visible match once it appears, or null after `ms`.
+  function waitForVisible(selector: string, ms = 5000): Promise<Element | null> {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      (function poll() {
+        const el = visibleMatch(selector);
+        if (el || Date.now() - t0 > ms) resolve(el);
+        else setTimeout(poll, 100);
+      })();
+    });
   }
 
   // The onboarding wizard is a full-screen overlay; a tour driven underneath it
@@ -68,9 +77,43 @@ const { username = null } = Astro.props;
   // so any tour that would start while it's still mounted is dropped.
   const onboardingOpen = () => !!document.getElementById('ck-onboarding');
 
-  function drive(steps: any[], onDone?: () => void) {
+  // The tour's steps that can run here. A tour only runs on its own page — the
+  // profile tour's targets (avatar, banner, Library tab…) exist on every profile,
+  // so without the page check it would tour someone else's profile as "yours".
+  // Steps whose target isn't visible are dropped, except `reveal` steps, whose
+  // target only appears once revealed.
+  function existingSteps(name: string): Step[] {
+    return (TOURS[name] || []).filter((s) =>
+      onPage(s) && (!s.selector || s.reveal || visibleMatch(s.selector)),
+    );
+  }
+
+  function drive(tourSteps: Step[], onDone?: () => void) {
     if (onboardingOpen()) return;
-    if (!steps.length) { onDone?.(); return; }
+    if (!tourSteps.length) { onDone?.(); return; }
+    // Chain to the next tour only if this one was finished, not closed early —
+    // closing the profile tour shouldn't then navigate to the home page.
+    let finished = false;
+    const steps = tourSteps.map((s, i) => {
+      const next = tourSteps[i + 1];
+      const popover = { ...s.popover };
+      if (next?.reveal && next.selector) {
+        const sel = next.selector;
+        popover.onNextClick = (_el: any, _step: any, { driver: d }: any) => {
+          next.reveal!();
+          waitForVisible(sel).then((el) => {
+            if (el) d.moveNext();
+            else if (d.hasNextStep()) d.moveTo(i + 2); // never showed up — skip it
+            else { finished = true; d.destroy(); }
+          });
+        };
+      }
+      return {
+        // null (target gone) makes driver.js fall back to a centered popover.
+        element: s.selector ? () => visibleMatch(s.selector!) as Element : undefined,
+        popover,
+      };
+    });
     const d = driver({
       showProgress: steps.length > 1,
       allowClose: true,
@@ -80,9 +123,13 @@ const { username = null } = Astro.props;
       prevBtnText: 'Back',
       doneBtnText: 'Done',
       steps,
+      onDestroyStarted: (_el: any, _step: any, { driver: dd }: any) => {
+        if (dd.isLastStep()) finished = true;
+        dd.destroy();
+      },
       onDestroyed: () => {
         try { localStorage.setItem('ck_tour_done', '1'); } catch (e) {}
-        onDone?.();
+        if (finished) onDone?.();
       },
     });
     d.drive();
