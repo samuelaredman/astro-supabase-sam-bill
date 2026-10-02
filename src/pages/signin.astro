@@ -9,11 +9,13 @@ import Layout from '../components/Layout.astro';
       --input-bg: #ffffff;
       --error: #c0392b;
       --error-bg: #fdf0ee;
+      --success: #1a6b3c;
     }
     :root[data-theme="dark"] {
       --input-bg: #222220;
       --error: #f87171;
       --error-bg: #2b0d0d;
+      --success: #4ade80;
     }
 
     .card {
@@ -111,6 +113,29 @@ import Layout from '../components/Layout.astro';
     }
     .error-msg.visible { display: block; }
 
+    /* Resend-confirmation prompt: shown for an unconfirmed email or a failed confirmation link. */
+    .resend-box {
+      margin: -6px 0 16px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .resend-box[hidden] { display: none; }
+    .resend-btn {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      font-weight: 500;
+      color: var(--text-primary);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      cursor: pointer;
+    }
+    .resend-btn:disabled { opacity: 0.5; cursor: default; }
+    .resend-status { display: block; margin-top: 6px; }
+    .resend-status.ok { color: var(--success); }
+    .resend-status.err { color: var(--error); }
+
     .footer-link {
       text-align: center;
       font-size: 13px;
@@ -136,6 +161,10 @@ import Layout from '../components/Layout.astro';
     <p class="subtitle">Sign in to your account to continue.</p>
 
     <div class="error-msg" id="errorMsg"></div>
+    <div class="resend-box" id="resendBox" hidden>
+      Didn't get the email? <button type="button" class="resend-btn" id="resendBtn">Resend confirmation email</button>
+      <span class="resend-status" id="resendStatus" hidden></span>
+    </div>
 
     <form id="signinForm">
       <div class="form-group">
@@ -161,16 +190,67 @@ import Layout from '../components/Layout.astro';
     const form = document.getElementById('signinForm') as HTMLFormElement;
     const errorMsg = document.getElementById('errorMsg') as HTMLDivElement;
     const submitBtn = document.getElementById('submitBtn') as HTMLButtonElement;
+    const resendBox = document.getElementById('resendBox') as HTMLDivElement;
+    const resendBtn = document.getElementById('resendBtn') as HTMLButtonElement;
+    const resendStatus = document.getElementById('resendStatus') as HTMLSpanElement;
+
+    function showError(text: string) {
+      errorMsg.textContent = text;
+      errorMsg.classList.add('visible');
+    }
+
+    // /auth/confirm sends people here when a confirmation link fails — usually
+    // because it expired, or an email security scanner opened it first (which uses
+    // it up but DOES confirm the account). Tell them what to do instead of showing
+    // a bare sign-in form.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('error') === 'confirmation_failed') {
+      showError("That confirmation link has expired or was already used. If you've already confirmed your email, just sign in below. Otherwise, enter your email and resend the confirmation.");
+      resendBox.hidden = false;
+      history.replaceState(null, '', window.location.pathname);
+    }
+
+    resendBtn.addEventListener('click', async () => {
+      const email = (document.getElementById('email') as HTMLInputElement).value.trim();
+      resendStatus.hidden = false;
+      resendStatus.className = 'resend-status';
+      if (!email) {
+        resendStatus.textContent = 'Enter your email above first.';
+        resendStatus.classList.add('err');
+        (document.getElementById('email') as HTMLInputElement).focus();
+        return;
+      }
+      resendBtn.disabled = true;
+      resendStatus.textContent = 'Sending…';
+      try {
+        const res = await fetch('/api/auth/resend-confirmation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Could not send the email. Please try again.');
+        resendStatus.textContent = 'Sent! Check your inbox (and spam folder) for a new link to ' + email + '.';
+        resendStatus.classList.add('ok');
+      } catch (err: any) {
+        resendStatus.textContent = err?.message || 'Could not send the email. Please try again.';
+        resendStatus.classList.add('err');
+      } finally {
+        resendBtn.disabled = false;
+      }
+    });
 
     // Came from a group page (?group=<id>&code=…): return to it after signing
     // in. Built from the id rather than taken as a URL, so it can't redirect off-site.
-    const params = new URLSearchParams(window.location.search);
+    // Reads `params` (parsed above) rather than window.location.search, which the
+    // confirmation_failed branch may already have cleared.
     const groupId = params.get('group');
     const inviteCode = params.get('code');
     let afterSignIn = '/';
     if (groupId && /^[0-9a-f-]{36}$/i.test(groupId)) {
       afterSignIn = `/groups/${groupId}` + (inviteCode ? `?code=${encodeURIComponent(inviteCode)}` : '');
-      (document.getElementById('signupLink') as HTMLAnchorElement).href = `/signup${window.location.search}`;
+      const signupQs = new URLSearchParams({ group: groupId, ...(inviteCode ? { code: inviteCode } : {}) });
+      (document.getElementById('signupLink') as HTMLAnchorElement).href = `/signup?${signupQs}`;
     }
 
     form.addEventListener('submit', async (e) => {
@@ -191,8 +271,8 @@ import Layout from '../components/Layout.astro';
       const data = await res.json();
 
       if (!res.ok) {
-        errorMsg.textContent = data.error ?? 'Something went wrong. Please try again.';
-        errorMsg.classList.add('visible');
+        showError(data.error ?? 'Something went wrong. Please try again.');
+        if (data.code === 'email_not_confirmed') resendBox.hidden = false;
         submitBtn.disabled = false;
         submitBtn.textContent = 'Sign in';
       } else {

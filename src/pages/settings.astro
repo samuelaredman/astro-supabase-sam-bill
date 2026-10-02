@@ -17,11 +17,13 @@ if (!user) return Astro.redirect('/signin');
 const db = getSupabaseAdmin() as any;
 const { data: profile } = await db
   .from('profiles')
-  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at, username_changed_at, username_locked')
+  .select('id, username, avatar_url, want_to_play_privacy, dropped_privacy, search_indexable, steam_id, steam_username, steam_synced_at, psn_account_id, psn_online_id, psn_synced_at, psn_trophies_synced_at, xbox_xuid, xbox_gamertag, xbox_synced_at, xbox_achievements_synced_at, username_changed_at, username_locked')
   .eq('auth_user_id', user.id)
   .single();
 
-const steamStatus = Astro.url.searchParams.get('steam'); // 'connected' | 'error' | 'cancelled' | null
+const steamStatus = Astro.url.searchParams.get('steam'); // 'connected' | 'error' | 'cancelled' | 'duplicate' | null
+const psnStatus = Astro.url.searchParams.get('psn');     // 'connected' | 'expired' | null
+const xboxStatus = Astro.url.searchParams.get('xbox');   // 'connected' | 'expired' | 'duplicate' | 'error' | null
 
 if (!profile) return Astro.redirect('/signin');
 
@@ -188,9 +190,15 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     </section>
 
     <!-- Steam -->
-    <section class="settings-section" id="steam">
-      <div class="settings-section-label">Steam</div>
-      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+    <section class="settings-section settings-section--collapsible" id="steam" data-collapsed="true">
+      <button type="button" class="settings-section-header" onclick="toggleSettingsSection('steam')" aria-expanded="false" aria-controls="steamBody">
+        <span class="settings-section-header-label">Steam</span>
+        <span class={`settings-section-header-status${profile.steam_id ? ' settings-section-header-status--ok' : ''}`}>
+          {profile.steam_id ? `Connected as ${profile.steam_username ?? profile.steam_id}` : 'Not connected'}
+        </span>
+        <svg class="settings-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div id="steamBody" class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
 
         {steamStatus === 'connected' && (
           <div class="steam-banner steam-banner-ok">Steam account connected successfully.</div>
@@ -200,6 +208,9 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
         )}
         {steamStatus === 'cancelled' && (
           <div class="steam-banner steam-banner-err">Steam connection was cancelled.</div>
+        )}
+        {steamStatus === 'duplicate' && (
+          <div class="steam-banner steam-banner-err">That Steam account is already linked to another Chekpoint profile. Disconnect it there first, or sign in to Steam with a different account.</div>
         )}
 
         {profile.steam_id ? (
@@ -241,6 +252,30 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
               </div>
               <div id="steamSyncResults" class="steam-results" style="display:none"></div>
             </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Import your Steam reviews</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Brings your Steam reviews across as Chekpoint <strong>drafts</strong>.
+                Steam reviews don&rsquo;t have scores, so we carry over the review text,
+                the date, and hours-at-review, then you pick a score and publish each one.
+                Games you already reviewed here are skipped. Your Steam profile&rsquo;s reviews
+                must be public (same privacy settings as library sync above).
+              </div>
+              <div id="srStartRow" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="srPreviewBtn" onclick="srPreview()">Preview reviews</button>
+                <button class="settings-save-btn" id="srImportBtn" onclick="srStart()" style="display:none">Import to drafts</button>
+                <span id="srMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="srPreview" class="bl-preview" style="display:none;margin-top:10px"></div>
+              <div id="srProgress" class="bl-progress" style="display:none;margin-top:10px">
+                <div class="bl-bar"><div class="bl-bar-fill" id="srBarFill"></div></div>
+                <div class="bl-progress-text" id="srProgressText"></div>
+              </div>
+              <div id="srResults" class="steam-results" style="display:none"></div>
+              <div id="srConflicts" class="sr-conflicts" style="display:none;margin-top:10px"></div>
+              <div id="srNeedsMapping" class="bl-needs-mapping" style="display:none;margin-top:10px"></div>
+            </div>
           </>
         ) : (
           <div class="steam-connect-row">
@@ -255,10 +290,222 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
       </div>
     </section>
 
+    <!-- PlayStation -->
+    <section class="settings-section settings-section--collapsible" id="psn" data-collapsed="true">
+      <button type="button" class="settings-section-header" onclick="toggleSettingsSection('psn')" aria-expanded="false" aria-controls="psnBody">
+        <span class="settings-section-header-label">PlayStation</span>
+        <span class={`settings-section-header-status${profile.psn_account_id ? ' settings-section-header-status--ok' : ''}`}>
+          {profile.psn_account_id ? `Connected as ${profile.psn_online_id ?? profile.psn_account_id}` : 'Not connected'}
+        </span>
+        <svg class="settings-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div id="psnBody" class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+
+        {psnStatus === 'connected' && (
+          <div class="steam-banner steam-banner-ok">PlayStation account connected successfully.</div>
+        )}
+        {psnStatus === 'expired' && (
+          <div class="steam-banner steam-banner-err">Your PlayStation connection expired. Paste a fresh NPSSO below to reconnect.</div>
+        )}
+
+        {profile.psn_account_id ? (
+          <>
+            <div class="steam-connected-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Connected as <strong>{profile.psn_online_id ?? profile.psn_account_id}</strong></div>
+                {profile.psn_synced_at || profile.psn_trophies_synced_at ? (
+                  <div class="settings-row-sub">
+                    {profile.psn_synced_at && (
+                      <>Library last synced {new Date(profile.psn_synced_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+                    )}
+                    {profile.psn_synced_at && profile.psn_trophies_synced_at && ' · '}
+                    {profile.psn_trophies_synced_at && (
+                      <>Trophies last synced {new Date(profile.psn_trophies_synced_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+                    )}
+                  </div>
+                ) : (
+                  <div class="settings-row-sub">Nothing synced yet — click the buttons below.</div>
+                )}
+              </div>
+              <button class="settings-ghost-btn steam-disconnect-btn" id="psnDisconnectBtn" onclick="psnDisconnect()">Disconnect</button>
+            </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Sync library</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Imports your PS3, PS4, and PS5 games as <strong>Owned</strong>, with trophy progress and (for PS4/PS5) playtime. Won't overwrite statuses you've set manually.
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="psnSyncBtn" onclick="psnSync()">Sync PlayStation library</button>
+                <span id="psnSyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="psnSyncResults" class="steam-results" style="display:none"></div>
+            </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Sync trophies</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Downloads every trophy for every game you've played on PSN. This can take a minute or two the first time — subsequent syncs only pull new unlocks.
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="psnTrophySyncBtn" onclick="psnSyncTrophies()">Sync PlayStation trophies</button>
+                <span id="psnTrophySyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="psnTrophySyncProgress" class="bl-progress" style="display:none;margin-top:10px">
+                <div class="bl-bar"><div class="bl-bar-fill" id="psnTrophyBarFill"></div></div>
+                <div class="bl-progress-text" id="psnTrophyProgressText"></div>
+              </div>
+              <div id="psnTrophySyncResults" class="steam-results" style="display:none"></div>
+            </div>
+          </>
+        ) : (
+          <div style="display:flex;flex-direction:column;gap:14px">
+            <div class="settings-row-text">
+              <div class="settings-row-label">Connect your PlayStation account</div>
+              <div class="settings-row-sub">
+                Enter your PSN username and Chekpoint imports your trophies. Your profile has to be set to Public in PlayStation privacy settings (that's the default).
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <input id="psnUsername" type="text" placeholder="Your PSN username" autocomplete="off" spellcheck={false}
+                style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px" />
+              <button class="settings-save-btn" id="psnConnectUsernameBtn" onclick="psnConnectByUsername()">Connect PlayStation</button>
+            </div>
+            <div id="psnConnectUsernameMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
+
+            <details class="psn-advanced">
+              <summary style="cursor:pointer;font-size:13px;color:var(--text-secondary)">Advanced — add playtime &amp; private-profile support (paste NPSSO)</summary>
+              <div style="margin-top:12px;display:flex;flex-direction:column;gap:12px">
+                <div class="settings-row-sub">
+                  PSN's public API returns trophies but not playtime. To also import playtime (PS4/PS5) and get access if your profile is private, paste an <strong>NPSSO token</strong> from your own PlayStation session.
+                </div>
+                <ol class="psn-steps">
+                  <li>Sign into <a href="https://www.playstation.com" target="_blank" rel="noopener">playstation.com</a> in a new tab.</li>
+                  <li>Open <a href="https://ca.account.sony.com/api/v1/ssocookie" target="_blank" rel="noopener">ca.account.sony.com/api/v1/ssocookie</a>. You'll see a small JSON object like <code>&#123;"npsso":"abc123..."&#125;</code>.</li>
+                  <li>Copy the value between the quotes — a 64-character string.</li>
+                  <li>Paste it below and click Connect.</li>
+                </ol>
+                <div class="psn-privacy-note">
+                  We store this token so future syncs work without prompting. Sony rotates NPSSOs about every 2 months — you'll be asked to repeat these steps then.
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                  <input id="psnNpsso" type="text" placeholder="Paste NPSSO here" autocomplete="off" spellcheck={false}
+                    style="flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font-size:13px;font-family:monospace" />
+                  <button class="settings-save-btn" id="psnConnectBtn" onclick="psnConnect()">Connect with NPSSO</button>
+                </div>
+                <div id="psnConnectMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
+              </div>
+            </details>
+          </div>
+        )}
+
+      </div>
+    </section>
+
+    <!-- Xbox -->
+    <section class="settings-section settings-section--collapsible" id="xbox" data-collapsed="true">
+      <button type="button" class="settings-section-header" onclick="toggleSettingsSection('xbox')" aria-expanded="false" aria-controls="xboxBody">
+        <span class="settings-section-header-label">Xbox</span>
+        <span class={`settings-section-header-status${profile.xbox_xuid ? ' settings-section-header-status--ok' : ''}`}>
+          {profile.xbox_xuid ? `Connected as ${profile.xbox_gamertag ?? profile.xbox_xuid}` : 'Not connected'}
+        </span>
+        <svg class="settings-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div id="xboxBody" class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+
+        {xboxStatus === 'connected' && (
+          <div class="steam-banner steam-banner-ok">Xbox account connected successfully.</div>
+        )}
+        {xboxStatus === 'expired' && (
+          <div class="steam-banner steam-banner-err">Your Xbox connection was rejected. Click Connect Xbox below to reauthorize.</div>
+        )}
+        {xboxStatus === 'duplicate' && (
+          <div class="steam-banner steam-banner-err">That Xbox account is already linked to another Chekpoint profile.</div>
+        )}
+        {xboxStatus === 'error' && (
+          <div class="steam-banner steam-banner-err">Something went wrong connecting to Xbox. Try again in a moment.</div>
+        )}
+
+        {profile.xbox_xuid ? (
+          <>
+            <div class="steam-connected-row">
+              <div class="settings-row-text">
+                <div class="settings-row-label">Connected as <strong>{profile.xbox_gamertag ?? profile.xbox_xuid}</strong></div>
+                {profile.xbox_synced_at || profile.xbox_achievements_synced_at ? (
+                  <div class="settings-row-sub">
+                    {profile.xbox_synced_at && (
+                      <>Library last synced {new Date(profile.xbox_synced_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+                    )}
+                    {profile.xbox_synced_at && profile.xbox_achievements_synced_at && ' · '}
+                    {profile.xbox_achievements_synced_at && (
+                      <>Achievements last synced {new Date(profile.xbox_achievements_synced_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</>
+                    )}
+                  </div>
+                ) : (
+                  <div class="settings-row-sub">Nothing synced yet — click the buttons below.</div>
+                )}
+              </div>
+              <button class="settings-ghost-btn steam-disconnect-btn" id="xboxDisconnectBtn" onclick="xboxDisconnect()">Disconnect</button>
+            </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Sync library</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Imports every game your gamertag has ever launched as <strong>Owned</strong>, with gamerscore progress. Won't overwrite statuses you've set manually.
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="xboxSyncBtn" onclick="xboxSync()">Sync Xbox library</button>
+                <span id="xboxSyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="xboxSyncResults" class="steam-results" style="display:none"></div>
+            </div>
+
+            <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
+              <div class="settings-row-label" style="margin-bottom:4px">Sync achievements</div>
+              <div class="settings-row-sub" style="margin-bottom:12px">
+                Downloads every achievement for every game you've played on Xbox. First sync takes a minute for a large library; subsequent syncs only refresh titles you've touched.
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="settings-save-btn" id="xboxAchSyncBtn" onclick="xboxSyncAchievements()">Sync Xbox achievements</button>
+                <span id="xboxAchSyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+              </div>
+              <div id="xboxAchSyncProgress" class="bl-progress" style="display:none;margin-top:10px">
+                <div class="bl-bar"><div class="bl-bar-fill" id="xboxAchBarFill"></div></div>
+                <div class="bl-progress-text" id="xboxAchProgressText"></div>
+              </div>
+              <div id="xboxAchSyncResults" class="steam-results" style="display:none"></div>
+            </div>
+          </>
+        ) : (
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div class="settings-row-text">
+              <div class="settings-row-label">Connect your Xbox account</div>
+              <div class="settings-row-sub">
+                Microsoft doesn't offer a direct sign-in for hobby apps, so we use <a href="https://xbl.io" target="_blank" rel="noopener">OpenXBL</a> —
+                a community proxy. Clicking Connect Xbox opens a Microsoft sign-in window; after you approve, you'll be sent back here automatically.
+              </div>
+            </div>
+            <div class="psn-privacy-note">
+              We only get read access to your Xbox profile, games, and achievements — no writes or purchases. You can revoke access any time from <a href="https://xbl.io/profile" target="_blank" rel="noopener">xbl.io/profile</a>.
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button class="settings-save-btn" id="xboxConnectBtn" onclick="xboxConnect()">Connect Xbox</button>
+            </div>
+            <div id="xboxConnectMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
+          </div>
+        )}
+
+      </div>
+    </section>
+
     <!-- Backloggd -->
-    <section class="settings-section" id="backloggd">
-      <div class="settings-section-label">Backloggd</div>
-      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+    <section class="settings-section settings-section--collapsible" id="backloggd" data-collapsed="true">
+      <button type="button" class="settings-section-header" onclick="toggleSettingsSection('backloggd')" aria-expanded="false" aria-controls="backloggdBody">
+        <span class="settings-section-header-label">Backloggd</span>
+        <span class="settings-section-header-status">Import reviews &amp; library</span>
+        <svg class="settings-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div id="backloggdBody" class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
         <div class="settings-row-text">
           <div class="settings-row-label">Import your reviews</div>
           <div class="settings-row-sub">
@@ -404,6 +651,57 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     letter-spacing: 0.08em;
     color: var(--text-tertiary);
     margin-bottom: 12px;
+  }
+
+  /* ── Collapsible sections (Steam / PlayStation / Backloggd) ──
+     Import/sync integrations get long — collapsed by default so the settings
+     page stays scannable. The header bar shows the connection status inline
+     so users can see at a glance whether they're linked without expanding. */
+  .settings-section--collapsible .settings-section-header {
+    display: flex; align-items: center; gap: 12px;
+    width: 100%;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    cursor: pointer;
+    color: var(--text-primary);
+    transition: background .15s, border-color .15s;
+    text-align: left;
+    font-family: inherit;
+  }
+  .settings-section--collapsible .settings-section-header:hover {
+    background: var(--bg-hover);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  }
+  .settings-section--collapsible .settings-section-header-label {
+    font-size: 14px; font-weight: 600; color: var(--text-primary);
+  }
+  .settings-section--collapsible .settings-section-header-status {
+    font-size: 12px; color: var(--text-secondary);
+    margin-left: auto; padding-right: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 50%;
+  }
+  .settings-section--collapsible .settings-section-header-status--ok {
+    color: #4ade80;
+  }
+  .settings-chevron {
+    transition: transform .2s ease;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+  }
+  .settings-section--collapsible[data-collapsed="true"] .settings-chevron {
+    transform: rotate(-90deg);
+  }
+  .settings-section--collapsible[data-collapsed="true"] > .settings-row {
+    display: none;
+  }
+  .settings-section--collapsible > .settings-row {
+    margin-top: 14px;
+  }
+  @media (max-width: 640px) {
+    .settings-section--collapsible .settings-section-header-status { max-width: 40%; }
   }
 
   /* ── Account card ── */
@@ -650,6 +948,15 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
   }
   .bl-preview .bl-sample { margin: 8px 0 10px; padding-left: 16px; }
   .bl-preview .bl-sample li { margin-bottom: 2px; }
+  /* Steam sample: force at most 2 lines with an ellipsis so long reviews
+     don't stretch the preview card. */
+  .bl-preview .sr-sample li {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   .bl-bar {
     height: 8px;
     border-radius: 999px;
@@ -703,6 +1010,157 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     cursor: pointer;
   }
   .bl-map-candidate:hover { border-color: var(--accent); color: var(--text-primary); }
+  .sr-conflicts {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .sr-conflict-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .sr-conflict-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .sr-conflict-title {
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+  .sr-conflict-kind {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+  }
+  .sr-conflict-kind.published {
+    background: rgba(96,80,200,.12);
+    color: var(--accent);
+  }
+  .sr-conflict-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  @media (max-width: 640px) {
+    .sr-conflict-cols { grid-template-columns: 1fr; }
+  }
+  .sr-conflict-col {
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .sr-conflict-col h4 {
+    margin: 0 0 6px 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+  }
+  .sr-conflict-body {
+    color: var(--text-secondary);
+    line-height: 1.5;
+    max-height: 140px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 12px;
+  }
+  .sr-conflict-meta {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .sr-conflict-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .sr-conflict-actions .settings-save-btn,
+  .sr-conflict-actions .settings-ghost-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+  .sr-published-summary {
+    background: var(--bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sr-published-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .sr-published-label {
+    color: var(--text-secondary);
+  }
+  .sr-published-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .sr-published-toggle:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+  .sr-published-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 8px;
+  }
+  .sr-published-list[hidden] { display: none; }
+  .sr-published-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+    font-size: 12.5px;
+  }
+  .sr-published-title {
+    color: var(--text-primary);
+    text-decoration: none;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sr-published-title:hover { color: var(--accent); }
+  .sr-published-link {
+    color: var(--text-tertiary);
+    text-decoration: none;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .sr-published-link:hover { color: var(--accent); }
   .bl-bookmarklet {
     display: inline-block;
     margin: 4px 0 2px 6px;
@@ -741,6 +1199,33 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     .steam-connect-row, .steam-connected-row { flex-direction: column; align-items: flex-start; }
     .steam-connect-btn { width: 100%; text-align: center; }
   }
+
+  /* ── PlayStation ── */
+  .psn-steps {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+  .psn-steps li { margin: 4px 0; }
+  .psn-steps a { color: var(--accent); text-decoration: none; }
+  .psn-steps a:hover { text-decoration: underline; }
+  .psn-steps code {
+    background: var(--bg-hover);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .psn-privacy-note {
+    background: var(--bg-hover);
+    border-left: 3px solid var(--accent);
+    padding: 10px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
 </style>
 
 <script>
@@ -752,14 +1237,26 @@ declare global {
     changeUsername: () => Promise<void>;
     setPrivacy: (field: string, value: string, btn: HTMLElement) => Promise<void>;
     setSearchIndexable: (value: boolean, btn: HTMLElement) => Promise<void>;
+    toggleSettingsSection: (id: string) => void;
     steamSync: () => Promise<void>;
     steamDisconnect: () => Promise<void>;
+    psnConnect: () => Promise<void>;
+    psnConnectByUsername: () => Promise<void>;
+    psnSync: () => Promise<void>;
+    psnSyncTrophies: () => Promise<void>;
+    psnDisconnect: () => Promise<void>;
+    xboxConnect: () => void;
+    xboxSync: () => Promise<void>;
+    xboxSyncAchievements: () => Promise<void>;
+    xboxDisconnect: () => Promise<void>;
     blPreview: () => Promise<void>;
     blRun: (mode: "username") => Promise<void>;
     blUpload: () => Promise<void>;
     blCopySnippet: () => void;
     blCopyLibSnippet: () => void;
     blLibImport: () => Promise<void>;
+    srStart: () => Promise<void>;
+    srPreview: () => Promise<void>;
   }
 }
 
@@ -833,6 +1330,43 @@ async function setSearchIndexable(value: boolean, btn: HTMLElement) {
   }
 }
 window.setSearchIndexable = setSearchIndexable;
+
+// ─── Collapsible sections (Steam / PSN / Backloggd) ─────────────────────────
+function toggleSettingsSection(id: string) {
+  const section = document.getElementById(id);
+  if (!section) return;
+  const collapsed = section.getAttribute('data-collapsed') === 'true';
+  section.setAttribute('data-collapsed', collapsed ? 'false' : 'true');
+  const header = section.querySelector('.settings-section-header');
+  if (header) header.setAttribute('aria-expanded', collapsed ? 'true' : 'false');
+}
+window.toggleSettingsSection = toggleSettingsSection;
+
+// Auto-expand a section if the URL points at it — either a query param from
+// the Steam/PSN connect callbacks (?steam=connected, ?psn=expired) or a hash
+// jump (#steam, #psn, #backloggd) from anywhere else on the site. Users
+// arriving mid-flow shouldn't have to click to see what just happened.
+(function autoExpandFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const hash = (window.location.hash || '').replace('#', '');
+    const shouldExpand = new Set<string>();
+    if (params.has('steam')) shouldExpand.add('steam');
+    if (params.has('psn')) shouldExpand.add('psn');
+    if (params.has('xbox')) shouldExpand.add('xbox');
+    if (['steam', 'psn', 'xbox', 'backloggd'].includes(hash)) shouldExpand.add(hash);
+    shouldExpand.forEach((id) => {
+      const section = document.getElementById(id);
+      if (!section) return;
+      section.setAttribute('data-collapsed', 'false');
+      const header = section.querySelector('.settings-section-header');
+      if (header) header.setAttribute('aria-expanded', 'true');
+      // Scroll into view for hash-jumps — the page anchor would normally do
+      // this, but we defer expansion so re-trigger explicitly.
+      if (hash === id) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  } catch { /* URL parsing failures are non-fatal — just leave collapsed */ }
+})();
 
 function togglePwForm() {
   const form = document.getElementById('pwForm');
@@ -1008,6 +1542,400 @@ async function steamDisconnect() {
   }
 }
 window.steamDisconnect = steamDisconnect;
+
+// ─── PlayStation ────────────────────────────────────────────────────────────
+async function psnConnectByUsername() {
+  const input = document.getElementById('psnUsername') as HTMLInputElement | null;
+  const btn = document.getElementById('psnConnectUsernameBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnConnectUsernameMsg');
+  if (!input || !btn || !msg) return;
+
+  const username = input.value.trim();
+  if (!username) {
+    msg.textContent = 'Enter your PSN username first.';
+    (msg as HTMLElement).style.color = '#f87171';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  msg.textContent = 'Looking up your PlayStation profile…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+
+  try {
+    const res = await fetch('/api/auth/psn-connect-username', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Failed to connect.';
+      (msg as HTMLElement).style.color = '#f87171';
+      btn.disabled = false;
+      btn.textContent = 'Connect PlayStation';
+      return;
+    }
+    window.location.href = '/settings?psn=connected#psn';
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+    btn.disabled = false;
+    btn.textContent = 'Connect PlayStation';
+  }
+}
+window.psnConnectByUsername = psnConnectByUsername;
+
+async function psnConnect() {
+  const input = document.getElementById('psnNpsso') as HTMLInputElement | null;
+  const btn = document.getElementById('psnConnectBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnConnectMsg');
+  if (!input || !btn || !msg) return;
+
+  const npsso = input.value.trim();
+  if (!npsso) {
+    msg.textContent = 'Paste an NPSSO token first.';
+    (msg as HTMLElement).style.color = '#f87171';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  msg.textContent = 'Exchanging token with PlayStation…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+
+  try {
+    const res = await fetch('/api/auth/psn-connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ npsso }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Failed to connect.';
+      (msg as HTMLElement).style.color = '#f87171';
+      btn.disabled = false;
+      btn.textContent = 'Connect PlayStation';
+      return;
+    }
+    window.location.href = '/settings?psn=connected#psn';
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+    btn.disabled = false;
+    btn.textContent = 'Connect PlayStation';
+  }
+}
+window.psnConnect = psnConnect;
+
+async function psnSync() {
+  const btn = document.getElementById('psnSyncBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnSyncMsg');
+  const results = document.getElementById('psnSyncResults');
+  if (!btn || !msg || !results) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.textContent = 'Fetching your PlayStation library…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+  results.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/psn/sync-library', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json();
+
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Something went wrong.';
+      (msg as HTMLElement).style.color = '#f87171';
+      if (data.needsReconnect) {
+        setTimeout(() => { window.location.href = '/settings?psn=expired#psn'; }, 1500);
+      }
+    } else {
+      msg.textContent = '';
+      results.style.display = 'block';
+      results.innerHTML = `
+        <strong>Sync complete</strong><br>
+        ${data.matched} games added as Owned &nbsp;·&nbsp;
+        ${data.updated} entries refreshed &nbsp;·&nbsp;
+        ${data.unmatched} PSN games not yet in Chekpoint's library
+        <br><span style="color:var(--text-tertiary);font-size:11px">${data.total} total games in your PlayStation library</span>
+      `;
+    }
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync PlayStation library';
+  }
+}
+window.psnSync = psnSync;
+
+async function psnSyncTrophies() {
+  const btn = document.getElementById('psnTrophySyncBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('psnTrophySyncMsg');
+  const results = document.getElementById('psnTrophySyncResults');
+  const progressBox = document.getElementById('psnTrophySyncProgress');
+  const barFill = document.getElementById('psnTrophyBarFill');
+  const progressText = document.getElementById('psnTrophyProgressText');
+  if (!btn || !msg || !results || !progressBox || !barFill || !progressText) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.textContent = 'Starting trophy sync…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+  results.style.display = 'none';
+  progressBox.style.display = 'block';
+
+  let totalSynced = 0;
+  let hitTrophies = 0;
+  let emptyResponses = 0;
+  let everSynced = false;
+  let cursor: string | null = null;
+
+  try {
+    // Drive the cursor-based endpoint in a loop until done. Netlify caps each
+    // call at 10s; the server returns partial progress + nextCursor.
+    // Small hard cap on batches so a stuck sync can't loop forever.
+    for (let batch = 0; batch < 200; batch++) {
+      const bodyPayload: Record<string, unknown> = {};
+      if (cursor !== null) bodyPayload.cursor = cursor;
+      const res = await fetch('/api/psn/sync-trophies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        msg.textContent = data.error ?? 'Something went wrong.';
+        (msg as HTMLElement).style.color = '#f87171';
+        if (data.needsReconnect) {
+          setTimeout(() => { window.location.href = '/settings?psn=expired#psn'; }, 1500);
+        }
+        return;
+      }
+      totalSynced += data.syncedThisCall ?? 0;
+      hitTrophies += data.hitTrophies ?? 0;
+      emptyResponses += data.emptyResponses ?? 0;
+      everSynced = data.everSynced ?? everSynced;
+
+      const pct = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 100;
+      (barFill as HTMLElement).style.width = `${pct}%`;
+      progressText.textContent = `${data.processed} / ${data.total} titles (${pct}%)`;
+
+      if (data.done) {
+        cursor = null;
+        break;
+      }
+      cursor = data.nextCursor;
+    }
+
+    msg.textContent = '';
+    results.style.display = 'block';
+    const emptyWarning = (hitTrophies === 0 && emptyResponses > 0 && !everSynced)
+      ? `<br><span style="color:#f87171;font-size:12px">PlayStation returned no trophy data — check that <strong>My Trophies</strong> is set to <strong>Anyone</strong> in your PSN privacy settings.</span>`
+      : '';
+    results.innerHTML = `
+      <strong>Trophy sync complete</strong><br>
+      ${totalSynced} trophy rows written across ${hitTrophies} titles
+      ${emptyWarning}
+    `;
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync PlayStation trophies';
+  }
+}
+window.psnSyncTrophies = psnSyncTrophies;
+
+async function psnDisconnect() {
+  const btn = document.getElementById('psnDisconnectBtn') as HTMLButtonElement | null;
+  if (!btn) return;
+  if (!confirm('Disconnect your PlayStation account? Your game statuses and trophies will not be removed.')) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Disconnecting…';
+
+  try {
+    const res = await fetch('/api/psn/disconnect', { method: 'POST' });
+    if (res.ok) {
+      window.location.reload();
+    } else {
+      const data = await res.json();
+      alert(data.error ?? 'Failed to disconnect.');
+      btn.disabled = false;
+      btn.textContent = 'Disconnect';
+    }
+  } catch (e) {
+    alert('Could not reach server. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Disconnect';
+  }
+}
+window.psnDisconnect = psnDisconnect;
+
+// ─── Xbox ───────────────────────────────────────────────────────────────────
+async function xboxConnect() {
+  const btn = document.getElementById('xboxConnectBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('xboxConnectMsg');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Redirecting…';
+  }
+  if (msg) {
+    msg.textContent = 'Opening Xbox sign-in…';
+    (msg as HTMLElement).style.color = 'var(--text-secondary)';
+  }
+  window.location.href = '/api/auth/xbox-connect';
+}
+window.xboxConnect = xboxConnect;
+
+async function xboxSync() {
+  const btn = document.getElementById('xboxSyncBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('xboxSyncMsg');
+  const results = document.getElementById('xboxSyncResults');
+  if (!btn || !msg || !results) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.textContent = 'Fetching your Xbox library…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+  results.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/xbox/sync-library', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json();
+
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Something went wrong.';
+      (msg as HTMLElement).style.color = '#f87171';
+      if (data.needsReconnect) {
+        setTimeout(() => { window.location.href = '/settings?xbox=expired#xbox'; }, 1500);
+      }
+    } else {
+      msg.textContent = '';
+      results.style.display = 'block';
+      results.innerHTML = `
+        <strong>Sync complete</strong><br>
+        ${data.matched} games added as Owned &nbsp;·&nbsp;
+        ${data.updated} entries refreshed &nbsp;·&nbsp;
+        ${data.unmatched} Xbox games not yet in Chekpoint's library
+        <br><span style="color:var(--text-tertiary);font-size:11px">${data.total} total games in your Xbox library</span>
+      `;
+    }
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync Xbox library';
+  }
+}
+window.xboxSync = xboxSync;
+
+async function xboxSyncAchievements() {
+  const btn = document.getElementById('xboxAchSyncBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('xboxAchSyncMsg');
+  const results = document.getElementById('xboxAchSyncResults');
+  const progressBox = document.getElementById('xboxAchSyncProgress');
+  const barFill = document.getElementById('xboxAchBarFill');
+  const progressText = document.getElementById('xboxAchProgressText');
+  if (!btn || !msg || !results || !progressBox || !barFill || !progressText) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  msg.textContent = 'Starting achievement sync…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+  results.style.display = 'none';
+  progressBox.style.display = 'block';
+
+  let totalSynced = 0;
+  let hitAchievements = 0;
+  let emptyResponses = 0;
+  let everSynced = false;
+  let cursor: string | null = null;
+
+  try {
+    for (let batch = 0; batch < 200; batch++) {
+      const bodyPayload: Record<string, unknown> = {};
+      if (cursor !== null) bodyPayload.cursor = cursor;
+      const res = await fetch('/api/xbox/sync-achievements', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        msg.textContent = data.error ?? 'Something went wrong.';
+        (msg as HTMLElement).style.color = '#f87171';
+        if (data.needsReconnect) {
+          setTimeout(() => { window.location.href = '/settings?xbox=expired#xbox'; }, 1500);
+        }
+        return;
+      }
+      totalSynced += data.syncedThisCall ?? 0;
+      hitAchievements += data.hitAchievements ?? 0;
+      emptyResponses += data.emptyResponses ?? 0;
+      everSynced = data.everSynced ?? everSynced;
+
+      const pct = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 100;
+      (barFill as HTMLElement).style.width = `${pct}%`;
+      progressText.textContent = `${data.processed} / ${data.total} titles (${pct}%)`;
+
+      if (data.done) {
+        cursor = null;
+        break;
+      }
+      cursor = data.nextCursor;
+    }
+
+    msg.textContent = '';
+    results.style.display = 'block';
+    const emptyWarning = (hitAchievements === 0 && emptyResponses > 0 && !everSynced)
+      ? `<br><span style="color:#f87171;font-size:12px">Xbox returned no achievement data — check that your gamertag privacy allows achievements to be visible.</span>`
+      : '';
+    results.innerHTML = `
+      <strong>Achievement sync complete</strong><br>
+      ${totalSynced} achievement rows written across ${hitAchievements} titles
+      ${emptyWarning}
+    `;
+  } catch (e) {
+    msg.textContent = 'Could not reach server. Please try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync Xbox achievements';
+  }
+}
+window.xboxSyncAchievements = xboxSyncAchievements;
+
+async function xboxDisconnect() {
+  const btn = document.getElementById('xboxDisconnectBtn') as HTMLButtonElement | null;
+  if (!btn) return;
+  if (!confirm('Disconnect your Xbox account? Your game statuses and achievements will not be removed.')) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Disconnecting…';
+
+  try {
+    const res = await fetch('/api/xbox/disconnect', { method: 'POST' });
+    if (res.ok) {
+      window.location.reload();
+    } else {
+      const data = await res.json();
+      alert(data.error ?? 'Failed to disconnect.');
+      btn.disabled = false;
+      btn.textContent = 'Disconnect';
+    }
+  } catch (e) {
+    alert('Could not reach server. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Disconnect';
+  }
+}
+window.xboxDisconnect = xboxDisconnect;
 
 // ─── Backloggd import ────────────────────────────────────────────────────────
 import {
@@ -1297,6 +2225,431 @@ window.blLibImport = blLibImport;
       blEl("blStartRow")!.style.display = "none";
       blRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
       await blFinish(resumed.job.id);
+    }
+  } catch {
+    /* nothing to resume */
+  }
+})();
+
+// ─── Steam review import ────────────────────────────────────────────────────
+import {
+  previewSteamReviews,
+  startAndDriveSteam,
+  resumeActiveSteam,
+  fetchSteamStatus,
+  mapSteamItem,
+  discardSteamItem,
+  replaceDraftFromSteam,
+  dismissSteamConflict,
+  type ImportProgress as SteamImportProgress,
+  type SteamConflictItem,
+  type SteamDraftConflict,
+  type SteamSummaryConflict,
+} from "../utils/steam-reviews/importClient";
+
+const srEl = (id: string) => document.getElementById(id);
+let srActiveController: AbortController | null = null;
+
+function srSetMsg(text: string, ok = false) {
+  const m = srEl("srMsg");
+  if (!m) return;
+  m.textContent = text;
+  m.style.color = ok ? "var(--score-great, #4ade80)" : "#f87171";
+}
+
+function srRenderProgress(p: SteamImportProgress) {
+  const wrap = srEl("srProgress");
+  const fill = srEl("srBarFill");
+  const txt = srEl("srProgressText");
+  if (!wrap || !fill || !txt) return;
+  wrap.style.display = "block";
+  fill.style.width = p.fraction == null ? "50%" : `${Math.round(p.fraction * 100)}%`;
+  fill.style.opacity = p.phase === "rate-limited" ? "0.5" : "1";
+  txt.textContent = p.message;
+}
+
+function srRenderResults(job: any) {
+  const box = srEl("srResults");
+  if (!box) return;
+  box.style.display = "block";
+  const parts = [
+    `<strong>${job.draft_count}</strong> saved as drafts (assign a score + publish when you&rsquo;re ready)`,
+    job.skipped_count ? `<strong>${job.skipped_count}</strong> skipped (game already has a review from you &mdash; compare below)` : "",
+    job.needs_mapping_count ? `<strong>${job.needs_mapping_count}</strong> couldn&rsquo;t be matched to a Chekpoint game &mdash; match or discard them below.` : "",
+    job.failed_count ? `<strong>${job.failed_count}</strong> failed` : "",
+  ].filter(Boolean);
+  box.innerHTML = parts.join("<br>");
+}
+
+function srDebounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
+  let t: any;
+  return (...a: Parameters<T>) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
+  };
+}
+
+function srEscapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+async function srMatchAndRemove(
+  row: HTMLElement,
+  itemId: string,
+  target: { gameId: string } | { igdbId: number },
+  label: string,
+) {
+  try {
+    const r = await mapSteamItem(itemId, target);
+    row.innerHTML = `<span class="bl-map-title">${srEscapeHtml(r.game.title || label)}</span> <span style="color:var(--score-great,#4ade80)">${r.status === "drafted" ? "drafted" : r.status}</span>`;
+    if (r.job) srRenderResults(r.job);
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Match failed.");
+  }
+}
+
+async function srDiscardAndRemove(row: HTMLElement, itemId: string) {
+  try {
+    const r = await discardSteamItem(itemId);
+    row.innerHTML = `<span class="bl-map-title" style="color:var(--text-tertiary)">Discarded</span>`;
+    if (r.job) srRenderResults(r.job);
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Could not discard.");
+  }
+}
+
+function srRenderNeedsMapping(items: any[]) {
+  const box = srEl("srNeedsMapping");
+  if (!box) return;
+  if (!items || !items.length) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "flex";
+  box.innerHTML = "";
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "bl-map-row";
+    const title = item.game_title || (item.steam_appid ? `Steam app ${item.steam_appid}` : "Untitled Steam review");
+    const steamLink = item.steam_appid
+      ? ` <a href="https://store.steampowered.com/app/${item.steam_appid}/" target="_blank" rel="noopener" style="color:var(--text-tertiary);font-size:11px">Steam ↗</a>`
+      : "";
+    row.innerHTML = `
+      <div style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span class="bl-map-title">${srEscapeHtml(title)}${steamLink}</span>
+        <button type="button" class="settings-ghost-btn sr-discard-btn" style="padding:4px 10px;font-size:12px">Discard</button>
+      </div>
+      <input type="text" placeholder="Search Chekpoint / IGDB…" />
+      <div class="bl-map-candidates"></div>`;
+    const input = row.querySelector("input") as HTMLInputElement;
+    const list = row.querySelector(".bl-map-candidates") as HTMLElement;
+    const discardBtn = row.querySelector(".sr-discard-btn") as HTMLButtonElement;
+    if (item.game_title) input.value = item.game_title;
+    discardBtn.onclick = () => srDiscardAndRemove(row, item.id);
+    const search = srDebounce(async () => {
+      const q = input.value.trim();
+      if (q.length < 2) { list.innerHTML = ""; return; }
+      try {
+        const res = await fetch(`/api/games/search?q=${encodeURIComponent(q)}`);
+        const results = await res.json();
+        list.innerHTML = "";
+        for (const g of (results ?? []).slice(0, 6)) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "bl-map-candidate";
+          const year = g.year ? ` (${g.year})` : "";
+          const src = g.source === "igdb" ? " · IGDB" : "";
+          btn.textContent = `${g.title}${year}${src}`;
+          if (g.source === "igdb") {
+            const igdbId = Number(g.igdb_id ?? g.id);
+            if (!Number.isFinite(igdbId)) continue;
+            btn.onclick = () => srMatchAndRemove(row, item.id, { igdbId }, g.title);
+          } else {
+            const gameId = String(g.id ?? "");
+            if (!gameId) continue;
+            btn.onclick = () => srMatchAndRemove(row, item.id, { gameId }, g.title);
+          }
+          list.appendChild(btn);
+        }
+        if (!list.children.length) {
+          list.innerHTML = `<div style="font-size:12px;color:var(--text-tertiary)">No match — try a different title, or Discard.</div>`;
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 300);
+    input.addEventListener("input", search);
+    // Trigger the initial search so the user sees candidates for the pre-filled title.
+    if (input.value.trim().length >= 2) search();
+    box.appendChild(row);
+  }
+}
+
+function srSnippet(text: string, max = 320): string {
+  const t = (text ?? "").trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max).trim()}…`;
+}
+
+async function srReplaceDraft(card: HTMLElement, itemId: string, gameTitle: string) {
+  if (!confirm(`Replace your existing draft of ${gameTitle} with the Steam version?\n\nYour current draft will be deleted.`)) return;
+  try {
+    const r = await replaceDraftFromSteam(itemId);
+    card.innerHTML = `<div class="sr-conflict-head"><span class="sr-conflict-title">${srEscapeHtml(gameTitle)}</span><span style="color:var(--score-great,#4ade80);font-size:12px">Replaced with Steam draft</span></div>`;
+    if (r.job) srRenderResults(r.job);
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Replace failed.");
+  }
+}
+
+async function srDismissConflict(card: HTMLElement, itemId: string) {
+  // Persist the decision — next Steam import won't re-surface this appid.
+  // Only remove the DOM card after the server confirms; on failure, leave
+  // the card in place with an error so the user isn't quietly lied to.
+  const dismissBtn = card.querySelector(".sr-dismiss-btn") as HTMLButtonElement | null;
+  const replaceBtn = card.querySelector(".sr-replace-btn") as HTMLButtonElement | null;
+  if (dismissBtn) dismissBtn.disabled = true;
+  if (replaceBtn) replaceBtn.disabled = true;
+  try {
+    await dismissSteamConflict(itemId);
+  } catch (e: any) {
+    if (dismissBtn) dismissBtn.disabled = false;
+    if (replaceBtn) replaceBtn.disabled = false;
+    srSetMsg(e?.message ?? "Could not dismiss this conflict.");
+    return;
+  }
+  card.remove();
+  const wrap = srEl("srConflicts");
+  // Keep the panel open as long as ANYTHING remains (e.g. the published
+  // summary), not just draft cards.
+  if (wrap && wrap.children.length === 0) {
+    wrap.style.display = "none";
+    wrap.innerHTML = "";
+  }
+}
+
+function srRenderConflicts(items: SteamConflictItem[] | undefined | null) {
+  const box = srEl("srConflicts");
+  if (!box) return;
+  if (!items || !items.length) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "flex";
+  box.innerHTML = "";
+
+  // Three UX shapes:
+  //   - draft conflicts w/ different text: real decision (Replace vs Keep) → full compare card
+  //   - published conflicts w/ different text: informational (only Dismiss/View) → summary row
+  //   - identical text: user pasted their Steam review verbatim into Chekpoint —
+  //     zero decision, zero surprise, just tell them it already exists → summary row
+  // Type predicates so TypeScript narrows to the trimmed summary shape (no body/steam)
+  // for the non-draft paths — matching the bandwidth-trimmed status.ts response.
+  const drafts = items.filter((c): c is SteamDraftConflict => c.kind === "draft");
+  const published = items.filter(
+    (c): c is SteamSummaryConflict => c.kind === "published",
+  );
+  const identical = items.filter(
+    (c): c is SteamSummaryConflict => c.kind === "identical",
+  );
+
+  for (const c of drafts) {
+    const card = document.createElement("div");
+    card.className = "sr-conflict-card";
+
+    const gameHref = c.game.slug ? `/games/${c.game.slug}` : `#`;
+    const reviewHref = `/reviews/${c.existing.id}`;
+
+    const steamMeta = [
+      c.steam.review_date ? c.steam.review_date : "",
+      c.steam.hours_at_review != null ? `${Math.round(c.steam.hours_at_review)} hrs` : "",
+      c.steam.appid ? `<a href="https://store.steampowered.com/app/${c.steam.appid}/" target="_blank" rel="noopener" style="color:inherit">Steam ↗</a>` : "",
+    ].filter(Boolean).join(" · ");
+
+    const existingScore = c.existing.score != null ? `${c.existing.score}/10` : "no score";
+    const existingWhen = c.existing.created_at
+      ? `drafted ${new Date(c.existing.created_at).toLocaleDateString()}`
+      : "";
+    const existingMeta = [existingScore, existingWhen].filter(Boolean).join(" · ");
+
+    card.innerHTML = `
+      <div class="sr-conflict-head">
+        <span class="sr-conflict-title"><a href="${gameHref}" style="color:inherit;text-decoration:none">${srEscapeHtml(c.game.title)}</a></span>
+        <span class="sr-conflict-kind">Existing draft</span>
+      </div>
+      <div class="sr-conflict-cols">
+        <div class="sr-conflict-col">
+          <h4>Your existing draft</h4>
+          ${c.existing.title ? `<div style="font-weight:500;margin-bottom:4px">${srEscapeHtml(c.existing.title)}</div>` : ""}
+          <div class="sr-conflict-body">${srEscapeHtml(srSnippet(c.existing.body))}</div>
+          ${existingMeta ? `<div class="sr-conflict-meta">${existingMeta}</div>` : ""}
+        </div>
+        <div class="sr-conflict-col">
+          <h4>Steam review</h4>
+          <div class="sr-conflict-body">${srEscapeHtml(srSnippet(c.steam.review_text))}</div>
+          ${steamMeta ? `<div class="sr-conflict-meta">${steamMeta}</div>` : ""}
+        </div>
+      </div>
+      <div class="sr-conflict-actions">
+        <button type="button" class="settings-save-btn sr-replace-btn">Replace my draft with Steam text</button>
+        <a href="${reviewHref}" class="settings-ghost-btn" style="padding:6px 12px;font-size:12px;text-decoration:none">View my draft</a>
+        <button type="button" class="settings-ghost-btn sr-dismiss-btn">Keep mine</button>
+      </div>`;
+
+    const replaceBtn = card.querySelector(".sr-replace-btn") as HTMLButtonElement | null;
+    if (replaceBtn) replaceBtn.onclick = () => srReplaceDraft(card, c.item_id, c.game.title);
+
+    const dismissBtn = card.querySelector(".sr-dismiss-btn") as HTMLButtonElement | null;
+    if (dismissBtn) dismissBtn.onclick = () => srDismissConflict(card, c.item_id);
+
+    box.appendChild(card);
+  }
+
+  // Identical first — most benign, least surprising to the user. Then published
+  // (informational) below it. Drafts (the ones with real decisions) render
+  // above these summary blocks.
+  if (identical.length) {
+    const n = identical.length;
+    box.appendChild(
+      srBuildSkippedSummary(
+        identical,
+        `${n} Steam review${n === 1 ? " is" : "s are"} already on Chekpoint (identical text) — skipped.`,
+      ),
+    );
+  }
+  if (published.length) {
+    const n = published.length;
+    box.appendChild(
+      srBuildSkippedSummary(
+        published,
+        `${n} Steam review${n === 1 ? "" : "s"} skipped — you've already published these on Chekpoint.`,
+      ),
+    );
+  }
+}
+
+function srBuildSkippedSummary(items: SteamSummaryConflict[], label: string): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "sr-published-summary";
+  wrap.innerHTML = `
+    <div class="sr-published-head">
+      <span class="sr-published-label">${label}</span>
+      <button type="button" class="sr-published-toggle" aria-expanded="false">Show ▾</button>
+    </div>
+    <div class="sr-published-list" hidden></div>`;
+
+  const list = wrap.querySelector(".sr-published-list") as HTMLElement;
+  for (const c of items) {
+    const row = document.createElement("div");
+    row.className = "sr-published-row";
+    const gameHref = c.game.slug ? `/games/${c.game.slug}` : `#`;
+    const reviewHref = `/reviews/${c.existing.id}`;
+    row.innerHTML = `
+      <a class="sr-published-title" href="${gameHref}">${srEscapeHtml(c.game.title)}</a>
+      <a class="sr-published-link" href="${reviewHref}">View my review →</a>`;
+    list.appendChild(row);
+  }
+
+  const btn = wrap.querySelector(".sr-published-toggle") as HTMLButtonElement;
+  btn.onclick = () => {
+    const open = btn.getAttribute("aria-expanded") === "true";
+    btn.setAttribute("aria-expanded", open ? "false" : "true");
+    btn.textContent = open ? "Show ▾" : "Hide ▴";
+    list.hidden = open;
+  };
+  return wrap;
+}
+
+async function srDrive() {
+  srEl("srStartRow")!.style.display = "none";
+  srEl("srPreview")!.style.display = "none";
+  srActiveController?.abort();
+  srActiveController = new AbortController();
+  try {
+    const { job } = await startAndDriveSteam({
+      onProgress: srRenderProgress,
+      signal: srActiveController.signal,
+    });
+    srRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+    try {
+      const status = await fetchSteamStatus(job.id);
+      srRenderResults(status.job);
+      srRenderNeedsMapping(status.needs_mapping);
+      srRenderConflicts(status.skipped_conflicts);
+      fetch("/api/import/steam/skip-onboarding", { method: "POST" }).catch(() => {});
+    } catch { /* results are best-effort */ }
+  } catch (e: any) {
+    if (e?.name === "AbortError") return;
+    srSetMsg(e?.message ?? "Import failed.");
+    srEl("srStartRow")!.style.display = "flex";
+  }
+}
+window.srStart = srDrive;
+
+async function srPreview() {
+  const btn = srEl("srPreviewBtn") as HTMLButtonElement | null;
+  const importBtn = srEl("srImportBtn") as HTMLButtonElement | null;
+  if (!btn) return;
+  btn.disabled = true;
+  srSetMsg("Checking Steam…", true);
+  try {
+    const p = await previewSteamReviews();
+    srSetMsg("");
+    const box = srEl("srPreview")!;
+    box.style.display = "block";
+    // Server already caps sample at 5 items and each body at 240 chars, but a
+    // 240-char blob of dense text still wraps to 4-5 lines on desktop and even
+    // more on mobile. Collapse whitespace, trim to ~140 chars with an ellipsis
+    // marker, and let CSS line-clamp the row at 2 lines regardless of width.
+    const previewList = p.sample
+      .slice(0, 5)
+      .map((s: any) => {
+        const hrs = s.hours_at_review ? ` — ${s.hours_at_review} hrs` : "";
+        const date = s.review_date ? ` <span style="color:var(--text-tertiary)">${s.review_date}</span>` : "";
+        const raw = (s.review_text || "").replace(/\s+/g, " ").trim();
+        const snippet = raw.length > 140 ? `${raw.slice(0, 140).trimEnd()}…` : raw;
+        return `<li>${srEscapeHtml(snippet) || "(no text)"}${hrs}${date}</li>`;
+      })
+      .join("");
+    const more = p.totalReviews > 5 ? ` <span style="color:var(--text-tertiary);font-size:11px">(showing 5 of ${p.totalReviews})</span>` : "";
+    box.innerHTML = `
+      Found <strong>${p.totalReviews}</strong> Steam review${p.totalReviews === 1 ? "" : "s"}${p.totalPages > 1 ? ` across ${p.totalPages} pages` : ""}.
+      All will import as drafts — you assign a score before publishing.${more}
+      <ul class="bl-sample sr-sample">${previewList}</ul>`;
+    if (importBtn) importBtn.style.display = "";
+  } catch (e: any) {
+    srSetMsg(e?.message ?? "Could not reach Steam.");
+  } finally {
+    btn.disabled = false;
+  }
+}
+window.srPreview = srPreview;
+
+// Reattach to an import that's still running (e.g. after a page reload).
+// Only run when the Steam import section is actually rendered — the whole
+// Steam block is conditional on profile.steam_id, so users without a
+// connected account skip the /status probe entirely.
+(async () => {
+  if (!srEl("srPreviewBtn")) return;
+  try {
+    srActiveController = new AbortController();
+    const resumed = await resumeActiveSteam({
+      onProgress: srRenderProgress,
+      signal: srActiveController.signal,
+    });
+    if (resumed?.job) {
+      srEl("srStartRow")!.style.display = "none";
+      srRenderProgress({ phase: "done", fraction: 1, message: "Import complete" });
+      srRenderResults(resumed.job);
+      srRenderNeedsMapping(resumed.needs_mapping);
+      srRenderConflicts(resumed.skipped_conflicts);
     }
   } catch {
     /* nothing to resume */

@@ -26,16 +26,20 @@ export const POST: APIRoute = async (context) => {
   if (pinned !== undefined) patch.pinned = pinned === true;
   if (is_locked !== undefined) patch.is_locked = is_locked === true;
 
-  const { error } = await (db as any)
+  const { data: updated, error } = await (db as any)
     .from("forum_posts")
     .update(patch)
     .eq("id", post_id)
-    .eq("profile_id", profile.id);
+    .eq("profile_id", profile.id)
+    .select("id");
 
   if (error) {
     console.error("[forum/posts/update] update error:", JSON.stringify(error));
     return json({ error: "Failed to update post." }, 500);
   }
+  // No row matched: the post doesn't exist or belongs to the other admin.
+  // Say so instead of reporting a save that didn't happen.
+  if (!updated?.length) return json({ error: "You can only edit your own posts." }, 403);
 
   return json({ success: true });
 };

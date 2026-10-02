@@ -13,6 +13,8 @@
  */
 import { getVoteCounts, igdbImage as igdbCover } from './format';
 import { REC_SELECT, shapeRec } from './recommendationsFeed';
+import { queryLibraryPage, LIBRARY_PAGE_SIZE, type LibraryPageResult } from './libraryQuery';
+import { attachReviewVideos } from './reviewVideos';
 
 export const LAZY_PROFILE_TABS = ['reviews', 'recommendations', 'lists', 'library', 'groups'] as const;
 export type LazyProfileTab = (typeof LAZY_PROFILE_TABS)[number];
@@ -69,13 +71,17 @@ export async function loadReviewsTab(ctx: ProfileTabContext) {
   const { db, publishedReviews } = ctx;
   const reviewGameIds = [...new Set(publishedReviews.map((r: any) => r.games?.id).filter(Boolean))] as string[];
 
-  // Developer names per reviewed game — for the dev filter.
-  const { data: revCompanyRows } = reviewGameIds.length > 0
-    ? await db.from('game_companies')
-        .select('game_id, developers(name)')
-        .eq('role', 'developer')
-        .in('game_id', reviewGameIds)
-    : { data: [] };
+  // Developer names per reviewed game — for the dev filter. Attached videos are
+  // looked up alongside (fail-soft: cards just render without them on error).
+  const [{ data: revCompanyRows }] = await Promise.all([
+    reviewGameIds.length > 0
+      ? db.from('game_companies')
+          .select('game_id, developers(name)')
+          .eq('role', 'developer')
+          .in('game_id', reviewGameIds)
+      : Promise.resolve({ data: [] }),
+    attachReviewVideos(db, publishedReviews),
+  ]);
   const devsByGameId: Record<string, string[]> = {};
   for (const row of (revCompanyRows ?? []) as any[]) {
     if (row.developers?.name) (devsByGameId[row.game_id] ||= []).push(row.developers.name);
@@ -205,7 +211,7 @@ export async function loadListsTab(ctx: ProfileTabContext) {
     supabase.from('list_saves')
       .select('list_id, is_hidden, lists(id, title, is_ranked, visibility, cover_image_url, updated_at, profiles(id, username, avatar_url))')
       .eq('profile_id', reviewer.id)
-      .order('created_at', { ascending: false }),
+      .order('saved_at', { ascending: false }),
   ]);
 
   // Owners see all saves; others only see non-hidden ones.
@@ -319,10 +325,10 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     || !(reviewer.dropped_privacy === 'private'
          || (reviewer.dropped_privacy === 'friends' && !isMutualFollow));
 
-  // Distinct genre / platform / developer names across the visible library —
-  // the filter dropdowns. Queried FROM each game↔X junction with a two-level
-  // inner join down to user_game_status; one row per (game, value) pair, so
-  // paginate past the 1000-row cap.
+  // Distinct genre / developer names across the visible library — the filter
+  // dropdowns. Queried FROM each game↔X junction with a two-level inner join
+  // down to user_game_status; one row per (game, value) pair, so paginate
+  // past the 1000-row cap.
   async function libDimNames(junction: string, dimEmbed: string, roleFilter?: string): Promise<string[]> {
     const CHUNK = 1000;
     const key = dimEmbed.split('(')[0];
@@ -347,18 +353,84 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     return [...names].sort();
   }
 
+  // Platform-filter options are source-driven, not IGDB-driven: one bucket per
+  // import origin the profile actually has rows for. Scans user_game_status
+  // once and reduces to the labels the client should show. Paginated past the
+  // 1000-row cap so a huge library doesn't silently drop options.
+  async function libPlatformOptions(): Promise<string[]> {
+    const CHUNK = 1000;
+    let hasSteam = false, hasOther = false, hasGenericXbox = false;
+    const psn = new Set<string>();
+    const xbox = new Set<string>();
+    for (let start = 0; ; start += CHUNK) {
+      const { data, error } = await db
+        .from('user_game_status')
+        .select('steam_appid, psn_np_communication_id, psn_platform, xbox_title_id, xbox_platform')
+        .eq('profile_id', reviewer.id)
+        .eq('is_hidden', false)
+        .range(start, start + CHUNK - 1);
+      if (error) {
+        console.error('[profile library] platform-option scan failed:', JSON.stringify(error));
+        break;
+      }
+      for (const r of (data ?? []) as any[]) {
+        if (r.steam_appid != null) hasSteam = true;
+        if (r.psn_platform) psn.add(r.psn_platform);
+        if (r.xbox_platform) xbox.add(r.xbox_platform);
+        else if (r.xbox_title_id != null) hasGenericXbox = true;
+        if (r.steam_appid == null && r.psn_np_communication_id == null && r.xbox_title_id == null) {
+          hasOther = true;
+        }
+      }
+      if (!data || data.length < CHUNK) break;
+    }
+    // Canonical display order: Steam → PS3/4/5 → Xbox 360/One/Series → generic Xbox → Other.
+    const opts: string[] = [];
+    if (hasSteam) opts.push('Steam');
+    for (const p of ['PS3', 'PS4', 'PS5']) if (psn.has(p)) opts.push(p);
+    for (const c of ['Xbox 360', 'Xbox One', 'Xbox Series X|S']) if (xbox.has(c)) opts.push(c);
+    if (hasGenericXbox) opts.push('Xbox');
+    if (hasOther) opts.push('Other');
+    return opts;
+  }
+
   const libCounts = { all: 0, playing: 0, want_to_play: 0, owned: 0, completed: 0, hundred_percent: 0, dropped: 0, unplayed: 0, hidden: 0 };
   let libGenres: string[] = [];
   let libPlatforms: string[] = [];
   let libDevs: string[] = [];
+  // Page 1 of the grid, run in parallel with the counts + dim queries. Inlined
+  // into the tab HTML so the client can hydrate without a second round-trip;
+  // filter / sort / pagination changes still hit /api/user-game-status/library.
+  let initialLibraryPage: LibraryPageResult = {
+    items: [],
+    total: 0,
+    page: 1,
+    pageSize: LIBRARY_PAGE_SIZE,
+    hasMore: false,
+  };
   if (!libraryIsPrivate) {
-    const [{ data: countRows }, dims] = await Promise.all([
+    const [{ data: countRows }, dims, gridPage] = await Promise.all([
       db.rpc('library_status_counts', { p_profile_id: reviewer.id }),
       Promise.all([
         libDimNames('game_genres', 'genres(name)'),
-        libDimNames('game_platforms', 'platforms(name)'),
+        libPlatformOptions(),
         libDimNames('game_companies', 'developers(name)', 'developer'),
       ]),
+      queryLibraryPage(db, {
+        profileId: reviewer.id,
+        isOwn: isOwnProfile,
+        canSeeWantToPlay,
+        canSeeDropped,
+      }).catch((e) => {
+        console.error('[profile library] initial page query failed:', e);
+        return {
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: LIBRARY_PAGE_SIZE,
+          hasMore: false,
+        } satisfies LibraryPageResult;
+      }),
     ]);
     const c = (countRows as any)?.[0] ?? {};
     libCounts.all             = Number(c.all_count ?? 0);
@@ -372,8 +444,9 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     libCounts.hidden          = isOwnProfile ? Number(c.hidden ?? 0) : 0;
     libCounts.unplayed        = Number(c.unplayed ?? 0);
     [libGenres, libPlatforms, libDevs] = dims;
+    initialLibraryPage = gridPage;
   }
-  return { librarySettings, libraryIsPrivate, libCounts, libGenres, libPlatforms, libDevs };
+  return { librarySettings, libraryIsPrivate, libCounts, libGenres, libPlatforms, libDevs, initialLibraryPage };
 }
 export type LibraryTabData = Awaited<ReturnType<typeof loadLibraryTab>>;
 

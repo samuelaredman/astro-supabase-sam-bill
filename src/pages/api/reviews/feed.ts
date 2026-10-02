@@ -2,6 +2,7 @@ import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
 import { cdnCacheHeaders } from "../../../utils/cache";
+import { attachReviewVideos } from "../../../utils/reviewVideos";
 
 const REVIEW_FIELDS = `
   id, score, title, body, play_time_hours,
@@ -52,7 +53,33 @@ export const GET: APIRoute = async (context) => {
       console.error("[feed] following error:", JSON.stringify(error));
       return json({ error: "Failed to load reviews." }, 500);
     }
-    return json(data ?? []);
+    return json(await attachReviewVideos(db, data));
+  }
+
+  // ── Videos tab — published reviews with an attached YouTube video. Public,
+  // CDN-cacheable. If the lookup fails (e.g. the column's migration isn't
+  // applied), it returns an empty list so the tab just shows its empty state. ──
+  if (tab === "videos") {
+    let videoQuery = db
+      .from("reviews")
+      .select(REVIEW_FIELDS)
+      .eq("status", "published")
+      .not("youtube_video_id", "is", null)
+      .order("published_at", { ascending: false })
+      .limit(limit);
+    if (cursor) videoQuery = videoQuery.lt("published_at", cursor);
+
+    const { data: videoData, error: videoError } = await videoQuery;
+    if (videoError) console.error("[feed] videos error:", JSON.stringify(videoError));
+
+    return new Response(JSON.stringify(await attachReviewVideos(db, videoError ? [] : videoData)), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ...cdnCacheHeaders(120, 300),
+        "Cache-Control": "no-store",
+      },
+    });
   }
 
   // ── Recent tab — public, CDN-cacheable ────────────────────────────────────
@@ -72,7 +99,7 @@ export const GET: APIRoute = async (context) => {
   }
 
   // Cache at the edge for 2 min — protects Supabase from repeated/bot hits.
-  return new Response(JSON.stringify(data ?? []), {
+  return new Response(JSON.stringify(await attachReviewVideos(db, data)), {
     status: 200,
     headers: {
       "Content-Type": "application/json",

@@ -30,14 +30,18 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     return NAMED.hasOwnProperty(b)?NAMED[b]:w; }); }
 
   // -> [{ slug, title }], deduped, in document order. "lib" (nav link) excluded.
+  // Real game cards on Backloggd 1.18+ always have a game_id attribute on the
+  // card div. Empty skeleton cards (rendered inside turbo-frame as
+  // "empty-card shimmer-bg" placeholders while the next page lazy-loads) do
+  // NOT have game_id, so we require it — no false positives from placeholders.
   function parseCards(html){
     var out = [], seen = {};
-    // card: <a href="/games/<slug>/" class="cover-link"> … <img … alt="<title>">
-    var re = /href="\/games\/([a-z0-9][a-z0-9-]*)\/"[^>]*class="cover-link"[\s\S]{0,240}?alt="([^"]*)"/g, m;
+    var re = /game_id="(\d+)"[\s\S]{0,600}?href="\/games\/([a-z0-9][a-z0-9-]*)\/"[\s\S]{0,600}?(?:alt="([^"]*)"|class="game-text-centered"[^>]*>\s*([^<]*)\s*<)/g, m;
     while ((m = re.exec(html))) {
-      if (m[1] === "lib" || seen[m[1]]) continue;
-      seen[m[1]] = 1;
-      out.push({ slug: m[1], title: decode(m[2]).trim() || m[1].replace(/-/g, " ") });
+      if (m[2] === "lib" || seen[m[2]]) continue;
+      seen[m[2]] = 1;
+      var title = decode((m[3] || m[4] || "").trim()) || m[2].replace(/-/g, " ");
+      out.push({ slug: m[2], title: title });
     }
     if (!out.length) { // markup drift: fall back to bare game links
       var re2 = /href="\/games\/([a-z0-9][a-z0-9-]*)\/"/g, mm;
@@ -49,15 +53,27 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     }
     return out;
   }
-  function lastPage(html){
-    var nav = html.match(/<nav[^>]*class="[^"]*\bpagy\b[^"]*"[^>]*>([\s\S]*?)<\/nav>/i);
-    if (!nav) return 1;
-    var mx = 1, y, r = /[?&]page=(\d+)/g;
-    while ((y = r.exec(nav[1]))) { var n = parseInt(y[1],10); if (n>mx) mx = n; }
-    return mx;
+  // Reads Backloggd's "Showing X games" / "X,XXX Games" label from page 1.
+  // This is the ground-truth total library size for the current view/filter
+  // and lets us plan the exact page range instead of guessing.
+  function totalFromSubtitle(html){
+    // Any element with class="...subtitle-text..." — text like "Showing 1,013 games"
+    // or "1,234 Games".
+    var re = /class="[^"]*\bsubtitle-text\b[^"]*"[^>]*>([\s\S]*?)</gi, m;
+    while ((m = re.exec(html))) {
+      var text = m[1].replace(/&nbsp;/g, " ").replace(/<[^>]+>/g, "").trim();
+      var g = text.match(/([\d,]+)\s+games\b/i);
+      if (g) {
+        var n = parseInt(g[1].replace(/,/g, ""), 10);
+        if (!isNaN(n) && n >= 0) return n;
+      }
+    }
+    return null;
   }
   function getText(url){ return fetch(url, { credentials: "include" }).then(function(r){ return r.text(); }); }
   var sleep = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
+  // 5000 games at ~40/page ≈ 125 pages. Safety cap.
+  var MAX_PAGES = 200;
 
   var um = location.pathname.match(/\/u\/([^\/]+)/);
   if (!um) { alert("Open your own Backloggd games tab first (backloggd.com/u/yourname/games/), then run this."); return; }
@@ -80,20 +96,54 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
   box.textContent = "Chekpoint library importer: starting…";
   document.body.appendChild(box);
 
-  // Walk every page of a given library URL, return the full card list.
+  // Walk every page of a given library URL.
+  //
+  // Backloggd renders a count like "Showing 1,013 games" in a .subtitle-text
+  // element on page 1 — the ground-truth total for the current filter. When
+  // present, we plan the exact page range from ceil(total / pageSize) so
+  // we don't depend on parsing Backloggd's pagy nav (which drifted and
+  // truncated a 1013-game import to 239 rows in a previous version).
+  //
+  // Safety net: if a page adds zero new slugs (empty, out-of-range silently
+  // returning page 1, or Backloggd rendering the same infinite-scroll batch
+  // for every page number), stop early. Skeleton placeholders inside
+  // <turbo-frame> are filtered out at parseCards level via the game_id
+  // requirement, so they never count as "new".
+  function pageUrl(pathBase, p){
+    return pathBase + (pathBase.indexOf("?") === -1 ? "?" : "&") + "page=" + p;
+  }
   async function crawl(pathBase, label){
-    var first = await getText(pathBase + "?page=1");
-    if (/anubis|not a bot/i.test(first)) throw new Error("Backloggd is showing a bot check — reload the page and try again.");
-    var pages = lastPage(first);
-    var cards = parseCards(first);
-    for (var p = 2; p <= pages; p++) {
-      box.textContent = "Chekpoint: " + label + " — page " + p + "/" + pages + " (" + cards.length + ")";
-      cards = cards.concat(parseCards(await getText(pathBase + "?page=" + p)));
-      await sleep(300);
-    }
-    // de-dupe by slug across pages
     var seen = {}, uniq = [];
-    for (var i = 0; i < cards.length; i++) { if (!seen[cards[i].slug]) { seen[cards[i].slug] = 1; uniq.push(cards[i]); } }
+    var firstHtml = await getText(pageUrl(pathBase, 1));
+    if (/anubis|not a bot/i.test(firstHtml)) throw new Error("Backloggd is showing a bot check — reload the page and try again.");
+    var firstCards = parseCards(firstHtml);
+    for (var i = 0; i < firstCards.length; i++) {
+      if (!seen[firstCards[i].slug]) { seen[firstCards[i].slug] = 1; uniq.push(firstCards[i]); }
+    }
+    var expectedTotal = totalFromSubtitle(firstHtml);
+    var perPage = firstCards.length;
+    var plannedPages = expectedTotal && perPage > 0
+      ? Math.min(MAX_PAGES, Math.ceil(expectedTotal / perPage))
+      : MAX_PAGES;
+    box.textContent = "Chekpoint: " + label + " — page 1" +
+      (expectedTotal ? " of ~" + plannedPages : "") + " (" + uniq.length + ")";
+
+    for (var p = 2; p <= plannedPages; p++) {
+      await sleep(300);
+      var html = await getText(pageUrl(pathBase, p));
+      if (/anubis|not a bot/i.test(html)) throw new Error("Backloggd is showing a bot check — reload the page and try again.");
+      var cards = parseCards(html);
+      var added = 0;
+      for (var j = 0; j < cards.length; j++) {
+        if (!seen[cards[j].slug]) { seen[cards[j].slug] = 1; uniq.push(cards[j]); added++; }
+      }
+      box.textContent = "Chekpoint: " + label + " — page " + p +
+        (expectedTotal ? "/" + plannedPages : "") + " (" + uniq.length + ")";
+      // If a page returns only slugs we've already seen (?page= silently
+      // repeating page 1 for out-of-range values), or genuinely empty,
+      // there's no point continuing.
+      if (added === 0) break;
+    }
     return uniq;
   }
 
@@ -113,9 +163,10 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
       return;
     }
 
-    // The default /games/ view is played+playing only — backlog & wishlist games
-    // aren't in it — so this is a lower bound on the library, used for titles and
-    // as a sanity ceiling, not as "the total".
+    // /games/ is the union of everything the user has touched: rated,
+    // reviewed, journalled, listed. Baseline-only slugs (games in this
+    // set that no explicit status shelf picks up — typically rated
+    // without a play state) are recovered later via the fallback prompt.
     var baseline = await crawl(base, "your library");
     var baseCount = baseline.length;
 
@@ -169,6 +220,39 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
 
     var libraryTotal = Object.keys(librarySlugs).length || baseCount;
 
+    // Baseline-only slugs: games in the library that no status filter picked
+    // up. Backloggd's /games/ view is a union of everything the user has
+    // rated, reviewed, journalled, or listed — a game that's rated but not
+    // explicitly marked with a play state (Played / Playing / Backlog /
+    // Wishlist / etc.) is in this set. For a heavy Backloggd user this can
+    // be hundreds of games and previously all fell on the floor.
+    var unassignedSlugs = [];
+    for (var uSlug in librarySlugs) { if (!assigned[uSlug]) unassignedSlugs.push(uSlug); }
+
+    // Ask the user how to import the unclassified games. Default choice is
+    // "played" — for most Backloggd users these are rated games, and rating
+    // implies at least a play attempt — but we won't presume that
+    // silently. Cancel-out skips them (existing behavior).
+    var fallbackStatus = null;
+    if (unassignedSlugs.length > 0) {
+      var promptMsg =
+        "Chekpoint found " + libraryTotal + " games in your Backloggd library.\n\n" +
+        Object.keys(assigned).length + " have an explicit status (Played / Playing / Backlog / Wishlist / Retired).\n\n" +
+        "The other " + unassignedSlugs.length + " are in your library but have no play state (usually games you rated without marking as played).\n\n" +
+        "Import those " + unassignedSlugs.length + " games as: type played / backlog / wishlist / skip";
+      var answer = (prompt(promptMsg, "played") || "").trim().toLowerCase();
+      if (answer === "played" || answer === "completed") fallbackStatus = "played";
+      else if (answer === "backlog" || answer === "want" || answer === "want_to_play") fallbackStatus = "backlog";
+      else if (answer === "wishlist") fallbackStatus = "wishlist";
+      // Anything else (including empty / "skip" / cancel) → skip.
+    }
+
+    if (fallbackStatus) {
+      for (var ui = 0; ui < unassignedSlugs.length; ui++) {
+        assigned[unassignedSlugs[ui]] = fallbackStatus;
+      }
+    }
+
     var rows = [];
     for (var slug in assigned) {
       rows.push({ game_slug: slug, game_title: titleBySlug[slug] || slug.replace(/-/g, " "),
@@ -193,9 +277,12 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     a.href = URL.createObjectURL(blob);
     a.download = "backloggd-chekpoint-library.json";
     document.body.appendChild(a); a.click(); a.remove();
-    box.textContent = "Chekpoint: done — " + rows.length + " games with a status (" +
+    var skipped = unassignedSlugs.length && !fallbackStatus
+      ? " (skipped " + unassignedSlugs.length + " unclassified)"
+      : "";
+    box.textContent = "Chekpoint: done — " + rows.length + " of " + libraryTotal + " games (" +
       counts.played + " played, " + counts.playing + " playing, " + counts.dropped + " dropped, " +
-      counts.backlog + " backlog, " + counts.wishlist + " wishlist). Upload the file on Chekpoint.";
+      counts.backlog + " backlog, " + counts.wishlist + " wishlist)" + skipped + ". Upload the file on Chekpoint.";
   } catch (e) {
     box.textContent = "Chekpoint library importer: failed — " + (e && e.message ? e.message : e);
     throw e;

@@ -8,7 +8,9 @@ export const GET: APIRoute = async (context) => {
 
   const origin = context.url.origin;
   // Allow callers to pass ?from=<path> so the callback can redirect back there
-  const from = context.url.searchParams.get('from') ?? '';
+  // Same-site paths only (the callback re-checks this before redirecting).
+  const rawFrom = context.url.searchParams.get('from') ?? '';
+  const from = /^\/(?![\/\\])/.test(rawFrom) ? rawFrom : '';
   const callbackUrl = from
     ? `${origin}/api/auth/steam-callback?from=${encodeURIComponent(from)}`
     : `${origin}/api/auth/steam-callback`;

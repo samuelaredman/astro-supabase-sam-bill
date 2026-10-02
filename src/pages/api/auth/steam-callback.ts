@@ -8,19 +8,27 @@ export const GET: APIRoute = async (context) => {
 
   const params = context.url.searchParams;
 
-  const from = params.get('from') ?? '';
+  // Only same-site paths ("/settings", "/?x=1") — never "//evil.com" or a full
+  // URL, which would turn this into an open redirect off chekpoint.gg.
+  const rawFrom = params.get('from') ?? '';
+  const from = /^\/(?![\/\\])/.test(rawFrom) ? rawFrom : '';
   function appendParam(base: string, kv: string) {
     return base ? `${base}${base.includes('?') ? '&' : '?'}${kv}` : '';
   }
   const successRedirect = from ? appendParam(from, 'steam=connected') : '/settings?steam=connected';
   const errorRedirect   = from ? appendParam(from, 'steam=error')     : '/settings?steam=error';
+  // Steam account already linked to a different Chekpoint profile (profiles_steam_id_key).
+  // Reported separately so it isn't shown as a generic "couldn't connect".
+  const duplicateRedirect = from ? appendParam(from, 'steam=duplicate') : '/settings?steam=duplicate';
 
   if (params.get('openid.mode') !== 'id_res') {
     return context.redirect(from ? appendParam(from, 'steam=cancelled') : '/settings?steam=cancelled');
   }
 
-  // Verify the assertion with Steam to prevent forgery
-  const verifyParams = new URLSearchParams(params);
+  // Verify the assertion with Steam to prevent forgery. Only the openid.* fields
+  // go back to Steam — not our own `from` param from the return_to URL.
+  const verifyParams = new URLSearchParams();
+  params.forEach((value, key) => { if (key.startsWith('openid.')) verifyParams.append(key, value); });
   verifyParams.set('openid.mode', 'check_authentication');
 
   const verifyRes = await fetch('https://steamcommunity.com/openid/login', {
@@ -70,6 +78,10 @@ export const GET: APIRoute = async (context) => {
   }).eq('id', profile.id);
 
   if (error) {
+    if (error.code === '23505') {
+      console.warn('[steam-callback] steam_id already linked to another profile:', steamId);
+      return context.redirect(duplicateRedirect);
+    }
     console.error('[steam-callback] profile update error:', JSON.stringify(error));
     return context.redirect(errorRedirect);
   }

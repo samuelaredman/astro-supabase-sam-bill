@@ -1500,6 +1500,7 @@ export type Database = {
           detail: string | null
           game_slug: string
           game_title: string
+          hours_at_review: number | null
           id: string
           job_id: string
           matched_game_id: string | null
@@ -1512,6 +1513,7 @@ export type Database = {
           review_text: string
           source_url: string | null
           status: string
+          steam_appid: number | null
           updated_at: string | null
         }
         Insert: {
@@ -1520,6 +1522,7 @@ export type Database = {
           detail?: string | null
           game_slug: string
           game_title: string
+          hours_at_review?: number | null
           id?: string
           job_id: string
           matched_game_id?: string | null
@@ -1532,6 +1535,7 @@ export type Database = {
           review_text: string
           source_url?: string | null
           status?: string
+          steam_appid?: number | null
           updated_at?: string | null
         }
         Update: {
@@ -1540,6 +1544,7 @@ export type Database = {
           detail?: string | null
           game_slug?: string
           game_title?: string
+          hours_at_review?: number | null
           id?: string
           job_id?: string
           matched_game_id?: string | null
@@ -1552,6 +1557,7 @@ export type Database = {
           review_text?: string
           source_url?: string | null
           status?: string
+          steam_appid?: number | null
           updated_at?: string | null
         }
         Relationships: [
@@ -2187,6 +2193,7 @@ export type Database = {
         Row: {
           accent_color: string | null
           achievements_sync_cursor: number
+          achievements_sync_snapshot: Json | null
           achievements_synced_at: string | null
           auth_user_id: string
           avatar_url: string | null
@@ -2209,6 +2216,15 @@ export type Database = {
           library_show_hours: boolean
           library_visibility: string
           onboarding_completed_at: string | null
+          psn_access_token: string | null
+          psn_account_id: string | null
+          psn_online_id: string | null
+          psn_refresh_token: string | null
+          psn_sync_cursor: Json | null
+          psn_sync_snapshot: Json | null
+          psn_synced_at: string | null
+          psn_token_expires_at: string | null
+          psn_trophies_synced_at: string | null
           psn_url: string | null
           retroachievements_url: string | null
           search_indexable: boolean
@@ -2216,6 +2232,7 @@ export type Database = {
           showcase_achievements: Json | null
           showcase_games: Json | null
           steam_id: string | null
+          steam_reviews_import_done_at: string | null
           steam_synced_at: string | null
           steam_url: string | null
           steam_username: string | null
@@ -2232,12 +2249,20 @@ export type Database = {
           username_since: string
           want_to_play_privacy: string
           website_url: string | null
+          xbox_achievements_synced_at: string | null
+          xbox_api_key: string | null
+          xbox_gamertag: string | null
+          xbox_sync_cursor: Json | null
+          xbox_sync_snapshot: Json | null
+          xbox_synced_at: string | null
           xbox_url: string | null
+          xbox_xuid: string | null
           youtube_url: string | null
         }
         Insert: {
           accent_color?: string | null
           achievements_sync_cursor?: number
+          achievements_sync_snapshot?: Json | null
           achievements_synced_at?: string | null
           auth_user_id: string
           avatar_url?: string | null
@@ -2260,6 +2285,15 @@ export type Database = {
           library_show_hours?: boolean
           library_visibility?: string
           onboarding_completed_at?: string | null
+          psn_access_token?: string | null
+          psn_account_id?: string | null
+          psn_online_id?: string | null
+          psn_refresh_token?: string | null
+          psn_sync_cursor?: Json | null
+          psn_sync_snapshot?: Json | null
+          psn_synced_at?: string | null
+          psn_token_expires_at?: string | null
+          psn_trophies_synced_at?: string | null
           psn_url?: string | null
           retroachievements_url?: string | null
           search_indexable?: boolean
@@ -2267,6 +2301,7 @@ export type Database = {
           showcase_achievements?: Json | null
           showcase_games?: Json | null
           steam_id?: string | null
+          steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
           steam_url?: string | null
           steam_username?: string | null
@@ -2283,12 +2318,20 @@ export type Database = {
           username_since?: string
           want_to_play_privacy?: string
           website_url?: string | null
+          xbox_achievements_synced_at?: string | null
+          xbox_api_key?: string | null
+          xbox_gamertag?: string | null
+          xbox_sync_cursor?: Json | null
+          xbox_sync_snapshot?: Json | null
+          xbox_synced_at?: string | null
           xbox_url?: string | null
+          xbox_xuid?: string | null
           youtube_url?: string | null
         }
         Update: {
           accent_color?: string | null
           achievements_sync_cursor?: number
+          achievements_sync_snapshot?: Json | null
           achievements_synced_at?: string | null
           auth_user_id?: string
           avatar_url?: string | null
@@ -2311,6 +2354,15 @@ export type Database = {
           library_show_hours?: boolean
           library_visibility?: string
           onboarding_completed_at?: string | null
+          psn_access_token?: string | null
+          psn_account_id?: string | null
+          psn_online_id?: string | null
+          psn_refresh_token?: string | null
+          psn_sync_cursor?: Json | null
+          psn_sync_snapshot?: Json | null
+          psn_synced_at?: string | null
+          psn_token_expires_at?: string | null
+          psn_trophies_synced_at?: string | null
           psn_url?: string | null
           retroachievements_url?: string | null
           search_indexable?: boolean
@@ -2318,6 +2370,7 @@ export type Database = {
           showcase_achievements?: Json | null
           showcase_games?: Json | null
           steam_id?: string | null
+          steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
           steam_url?: string | null
           steam_username?: string | null
@@ -2334,7 +2387,14 @@ export type Database = {
           username_since?: string
           want_to_play_privacy?: string
           website_url?: string | null
+          xbox_achievements_synced_at?: string | null
+          xbox_api_key?: string | null
+          xbox_gamertag?: string | null
+          xbox_sync_cursor?: Json | null
+          xbox_sync_snapshot?: Json | null
+          xbox_synced_at?: string | null
           xbox_url?: string | null
+          xbox_xuid?: string | null
           youtube_url?: string | null
         }
         Relationships: [
@@ -2353,6 +2413,60 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      psn_service_auth: {
+        Row: {
+          access_token: string | null
+          access_token_expires_at: string | null
+          id: string
+          refresh_token: string
+          updated_at: string
+        }
+        Insert: {
+          access_token?: string | null
+          access_token_expires_at?: string | null
+          id?: string
+          refresh_token: string
+          updated_at?: string
+        }
+        Update: {
+          access_token?: string | null
+          access_token_expires_at?: string | null
+          id?: string
+          refresh_token?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      psn_title_schema: {
+        Row: {
+          fetched_at: string
+          no_trophies: boolean
+          np_communication_id: string
+          np_service_name: string | null
+          trophies: Json | null
+          trophy_groups: Json | null
+          trophy_set_version: string | null
+        }
+        Insert: {
+          fetched_at?: string
+          no_trophies?: boolean
+          np_communication_id: string
+          np_service_name?: string | null
+          trophies?: Json | null
+          trophy_groups?: Json | null
+          trophy_set_version?: string | null
+        }
+        Update: {
+          fetched_at?: string
+          no_trophies?: boolean
+          np_communication_id?: string
+          np_service_name?: string | null
+          trophies?: Json | null
+          trophy_groups?: Json | null
+          trophy_set_version?: string | null
+        }
+        Relationships: []
       }
       recommendation_cache: {
         Row: {
@@ -2928,6 +3042,7 @@ export type Database = {
           status: string | null
           title: string | null
           updated_at: string | null
+          youtube_video_id: string | null
         }
         Insert: {
           body: string
@@ -2949,6 +3064,7 @@ export type Database = {
           status?: string | null
           title?: string | null
           updated_at?: string | null
+          youtube_video_id?: string | null
         }
         Update: {
           body?: string
@@ -2970,6 +3086,7 @@ export type Database = {
           status?: string | null
           title?: string | null
           updated_at?: string | null
+          youtube_video_id?: string | null
         }
         Relationships: [
           {
@@ -3045,21 +3162,53 @@ export type Database = {
           achievements: Json
           fetched_at: string
           global_percents: Json
+          no_achievements: boolean
           steam_appid: number
         }
         Insert: {
           achievements?: Json
           fetched_at?: string
           global_percents?: Json
+          no_achievements?: boolean
           steam_appid: number
         }
         Update: {
           achievements?: Json
           fetched_at?: string
           global_percents?: Json
+          no_achievements?: boolean
           steam_appid?: number
         }
         Relationships: []
+      }
+      steam_import_dismissals: {
+        Row: {
+          dismissed_at: string
+          dismissed_via: string
+          profile_id: string
+          steam_appid: number
+        }
+        Insert: {
+          dismissed_at?: string
+          dismissed_via: string
+          profile_id: string
+          steam_appid: number
+        }
+        Update: {
+          dismissed_at?: string
+          dismissed_via?: string
+          profile_id?: string
+          steam_appid?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "steam_import_dismissals_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       steam_unmatched_titles: {
         Row: {
@@ -3186,11 +3335,24 @@ export type Database = {
           is_hidden: boolean
           is_owned: boolean
           profile_id: string
+          psn_last_played_at: string | null
+          psn_np_communication_id: string | null
+          psn_platform: string | null
+          psn_playtime_minutes: number | null
+          psn_progress: number | null
+          psn_trophies_earned: number | null
+          psn_trophies_total: number | null
           status: string
           steam_appid: number | null
           steam_last_played_at: string | null
           steam_playtime_minutes: number | null
           updated_at: string
+          xbox_current_gamerscore: number | null
+          xbox_last_played_at: string | null
+          xbox_max_gamerscore: number | null
+          xbox_platform: string | null
+          xbox_progress: number | null
+          xbox_title_id: string | null
         }
         Insert: {
           created_at?: string
@@ -3199,11 +3361,24 @@ export type Database = {
           is_hidden?: boolean
           is_owned?: boolean
           profile_id: string
+          psn_last_played_at?: string | null
+          psn_np_communication_id?: string | null
+          psn_platform?: string | null
+          psn_playtime_minutes?: number | null
+          psn_progress?: number | null
+          psn_trophies_earned?: number | null
+          psn_trophies_total?: number | null
           status: string
           steam_appid?: number | null
           steam_last_played_at?: string | null
           steam_playtime_minutes?: number | null
           updated_at?: string
+          xbox_current_gamerscore?: number | null
+          xbox_last_played_at?: string | null
+          xbox_max_gamerscore?: number | null
+          xbox_platform?: string | null
+          xbox_progress?: number | null
+          xbox_title_id?: string | null
         }
         Update: {
           created_at?: string
@@ -3212,11 +3387,24 @@ export type Database = {
           is_hidden?: boolean
           is_owned?: boolean
           profile_id?: string
+          psn_last_played_at?: string | null
+          psn_np_communication_id?: string | null
+          psn_platform?: string | null
+          psn_playtime_minutes?: number | null
+          psn_progress?: number | null
+          psn_trophies_earned?: number | null
+          psn_trophies_total?: number | null
           status?: string
           steam_appid?: number | null
           steam_last_played_at?: string | null
           steam_playtime_minutes?: number | null
           updated_at?: string
+          xbox_current_gamerscore?: number | null
+          xbox_last_played_at?: string | null
+          xbox_max_gamerscore?: number | null
+          xbox_platform?: string | null
+          xbox_progress?: number | null
+          xbox_title_id?: string | null
         }
         Relationships: [
           {
@@ -3228,6 +3416,150 @@ export type Database = {
           },
           {
             foreignKeyName: "user_game_status_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_trophies: {
+        Row: {
+          description: string | null
+          earned: boolean
+          earned_at: string | null
+          earned_rate: number | null
+          game_id: string | null
+          hidden: boolean
+          icon_url: string | null
+          id: string
+          name: string | null
+          np_communication_id: string
+          np_service_name: string
+          profile_id: string
+          psn_game_title: string | null
+          psn_platform: string
+          synced_at: string
+          trophy_group_id: string
+          trophy_id: number
+          trophy_type: string
+        }
+        Insert: {
+          description?: string | null
+          earned?: boolean
+          earned_at?: string | null
+          earned_rate?: number | null
+          game_id?: string | null
+          hidden?: boolean
+          icon_url?: string | null
+          id?: string
+          name?: string | null
+          np_communication_id: string
+          np_service_name: string
+          profile_id: string
+          psn_game_title?: string | null
+          psn_platform: string
+          synced_at?: string
+          trophy_group_id: string
+          trophy_id: number
+          trophy_type: string
+        }
+        Update: {
+          description?: string | null
+          earned?: boolean
+          earned_at?: string | null
+          earned_rate?: number | null
+          game_id?: string | null
+          hidden?: boolean
+          icon_url?: string | null
+          id?: string
+          name?: string | null
+          np_communication_id?: string
+          np_service_name?: string
+          profile_id?: string
+          psn_game_title?: string | null
+          psn_platform?: string
+          synced_at?: string
+          trophy_group_id?: string
+          trophy_id?: number
+          trophy_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_trophies_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_trophies_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_xbox_achievements: {
+        Row: {
+          achievement_id: string
+          description: string | null
+          game_id: string | null
+          gamerscore: number | null
+          icon_url: string | null
+          id: string
+          name: string | null
+          profile_id: string
+          rarity: number | null
+          synced_at: string
+          unlocked: boolean
+          unlocked_at: string | null
+          xbox_game_title: string | null
+          xbox_title_id: string
+        }
+        Insert: {
+          achievement_id: string
+          description?: string | null
+          game_id?: string | null
+          gamerscore?: number | null
+          icon_url?: string | null
+          id?: string
+          name?: string | null
+          profile_id: string
+          rarity?: number | null
+          synced_at?: string
+          unlocked?: boolean
+          unlocked_at?: string | null
+          xbox_game_title?: string | null
+          xbox_title_id: string
+        }
+        Update: {
+          achievement_id?: string
+          description?: string | null
+          game_id?: string | null
+          gamerscore?: number | null
+          icon_url?: string | null
+          id?: string
+          name?: string | null
+          profile_id?: string
+          rarity?: number | null
+          synced_at?: string
+          unlocked?: boolean
+          unlocked_at?: string | null
+          xbox_game_title?: string | null
+          xbox_title_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_xbox_achievements_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_xbox_achievements_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
@@ -3302,6 +3634,27 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      xbox_title_schema: {
+        Row: {
+          achievements: Json | null
+          fetched_at: string
+          no_achievements: boolean
+          xbox_title_id: string
+        }
+        Insert: {
+          achievements?: Json | null
+          fetched_at?: string
+          no_achievements?: boolean
+          xbox_title_id: string
+        }
+        Update: {
+          achievements?: Json | null
+          fetched_at?: string
+          no_achievements?: boolean
+          xbox_title_id?: string
+        }
+        Relationships: []
       }
     }
     Views: {
@@ -3391,6 +3744,23 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      user_unlocks: {
+        Row: {
+          api_name: string | null
+          description: string | null
+          display_name: string | null
+          external_id: string | null
+          game_title: string | null
+          global_percent: number | null
+          icon_url: string | null
+          platform_label: string | null
+          profile_id: string | null
+          source: string | null
+          trophy_type: string | null
+          unlock_time: string | null
+        }
+        Relationships: []
       }
     }
     Functions: {
@@ -3822,12 +4192,28 @@ export type Database = {
         Args: { titles: string[] }
         Returns: undefined
       }
+      match_psn_games: {
+        Args: { psn_titles: string[] }
+        Returns: {
+          id: string
+          psn_title: string
+          title: string
+        }[]
+      }
       match_steam_games: {
         Args: { steam_titles: string[] }
         Returns: {
           id: string
           steam_title: string
           title: string
+        }[]
+      }
+      match_xbox_games: {
+        Args: { xbox_titles: string[] }
+        Returns: {
+          id: string
+          title: string
+          xbox_title: string
         }[]
       }
       most_reviewed_games: {
@@ -3903,6 +4289,13 @@ export type Database = {
       }
       show_limit: { Args: never; Returns: number }
       show_trgm: { Args: { "": string }; Returns: string[] }
+      steam_appid_last_synced: {
+        Args: { p_profile_id: string }
+        Returns: {
+          last_synced_at: string
+          steam_appid: number
+        }[]
+      }
       top_studios_by_reviewed_games: {
         Args: { p_limit?: number }
         Returns: {
@@ -3912,7 +4305,33 @@ export type Database = {
           slug: string
         }[]
       }
+      trophy_completion_by_npcommid: {
+        Args: { p_profile_id: string }
+        Returns: {
+          np_communication_id: string
+          pct: number
+        }[]
+      }
       unaccent: { Args: { "": string }; Returns: string }
+      user_synced_steam_appids: {
+        Args: { p_profile_id: string }
+        Returns: {
+          steam_appid: number
+        }[]
+      }
+      xbox_achievement_completion_by_titleid: {
+        Args: { p_profile_id: string }
+        Returns: {
+          pct: number
+          xbox_title_id: string
+        }[]
+      }
+      xbox_synced_title_ids: {
+        Args: { p_profile_id: string }
+        Returns: {
+          xbox_title_id: string
+        }[]
+      }
     }
     Enums: {
       [_ in never]: never
