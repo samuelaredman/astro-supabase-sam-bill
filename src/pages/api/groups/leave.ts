@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { SITE_GROUP_LEAVE_ERROR, isSiteGroup } from "../../../utils/siteGroup";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -7,6 +8,9 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const { group_id } = await context.request.json();
+  if (!group_id) return json({ error: "group_id required" }, 400);
+
+  if (await isSiteGroup(db, group_id)) return json({ error: SITE_GROUP_LEAVE_ERROR }, 403);
 
   const { data: membership } = await db.from("group_members")
     .select("id, role").eq("group_id", group_id).eq("profile_id", profile.id).single();

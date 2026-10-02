@@ -1,0 +1,160 @@
+---
+export const prerender = false;
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import Layout from "../../../components/Layout.astro";
+import DetailNav from "../../../components/DetailNav.astro";
+import { scoreClass, igdbImage as igdbCover } from '../../../utils/format';
+import { getPageUser } from '../../../utils/pageAuth';
+
+const supabase = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, supabase);
+const { id } = Astro.params;
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await (supabase as any)
+    .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
+  currentProfile = cp;
+}
+
+const db = getSupabaseAdmin();
+
+const { data: group } = await db
+  .from("groups")
+  .select("id, name, visibility, invite_code, stats_config")
+  .eq("id", id!)
+  .maybeSingle();
+
+if (!group) return Astro.redirect("/groups");
+
+let membership: any = null;
+if (currentProfile) {
+  const { data: m } = await db
+    .from("group_members").select("role").eq("group_id", group.id).eq("profile_id", currentProfile.id).maybeSingle();
+  membership = m;
+}
+
+const isMember = !!membership;
+const joinCode = Astro.url.searchParams.get("code");
+
+if (group.visibility === "private" && !isMember) {
+  if (!joinCode || joinCode.toUpperCase() !== group.invite_code) {
+    return Astro.redirect("/groups");
+  }
+}
+
+const statsConf = (group.stats_config ?? {}) as { focus_genre_id?: string | null; focus_platform_id?: string | null };
+const statArgs = {
+  p_group_id: group.id,
+  p_genre_id: statsConf.focus_genre_id ?? undefined,
+  p_platform_id: statsConf.focus_genre_id ? undefined : statsConf.focus_platform_id ?? undefined,
+};
+
+const PAGE_LIMIT = 25;
+const MIN_REVIEWS = 3;
+
+const { data: rows } = await db.rpc("group_divergent_picks", {
+  ...statArgs, p_limit: PAGE_LIMIT, p_min_reviews: MIN_REVIEWS,
+});
+
+const games = (rows ?? []).map((row: any) => ({
+  id: row.game_id, title: row.title, slug: row.slug, cover_img_url: row.cover_img_url,
+  reviewCount: row.review_count, avgScore: +row.avg_score.toFixed(1),
+  minScore: row.min_score, maxScore: row.max_score,
+}));
+
+---
+
+<Layout title={`Most Divisive — ${group.name} — Chekpoint`} isLoggedIn={!!user} currentProfile={currentProfile} variant="fullwidth" noindex={group.visibility === "private"}>
+<style is:global>
+  :root[data-theme="dark"] {
+    --bg:#09090a;--bg-card:#131314;--bg-hover:#1c1c1e;
+    --border:#222224;--border-subtle:#191919;
+    --text-tertiary:#484644;--tag-bg:#1c1c1e;--tag-text:#6a6866;
+    --shadow:0 1px 3px rgba(0,0,0,.5);
+    --score-perfect:#ffffff;--score-perfect-bg:#22223a;
+    --score-great:#4ade80;--score-great-bg:#112e1c;
+    --score-teal:#2dd4bf;--score-teal-bg:#082d2a;
+    --score-good:#60a5fa;--score-good-bg:#0e2240;
+    --score-mid:#fbbf24;--score-mid-bg:#271e00;
+    --score-orange:#fb923c;--score-orange-bg:#2c160a;
+    --score-low:#f87171;--score-low-bg:#300e0e;
+  }
+
+  .page{max-width:700px;margin:0 auto;padding:32px 28px 80px}
+  .page-title{font-family:'DM Serif Display',serif;font-size:22px;margin-bottom:4px}
+  .page-sub{font-size:13px;color:var(--text-secondary);margin-bottom:24px}
+
+  .rank-list{display:flex;flex-direction:column}
+  .rank-item{display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--border-subtle);text-decoration:none;color:inherit}
+  .rank-item:last-child{border-bottom:none}
+  .rank-item:hover .rank-title{color:var(--accent)}
+  .rank-num{width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:12px;font-weight:700;flex-shrink:0;background:var(--tag-bg);color:var(--text-tertiary)}
+  .rank-1{background:rgba(251,191,36,.2);color:#fbbf24}
+  .rank-2{background:rgba(148,163,184,.15);color:#94a3b8}
+  .rank-3{background:rgba(194,129,60,.15);color:#c2813c}
+  .rank-cover{width:38px;height:50px;border-radius:6px;object-fit:cover;flex-shrink:0;display:block}
+  .rank-cover-placeholder{width:38px;height:50px;border-radius:6px;background:var(--tag-bg);flex-shrink:0}
+  .rank-info{flex:1;min-width:0}
+  .rank-title{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color .15s}
+  .rank-meta{font-size:12px;color:var(--text-tertiary);margin-top:2px}
+  .score-badge{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:7px;font-size:12px;font-weight:700;flex-shrink:0}
+  .score-perfect{background:var(--score-perfect-bg);color:var(--score-perfect)}
+  .score-great{background:var(--score-great-bg);color:var(--score-great)}
+  .score-teal{background:var(--score-teal-bg);color:var(--score-teal)}
+  .score-good{background:var(--score-good-bg);color:var(--score-good)}
+  .score-mid{background:var(--score-mid-bg);color:var(--score-mid)}
+  .score-orange{background:var(--score-orange-bg);color:var(--score-orange)}
+  .score-low{background:var(--score-low-bg);color:var(--score-low)}
+  .empty{padding:48px 0;text-align:center;color:var(--text-tertiary);font-size:14px}
+</style>
+
+<DetailNav isLoggedIn={!!user} currentProfile={currentProfile} />
+
+<div class="page">
+  <div class="page-title">Most Divisive — {group.name}</div>
+  <div class="page-sub">Games the group disagrees on most · widest score variance · at least {MIN_REVIEWS} members reviewed</div>
+
+  {games.length === 0 ? (
+    <div class="empty">Not enough overlapping reviews yet — needs at least {MIN_REVIEWS} members to review the same game.</div>
+  ) : (
+    <div class="rank-list">
+      {games.map((g: any, i: number) => (
+        <a class="rank-item" href={`/games/${g.slug}`}>
+          <div class={`rank-num${i === 0 ? " rank-1" : i === 1 ? " rank-2" : i === 2 ? " rank-3" : ""}`}>{i + 1}</div>
+          {igdbCover(g.cover_img_url, "t_thumb")
+            ? <img class="rank-cover" src={igdbCover(g.cover_img_url, "t_thumb")!} alt={g.title} loading="lazy" />
+            : <div class="rank-cover-placeholder" />
+          }
+          <div class="rank-info">
+            <div class="rank-title">{g.title}</div>
+            <div class="rank-meta">{g.reviewCount} reviews · scores {g.minScore}–{g.maxScore}</div>
+          </div>
+          <div class={`score-badge ${scoreClass(Math.round(g.avgScore))}`}>{g.avgScore}</div>
+        </a>
+      ))}
+    </div>
+  )}
+</div>
+
+<script is:inline>
+  function toggleTheme() {
+    const h = document.documentElement
+    const n = h.getAttribute('data-theme') === 'light' ? 'dark' : 'light'
+    h.setAttribute('data-theme', n)
+    localStorage.setItem('theme', n)
+    updateIcon(n)
+    const m = document.getElementById('meta-theme-color')
+    if (m) m.content = n === 'dark' ? '#0f0f0e' : '#f9f8f6'
+  }
+  function updateIcon(t) {
+    const i = document.getElementById('themeIcon')
+    if (!i) return
+    i.innerHTML = t === 'dark'
+      ? '<path d="M15 10.5A7 7 0 016.5 3a7 7 0 100 12 7 7 0 008.5-4.5z"/>'
+      : '<circle cx="9" cy="9" r="3.5"/><path d="M9 1v2M9 15v2M1 9h2M15 9h2M3.22 3.22l1.42 1.42M13.36 13.36l1.42 1.42M13.36 4.64l1.42-1.42M3.22 14.78l1.42-1.42"/>'
+  }
+  window.toggleTheme = toggleTheme
+  updateIcon(document.documentElement.getAttribute('data-theme') || 'dark')
+</script>
+</Layout>

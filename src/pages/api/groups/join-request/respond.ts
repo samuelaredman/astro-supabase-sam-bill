@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../../utils/api";
+import { requireAuth, json, getGroupAuthority } from "../../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -28,8 +28,7 @@ export const POST: APIRoute = async (context) => {
   if (!req) return json({ error: "Pending request not found" }, 404);
 
   // Caller must be an admin or owner of that group
-  const { data: membership } = await db.from("group_members")
-    .select("role").eq("group_id", req.group_id).eq("profile_id", profile.id).maybeSingle();
+  const membership = await getGroupAuthority(db, req.group_id, profile.id);
   if (!membership || !["owner", "admin"].includes(membership.role)) {
     return json({ error: "Not authorized" }, 403);
   }

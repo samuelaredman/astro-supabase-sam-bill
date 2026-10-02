@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../../utils/api";
+import { requireAuth, json, getGroupAuthority } from "../../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -10,8 +10,7 @@ export const POST: APIRoute = async (context) => {
   if (!group_id || !invited_profile_id)
     return json({ error: "group_id and invited_profile_id required" }, 400);
 
-  const { data: membership } = await db.from("group_members")
-    .select("role").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
+  const membership = await getGroupAuthority(db, group_id, profile.id);
   if (!membership || !["owner", "admin"].includes(membership.role))
     return json({ error: "Not authorized" }, 403);
 

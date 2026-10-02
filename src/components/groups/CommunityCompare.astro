@@ -1,0 +1,217 @@
+---
+/**
+ * The Stats tab's "vs the community" block: one member — the group's owner by
+ * default, which on a creator's group is the creator — against everyone else,
+ * with their own reviews left out of the community side.
+ *
+ * Rendered inside CompareTab.astro, so the page and the /groups/[id]/compare
+ * partial both show it from the same loadGroupCompare() data. Styles live in the
+ * group page's global block with the rest of the tab; the subject switcher is
+ * delegated from src/scripts/group-compare.ts.
+ */
+import { igdbImage as igdbCover, scoreClass } from "../../utils/format";
+import {
+  COMMUNITY_MIN_REVIEWS,
+  agreementLabel,
+  graderLabel,
+  signedScore,
+  type CommunityCompareData,
+  type CommunityGameRow,
+} from "../../utils/groupCompare";
+
+interface Props {
+  data: CommunityCompareData;
+}
+const { data } = Astro.props;
+const {
+  subject, options, sharedGames, subjectAvg, communityAvg, meanAbsDiff,
+  agreementPct, above, below, level, hottestTake,
+  higher, lower, subjectTop, communityTop, unreviewed,
+} = data;
+
+const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
+const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+const who = subject.isViewer ? "You" : `@${subject.username}`;
+const optionLabel = (o: { isViewer: boolean; isOwner: boolean; username: string }) =>
+  o.isViewer ? "You" : o.isOwner ? `@${o.username} (owner)` : `@${o.username}`;
+
+const grader = graderLabel(subjectAvg, communityAvg);
+const subjectTopIds = new Set(subjectTop.map((g) => g.game.id));
+const inBothTops = communityTop.filter((g) => subjectTopIds.has(g.game.id)).length;
+const communityTopIds = new Set(communityTop.map((g) => g.game.id));
+const cover = (g: CommunityGameRow) => igdbCover(g.game.cover_img_url, "t_thumb");
+const avg = (n: number | null) => (n != null ? n.toFixed(1) : "—");
+---
+
+<div class="gc-block gcc" data-gc-vs-value={subject.id} data-gc-vs-default={options[0]?.id ?? ""}>
+  <div class="stats-section-header">
+    <span>{who} vs the community</span>
+    <span class="stats-section-count">
+      {sharedGames > 0 ? `over ${plural(sharedGames, "shared game")}` : "everyone else in the group"}
+    </span>
+  </div>
+
+  {options.length >= 2 && (
+    <div class="gc-toggle gcc-switch" role="group" aria-label="Whose scores to compare with the community">
+      {options.map((o) => (
+        <button
+          type="button"
+          class={`gc-toggle-btn${o.id === subject.id ? " gc-toggle-on" : ""}`}
+          data-gc-vs={o.id}
+          aria-pressed={o.id === subject.id ? "true" : "false"}
+        >{optionLabel(o)}</button>
+      ))}
+    </div>
+  )}
+
+  {subject.reviewCount === 0 ? (
+    <div class="empty-tab">
+      {subject.isViewer ? "You haven't" : `@${subject.username} hasn't`} published a review in this group yet.
+    </div>
+  ) : sharedGames === 0 ? (
+    <div class="empty-tab">
+      Nothing to compare yet: none of {subject.isViewer ? "your" : `@${subject.username}'s`} games has been reviewed by
+      at least {COMMUNITY_MIN_REVIEWS} other members.
+    </div>
+  ) : (
+    <>
+      {/* ── Headline ── */}
+      <div class="gcc-hero">
+        <div class="gcc-hero-who">
+          <span class="gc-card-av gcc-av">
+            {subject.avatar_url ? <img src={subject.avatar_url} alt="" loading="lazy" /> : initials(subject.username)}
+          </span>
+          <div class="gcc-hero-text">
+            <div class="gcc-hero-label">{meanAbsDiff != null ? agreementLabel(meanAbsDiff) : "—"}</div>
+            {grader && <div class="gcc-hero-sub">{grader}</div>}
+          </div>
+        </div>
+        <div class="gc-tiles gcc-tiles">
+          <div class="gc-tile">
+            <div class="gc-tile-val">{agreementPct}%</div>
+            <div class="gc-tile-lbl">Within a point</div>
+          </div>
+          <div class="gc-tile">
+            <div class="gc-tile-val">{avg(meanAbsDiff)}</div>
+            <div class="gc-tile-lbl">Average gap</div>
+          </div>
+          <div class="gc-tile">
+            <div class="gc-tile-val gcc-vs-val">
+              <span class={`gc-tile-score ${subjectAvg != null ? scoreClass(Math.round(subjectAvg)) : ""}`}>{avg(subjectAvg)}</span>
+              <span class="gcc-vs-sep">vs</span>
+              <span class={`gc-tile-score ${communityAvg != null ? scoreClass(Math.round(communityAvg)) : ""}`}>{avg(communityAvg)}</span>
+            </div>
+            <div class="gc-tile-lbl">{who} vs community</div>
+          </div>
+          <div class="gc-tile">
+            <div class="gc-tile-val">{above} / {level} / {below}</div>
+            <div class="gc-tile-lbl">Above / level / below</div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Hottest take ── */}
+      {hottestTake && hottestTake.subjectScore != null && hottestTake.diff != null && (
+        <div class="gcc-take">
+          {cover(hottestTake) ? <img class="gcc-take-cover" src={cover(hottestTake)!} alt="" loading="lazy" /> : <div class="gcc-take-cover"></div>}
+          <div class="gcc-take-body">
+            <div class="gcc-take-kicker">{subject.isViewer ? "Your" : `@${subject.username}'s`} hottest take</div>
+            <a class="gcc-take-title" href={`/games/${hottestTake.game.slug}`}>{hottestTake.game.title}</a>
+            <div class="gcc-take-scores">
+              <span>{who} <span class={`score-badge ${scoreClass(hottestTake.subjectScore)}`}>{hottestTake.subjectScore}</span></span>
+              <span>Community <strong>{avg(hottestTake.communityAvg)}</strong> <span class="gcc-n">({hottestTake.communityCount})</span></span>
+            </div>
+          </div>
+          <div class={`gcc-diff gcc-diff-big ${hottestTake.diff > 0 ? "gcc-diff-up" : "gcc-diff-down"}`}>{signedScore(hottestTake.diff)}</div>
+        </div>
+      )}
+
+      {/* ── Where they part ways ── */}
+      {(higher.length > 0 || lower.length > 0) && (
+        <div class="gcc-cols">
+          {[
+            { title: `${who} rated higher`, rows: higher, none: "No game more than a point above the community." },
+            { title: `${who} rated lower`, rows: lower, none: "No game more than a point below the community." },
+          ].map((col) => (
+            <div class="gcc-list">
+              <div class="gcc-list-title">{col.title}</div>
+              {col.rows.length === 0 ? (
+                <div class="gcc-list-empty">{col.none}</div>
+              ) : col.rows.map((g) => (
+                <div class="gcc-row">
+                  {cover(g) ? <img class="gc-game-cover gcc-row-cover" src={cover(g)!} alt="" loading="lazy" /> : <div class="gc-game-cover gcc-row-cover"></div>}
+                  <a class="gcc-row-title" href={`/games/${g.game.slug}`}>{g.game.title}</a>
+                  <span class={`score-badge ${scoreClass(g.subjectScore!)}`} title={`${who}: ${g.subjectScore}`}>{g.subjectScore}</span>
+                  <span class="gcc-row-comm" title={`Community average from ${plural(g.communityCount, "review")}`}>{avg(g.communityAvg)}</span>
+                  <span class={`gcc-diff ${g.diff! > 0 ? "gcc-diff-up" : "gcc-diff-down"}`}>{signedScore(g.diff!)}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  )}
+
+  {/* ── Top 10 vs top 10 ── */}
+  {subjectTop.length > 0 && communityTop.length > 0 && (
+    <>
+      <div class="gcc-subhead">
+        <span>{subject.isViewer ? "Your" : `@${subject.username}'s`} top {subjectTop.length} vs the community's</span>
+        <span class="stats-section-count">{inBothTops} in both</span>
+      </div>
+      <div class="gcc-cols">
+        <div class="gcc-list">
+          <div class="gcc-list-title">{who}</div>
+          <ol class="gcc-top">
+          {subjectTop.map((g, i) => (
+            <li class={`gcc-row${communityTopIds.has(g.game.id) ? " gcc-row-both" : ""}`}>
+              <span class="gcc-rank">{i + 1}</span>
+              <a class="gcc-row-title" href={`/games/${g.game.slug}`}>{g.game.title}</a>
+              <span class={`score-badge ${scoreClass(g.subjectScore!)}`}>{g.subjectScore}</span>
+              <span class="gcc-row-comm" title={g.communityCount > 0 ? `Community average from ${plural(g.communityCount, "review")}` : "No one else has reviewed it"}>
+                {g.communityCount > 0 ? avg(g.communityAvg) : "—"}
+              </span>
+            </li>
+          ))}
+          </ol>
+        </div>
+        <div class="gcc-list">
+          <div class="gcc-list-title">Community</div>
+          <ol class="gcc-top">
+          {communityTop.map((g, i) => (
+            <li class={`gcc-row${subjectTopIds.has(g.game.id) ? " gcc-row-both" : ""}`}>
+              <span class="gcc-rank">{i + 1}</span>
+              <a class="gcc-row-title" href={`/games/${g.game.slug}`}>{g.game.title}</a>
+              <span class="gcc-row-comm gcc-row-comm-main" title={`From ${plural(g.communityCount, "review")}`}>{avg(g.communityAvg)}</span>
+              {g.subjectScore != null
+                ? <span class={`score-badge ${scoreClass(g.subjectScore)}`} title={`${who}: ${g.subjectScore}`}>{g.subjectScore}</span>
+                : <span class="gcc-row-missing" title={`${who} hasn't reviewed it`}>—</span>}
+            </li>
+          ))}
+          </ol>
+        </div>
+      </div>
+      <div class="gcc-note">Community ranks need {COMMUNITY_MIN_REVIEWS}+ reviews from other members and are weighted towards games more of them agree on. Highlighted games are in both lists.</div>
+    </>
+  )}
+
+  {/* ── The community's favourites they haven't reviewed ── */}
+  {unreviewed.length > 0 && (
+    <>
+      <div class="gcc-subhead">
+        <span>The community loves, {subject.isViewer ? "you haven't" : `@${subject.username} hasn't`} reviewed</span>
+      </div>
+      <div class="gcc-list">
+        {unreviewed.map((g) => (
+          <div class="gcc-row">
+            {cover(g) ? <img class="gc-game-cover gcc-row-cover" src={cover(g)!} alt="" loading="lazy" /> : <div class="gc-game-cover gcc-row-cover"></div>}
+            <a class="gcc-row-title" href={`/games/${g.game.slug}`}>{g.game.title}</a>
+            <span class="gcc-n">{plural(g.communityCount, "review")}</span>
+            <span class={`score-badge ${g.communityAvg != null ? scoreClass(Math.round(g.communityAvg)) : ""}`}>{avg(g.communityAvg)}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  )}
+</div>
