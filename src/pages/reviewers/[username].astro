@@ -1170,6 +1170,26 @@ const reviewerBreadcrumbJsonLd = {
     /* Post-sync status message under the sync dropdown — populated by
        profileSteamSync() with a "Synced — N new, N updated" line. */
     .steam-sync-status{font-size:12px;color:var(--text-tertiary);text-align:right;min-height:18px;margin-bottom:12px}
+    .steam-sync-alert{--ssa-red:#ef4444;text-align:left;font-size:13px;line-height:1.5;color:var(--text-secondary);background:color-mix(in srgb,var(--ssa-red) 7%,var(--bg-card));border:1px solid color-mix(in srgb,var(--ssa-red) 35%,var(--border));border-left:3px solid var(--ssa-red);border-radius:10px;padding:14px 16px;margin-bottom:4px}
+    .ssa-head{display:flex;align-items:flex-start;gap:10px}
+    .ssa-icon{color:var(--ssa-red);flex-shrink:0;margin-top:2px;display:flex}
+    .ssa-head-text{flex:1;min-width:0}
+    .ssa-title{font-size:14px;font-weight:700;color:var(--text-primary);line-height:1.3}
+    .ssa-msg{margin-top:2px}
+    .ssa-close{flex-shrink:0;background:none;border:none;color:var(--text-tertiary);font-size:20px;line-height:1;padding:0 2px;cursor:pointer;border-radius:4px}
+    .ssa-close:hover{color:var(--text-primary)}
+    .ssa-body{margin:12px 0 0 26px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--ssa-red) 20%,var(--border))}
+    .ssa-sub{font-weight:600;color:var(--text-primary);margin-bottom:6px}
+    .ssa-steps{margin:0 0 12px;padding-left:20px}
+    .ssa-steps li{margin-bottom:4px}
+    .ssa-steps li::marker{color:var(--text-tertiary);font-weight:600}
+    .ssa-steps strong{color:var(--text-primary)}
+    .ssa-actions{display:flex;flex-wrap:wrap;gap:8px}
+    .ssa-btn{display:inline-flex;align-items:center;font-size:12px;font-weight:600;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);cursor:pointer;text-decoration:none;font-family:inherit}
+    .ssa-btn:hover{border-color:var(--accent);color:var(--accent)}
+    .ssa-btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+    .ssa-btn--primary:hover{filter:brightness(1.1);color:var(--accent-text)}
+    @media (max-width:520px){.ssa-body{margin-left:0}.ssa-btn{flex:1;justify-content:center}}
     /* Library: Overview/Detailed pills share this row with the sync dropdown */
     .lib-view-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
     .lib-view-row .sort-tabs{margin-bottom:0}
@@ -5247,7 +5267,12 @@ const reviewerBreadcrumbJsonLd = {
       });
       var data = await res.json();
       if (!res.ok) {
-        if (statusEl) { statusEl.textContent = data.error || 'Sync failed.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block'; }
+        // Rate-limit errors are self-explanatory; anything else is most often
+        // a private Steam profile, so point at the privacy settings.
+        var message = data.code === 'steam_private'
+          ? 'Steam didn’t return any games — this usually means your library is hidden.'
+          : (data.error || 'Something went wrong.');
+        showSteamSyncError(statusEl, message, res.status !== 429);
       } else {
         var parts = [data.matched + ' new', data.updated + ' updated'];
         if (data.removed > 0) parts.push(data.removed + ' removed');
@@ -5260,12 +5285,59 @@ const reviewerBreadcrumbJsonLd = {
         }, 1500);
       }
     } catch (e) {
-      if (statusEl) { statusEl.textContent = 'Network error.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block'; }
+      showSteamSyncError(statusEl, 'Sync failed — could not reach the server.', true);
     } finally {
       btn.disabled = false;
       btn.textContent = 'Sync now';
     }
   };
+
+  // Failure card under the sync row. Mirrors the "Steam privacy requirements"
+  // note on /settings, since a private profile is the usual cause. The sync
+  // menu is closed first — it drops down over this exact spot.
+  function showSteamSyncError(statusEl: HTMLElement | null, message: string, withPrivacyHint: boolean) {
+    if (!statusEl) return;
+    var wrap = document.querySelector('.lib-sync') as HTMLElement | null;
+    if (wrap && wrap.getAttribute('data-open') === 'true') (window as any).toggleLibSyncMenu();
+
+    var card = document.createElement('div');
+    card.className = 'steam-sync-alert';
+    card.setAttribute('role', 'alert');
+    card.innerHTML =
+      '<div class="ssa-head">' +
+        '<span class="ssa-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>' +
+        '<div class="ssa-head-text"><div class="ssa-title">Steam sync failed</div><div class="ssa-msg"></div></div>' +
+        '<button type="button" class="ssa-close" aria-label="Dismiss">&times;</button>' +
+      '</div>' +
+      (withPrivacyHint
+        ? '<div class="ssa-body">' +
+            '<div class="ssa-sub">Make sure your Steam profile is public</div>' +
+            '<ol class="ssa-steps">' +
+              '<li>In Steam, go to <strong>Edit Profile → Privacy Settings</strong>.</li>' +
+              '<li>Set <strong>Game details</strong> to <strong>Public</strong>.</li>' +
+              '<li>Uncheck <strong>“Always keep my total playtime private”</strong> so your hours sync — otherwise every game shows 0 hours.</li>' +
+            '</ol>' +
+            '<div class="ssa-actions">' +
+              '<a class="ssa-btn ssa-btn--primary" href="https://steamcommunity.com/my/edit/settings" target="_blank" rel="noopener noreferrer">Open Steam privacy settings ↗</a>' +
+              '<button type="button" class="ssa-btn ssa-retry">Try again</button>' +
+            '</div>' +
+          '</div>'
+        : '');
+    (card.querySelector('.ssa-msg') as HTMLElement).textContent = message;
+    card.querySelector('.ssa-close')?.addEventListener('click', function() {
+      statusEl.textContent = '';
+      statusEl.style.display = 'none';
+    });
+    card.querySelector('.ssa-retry')?.addEventListener('click', function() {
+      (window as any).profileSteamSync();
+    });
+
+    statusEl.textContent = '';
+    statusEl.style.color = '';
+    statusEl.style.display = 'block';
+    statusEl.appendChild(card);
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
 </script>
 
 <script is:inline>
