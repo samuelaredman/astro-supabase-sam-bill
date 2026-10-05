@@ -3,6 +3,8 @@ export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../utils/database";
 import Layout from "../../components/Layout.astro";
 import { getPageUser } from "../../utils/pageAuth";
+import { groupGradient } from "../../utils/groupTheme";
+import GroupCard, { type GroupCardSummary } from "../../components/groups/GroupCard.astro";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, supabase);
@@ -17,7 +19,7 @@ if (!profile) return Astro.redirect("/signin");
 // My groups
 const { data: myMemberships } = await (supabase as any)
   .from("group_members")
-  .select(`role, groups ( id, name, description, avatar_url, visibility, created_at )`)
+  .select(`role, groups ( id, name, description, avatar_url, banner_url, banner_position, visibility, created_at )`)
   .eq("profile_id", profile.id)
   .order("joined_at", { ascending: false });
 
@@ -47,13 +49,25 @@ const { data: pendingInvites } = await (supabase as any)
 // Discover all groups the user isn't already a member of (including private — users can apply to join)
 const { data: discoverGroups } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, visibility, requires_approval, created_at")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, created_at")
   .in("visibility", ["public", "private"])
   .not("id", "in", `(${groupIds.length > 0 ? groupIds.join(",") : "00000000-0000-0000-0000-000000000000"})`)
   .order("created_at", { ascending: false })
   .limit(20);
 
 const discoverMemberCounts = await countMembers((discoverGroups ?? []).map((g: any) => g.id));
+
+// Covers, member avatars and activity for every card, in one call. A missing
+// function (migration not applied yet) just leaves the cards without them.
+async function loadSummaries(ids: string[]): Promise<Record<string, GroupCardSummary>> {
+  const out: Record<string, GroupCardSummary> = {};
+  if (ids.length === 0) return out;
+  const { data, error } = await db.rpc("group_card_summaries", { p_group_ids: ids });
+  if (error) console.error("[groups] card summaries error:", JSON.stringify(error));
+  for (const row of data ?? []) out[row.group_id] = row;
+  return out;
+}
+const summaries = await loadSummaries([...groupIds, ...(discoverGroups ?? []).map((g: any) => g.id)]);
 
 // User's pending join requests (so we can show status in discover)
 const { data: pendingRequests } = await (supabase as any)
@@ -74,13 +88,9 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
   .btn-primary:hover { opacity:.85; }
   .section-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--text-tertiary); padding:24px 28px 10px; }
   .group-list { display:flex; flex-direction:column; gap:1px; }
-  .group-card { display:flex; align-items:center; gap:14px; padding:14px 28px; background:var(--bg-card); border-bottom:1px solid var(--border-subtle); transition:background .12s; text-decoration:none; color:inherit; }
-  .group-card:hover { background:var(--bg-hover); }
+  .group-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:16px; padding:0 28px 8px; }
+  @media (max-width: 640px) { .group-grid { grid-template-columns:1fr; padding:0 16px 8px; } }
   .group-avatar { width:44px; height:44px; border-radius:12px; background:var(--accent-subtle); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-family:'DM Serif Display',serif; font-size:16px; font-weight:600; color:var(--accent); flex-shrink:0; overflow:hidden; }
-  .group-avatar img { width:100%; height:100%; object-fit:cover; }
-  .group-info { flex:1; min-width:0; }
-  .group-name { font-size:15px; font-weight:600; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .group-meta { font-size:12px; color:var(--text-tertiary); display:flex; align-items:center; gap:8px; }
   .group-role { font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; background:var(--accent-subtle); color:var(--accent); text-transform:capitalize; }
   .visibility-badge { font-size:11px; padding:2px 8px; border-radius:10px; background:var(--tag-bg); color:var(--tag-text); }
   .empty-state { padding:40px 28px; text-align:center; color:var(--text-tertiary); font-size:14px; }
@@ -115,7 +125,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
       <div class="group-list" id="invites-list">
         {(pendingInvites ?? []).map((inv: any) => (
           <div class="invite-card" data-invite-id={inv.id} data-group-id={inv.group_id}>
-            <div class="group-avatar">{getInitials(inv.groups?.name ?? "?")}</div>
+            <div class="group-avatar" style={`background:${groupGradient(inv.group_id)};color:#fff;border:none`}>{getInitials(inv.groups?.name ?? "?")}</div>
             <div class="invite-info">
               <div class="invite-group-name">{inv.groups?.name}</div>
               <div class="invite-from">Invited by @{inv.invited_by_profile?.username}</div>
@@ -145,21 +155,12 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
   {myGroups.length > 0 && (
     <div>
       <div class="section-label">My Groups</div>
-      <div class="group-list">
+      <div class="group-grid">
         {myGroups.map((g: any) => (
-          <a class="group-card" href={`/groups/${g.id}`}>
-            <div class="group-avatar">
-              {g.avatar_url ? <img src={g.avatar_url} alt={g.name} /> : getInitials(g.name)}
-            </div>
-            <div class="group-info">
-              <div class="group-name">{g.name}</div>
-              <div class="group-meta">
-                <span>{memberCounts[g.id] ?? 1} member{(memberCounts[g.id] ?? 1) !== 1 ? "s" : ""}</span>
-                <span class="visibility-badge">{g.visibility}</span>
-              </div>
-            </div>
-            <span class="group-role">{g.role}</span>
-          </a>
+          <GroupCard group={g} memberCount={memberCounts[g.id] ?? 1} summary={summaries[g.id]}>
+            <span slot="meta" class="visibility-badge">{g.visibility}</span>
+            <span slot="badge" class="group-role">{g.role}</span>
+          </GroupCard>
         ))}
       </div>
     </div>
@@ -169,32 +170,20 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
   {(discoverGroups ?? []).length > 0 && (
     <div>
       <div class="section-label">Discover Groups</div>
-      <div class="group-list">
+      <div class="group-grid">
         {(discoverGroups ?? []).map((g: any) => {
           const isPending = pendingRequestGroupIds.has(g.id);
           const isPrivate = g.visibility === "private";
           const needsApproval = isPrivate || !!g.requires_approval;
           return (
-            <a class="group-card" href={`/groups/${g.id}`}>
-              <div class="group-avatar">
-                {g.avatar_url ? <img src={g.avatar_url} alt={g.name} /> : getInitials(g.name)}
-              </div>
-              <div class="group-info">
-                <div class="group-name">
-                  {isPrivate && <span style="margin-right:5px">🔒</span>}
-                  {g.name}
-                </div>
-                <div class="group-meta">
-                  <span>{discoverMemberCounts[g.id] ?? 0} member{(discoverMemberCounts[g.id] ?? 0) !== 1 ? "s" : ""}</span>
-                  {isPrivate && <span class="visibility-badge">Private</span>}
-                  {!isPrivate && g.requires_approval && <span class="visibility-badge">Application required</span>}
-                </div>
-              </div>
+            <GroupCard group={g} memberCount={discoverMemberCounts[g.id] ?? 0} summary={summaries[g.id]} isPrivate={isPrivate}>
+              {isPrivate && <span slot="meta" class="visibility-badge">Private</span>}
+              {!isPrivate && g.requires_approval && <span slot="meta" class="visibility-badge">Application required</span>}
               {isPending
-                ? <span class="badge-pending">Request pending</span>
-                : <span class="join-link">{needsApproval ? "Request →" : "View →"}</span>
+                ? <span slot="badge" class="badge-pending">Request pending</span>
+                : <span slot="badge" class="join-link">{needsApproval ? "Request →" : "View →"}</span>
               }
-            </a>
+            </GroupCard>
           );
         })}
       </div>
