@@ -2965,6 +2965,25 @@ const reviewerBreadcrumbJsonLd = {
   var _allAchievements = null
   var _achPickerSlot = 0
 
+  // Steam, PSN and Xbox unlocks can all be featured. When the user has a game
+  // on more than one platform, its unlocks carry a platform tag in front of
+  // the game name (src/utils/achievementShowcase.ts sets multi_platform).
+  // Showcases saved before PSN/Xbox have no source and are Steam.
+  var _ACH_SOURCE_TAG = { steam: 'Steam', psn: 'PSN', xbox: 'Xbox' }
+  function _achSourceTag(ach) {
+    var source = ach.source || 'steam'
+    if (!ach.multi_platform || !_ACH_SOURCE_TAG[source]) return null
+    var tag = document.createElement('span')
+    tag.className = 'ach-src-tag ach-src-tag--' + source
+    tag.textContent = _ACH_SOURCE_TAG[source]
+    return tag
+  }
+  function _achGameLabel(ach) {
+    var title = ach.game_title || ('App ' + (ach.external_id || ach.steam_appid))
+    var source = ach.source || 'steam'
+    return ach.multi_platform && _ACH_SOURCE_TAG[source] ? _ACH_SOURCE_TAG[source] + ' · ' + title : title
+  }
+
   ;(function initAchShowcase() {
     var padded = currentAchShowcase.slice()
     while (padded.length < 5) padded.push(null)
@@ -3024,7 +3043,11 @@ const reviewerBreadcrumbJsonLd = {
         var name = document.createElement('div'); name.className = 'ach-showcase-name'
         name.textContent = ach.display_name || ach.api_name || ''; wrap.appendChild(name)
         var game = document.createElement('div'); game.className = 'ach-showcase-game'
-        game.textContent = ach.game_title || ''; wrap.appendChild(game)
+        var gameTag = _achSourceTag(ach)
+        if (gameTag) game.appendChild(gameTag)
+        game.appendChild(document.createTextNode(ach.game_title || ''))
+        game.title = _achGameLabel(ach)
+        wrap.appendChild(game)
         grid.appendChild(wrap)
       } else {
         var empty = document.createElement('div'); empty.className = 'ach-showcase-empty'
@@ -3048,7 +3071,7 @@ const reviewerBreadcrumbJsonLd = {
     if (searchEl) searchEl.value = ''
     if (_allAchievements) { _populateGameFilter(_allAchievements); filterAchPicker(); return }
     document.getElementById('achPickerList').innerHTML = '<div class="modal-empty">Loading…</div>'
-    fetch('/api/steam/my-achievements').then(function(r) { return r.ok ? r.json() : Promise.reject() })
+    fetch('/api/profile/showcase-achievements').then(function(r) { return r.ok ? r.json() : Promise.reject() })
       .then(function(data) {
         _allAchievements = data.achievements || []
         _populateGameFilter(_allAchievements)
@@ -3064,10 +3087,12 @@ const reviewerBreadcrumbJsonLd = {
     if (!gameEl || gameEl.options.length > 1) return
     var seen = {}, games = []
     achievements.forEach(function(a) {
-      var t = a.game_title || ('App ' + a.steam_appid)
+      var t = _achGameLabel(a)
       if (!seen[t]) { seen[t] = true; games.push(t) }
     })
-    games.sort().forEach(function(g) {
+    // Sort by game, so a game's platforms sit next to each other
+    function _bare(label) { return label.replace(/^(Steam|PSN|Xbox) · /, '').toLowerCase() }
+    games.sort(function(x, y) { return _bare(x) < _bare(y) ? -1 : _bare(x) > _bare(y) ? 1 : x < y ? -1 : x > y ? 1 : 0 }).forEach(function(g) {
       var opt = document.createElement('option'); opt.value = g; opt.textContent = g
       gameEl.appendChild(opt)
     })
@@ -3083,8 +3108,7 @@ const reviewerBreadcrumbJsonLd = {
     var q    = searchEl ? searchEl.value.toLowerCase().trim() : ''
     var game = gameEl  ? gameEl.value : ''
     var filtered = _allAchievements.filter(function(a) {
-      var aGame = a.game_title || ('App ' + a.steam_appid)
-      if (game && aGame !== game) return false
+      if (game && _achGameLabel(a) !== game) return false
       if (q && !(a.display_name || a.api_name || '').toLowerCase().includes(q)) return false
       return true
     })
@@ -3116,6 +3140,8 @@ const reviewerBreadcrumbJsonLd = {
         ph.textContent = '🏆'; iw.appendChild(ph)
       }
       card.appendChild(iw)
+      var pickTag = _achSourceTag(ach)
+      if (pickTag) card.appendChild(pickTag)
       var nm = document.createElement('div'); nm.className = 'ach-picker-card-name'
       nm.textContent = ach.display_name || ach.api_name || ''; card.appendChild(nm)
       if (ach.global_percent != null) {
@@ -3125,7 +3151,7 @@ const reviewerBreadcrumbJsonLd = {
       }
       card.onclick = async function() {
         var sc = currentAchShowcase.slice()
-        sc[_achPickerSlot] = { api_name: ach.api_name, steam_appid: ach.steam_appid, display_name: ach.display_name, description: ach.description, icon_url: ach.icon_url, global_percent: ach.global_percent, game_title: ach.game_title }
+        sc[_achPickerSlot] = { source: ach.source, external_id: ach.external_id, api_name: ach.api_name, steam_appid: ach.steam_appid, display_name: ach.display_name, description: ach.description, icon_url: ach.icon_url, global_percent: ach.global_percent, game_title: ach.game_title, trophy_type: ach.trophy_type, multi_platform: ach.multi_platform }
         closeAchPicker()
         try {
           var r = await fetch('/api/profile/update', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ showcase_achievements: sc.filter(Boolean) }) })
@@ -6381,6 +6407,16 @@ async function createNewList(btn) {
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
   .ach-picker-card-pct { font-size: 9px; color: var(--text-tertiary); }
+  /* Platform tag for games the user has on more than one platform; colours
+     match the Achievements feed's .ach-feed-src badges */
+  .ach-src-tag {
+    display: inline-block; vertical-align: 1px; margin-right: 4px; padding: 1px 4px; border-radius: 4px;
+    font-size: 8px; font-weight: 700; line-height: 1.3; letter-spacing: .04em; text-transform: uppercase; color: #fff;
+  }
+  .ach-src-tag--steam { background: #1b2838; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); }
+  .ach-src-tag--psn   { background: #003791; }
+  .ach-src-tag--xbox  { background: #107C10; }
+  .ach-picker-card .ach-src-tag { margin-right: 0; }
   .ach-picker-card-pct--rare { color: #ca8a04; font-weight: 700; }
 
   /* ── Achievement filters ── */
