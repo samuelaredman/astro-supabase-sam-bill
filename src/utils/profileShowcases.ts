@@ -1,14 +1,14 @@
 // Showcase sections on a profile's Overview tab that the owner can hide.
-// Hidden sections aren't rendered for anyone; they're turned back on in
-// Settings → Profile showcases. Keys are stored in profiles.hidden_showcases
-// (the migration's CHECK constraint lists the same keys).
+// Hidden sections aren't shown to visitors, or to the owner outside Edit
+// profile, where they can be shown again. Keys are stored in
+// profiles.hidden_showcases (the migration's CHECK constraint lists the same keys).
 
 export const SHOWCASE_SECTIONS = [
-  { key: 'favorite_game', label: 'Favorite game', icon: '⭐', desc: 'The one game that defines you.' },
-  { key: 'featured_group', label: 'Join my community', icon: '👥', desc: 'A group you invite visitors to join.' },
-  { key: 'video', label: 'Video', icon: '🎬', desc: 'Your latest YouTube upload or a featured video.' },
-  { key: 'games', label: 'Game showcase', icon: '🎮', desc: 'Three games you want to show off.' },
-  { key: 'achievements', label: 'Achievement showcase', icon: '🏆', desc: 'Five achievements you’re proud of.' },
+  { key: 'favorite_game', label: 'Favorite game' },
+  { key: 'featured_group', label: 'Join my community' },
+  { key: 'video', label: 'Video' },
+  { key: 'games', label: 'Game showcase' },
+  { key: 'achievements', label: 'Achievement showcase' },
 ] as const;
 
 export type ShowcaseKey = (typeof SHOWCASE_SECTIONS)[number]['key'];

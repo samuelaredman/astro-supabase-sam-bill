@@ -4,7 +4,6 @@ import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../util
 import Layout from "../components/Layout.astro";
 import { LIBRARY_SCRAPER_SOURCE } from "../utils/backloggd/libraryScraperSource";
 import { getPageUser } from "../utils/pageAuth";
-import { SHOWCASE_SECTIONS, readHiddenShowcases } from "../utils/profileShowcases";
 
 // Drag-to-bookmarks-bar bookmarklet: the library scraper as a javascript: URI.
 // encodeURIComponent so it's safe inside a double-quoted href with no eval().
@@ -34,10 +33,6 @@ const { data: adminRow } = await db
   .eq('profile_id', profile.id)
   .maybeSingle();
 const isSiteAdmin = !!adminRow;
-
-// Own query so Settings still loads if the hidden_showcases migration isn't applied.
-const { data: showcaseRow } = await db.from('profiles').select('hidden_showcases').eq('id', profile.id).maybeSingle();
-const hiddenShowcases = new Set<string>(readHiddenShowcases(showcaseRow?.hidden_showcases) ?? []);
 
 // Username-change availability (policy enforced server-side in
 // /api/profile/change-username — this is just for the button/copy state).
@@ -139,29 +134,6 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
             <span id="pwMsg" style="font-size:12px"></span>
           </div>
         </div>
-      </div>
-    </section>
-
-    <!-- Profile showcases -->
-    <section class="settings-section" id="showcases">
-      <div class="settings-section-label">Profile showcases</div>
-      <div class="settings-row" style="flex-direction:column;align-items:stretch;gap:0">
-        <div class="settings-row-sub" style="margin-bottom:4px">
-          Choose which sections appear on the Overview tab of <a href={`/reviewers/${profile.username}`} style="color:var(--accent)">your profile</a>. Hidden sections aren't shown to anyone, including you — your picks are kept for when you turn them back on.
-        </div>
-        {SHOWCASE_SECTIONS.map((sec) => (
-          <div class="priv-row showcase-row">
-            <div class="settings-row-text">
-              <div class="settings-row-label">{sec.icon} {sec.label}</div>
-              <div class="settings-row-sub">{sec.desc}</div>
-            </div>
-            <div class="priv-toggle" data-showcase={sec.key}>
-              <button class={`priv-opt${hiddenShowcases.has(sec.key) ? '' : ' active'}`} data-value="show" onclick={`setShowcaseVisible('${sec.key}', true, this)`}>Show</button>
-              <button class={`priv-opt${hiddenShowcases.has(sec.key) ? ' active' : ''}`} data-value="hide" onclick={`setShowcaseVisible('${sec.key}', false, this)`}>Hide</button>
-            </div>
-          </div>
-        ))}
-        <div id="showcasesMsg" style="font-size:12px;min-height:16px;margin-top:8px"></div>
       </div>
     </section>
 
@@ -879,8 +851,6 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
   }
 
   /* ── Privacy ── */
-  .showcase-row + .showcase-row { border-top: 1px solid var(--border-subtle); }
-  .showcase-row { padding: 12px 0; }
   .priv-row {
     display: flex;
     align-items: center;
@@ -1267,7 +1237,6 @@ declare global {
     changeUsername: () => Promise<void>;
     setPrivacy: (field: string, value: string, btn: HTMLElement) => Promise<void>;
     setSearchIndexable: (value: boolean, btn: HTMLElement) => Promise<void>;
-    setShowcaseVisible: (key: string, visible: boolean, btn: HTMLElement) => Promise<void>;
     toggleSettingsSection: (id: string) => void;
     steamSync: () => Promise<void>;
     steamDisconnect: () => Promise<void>;
@@ -1361,42 +1330,6 @@ async function setSearchIndexable(value: boolean, btn: HTMLElement) {
   }
 }
 window.setSearchIndexable = setSearchIndexable;
-
-// Profile showcases — the toggles are the source of truth for the saved list.
-async function setShowcaseVisible(key: string, visible: boolean, btn: HTMLElement) {
-  const toggle = btn.closest('.priv-toggle') as HTMLElement | null;
-  if (!toggle || btn.classList.contains('active')) return;
-  const prevActive = toggle.querySelector('.priv-opt.active') as HTMLElement | null;
-  toggle.querySelectorAll('.priv-opt').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  const hidden = Array.from(document.querySelectorAll('#showcases .priv-toggle'))
-    .filter(t => t.querySelector('.priv-opt.active')?.getAttribute('data-value') === 'hide')
-    .map(t => (t as HTMLElement).dataset.showcase);
-  const msg = document.getElementById('showcasesMsg');
-  if (msg) msg.textContent = '';
-  try {
-    const res = await fetch('/api/profile/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hidden_showcases: hidden }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error ?? 'Failed to save');
-    if (msg) {
-      msg.textContent = visible ? 'Shown on your profile.' : 'Hidden from your profile.';
-      (msg as HTMLElement).style.color = 'var(--score-great, #4ade80)';
-      setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
-    }
-  } catch (e: any) {
-    toggle.querySelectorAll('.priv-opt').forEach(b => b.classList.remove('active'));
-    prevActive?.classList.add('active');
-    if (msg) {
-      msg.textContent = e.message ?? 'Something went wrong.';
-      (msg as HTMLElement).style.color = '#f87171';
-    }
-  }
-}
-window.setShowcaseVisible = setShowcaseVisible;
 
 // ─── Collapsible sections (Steam / PSN / Backloggd) ─────────────────────────
 function toggleSettingsSection(id: string) {
