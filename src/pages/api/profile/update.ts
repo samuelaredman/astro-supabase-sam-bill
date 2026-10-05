@@ -3,7 +3,7 @@ import type { APIRoute } from 'astro';
 import { requireAuth, json } from '../../../utils/api';
 import { validateSocialUrl } from '../../../utils/socialLinks';
 import { parseYouTubeId } from '../../../utils/youtube';
-import { readHiddenShowcases } from '../../../utils/profileShowcases';
+import { readShowcaseKeys } from '../../../utils/profileShowcases';
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -42,9 +42,15 @@ export const POST: APIRoute = async (context) => {
   }
 
   if ('hidden_showcases' in body) {
-    const hidden = readHiddenShowcases(body.hidden_showcases);
+    const hidden = readShowcaseKeys(body.hidden_showcases);
     if (!hidden) return json({ error: 'Invalid showcase list.' }, 400);
     update.hidden_showcases = hidden;
+  }
+
+  if ('showcase_order' in body) {
+    const order = readShowcaseKeys(body.showcase_order);
+    if (!order) return json({ error: 'Invalid showcase order.' }, 400);
+    update.showcase_order = order;
   }
 
   if (Object.keys(update).length === 0)
