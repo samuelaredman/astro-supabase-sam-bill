@@ -2,6 +2,7 @@ export const prerender = false;
 import type { APIRoute } from 'astro';
 import { requireAuth, json } from '../../../utils/api';
 import { validateSocialUrl } from '../../../utils/socialLinks';
+import { parseYouTubeId } from '../../../utils/youtube';
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -18,6 +19,25 @@ export const POST: APIRoute = async (context) => {
   const update: Record<string, any> = {};
   for (const key of allowed) {
     if (key in body) update[key] = body[key];
+  }
+
+  // Video showcase: mode is 'latest' | 'featured' | null (off). A featured
+  // video arrives as a pasted link and is stored as its 11-char id.
+  if ('showcase_video_mode' in body) {
+    const mode = body.showcase_video_mode || null;
+    if (mode !== null && mode !== 'latest' && mode !== 'featured')
+      return json({ error: 'Invalid video showcase option.' }, 400);
+    if (mode === 'featured') {
+      const id = parseYouTubeId(typeof body.showcase_video_url === 'string' ? body.showcase_video_url : '');
+      if (!id) return json({ error: "That doesn't look like a YouTube video link." }, 400);
+      update.showcase_video_id = id;
+    }
+    if (mode === 'latest') {
+      const { data: row } = await db.from('profiles').select('youtube_url').eq('id', profile.id).maybeSingle();
+      const youtubeUrl = 'youtube_url' in update ? update.youtube_url : row?.youtube_url;
+      if (!youtubeUrl) return json({ error: 'Add your YouTube channel to your profile links first.' }, 400);
+    }
+    update.showcase_video_mode = mode;
   }
 
   if (Object.keys(update).length === 0)

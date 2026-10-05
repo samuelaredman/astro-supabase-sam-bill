@@ -2231,6 +2231,8 @@ export type Database = {
           search_indexable_at: string | null
           showcase_achievements: Json | null
           showcase_games: Json | null
+          showcase_video_id: string | null
+          showcase_video_mode: string | null
           steam_id: string | null
           steam_reviews_import_done_at: string | null
           steam_synced_at: string | null
@@ -2300,6 +2302,8 @@ export type Database = {
           search_indexable_at?: string | null
           showcase_achievements?: Json | null
           showcase_games?: Json | null
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
@@ -2369,6 +2373,8 @@ export type Database = {
           search_indexable_at?: string | null
           showcase_achievements?: Json | null
           showcase_games?: Json | null
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
