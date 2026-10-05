@@ -14,8 +14,12 @@
  * first paint and every later pick can't drift apart.
  */
 
-/** Other members who must have reviewed a game before it counts as the community's opinion. */
-export const COMMUNITY_MIN_REVIEWS = 2;
+/**
+ * Other members who must have reviewed a game before it counts as the
+ * community's opinion. One: most games here have only a handful of reviews,
+ * and at two a typical member had nothing in common with their group at all.
+ */
+export const COMMUNITY_MIN_REVIEWS = 1;
 
 /** Games in each list on the tab. */
 export const VERSUS_LIST_SHOWN = 5;
@@ -57,6 +61,8 @@ export interface GroupVersusData {
   viewerIsGuest: boolean;
   /** Other-side reviews a game needs before it counts. */
   minReviews: number;
+  /** A stats query failed (e.g. the migration isn't applied), so the numbers can't be trusted. */
+  failed: boolean;
   sharedGames: number;
   subjectAvg: number | null;
   otherAvg: number | null;
@@ -214,6 +220,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     options: versusOptions(ranked, subjectId, opponentId),
     viewerIsGuest: !viewerProfileId || !byId.has(viewerProfileId),
     minReviews,
+    failed: false,
     sharedGames: 0, subjectAvg: null, otherAvg: null, meanAbsDiff: null,
     agreementPct: 0, above: 0, below: 0, level: 0,
     disagreements: [], agreements: [], unreviewed: [],
@@ -243,9 +250,11 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       .order("other_weighted", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
       .limit(VERSUS_LIST_SHOWN),
   ]);
-  for (const res of [summaryRes, disagreeRes, agreeRes, unreviewedRes]) {
+  const results = [summaryRes, disagreeRes, agreeRes, unreviewedRes];
+  for (const res of results) {
     if (res?.error) console.error("[groupCompare] versus error:", JSON.stringify(res.error));
   }
+  if (results.some((res) => res?.error)) return { ...data, failed: true };
 
   const s = summaryRes?.data;
   return {
