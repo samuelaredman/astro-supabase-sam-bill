@@ -1,19 +1,13 @@
 /**
- * The group Feed tab: its filters, its "Load more", and the vote on the day's
- * disagreement.
+ * The group Feed tab: its filters and its "Load more".
  *
  * Filtering and paging re-fetch /groups/[id]/feed — the same loader and
  * components the page rendered — rather than building cards in JS, so the
- * markup can't drift from the first paint. Voting is the exception: the API
- * returns the new counts and the card is already carrying the elements to put
- * them in, so it updates in place instead of re-rendering the feed under
- * someone who has scrolled.
+ * markup can't drift from the first paint.
  *
  * Every listener is delegated from document and registered once, because the
  * controls are replaced on each swap.
  */
-import { votePercents } from "../utils/groupFeed";
-
 const PANEL_ID = "feed-panel";
 
 function panel(): HTMLElement | null {
@@ -97,71 +91,6 @@ async function loadMore(button: HTMLElement) {
   }
 }
 
-/** Take a side in the day's disagreement. */
-async function vote(button: HTMLElement) {
-  const card = button.closest<HTMLElement>("[data-dd-root]");
-  const votedFor = button.dataset.ddVote;
-  const groupId = card?.dataset.ddGroup;
-  if (!card || !votedFor || !groupId || card.dataset.ddBusy === "1") return;
-
-  card.dataset.ddBusy = "1";
-  const error = card.querySelector<HTMLElement>("[data-dd-error]");
-  if (error) error.hidden = true;
-  try {
-    const res = await fetch("/api/groups/disagreement/vote", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ group_id: groupId, voted_for: votedFor }),
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.success) throw new Error(data?.error ?? String(res.status));
-    card.dataset.ddVoted = data.voted_for;
-    paintVote(card, data);
-  } catch {
-    if (error) error.hidden = false;
-  } finally {
-    card.dataset.ddBusy = "";
-  }
-}
-
-function paintVote(
-  card: HTMLElement,
-  data: { voted_for: string; high: { profile_id: string; votes: number }; low: { profile_id: string; votes: number } }
-) {
-  const pct = votePercents(data.high.votes, data.low.votes);
-  const share: Record<string, { votes: number; pct: number }> = {
-    [data.high.profile_id]: { votes: data.high.votes, pct: pct.high },
-    [data.low.profile_id]: { votes: data.low.votes, pct: pct.low },
-  };
-
-  for (const result of card.querySelectorAll<HTMLElement>("[data-dd-result]")) {
-    const side = share[result.dataset.ddResult ?? ""];
-    if (!side) continue;
-    result.hidden = false;
-    const bar = result.querySelector<HTMLElement>("[data-dd-bar]");
-    if (bar) bar.style.width = `${side.pct}%`;
-    const pctEl = result.querySelector<HTMLElement>("[data-dd-pct]");
-    if (pctEl) pctEl.textContent = String(side.pct);
-    const votesEl = result.querySelector<HTMLElement>("[data-dd-votes]");
-    if (votesEl) votesEl.textContent = String(side.votes);
-  }
-
-  for (const btn of card.querySelectorAll<HTMLElement>("[data-dd-vote]")) {
-    const on = btn.dataset.ddVote === data.voted_for;
-    btn.classList.toggle("dd-vote-on", on);
-    btn.setAttribute("aria-pressed", on ? "true" : "false");
-    btn.textContent = on ? "You're with them" : `Side with @${btn.dataset.ddUsername ?? ""}`;
-    btn.closest<HTMLElement>(".dd-side")?.classList.toggle("dd-side-mine", on);
-  }
-
-  const prompt = card.querySelector<HTMLElement>("[data-dd-prompt]");
-  if (prompt) prompt.hidden = true;
-  const tallied = card.querySelector<HTMLElement>("[data-dd-tallied]");
-  if (tallied) tallied.hidden = false;
-  const total = card.querySelector<HTMLElement>("[data-dd-total]");
-  if (total) total.textContent = String(data.high.votes + data.low.votes);
-}
-
 export function initGroupFeed() {
   if ((window as any).__gfInit) return;
   (window as any).__gfInit = true;
@@ -178,10 +107,7 @@ export function initGroupFeed() {
     }
 
     const moreBtn = target.closest<HTMLElement>("[data-gf-more]");
-    if (moreBtn) { void loadMore(moreBtn); return; }
-
-    const voteBtn = target.closest<HTMLElement>("[data-dd-vote]");
-    if (voteBtn) void vote(voteBtn);
+    if (moreBtn) void loadMore(moreBtn);
   });
 }
 

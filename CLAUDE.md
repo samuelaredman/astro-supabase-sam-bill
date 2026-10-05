@@ -304,14 +304,6 @@ supabase/
   Each card carries the viewer's own score for that game — the point of the tab, and the one thing a
   chat app can't show. The filters ("We disagree", "Haven't played") are applied inside `group_feed()`,
   not after the rows arrive: filtering a page of 20 in JS shows a handful of rows and pages wrongly.
-- **The disagreement of the day heads the feed.** `group_daily_disagreement(group, day)` picks one game
-  two members scored 3+ apart, derived from the group id and the date rather than stored — the same
-  pick for everyone all day, rotating through the 30 widest disagreements, with no nightly job. Votes
-  go to `group_disagreement_votes` (one per member per group per day) via
-  `POST /api/groups/disagreement/vote`, which re-derives the day's pairing server-side so a
-  hand-written request can't vote for a profile that isn't one of today's two sides. The day boundary
-  is `siteDay()` — Los Angeles, matching the home page's "today" — so it must not be the viewer's own
-  timezone. Note the viewer can be one of the two sides; they get "that's your review", not a vote.
 - **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
   not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
   so we can moderate the groups we run without joining them. Owner-only actions (delete, transfer,

@@ -3,8 +3,6 @@ import {
   parseFeedFilter,
   parseFeedOffset,
   scoreComparison,
-  siteDay,
-  votePercents,
 } from "./groupFeed";
 
 describe("parseFeedFilter", () => {
@@ -41,38 +39,6 @@ describe("parseFeedOffset", () => {
     expect(parseFeedOffset("many")).toBe(0);
     expect(parseFeedOffset(undefined)).toBe(0);
     expect(parseFeedOffset(Infinity)).toBe(0);
-  });
-});
-
-describe("siteDay", () => {
-  it("formats the Los Angeles day as YYYY-MM-DD", () => {
-    expect(siteDay(new Date("2026-09-12T18:00:00Z"))).toBe("2026-09-12");
-  });
-
-  it("is still yesterday just after UTC midnight", () => {
-    // 00:30 UTC on the 13th is 17:30 on the 12th in Los Angeles
-    expect(siteDay(new Date("2026-09-13T00:30:00Z"))).toBe("2026-09-12");
-  });
-
-  it("rolls over at Los Angeles midnight, not UTC's", () => {
-    expect(siteDay(new Date("2026-09-13T06:59:00Z"))).toBe("2026-09-12");
-    expect(siteDay(new Date("2026-09-13T07:01:00Z"))).toBe("2026-09-13");
-  });
-});
-
-describe("votePercents", () => {
-  it("splits the vote", () => {
-    expect(votePercents(3, 1)).toEqual({ high: 75, low: 25 });
-  });
-
-  it("always totals 100, even when rounding fights back", () => {
-    const { high, low } = votePercents(1, 2);
-    expect(high + low).toBe(100);
-    expect(high).toBe(33);
-  });
-
-  it("is zero for both sides before anyone votes", () => {
-    expect(votePercents(0, 0)).toEqual({ high: 0, low: 0 });
   });
 });
 
