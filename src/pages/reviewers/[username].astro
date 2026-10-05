@@ -19,6 +19,8 @@ import RecommendationsTab from '../../components/profile/RecommendationsTab.astr
 import ListsTab from '../../components/profile/ListsTab.astro';
 import LibraryTab from '../../components/profile/LibraryTab.astro';
 import GroupsTab from '../../components/profile/GroupsTab.astro';
+import ShowcaseHideButton from '../../components/profile/ShowcaseHideButton.astro';
+import { readHiddenShowcases } from '../../utils/profileShowcases';
 import { groupPath } from '../../utils/groupSlug';
 import {
   isLazyProfileTab, loadProfileTab, PROFILE_REVIEWS_SELECT, sortPublishedReviews,
@@ -78,6 +80,7 @@ const _newSocialCols = ['steam_url', 'psn_url', 'xbox_url', 'instagram_url', 'ti
 const [
   { data: _showcaseAchData },
   { data: _showcaseVideoData },
+  { data: _hiddenShowcasesData },
   { data: _newSocialData },
   { data: _aliasRows },
   { data: voteTotalsRows },
@@ -96,6 +99,7 @@ const [
   // field instead of 404ing the whole profile (the select above uses .single()).
   db.from('profiles').select('showcase_achievements').eq('id', reviewer.id).maybeSingle(),
   db.from('profiles').select('showcase_video_mode, showcase_video_id').eq('id', reviewer.id).maybeSingle(),
+  db.from('profiles').select('hidden_showcases').eq('id', reviewer.id).maybeSingle(),
   db.from('profiles').select(_newSocialCols.join(', ')).eq('id', reviewer.id).maybeSingle(),
   db.from('username_history')
     .select('old_username, changed_at')
@@ -158,6 +162,10 @@ const showcaseVideoMode: 'latest' | 'featured' | null =
   _showcaseVideoData?.showcase_video_mode === 'latest' && reviewer.youtube_url ? 'latest'
   : _showcaseVideoData?.showcase_video_mode === 'featured' && _showcaseVideoData?.showcase_video_id ? 'featured'
   : null;
+// Showcase sections the owner hid — not rendered for anyone, re-enabled in Settings.
+const hiddenShowcaseList = readHiddenShowcases(_hiddenShowcasesData?.hidden_showcases) ?? [];
+const hiddenShowcases = new Set<string>(hiddenShowcaseList);
+const hiddenShowcasesJson = JSON.stringify(hiddenShowcaseList);
 const showcaseVideoId: string | null = showcaseVideoMode === 'featured' ? _showcaseVideoData!.showcase_video_id : null;
 for (const c of _newSocialCols) (reviewer as any)[c] = (_newSocialData as any)?.[c] ?? null;
 
@@ -813,6 +821,24 @@ const reviewerBreadcrumbJsonLd = {
     .fav-empty:hover .fav-empty-icon{border-color:var(--accent)}
 
     /* FEATURED COMMUNITY */
+    /* Hide-showcase controls (owner only) */
+    .sc-title-row{display:flex;align-items:center;justify-content:space-between}
+    .sc-title-actions{display:inline-flex;align-items:center;gap:10px}
+    .sc-hide-btn{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:none;border-radius:6px;background:none;color:var(--text-tertiary);cursor:pointer;transition:color .15s,background .15s}
+    .sc-hide-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
+    .sc-hide-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+    .sc-hide-btn:disabled{opacity:.5;cursor:default}
+    .sc-hide-btn--on-image{width:26px;height:26px;border-radius:8px;background:rgba(0,0,0,.6);color:#fff;backdrop-filter:blur(4px)}
+    .sc-hide-btn--on-image:hover{background:rgba(0,0,0,.8);color:#fff}
+    .sc-corner-actions{position:absolute;top:10px;right:10px;z-index:2;display:flex;align-items:center;gap:6px}
+    .sc-hidden-note{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:14px;border:1px dashed var(--border);border-radius:12px;font-size:13px;color:var(--text-secondary)}
+    .sc-hidden-note svg{color:var(--text-tertiary);flex-shrink:0}
+    .sc-hidden-note strong{color:var(--text-primary);font-weight:600}
+    .sc-hidden-text{flex:1;min-width:160px}
+    .sc-hidden-undo{background:none;border:none;padding:0;font:inherit;font-weight:600;color:var(--accent);cursor:pointer}
+    .sc-hidden-undo:disabled{opacity:.5}
+    .sc-hidden-link{color:var(--text-tertiary);font-size:12px;text-decoration:underline;text-underline-offset:2px}
+    .sc-hidden-link:hover{color:var(--text-primary)}
     /* Video showcase */
     .vs-label{display:inline-flex;align-items:center;gap:7px}
     .vs-live-dot{width:7px;height:7px;border-radius:50%;background:#ff0033;box-shadow:0 0 0 3px color-mix(in srgb,#ff0033 25%,transparent)}
@@ -1548,7 +1574,7 @@ const reviewerBreadcrumbJsonLd = {
       <div>
 
         <!-- FAVORITE GAME -->
-        {favGame ? (
+        {hiddenShowcases.has('favorite_game') ? null : favGame ? (
           <div class="fav-game-card" id="favGameCard">
             <img class="fav-game-bg" src={igdbCover(favGame.cover_img_url, 't_screenshot_big') ?? ''} alt="" />
             <div class="fav-game-overlay"></div>
@@ -1566,16 +1592,20 @@ const reviewerBreadcrumbJsonLd = {
               )}
             </div>
             {isOwnProfile && (
-              <button
-                onclick="openGamePicker('favorite')"
-                style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,.6);border:none;color:white;font-size:11px;font-family:inherit;padding:4px 10px;border-radius:8px;cursor:pointer;backdrop-filter:blur(4px)"
-              >
-                Change
-              </button>
+              <div class="sc-corner-actions">
+                <button
+                  onclick="openGamePicker('favorite')"
+                  style="background:rgba(0,0,0,.6);border:none;color:white;font-size:11px;font-family:inherit;padding:4px 10px;border-radius:8px;cursor:pointer;backdrop-filter:blur(4px)"
+                >
+                  Change
+                </button>
+                <ShowcaseHideButton section="favorite_game" label="Favorite game" onImage />
+              </div>
             )}
           </div>
         ) : isOwnProfile ? (
           <div class="fav-game-card">
+            <div class="sc-corner-actions"><ShowcaseHideButton section="favorite_game" label="Favorite game" /></div>
             <div class="fav-empty" onclick="openGamePicker('favorite')">
               <div class="fav-empty-icon">⭐</div>
               <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Set a favorite game</div>
@@ -1585,11 +1615,11 @@ const reviewerBreadcrumbJsonLd = {
         ) : null}
 
         <!-- FEATURED COMMUNITY -->
-        {featuredGroup ? (
+        {hiddenShowcases.has('featured_group') ? null : featuredGroup ? (
           <div class="card" id="featuredGroupCard">
             <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
               <span>Join my community</span>
-              {isOwnProfile && <button class="fg-change-btn" onclick="openFeaturedGroupPicker()">Change</button>}
+              {isOwnProfile && <span class="sc-title-actions"><button class="fg-change-btn" onclick="openFeaturedGroupPicker()">Change</button><ShowcaseHideButton section="featured_group" label="Join my community" /></span>}
             </div>
             <a href={groupPath(featuredGroup)} class="fg-card">
               {featuredGroup.avatar_url
@@ -1606,7 +1636,7 @@ const reviewerBreadcrumbJsonLd = {
           </div>
         ) : isOwnProfile ? (
           <div class="card">
-            <div class="card-title">Join my community</div>
+            <div class="card-title sc-title-row"><span>Join my community</span><ShowcaseHideButton section="featured_group" label="Join my community" /></div>
             <div class="fav-empty" onclick="openFeaturedGroupPicker()">
               <div class="fav-empty-icon">👥</div>
               <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Feature a group on your profile</div>
@@ -1616,14 +1646,14 @@ const reviewerBreadcrumbJsonLd = {
         ) : null}
 
         <!-- VIDEO SHOWCASE — featured: id rendered here; latest: filled by JS from /api/profile/latest-video -->
-        {showcaseVideoMode ? (
+        {hiddenShowcases.has('video') ? null : showcaseVideoMode ? (
           <div class="card" id="videoShowcaseCard" data-mode={showcaseVideoMode} data-video-id={showcaseVideoId ?? ''} data-username={reviewer.username}>
             <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
               <span class="vs-label">
                 {showcaseVideoMode === 'latest' && <span class="vs-live-dot" aria-hidden="true"></span>}
                 {showcaseVideoMode === 'latest' ? 'Latest video' : 'Featured video'}
               </span>
-              {isOwnProfile && <button class="fg-change-btn" onclick="openVideoShowcasePicker()">Change</button>}
+              {isOwnProfile && <span class="sc-title-actions"><button class="fg-change-btn" onclick="openVideoShowcasePicker()">Change</button><ShowcaseHideButton section="video" label="Video" /></span>}
             </div>
             <div class="vs-body" data-state={showcaseVideoMode === 'featured' ? 'ready' : 'loading'}>
               <button type="button" class="vs-player" aria-label="Play video" onclick="playShowcaseVideo()">
@@ -1646,7 +1676,7 @@ const reviewerBreadcrumbJsonLd = {
           </div>
         ) : isOwnProfile ? (
           <div class="card">
-            <div class="card-title">Video</div>
+            <div class="card-title sc-title-row"><span>Video</span><ShowcaseHideButton section="video" label="Video" /></div>
             <div class="fav-empty" onclick="openVideoShowcasePicker()">
               <div class="fav-empty-icon">🎬</div>
               <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Showcase a video</div>
@@ -1656,10 +1686,11 @@ const reviewerBreadcrumbJsonLd = {
         ) : null}
 
         <!-- SHOWCASE -->
+        {!hiddenShowcases.has('games') && (
         <div class="card">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
             <span>Showcase</span>
-            {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
+            {isOwnProfile && <span class="sc-title-actions"><span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span><ShowcaseHideButton section="games" label="Game showcase" /></span>}
           </div>
           <div class="showcase-grid" id="showcaseGrid">
             <!-- Filled by JS from localStorage/server -->
@@ -1677,12 +1708,14 @@ const reviewerBreadcrumbJsonLd = {
             </div>
           </div>
         </div>
+        )}
 
         <!-- ACHIEVEMENT SHOWCASE -->
+        {!hiddenShowcases.has('achievements') && (
         <div class="card" id="achShowcaseCard">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
             <span>Achievement Showcase</span>
-            {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
+            {isOwnProfile && <span class="sc-title-actions"><span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span><ShowcaseHideButton section="achievements" label="Achievement showcase" /></span>}
           </div>
           <div class="ach-showcase-grid" id="achShowcaseGrid">
             {[0,1,2,3,4].map(i => (
@@ -1693,6 +1726,7 @@ const reviewerBreadcrumbJsonLd = {
             ))}
           </div>
         </div>
+        )}
 
         <!-- SCORE DISTRIBUTION -->
         {publishedReviews.length > 0 && (
@@ -2087,7 +2121,7 @@ const reviewerBreadcrumbJsonLd = {
   </defs>
 </svg>
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor, featuredGroupJson, reviewerGroupsForPickerJson }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor, featuredGroupJson, reviewerGroupsForPickerJson, hiddenShowcasesJson }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -2485,6 +2519,56 @@ const reviewerBreadcrumbJsonLd = {
   window.closeFeaturedGroupPicker = closeFeaturedGroupPicker
   window.closeFeaturedGroupPickerOnBackdrop = closeFeaturedGroupPickerOnBackdrop
   window.selectFeaturedGroup = selectFeaturedGroup
+
+  // ── HIDE SHOWCASES ──
+  // Hiding swaps the card for a slim note (Undo / Settings link) until reload;
+  // after that the section isn't rendered at all. Settings → Profile showcases
+  // turns it back on.
+  var hiddenShowcases = JSON.parse(hiddenShowcasesJson || '[]')
+  async function saveHiddenShowcases(list) {
+    var res = await fetch('/api/profile/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hidden_showcases: list })
+    })
+    var data = await res.json().catch(function() { return {} })
+    if (!res.ok) throw new Error(data.error || 'Failed to save')
+    hiddenShowcases = list
+  }
+  async function hideShowcase(key, btn) {
+    var card = btn.closest('.card, .fav-game-card')
+    if (!card || btn.disabled) return
+    var label = (btn.getAttribute('aria-label') || '').replace(/^Hide /, '').replace(/ from your profile$/, '')
+    btn.disabled = true
+    try {
+      await saveHiddenShowcases(hiddenShowcases.filter(function(k) { return k !== key }).concat([key]))
+    } catch (e) {
+      btn.disabled = false
+      showToast(e && e.message ? e.message : 'Failed to hide', 'error')
+      return
+    }
+    var note = document.createElement('div')
+    note.className = 'sc-hidden-note'
+    note.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>' +
+      '<span class="sc-hidden-text"><strong></strong> is hidden from your profile.</span>' +
+      '<button type="button" class="sc-hidden-undo">Undo</button>' +
+      '<a class="sc-hidden-link" href="/settings#showcases">Settings</a>'
+    note.querySelector('strong').textContent = label
+    note.querySelector('.sc-hidden-undo').addEventListener('click', async function() {
+      this.disabled = true
+      try {
+        await saveHiddenShowcases(hiddenShowcases.filter(function(k) { return k !== key }))
+        btn.disabled = false
+        note.replaceWith(card)
+      } catch (e) {
+        this.disabled = false
+        showToast(e && e.message ? e.message : 'Failed to undo', 'error')
+      }
+    })
+    card.replaceWith(note)
+  }
+  window.hideShowcase = hideShowcase
 
   // ── VIDEO SHOWCASE ──
   // Featured: the id is server-rendered. Latest: ask /api/profile/latest-video

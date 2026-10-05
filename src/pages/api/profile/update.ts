@@ -3,6 +3,7 @@ import type { APIRoute } from 'astro';
 import { requireAuth, json } from '../../../utils/api';
 import { validateSocialUrl } from '../../../utils/socialLinks';
 import { parseYouTubeId } from '../../../utils/youtube';
+import { readHiddenShowcases } from '../../../utils/profileShowcases';
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -38,6 +39,12 @@ export const POST: APIRoute = async (context) => {
       if (!youtubeUrl) return json({ error: 'Add your YouTube channel to your profile links first.' }, 400);
     }
     update.showcase_video_mode = mode;
+  }
+
+  if ('hidden_showcases' in body) {
+    const hidden = readHiddenShowcases(body.hidden_showcases);
+    if (!hidden) return json({ error: 'Invalid showcase list.' }, 400);
+    update.hidden_showcases = hidden;
   }
 
   if (Object.keys(update).length === 0)

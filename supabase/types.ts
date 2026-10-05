@@ -2208,6 +2208,7 @@ export type Database = {
           dropped_privacy: string
           favorite_game_id: string | null
           featured_group_id: string | null
+          hidden_showcases: string[]
           id: string
           instagram_url: string | null
           is_active: boolean
@@ -2279,6 +2280,7 @@ export type Database = {
           dropped_privacy?: string
           favorite_game_id?: string | null
           featured_group_id?: string | null
+          hidden_showcases?: string[]
           id?: string
           instagram_url?: string | null
           is_active?: boolean
@@ -2350,6 +2352,7 @@ export type Database = {
           dropped_privacy?: string
           favorite_game_id?: string | null
           featured_group_id?: string | null
+          hidden_showcases?: string[]
           id?: string
           instagram_url?: string | null
           is_active?: boolean
