@@ -1,7 +1,7 @@
 ---
 /**
  * The group Stats tab as an HTML fragment, re-fetched whenever the viewer
- * changes who is being compared, the sort, or the any/all mode (see
+ * picks someone else in the "compare with" menu (see
  * src/scripts/group-compare.ts). Renders exactly what the page renders for
  * ?tab=compare: the same loader (src/utils/groupCompare.ts) and the same
  * component, so the two can't drift.
@@ -14,14 +14,7 @@ import { getPageUser } from "../../../utils/pageAuth";
 import { setPageCacheHeaders } from "../../../utils/cache";
 import { fetchAll } from "../../../utils/fetchAll";
 import { getGroupAuthority } from "../../../utils/api";
-import {
-  loadGroupCompare,
-  parseCompareMode,
-  parseCompareSort,
-  rankMemberIds,
-  resolveCommunitySubject,
-  resolveCompareSelection,
-} from "../../../utils/groupCompare";
+import { loadGroupVersus } from "../../../utils/groupCompare";
 import CompareTab from "../../../components/groups/CompareTab.astro";
 
 const id = Astro.params.id;
@@ -71,7 +64,7 @@ const statArgs = {
 
 // Admin client: RLS shows a group's members only to its other members, so a
 // visitor to a public group would otherwise compare an empty group.
-const [memberRows, summaryRes, memberStats] = await Promise.all([
+const [memberRows, memberStats] = await Promise.all([
   fetchAll<any>((from, to) => db
     .from("group_members")
     .select("role, profiles ( id, username, avatar_url )")
@@ -79,11 +72,9 @@ const [memberRows, summaryRes, memberStats] = await Promise.all([
     .order("joined_at", { ascending: true })
     .order("profile_id")
     .range(from, to)),
-  db.rpc("group_review_summary", statArgs).maybeSingle(),
   fetchAll<{ profile_id: string; review_count: number; avg_score: number }>(
     (from, to) => db.rpc("group_member_review_stats", statArgs).order("profile_id").range(from, to)),
 ]);
-if (summaryRes.error) console.error("[groups/compare] summary error:", JSON.stringify(summaryRes.error));
 
 // The page shows the group's focus beside its totals; keep the fragment matching
 let focusLabel: string | null = null;
@@ -99,39 +90,21 @@ const members = memberRows
   .filter((m: any) => m.profiles)
   .map((m: any) => ({ ...m.profiles, role: m.role }));
 
-const memberIds: string[] = members.map((m: any) => m.id);
 // Same as the page: the site group's owner isn't a creator to compare with
-const compareOwnerId = group.is_site_group ? null : group.created_by;
-const selectedIds = resolveCompareSelection(Astro.url.searchParams, {
-  memberIds,
-  memberStats,
-  viewerProfileId: currentProfile?.id ?? null,
-  ownerProfileId: compareOwnerId,
-});
-
-const data = await loadGroupCompare({
+const data = await loadGroupVersus({
   db,
   groupId: id,
   genreId,
   platformId,
   members,
-  ownerProfileId: compareOwnerId,
-  viewerProfileId: currentProfile?.id ?? null,
-  selectedIds,
-  subjectId: resolveCommunitySubject(Astro.url.searchParams, {
-    memberIds,
-    rankedMemberIds: rankMemberIds(memberStats),
-    viewerProfileId: currentProfile?.id ?? null,
-    ownerProfileId: compareOwnerId,
-  }),
-  sort: parseCompareSort(Astro.url.searchParams.get("sort"), selectedIds.length),
-  mode: parseCompareMode(Astro.url.searchParams.get("mode")),
-  summary: summaryRes.data ?? null,
   memberStats,
+  ownerProfileId: group.is_site_group ? null : group.created_by,
+  viewerProfileId: currentProfile?.id ?? null,
+  withParam: Astro.url.searchParams.get("with"),
 });
 
 // Same caching as the page: shared at the CDN for logged-out visitors, never
-// for logged-in ones (the fragment marks the viewer's own chip).
+// for logged-in ones (the left side is the viewer).
 setPageCacheHeaders(Astro.response.headers, !!user);
 ---
 <CompareTab data={data} groupId={id} focusLabel={focusLabel} />

@@ -275,30 +275,25 @@ supabase/
 
 - **Stats come from the `group_*` SQL functions** (migrations `20260911120000` and `20260912000000`):
   `group_review_summary`, `group_member_review_stats`, `group_game_review_stats`,
-  `group_game_member_scores`, `group_split_decision`, `group_hot_take`, plus the Stats tab's
-  `group_score_distribution`, `group_compare_member_stats`, `group_compare_games`,
-  `group_compare_scores` and `group_compare_pairs` — all reading through
+  `group_game_member_scores`, `group_split_decision`, `group_hot_take`, `group_score_distribution`,
+  plus the Stats tab's `group_versus_games` and `group_versus_summary` — all reading through
   `group_reviews(group, genre?, platform?)`, which applies "published, by a current member, inside the
   group's focus". Site-wide numbers (Hot Take's community side) come from `game_review_stats`, per the
   review-stats rule. Service role only. Never `.in('profile_id', memberIds)` over reviews: it truncates
   at 1000 rows and fails on URL length.
-- **The Stats tab (`?tab=compare`) compares chosen members with each other and with the group.**
-  `loadGroupCompare()` (`src/utils/groupCompare.ts`) builds it and `CompareTab.astro` renders it; the
-  group page calls both for the first paint, and the picker re-fetches the partial route
-  `/groups/[id]/compare` (same loader, same component) when the picks, sort or mode change. The picks
-  live in `?with=` so a comparison is a shareable link, and they are re-validated against current
-  members on every request. Behaviour is delegated once from `src/scripts/group-compare.ts`; the CSS
-  lives in the page's global block, like the profile tab components, so swapped-in markup is styled.
-  Add a stat by putting the query in a `group_compare_*` function and reading it in the loader — the
-  compare queries are bounded by the picked set (at most four) or by `COMPARE_GAMES_SHOWN`, which is
-  what keeps them clear of the 1000-row cap. The tab's queries only run when it is the tab in the URL.
-- **The Stats tab opens with "vs the community"**: one member (the owner by default, `?vs=` to switch)
-  against everyone else, from `group_compare_community_games` / `_summary` (migration
-  `20260912000002`). The subject's own reviews are left out of the community side, unlike the
-  `vs_group_*` numbers, which include them. Every list is a `.limit()`ed read of the games function.
-  `CommunityCompare.astro` renders it inside `CompareTab.astro`.
-- **The Feed tab (`?tab=feed`) is the group's activity, and members land on it** rather than Overview
-  (visitors still land on Overview, which is the group's shop window). `loadGroupFeed()`
+- **The Stats tab (`?tab=compare`) is "you vs someone".** The viewer (a visitor sees the owner, or on the
+  site group the most active reviewer) against the community — everyone else in the group — or one member
+  picked in the "compare with" menu, kept in `?with=` so a comparison is a shareable link. It shows a
+  scoreboard (both averages over shared games, agreement, gap) and three five-game lists: biggest
+  disagreements, where you agree, and what the other side loves that you haven't reviewed.
+  `loadGroupVersus()` (`src/utils/groupCompare.ts`) builds it from `group_versus_games` /
+  `group_versus_summary` (migration `20261005000002`), which never count the subject on the other side;
+  the community needs `COMMUNITY_MIN_REVIEWS` other reviews before a game counts. `CompareTab.astro`
+  renders it, the page calls both for the first paint, and the menu re-fetches the partial route
+  `/groups/[id]/compare`. Behaviour is delegated once from `src/scripts/group-compare.ts`; the CSS lives in
+  the page's global block. Every list is a `.limit()`ed read, which keeps it clear of the 1000-row cap.
+- **The Feed tab (`?tab=feed`) is the group's activity.** Everyone, members included, lands on
+  Overview; the Feed loads only when it's the tab in the URL. `loadGroupFeed()`
   (`src/utils/groupFeed.ts`) builds a page and `FeedTab.astro` renders it; filter changes and further
   pages re-fetch the partial route `/groups/[id]/feed`, which runs the same loader and components.
   Each card carries the viewer's own score for that game — the point of the tab, and the one thing a

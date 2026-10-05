@@ -1,363 +1,190 @@
 ---
 /**
- * The group Stats tab: one member (the owner, by default) against the rest of
- * the community, the group's own averages, then any two to four members lined
- * up against each other and against the group average.
+ * The group Stats tab: you vs the community, or you vs one member you pick
+ * (the creator, say). One matchup, one scoreboard, and three short lists:
+ * where you disagree most, where you agree, and what they love that you
+ * haven't reviewed.
  *
  * Rendered both by the group page (first paint) and by the partial route
- * /groups/[id]/compare that the picker re-fetches, from the same
- * loadGroupCompare() data — see src/utils/groupCompare.ts. Styles live in the
- * page's global block, like the profile tab components, so markup swapped in
- * later is styled without shipping the CSS twice. Behaviour is delegated from
- * src/scripts/group-compare.ts.
+ * /groups/[id]/compare that the "compare with" menu re-fetches, from the same
+ * loadGroupVersus() data — see src/utils/groupCompare.ts. Styles live in the
+ * page's global block, like the other group tab components, so markup swapped
+ * in later is styled. Behaviour is delegated from src/scripts/group-compare.ts.
  */
 import { igdbImage as igdbCover, scoreClass } from "../../utils/format";
-import CommunityCompare from "./CommunityCompare.astro";
 import {
-  COMPARE_MAX_MEMBERS,
-  COMPARE_SORTS,
-  COMPARE_SORT_LABELS,
   agreementLabel,
-  barPercent,
+  graderLabel,
   signedScore,
-  spreadLabel,
-  type GroupCompareData,
+  type GroupVersusData,
+  type VersusGameRow,
+  type VersusMember,
 } from "../../utils/groupCompare";
 
 interface Props {
-  data: GroupCompareData;
-  /** The group being compared — the picker re-fetches /groups/<id>/compare. */
+  data: GroupVersusData;
+  /** The group being compared — the menu re-fetches /groups/<id>/compare. */
   groupId: string;
-  /** Shown next to the group totals when the group has a genre/platform focus. */
+  /** Shown under the scoreboard when the group has a genre/platform focus. */
   focusLabel?: string | null;
 }
 const { data, groupId, focusLabel } = Astro.props;
 const {
-  community, members, pickable, groupAvg, groupReviewCount, groupGameCount, groupHoursSum,
-  groupDistribution, games, pairs, sort, mode, truncated,
+  subject, opponent, options, viewerIsGuest, minReviews, sharedGames,
+  subjectAvg, otherAvg, meanAbsDiff, agreementPct, disagreements, agreements, unreviewed,
 } = data;
-
-const memberById = new Map(members.map((m) => [m.id, m]));
-const distMax = Math.max(1, ...groupDistribution);
 
 const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
 const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
-const hours = (h: number) => (h > 0 ? `${h.toLocaleString()}h` : "—");
-/** A member's own distribution, scaled to their own busiest score. */
-const sparkMax = (buckets: number[]) => Math.max(1, ...buckets);
+
+const subjectName = subject ? (subject.isViewer ? "You" : `@${subject.username}`) : "";
+const otherName = opponent ? `@${opponent.username}` : "the community";
+const otherShort = opponent ? `@${opponent.username}` : "Community";
+const optionLabel = (m: VersusMember) => `@${m.username}${m.isOwner ? " (owner)" : ""}`;
+
+const grader = graderLabel(subjectName, otherName, subjectAvg, otherAvg);
+const badge = (score: number | null) => (score != null ? scoreClass(Math.round(score)) : "");
+const fmt = (score: number | null) =>
+  score == null ? "—" : Number.isInteger(score) ? String(score) : score.toFixed(1);
+const cover = (g: VersusGameRow) => igdbCover(g.game.cover_img_url, "t_thumb");
+
+// Possessives and "hasn't" built here rather than in the markup, where nested
+// template strings with apostrophes trip the Astro parser
+const subjectHasnt = subject?.isViewer ? "you haven't" : `${subjectName} hasn't`;
+const subjectGames = subject?.isViewer ? "your" : `${subjectName}'s`;
+const emptyMessage = !subject
+  ? ""
+  : subject.reviewCount === 0
+    ? `${subject.isViewer ? "You haven't" : `${subjectName} hasn't`} reviewed any games in this group yet.`
+    : opponent
+      ? `${subjectName} and ${otherName} haven't reviewed any of the same games yet.`
+      : `None of ${subjectGames} games has been reviewed by ${minReviews}+ other members yet.`;
+const sharedLabel = sharedGames === 1 ? "shared game" : "shared games";
+
+const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubject: boolean }[] = [
+  { title: "Biggest disagreements", rows: disagreements, showDiff: true, showSubject: true },
+  { title: "Where you agree", rows: agreements, showDiff: false, showSubject: true },
+  {
+    title: `${opponent ? `@${opponent.username}` : "The community"} loves, ${subjectHasnt} reviewed`,
+    rows: unreviewed, showDiff: false, showSubject: false,
+  },
+];
 ---
 
-<div
-  class="gc-root"
-  data-gc-group={groupId}
-  data-gc-selected={members.map((m) => m.id).join(",")}
-  data-gc-sort-value={sort}
-  data-gc-mode-value={mode}
->
-
-  {community && <CommunityCompare data={community} />}
-
-  {/* ── Group averages ── */}
-  <div class="gc-block">
-    <div class="stats-section-header">
-      <span>Group averages</span>
-      <span class="stats-section-count">
-        {plural(groupReviewCount, "review")} · {plural(groupGameCount, "game")}
-        {focusLabel && ` · ${focusLabel}`}
-      </span>
-    </div>
-
-    <div class="gc-tiles">
-      <div class="gc-tile">
-        <div class={`gc-tile-val${groupAvg != null ? ` gc-tile-score ${scoreClass(Math.round(groupAvg))}` : ""}`}>
-          {groupAvg != null ? groupAvg.toFixed(1) : "—"}
-        </div>
-        <div class="gc-tile-lbl">Average score</div>
-      </div>
-      <div class="gc-tile">
-        <div class="gc-tile-val">{groupReviewCount.toLocaleString()}</div>
-        <div class="gc-tile-lbl">Reviews</div>
-      </div>
-      <div class="gc-tile">
-        <div class="gc-tile-val">{groupGameCount.toLocaleString()}</div>
-        <div class="gc-tile-lbl">Games reviewed</div>
-      </div>
-      <div class="gc-tile">
-        <div class="gc-tile-val">{groupHoursSum > 0 ? groupHoursSum.toLocaleString() : "—"}</div>
-        <div class="gc-tile-lbl">Hours logged</div>
-      </div>
-    </div>
-
-    {groupReviewCount > 0 && (
-      <div class="gc-hist">
-        <div class="gc-hist-bars">
-          {groupDistribution.map((count, i) => (
-            <div class="gc-hist-col" title={`${plural(count, "review")} at ${i + 1}`}>
-              <div class="gc-hist-count">{count > 0 ? count.toLocaleString() : ""}</div>
-              <div class="gc-hist-track">
-                <div class={`gc-hist-bar ${scoreClass(i + 1)}`} style={`height:${(count / distMax) * 100}%`}></div>
-              </div>
-              <div class="gc-hist-x">{i + 1}</div>
-            </div>
-          ))}
-          <div class="gc-hist-ticks">
-            {groupAvg != null && (
-              <span class="gc-tick gc-tick-group" style={`left:${barPercent(groupAvg)}%`}></span>
-            )}
-            {members.filter((m) => m.avgScore != null).map((m) => (
-              <span class="gc-tick" style={`left:${barPercent(m.avgScore!)}%;background:${m.color}`}></span>
-            ))}
-          </div>
-        </div>
-        <div class="gc-hist-legend">
-          {groupAvg != null && (
-            <span class="gc-legend-item"><span class="gc-legend-key gc-legend-key-group"></span>Group {groupAvg.toFixed(1)}</span>
-          )}
-          {members.filter((m) => m.avgScore != null).map((m) => (
-            <span class="gc-legend-item"><span class="gc-legend-key" style={`background:${m.color}`}></span>@{m.username} {m.avgScore!.toFixed(1)}</span>
-          ))}
-        </div>
-      </div>
-    )}
-  </div>
-
-  {/* ── Member picker ── */}
-  <div class="gc-block">
-    <div class="stats-section-header">
-      <span>Compare members</span>
-      <span class="stats-section-count">Pick up to {COMPARE_MAX_MEMBERS}</span>
-    </div>
-
-    {pickable.length === 0 ? (
-      <div class="empty-tab">No member has published a review yet.</div>
-    ) : (
-      <>
-        {pickable.length > 12 && (
-          <input
-            class="gc-search"
-            type="search"
-            placeholder="Find a member…"
-            aria-label="Filter members"
-            data-gc-search
-          />
-        )}
-        <div class="gc-picker" data-gc-picker>
-          {pickable.map((p) => {
-            const picked = memberById.get(p.id);
-            return (
-              <button
-                type="button"
-                class={`gc-chip${picked ? " gc-chip-on" : ""}`}
-                style={picked ? `--gc-color:${picked.color}` : undefined}
-                data-gc-toggle={p.id}
-                data-gc-username={p.username}
-                aria-pressed={picked ? "true" : "false"}
-              >
-                <span class="gc-chip-av">
-                  {p.avatar_url
-                    ? <img src={p.avatar_url} alt="" loading="lazy" />
-                    : initials(p.username)}
-                </span>
-                <span class="gc-chip-name">@{p.username}</span>
-                {p.isViewer && <span class="gc-chip-tag">you</span>}
-                {p.isOwner && <span class="gc-chip-tag">owner</span>}
-                <span class="gc-chip-n">{p.reviewCount}</span>
-              </button>
-            );
-          })}
-        </div>
-        <div class="gc-picker-empty" data-gc-picker-empty hidden>No member matches that name.</div>
-        <div class="gc-picker-hint" data-gc-hint hidden>
-          Deselect someone first — up to {COMPARE_MAX_MEMBERS} at a time.
-        </div>
-        <div class="gc-picker-error" data-gc-error hidden>
-          Couldn't update the comparison. The one below is still the last one that loaded.
-        </div>
-      </>
-    )}
-  </div>
-
-  {members.length === 0 ? (
-    pickable.length > 0 && <div class="empty-tab">Pick a member above to compare them with the group.</div>
+<div class="gv-root" data-gv-group={groupId}>
+  {!subject ? (
+    <div class="empty-tab">Nobody in this group has reviewed a game yet.</div>
   ) : (
     <>
-      {/* ── Each pick beside the group average ── */}
-      <div class="gc-cards">
-        <div class="gc-card gc-card-group">
-          <div class="gc-card-head">
-            <span class="gc-card-key gc-legend-key-group"></span>
-            <span class="gc-card-name">Group average</span>
-          </div>
-          <div class={`gc-card-score${groupAvg != null ? ` ${scoreClass(Math.round(groupAvg))}` : ""}`}>
-            {groupAvg != null ? groupAvg.toFixed(1) : "—"}
-          </div>
-          <div class="gc-card-sub">{plural(groupReviewCount, "review")} · {hours(groupHoursSum)}</div>
-          <div class="gc-spark" aria-hidden="true">
-            {groupDistribution.map((count, i) => (
-              <span class="gc-spark-bar" style={`height:${(count / distMax) * 100}%`} title={`${count} at ${i + 1}`}></span>
-            ))}
-          </div>
-        </div>
-
-        {members.map((m) => {
-          const delta = m.avgScore != null && groupAvg != null ? Math.round((m.avgScore - groupAvg) * 10) / 10 : null;
-          const max = sparkMax(m.distribution);
-          return (
-            <div class="gc-card" style={`--gc-color:${m.color}`}>
-              <div class="gc-card-head">
-                <span class="gc-card-av">
-                  {m.avatar_url
-                    ? <img src={m.avatar_url} alt="" loading="lazy" />
-                    : initials(m.username)}
-                </span>
-                <a class="gc-card-name" href={`/reviewers/${m.username}`}>@{m.username}</a>
-                {m.isViewer && <span class="gc-chip-tag">you</span>}
-                {m.isOwner && <span class="gc-chip-tag">owner</span>}
-              </div>
-              <div class={`gc-card-score${m.avgScore != null ? ` ${scoreClass(Math.round(m.avgScore))}` : ""}`}>
-                {m.avgScore != null ? m.avgScore.toFixed(1) : "—"}
-              </div>
-              {delta != null && (
-                <div class={`gc-delta${delta > 0 ? " gc-delta-up" : delta < 0 ? " gc-delta-down" : ""}`}>
-                  {delta === 0 ? "level with group" : `${signedScore(delta)} vs group`}
-                </div>
-              )}
-              <div class="gc-card-sub">{plural(m.reviewCount, "review")} · {hours(m.hoursSum)}</div>
-              <div class="gc-spark" aria-hidden="true">
-                {m.distribution.map((count, i) => (
-                  <span
-                    class="gc-spark-bar gc-spark-bar-member"
-                    style={`height:${(count / max) * 100}%`}
-                    title={`${count} at ${i + 1}`}
-                  ></span>
-                ))}
-              </div>
-              {m.vsGroupGames > 0 ? (
-                <div class="gc-card-vs">
-                  <div class="gc-vs-row">
-                    <span>Average gap</span>
-                    <strong>{m.vsGroupAbsDiff != null ? m.vsGroupAbsDiff.toFixed(1) : "—"}</strong>
-                  </div>
-                  <div class="gc-vs-row">
-                    <span>Above / level / below</span>
-                    <strong>{m.vsGroupAbove} / {m.vsGroupLevel} / {m.vsGroupBelow}</strong>
-                  </div>
-                  <div class="gc-vs-note">over {plural(m.vsGroupGames, "game")} another member also reviewed</div>
-                </div>
-              ) : (
-                <div class="gc-card-vs">
-                  <div class="gc-vs-note">No game of theirs has a second review in the group yet.</div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* ── Pairwise agreement ── */}
-      {pairs.length > 0 && (
-        <div class="gc-block">
-          <div class="stats-section-header">
-            <span>Agreement</span>
-            <span class="stats-section-count">over games both reviewed</span>
-          </div>
-          {pairs.map((p) => (
-            <div class="gc-pair">
-              <div class="gc-pair-head">
-                <span class="gc-pair-who"><span class="gc-legend-key" style={`background:${p.a.color}`}></span>@{p.a.username}</span>
-                <span class="gc-pair-vs">vs</span>
-                <span class="gc-pair-who"><span class="gc-legend-key" style={`background:${p.b.color}`}></span>@{p.b.username}</span>
-                <span class="gc-pair-label">{agreementLabel(p.meanAbsDiff)}</span>
-              </div>
-              <div class="gc-pair-bar" title={`${p.aHigher} higher for @${p.a.username}, ${p.exactMatches} identical, ${p.bHigher} higher for @${p.b.username}`}>
-                <span class="gc-pair-seg" style={`width:${(p.aHigher / p.sharedGames) * 100}%;background:${p.a.color}`}></span>
-                <span class="gc-pair-seg gc-pair-seg-same" style={`width:${(p.exactMatches / p.sharedGames) * 100}%`}></span>
-                <span class="gc-pair-seg" style={`width:${(p.bHigher / p.sharedGames) * 100}%;background:${p.b.color}`}></span>
-              </div>
-              <div class="gc-pair-stats">
-                <span><strong>{p.agreementPct}%</strong> within a point</span>
-                <span><strong>{p.meanAbsDiff.toFixed(1)}</strong> average gap</span>
-                <span><strong>{p.exactMatches}</strong> identical</span>
-                <span><strong>{p.sharedGames}</strong> shared</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ── Game by game ── */}
-      <div class="gc-block">
-        <div class="stats-section-header">
-          <span>Game by game</span>
-          <span class="stats-section-count">
-            {games.length === 0 ? "nothing to show" : truncated ? `top ${games.length}` : plural(games.length, "game")}
+      {/* ── The matchup ── */}
+      <div class="gv-matchup">
+        <div class="gv-side">
+          <span class="gv-av">
+            {subject.avatar_url ? <img src={subject.avatar_url} alt="" loading="lazy" /> : initials(subject.username)}
+          </span>
+          <span class="gv-side-text">
+            <span class="gv-name">{subjectName}</span>
+            <span class="gv-sub">{plural(subject.reviewCount, "review")}</span>
           </span>
         </div>
 
-        <div class="gc-controls">
-          <label class="gc-control">
-            <span class="gc-control-lbl">Sort</span>
-            <select class="gc-select" data-gc-sort>
-              {COMPARE_SORTS.map((s) => (
-                <option value={s} selected={s === sort}>{COMPARE_SORT_LABELS[s]}</option>
-              ))}
+        <span class="gv-vs">vs</span>
+
+        <div class="gv-side gv-side-other">
+          <span class="gv-av">
+            {opponent
+              ? (opponent.avatar_url ? <img src={opponent.avatar_url} alt="" loading="lazy" /> : initials(opponent.username))
+              : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
+          </span>
+          <label class="gv-pick">
+            <span class="gv-pick-lbl">Compare with</span>
+            <select class="gv-select" data-gv-with aria-label="Compare with">
+              <option value="" selected={!opponent}>The community</option>
+              {options.length > 0 && (
+                <optgroup label="Members">
+                  {options.map((m) => (
+                    <option value={m.id} selected={opponent?.id === m.id}>{optionLabel(m)}</option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </label>
-          {members.length >= 2 && (
-            <div class="gc-toggle" role="group" aria-label="Which games to list">
-              <button type="button" class={`gc-toggle-btn${mode === "any" ? " gc-toggle-on" : ""}`} data-gc-mode="any">Any pick</button>
-              <button type="button" class={`gc-toggle-btn${mode === "all" ? " gc-toggle-on" : ""}`} data-gc-mode="all">All picks</button>
-            </div>
-          )}
         </div>
-
-        {games.length === 0 ? (
-          <div class="empty-tab">
-            {mode === "all"
-              ? "No game has been reviewed by every pick. Try “Any pick”."
-              : "None of the picked members has published a review yet."}
-          </div>
-        ) : (
-          games.map((g) => {
-            const spread = spreadLabel(g.selSpread);
-            return (
-              <div class="gc-game">
-                <div class="gc-game-head">
-                  {igdbCover(g.game.cover_img_url, "t_thumb")
-                    ? <img class="gc-game-cover" src={igdbCover(g.game.cover_img_url, "t_thumb")!} alt="" loading="lazy" />
-                    : <div class="gc-game-cover"></div>}
-                  <a class="gc-game-title" href={`/games/${g.game.slug}`}>{g.game.title}</a>
-                  {g.selCount >= 2 && <span class={`variance-tag ${spread.className}`}>{spread.label}</span>}
-                  <span class="gc-game-group">
-                    Group <strong>{g.groupAvg.toFixed(1)}</strong>
-                    <span class="gc-game-n">({g.groupCount})</span>
-                  </span>
-                </div>
-                <div class="gc-bars">
-                  {g.scores.map((s) => {
-                    const m = memberById.get(s.profileId);
-                    if (!m) return null;
-                    return (
-                      <div class="gc-bar-row">
-                        <span class="gc-bar-name" style={`color:${m.color}`}>@{m.username}</span>
-                        <div class="gc-bar-track">
-                          <div class="gc-bar-fill" style={`width:${barPercent(s.score)}%;background:${m.color}`}></div>
-                          <span
-                            class="gc-bar-groupline"
-                            style={`left:${barPercent(g.groupAvg)}%`}
-                            title={`Group average ${g.groupAvg.toFixed(1)}`}
-                          ></span>
-                        </div>
-                        <span class={`score-badge ${scoreClass(s.score)}`}>{s.score}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })
-        )}
       </div>
+
+      {viewerIsGuest && (
+        <div class="gv-note">Showing {subjectName}. Join the group and review a few games to compare yourself.</div>
+      )}
+
+      {sharedGames === 0 ? (
+        <div class="empty-tab">
+          {emptyMessage}
+        </div>
+      ) : (
+        <>
+          {/* ── Scoreboard ── */}
+          <div class="gv-board">
+            <div class="gv-score">
+              <span class={`gv-score-val ${badge(subjectAvg) || "gv-score-none"}`}>{fmt(subjectAvg)}</span>
+              <span class="gv-score-lbl">{subjectName}</span>
+            </div>
+            <div class="gv-verdict">
+              <div class="gv-verdict-title">{meanAbsDiff != null ? agreementLabel(meanAbsDiff) : "—"}</div>
+              {grader && <div class="gv-verdict-sub">{grader}</div>}
+            </div>
+            <div class="gv-score">
+              <span class={`gv-score-val ${badge(otherAvg) || "gv-score-none"}`}>{fmt(otherAvg)}</span>
+              <span class="gv-score-lbl">{otherShort}</span>
+            </div>
+          </div>
+          <div class="gv-facts">
+            <span><strong>{sharedGames.toLocaleString()}</strong> {sharedLabel}</span>
+            <span><strong>{agreementPct}%</strong> within a point</span>
+            {meanAbsDiff != null && <span><strong>{meanAbsDiff.toFixed(1)}</strong> average gap</span>}
+            {focusLabel && <span>{focusLabel}</span>}
+          </div>
+        </>
+      )}
+
+      {/* ── The lists ── */}
+      {lists.filter((l) => l.rows.length > 0).map((list) => (
+        <section class="gv-list">
+          <div class="gv-list-head">
+            <span class="gv-list-title">{list.title}</span>
+            <span class="gv-cols" aria-hidden="true">
+              {list.showSubject && (
+                <span class="gv-col" title={subjectName}>
+                  <span class="gv-col-av">{subject.avatar_url ? <img src={subject.avatar_url} alt="" loading="lazy" /> : initials(subject.username)}</span>
+                </span>
+              )}
+              <span class="gv-col" title={opponent ? `@${opponent.username}` : "Community average"}>
+                {opponent
+                  ? <span class="gv-col-av">{opponent.avatar_url ? <img src={opponent.avatar_url} alt="" loading="lazy" /> : initials(opponent.username)}</span>
+                  : "Avg"}
+              </span>
+              {list.showDiff && <span class="gv-col gv-col-diff"></span>}
+            </span>
+          </div>
+          {list.rows.map((g) => (
+            <a class="gv-row" href={`/games/${g.game.slug}`}>
+              {cover(g) ? <img class="gv-cover" src={cover(g)!} alt="" loading="lazy" /> : <span class="gv-cover"></span>}
+              <span class="gv-title">{g.game.title}</span>
+              <span class="gv-cols">
+                {list.showSubject && <span class={`score-badge ${badge(g.subjectScore)}`}>{fmt(g.subjectScore)}</span>}
+                <span
+                  class={`score-badge ${badge(g.otherScore)}`}
+                  title={opponent ? undefined : `Average of ${plural(g.otherCount, "review")}`}
+                >{fmt(g.otherScore)}</span>
+                {list.showDiff && g.diff != null && (
+                  <span class={`gv-diff ${g.diff > 0 ? "gv-diff-up" : "gv-diff-down"}`}>{signedScore(g.diff)}</span>
+                )}
+              </span>
+            </a>
+          ))}
+        </section>
+      ))}
+
+      <div class="gv-error" data-gv-error hidden>Couldn't load that comparison. Try again.</div>
     </>
   )}
 </div>
