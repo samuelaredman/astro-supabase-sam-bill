@@ -8,6 +8,8 @@ import {
   buildTape,
   filterVersusGames,
   gameDetails,
+  normalizeMemberQuery,
+  searchVersusMembers,
   parseVersusGameFilter,
   parseVersusGameGenre,
   parseVersusGameSearch,
@@ -239,6 +241,30 @@ describe("sortVersusGames", () => {
     const { q, calls } = recorder();
     sortVersusGames(q, "gap");
     expect(calls[0]).toBe('order("diff_abs",{"ascending":false,"nullsFirst":false})');
+  });
+});
+
+describe("member search", () => {
+  const ranked = [
+    member("s", { username: "billy", reviewCount: 50 }),
+    member("a", { username: "samwise", reviewCount: 40 }),
+    member("b", { username: "Sam", reviewCount: 10 }),
+    member("c", { username: "jessam", reviewCount: 30 }),
+    member("d", { username: "zed", reviewCount: 5 }),
+  ];
+
+  it("ignores a leading @ and case", () => {
+    expect(normalizeMemberQuery("  @@Sam ")).toBe("sam");
+    expect(normalizeMemberQuery("@")).toBe("");
+  });
+
+  it("finds names containing the query, starts first, never the subject", () => {
+    expect(searchVersusMembers(ranked, "s", null, "@sam").map((m) => m.username)).toEqual(["samwise", "Sam", "jessam"]);
+    expect(searchVersusMembers(ranked, "s", null, "bil")).toEqual([]);
+  });
+
+  it("gives the usual list for an empty query", () => {
+    expect(searchVersusMembers(ranked, "s", null, "@ ").map((m) => m.id)).toEqual(["a", "b", "c", "d"]);
   });
 });
 

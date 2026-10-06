@@ -423,6 +423,31 @@ export function versusOptions(ranked: VersusMember[], subjectId: string | null, 
   return [...pinned, ...rest].slice(0, Math.max(max, pinned.length));
 }
 
+/** Members a "compare with" search returns at most. */
+export const VERSUS_MEMBER_RESULTS = 30;
+
+/** A member search, as typed: any leading @ dropped, case ignored. */
+export function normalizeMemberQuery(raw: string | null | undefined): string {
+  return (raw ?? "").trim().replace(/^@+/, "").trim().toLowerCase().slice(0, 50);
+}
+
+/**
+ * The "compare with" search: members (never the subject) whose username
+ * contains the query, those starting with it first, then the most active.
+ * An empty query gives the menu's usual list.
+ */
+export function searchVersusMembers(
+  ranked: VersusMember[], subjectId: string | null, opponentId: string | null, rawQuery: string | null | undefined,
+  max = VERSUS_MEMBER_RESULTS,
+): VersusMember[] {
+  const q = normalizeMemberQuery(rawQuery);
+  if (!q) return versusOptions(ranked, subjectId, opponentId);
+  const hits = ranked.filter((m) => m.id !== subjectId && m.username.toLowerCase().includes(q));
+  const starts = hits.filter((m) => m.username.toLowerCase().startsWith(q));
+  const inside = hits.filter((m) => !m.username.toLowerCase().startsWith(q));
+  return [...starts, ...inside].slice(0, max);
+}
+
 /** Share of shared games scored within a point of each other, 0–100. */
 export function agreementPercent(withinOne: number, sharedGames: number): number {
   if (sharedGames <= 0) return 0;
@@ -629,9 +654,13 @@ async function loadVersusGames(
  * list a .limit()ed read of group_versus_games (VERSUS_GAMES_MAX at most), so
  * nothing here can reach Supabase's 1000-row cap.
  */
-export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVersusData> {
-  const { db, groupId, members, memberStats, ownerProfileId = null, viewerProfileId = null } = ctx;
-
+/**
+ * Who's on each side: every member ranked by reviews, the subject (the viewer,
+ * or for a visitor the owner or the most active reviewer) and the opponent
+ * (?with=, or null for the community).
+ */
+export function versusSides(ctx: Pick<GroupVersusContext, "members" | "memberStats" | "ownerProfileId" | "viewerProfileId" | "withParam">) {
+  const { members, memberStats, ownerProfileId = null, viewerProfileId = null } = ctx;
   const memberIds = members.map((m) => m.id);
   const reviewsById = new Map(memberStats.map((s) => [s.profile_id, s.review_count]));
   const ranked: VersusMember[] = members
@@ -653,8 +682,19 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     ownerProfileId,
   });
   const opponentId = resolveVersusOpponent(ctx.withParam, memberIds, subjectId);
-  const subject = subjectId ? byId.get(subjectId)! : null;
-  const opponent = opponentId ? byId.get(opponentId)! : null;
+  return {
+    ranked,
+    byId,
+    subject: subjectId ? byId.get(subjectId)! : null,
+    opponent: opponentId ? byId.get(opponentId)! : null,
+  };
+}
+
+export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVersusData> {
+  const { db, groupId, viewerProfileId = null } = ctx;
+  const { ranked, byId, subject, opponent } = versusSides(ctx);
+  const subjectId = subject?.id ?? null;
+  const opponentId = opponent?.id ?? null;
   const minReviews = opponent ? 1 : COMMUNITY_MIN_REVIEWS;
 
   const data: GroupVersusData = {

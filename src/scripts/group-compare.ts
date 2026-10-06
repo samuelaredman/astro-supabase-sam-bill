@@ -1,6 +1,6 @@
 /**
- * The group Stats tab's "compare with" menu, and its games list's filter and
- * sort menus and "Show more".
+ * The group Stats tab's searchable "compare with" picker, and its games list's
+ * search, menus and "Show more".
  *
  * Picking someone re-fetches the tab from /groups/[id]/compare — the same
  * loader and component the page rendered — and swaps it into #compare-panel, so
@@ -46,13 +46,11 @@ function fragmentQuery(pageUrl: URL, extra: Record<string, string> = {}): string
   return str ? `?${str}` : "";
 }
 
-async function compareWith(select: HTMLSelectElement) {
+/** Compare with someone else (a member's id, or "" for the community): re-fetch the whole tab. */
+async function compareWith(withId: string) {
   const host = panel();
   const groupId = host?.querySelector<HTMLElement>("[data-gv-group]")?.dataset.gvGroup;
   if (!host || !groupId) return;
-  const withId = select.value;
-  // What was on screen, to put the menu back if the swap fails
-  const previous = [...select.options].find((o) => o.defaultSelected)?.value ?? "";
 
   // Keep the address bar shareable, without filling up the back button. The
   // games list keeps its filter and sort, but starts again from one page.
@@ -80,7 +78,7 @@ async function compareWith(select: HTMLSelectElement) {
     if (seq === requestSeq) {
       host.classList.remove("gv-busy");
       if (!ok) {
-        select.value = previous;
+        // The picker still shows who's on screen, since only a successful swap changes it
         const error = host.querySelector<HTMLElement>("[data-gv-error]");
         if (error) error.hidden = false;
       }
@@ -186,17 +184,70 @@ function syncColorControls() {
   });
 }
 
+// ── "Compare with" picker ──
+// A button opening a searchable list. Typing filters the listed members at
+// once, then asks /groups/[id]/compare?part=members&q= so anyone in the group
+// can be found, not just the members listed at first. A leading @ is ignored.
+
+function picker(): HTMLElement | null {
+  return panel()?.querySelector<HTMLElement>("[data-gv-picker]") ?? null;
+}
+
+function setPickerOpen(open: boolean, focusToggle = false) {
+  const root = picker();
+  const pop = root?.querySelector<HTMLElement>("[data-gv-pick-pop]");
+  const toggle = root?.querySelector<HTMLElement>("[data-gv-pick-toggle]");
+  if (!root || !pop || !toggle) return;
+  pop.hidden = !open;
+  toggle.setAttribute("aria-expanded", String(open));
+  if (open) root.querySelector<HTMLInputElement>("[data-gv-pick-search]")?.focus();
+  else if (focusToggle) toggle.focus();
+}
+
+const memberQuery = (raw: string) => raw.trim().replace(/^@+/, "").trim().toLowerCase();
+
+/** Hide listed members whose name doesn't contain the query. */
+function filterPickerLocally(q: string) {
+  picker()?.querySelectorAll<HTMLElement>(".gv-pick-opt[data-gv-name]").forEach((opt) => {
+    opt.hidden = !!q && !(opt.dataset.gvName ?? "").includes(q);
+  });
+}
+
+let pickSeq = 0;
+let pickTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function searchMembers(raw: string) {
+  const host = panel();
+  const groupId = host?.querySelector<HTMLElement>("[data-gv-group]")?.dataset.gvGroup;
+  const list = picker()?.querySelector<HTMLElement>("[data-gv-pick-list]");
+  if (!host || !groupId || !list) return;
+  const seq = ++pickSeq;
+  const q = new URLSearchParams({ part: "members" });
+  const withId = new URL(window.location.href).searchParams.get("with");
+  if (withId) q.set("with", withId);
+  if (memberQuery(raw)) q.set("q", memberQuery(raw));
+  try {
+    const res = await fetch(`/groups/${groupId}/compare?${q}`, { headers: { Accept: "text/html" } });
+    if (seq !== pickSeq || !res.ok) return;
+    const html = await res.text();
+    if (seq !== pickSeq) return;
+    list.innerHTML = html;
+  } catch {
+    // Keep the locally filtered list
+  }
+}
+
+/** The options someone can move to with the arrow keys. */
+function visibleOptions(): HTMLElement[] {
+  return [...(picker()?.querySelectorAll<HTMLElement>(".gv-pick-opt") ?? [])].filter((o) => !o.hidden);
+}
+
 export function initGroupCompare() {
   if ((window as any).__gvInit) return;
   (window as any).__gvInit = true;
 
   document.addEventListener("change", (event) => {
     const target = event.target as HTMLElement | null;
-    const select = target?.closest<HTMLSelectElement>("[data-gv-with]");
-    if (select && panel()?.contains(select)) {
-      void compareWith(select);
-      return;
-    }
     // A new filter, genre or sort starts the list again from one page
     const menu = target?.closest<HTMLSelectElement>("[data-gv-filter], [data-gv-genre], [data-gv-sort]");
     if (menu && panel()?.contains(menu)) {
@@ -209,6 +260,55 @@ export function initGroupCompare() {
       url.searchParams.delete("gn");
       void showGames(url);
     }
+  });
+
+  // The "compare with" picker
+  document.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    const root = picker();
+    if (!root) return;
+    if (target?.closest("[data-gv-pick-toggle]") && root.contains(target)) {
+      const pop = root.querySelector<HTMLElement>("[data-gv-pick-pop]");
+      setPickerOpen(!!pop?.hidden);
+      return;
+    }
+    const opt = target?.closest<HTMLElement>(".gv-pick-opt");
+    if (opt && root.contains(opt)) {
+      setPickerOpen(false, true);
+      const id = opt.dataset.gvWithId ?? "";
+      const current = new URL(window.location.href).searchParams.get("with") ?? "";
+      if (id !== current) void compareWith(id);
+      return;
+    }
+    if (!root.contains(target)) setPickerOpen(false);
+  });
+  document.addEventListener("input", (event) => {
+    const box = (event.target as HTMLElement | null)?.closest<HTMLInputElement>("[data-gv-pick-search]");
+    if (!box || !picker()?.contains(box)) return;
+    filterPickerLocally(memberQuery(box.value));
+    clearTimeout(pickTimer);
+    pickTimer = setTimeout(() => void searchMembers(box.value), 200);
+  });
+  document.addEventListener("keydown", (event) => {
+    const root = picker();
+    const target = event.target as HTMLElement | null;
+    if (!root || !target || !root.contains(target)) return;
+    const pop = root.querySelector<HTMLElement>("[data-gv-pick-pop]");
+    if (!pop || pop.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setPickerOpen(false, true);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    const opts = visibleOptions();
+    if (opts.length === 0) return;
+    const at = opts.indexOf(target);
+    const next = event.key === "ArrowDown"
+      ? opts[at < 0 ? 0 : Math.min(at + 1, opts.length - 1)]
+      : at <= 0 ? root.querySelector<HTMLElement>("[data-gv-pick-search]") : opts[at - 1];
+    next?.focus();
   });
 
   // Searching: as you type, once you pause
@@ -228,6 +328,14 @@ export function initGroupCompare() {
     if (!box || !panel()?.contains(box)) return;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => search(box.value), 300);
+  });
+  // Enter in the picker's search picks the first match
+  document.addEventListener("keydown", (event) => {
+    const box = (event.target as HTMLElement | null)?.closest<HTMLInputElement>("[data-gv-pick-search]");
+    if (!box || event.key !== "Enter" || !picker()?.contains(box)) return;
+    event.preventDefault();
+    const first = visibleOptions().find((o) => o.dataset.gvName) ?? visibleOptions()[0];
+    first?.click();
   });
   document.addEventListener("submit", (event) => {
     const form = (event.target as HTMLElement | null)?.closest<HTMLFormElement>("[data-gv-search-form]");

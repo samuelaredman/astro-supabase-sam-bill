@@ -2,7 +2,8 @@
 /**
  * The group Stats tab as an HTML fragment, re-fetched whenever the viewer
  * picks someone else in the "compare with" menu, or with ?part=games just its
- * games list, when the list's filter, sort or length changes (see
+ * games list, when the list's filter, sort or length changes, or with
+ * ?part=members&q= just the picker's options for a member search (see
  * src/scripts/group-compare.ts). Renders exactly what the page renders for
  * ?tab=compare: the same loader (src/utils/groupCompare.ts) and the same
  * component, so the two can't drift.
@@ -15,9 +16,12 @@ import { getPageUser } from "../../../utils/pageAuth";
 import { setPageCacheHeaders } from "../../../utils/cache";
 import { fetchAll } from "../../../utils/fetchAll";
 import { getGroupAuthority } from "../../../utils/api";
-import { loadGroupVersus } from "../../../utils/groupCompare";
+import {
+  loadGroupVersus, normalizeMemberQuery, searchVersusMembers, versusSides, type VersusMember,
+} from "../../../utils/groupCompare";
 import CompareTab from "../../../components/groups/CompareTab.astro";
 import VersusGames from "../../../components/groups/VersusGames.astro";
+import MemberOptions from "../../../components/groups/MemberOptions.astro";
 
 const id = Astro.params.id;
 if (!id) return new Response(null, { status: 404 });
@@ -92,20 +96,35 @@ const members = memberRows
   .filter((m: any) => m.profiles)
   .map((m: any) => ({ ...m.profiles, role: m.role }));
 
-// ?part=games: just the games list, for a filter, sort or "Show more"
-const gamesOnly = Astro.url.searchParams.get("part") === "games";
+// ?part=games: just the games list, for a filter, sort or "Show more".
+// ?part=members&q=: just the "compare with" picker's options, for a search.
+const part = Astro.url.searchParams.get("part");
+const gamesOnly = part === "games";
+const membersOnly = part === "members";
 
 // Same as the page: the site group's owner isn't a creator to compare with
-const data = await loadGroupVersus({
-  db,
-  groupId: id,
-  genreId,
-  platformId,
+const sidesCtx = {
   members,
   memberStats,
   ownerProfileId: group.is_site_group ? null : group.created_by,
   viewerProfileId: currentProfile?.id ?? null,
   withParam: Astro.url.searchParams.get("with"),
+};
+const memberQuery = Astro.url.searchParams.get("q");
+let memberResults: VersusMember[] = [];
+let pickedId: string | null = null;
+if (membersOnly) {
+  const sides = versusSides(sidesCtx);
+  pickedId = sides.opponent?.id ?? null;
+  memberResults = searchVersusMembers(sides.ranked, sides.subject?.id ?? null, pickedId, memberQuery);
+}
+
+const data = membersOnly ? null : await loadGroupVersus({
+  db,
+  groupId: id,
+  genreId,
+  platformId,
+  ...sidesCtx,
   gamesFilter: Astro.url.searchParams.get("gf"),
   gamesSort: Astro.url.searchParams.get("gs"),
   gamesLimit: Astro.url.searchParams.get("gn"),
@@ -118,6 +137,8 @@ const data = await loadGroupVersus({
 // for logged-in ones (the left side is the viewer).
 setPageCacheHeaders(Astro.response.headers, !!user);
 ---
-{gamesOnly
-  ? <VersusGames data={data} />
-  : <CompareTab data={data} groupId={id} focusLabel={focusLabel} />}
+{membersOnly
+  ? <MemberOptions members={memberResults} selectedId={pickedId} query={normalizeMemberQuery(memberQuery) || undefined} />
+  : gamesOnly
+    ? <VersusGames data={data!} />
+    : <CompareTab data={data!} groupId={id} focusLabel={focusLabel} />}
