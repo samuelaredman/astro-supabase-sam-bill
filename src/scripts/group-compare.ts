@@ -1,6 +1,6 @@
 /**
- * The group Stats tab's "compare with" menu, and its games list's filters,
- * sort and "Show more".
+ * The group Stats tab's "compare with" menu, and its games list's filter and
+ * sort menus and "Show more".
  *
  * Picking someone re-fetches the tab from /groups/[id]/compare — the same
  * loader and component the page rendered — and swaps it into #compare-panel, so
@@ -8,11 +8,22 @@
  * (?with=), so a comparison is a link someone can share.
  *
  * The games list swaps on its own, from /groups/[id]/compare?part=games, with
- * its filter, sort and length in the URL too (?gf= / ?gs= / ?gn=).
+ * its filter, genre, sort and length in the URL too (?gf= / ?gg= / ?gs= / ?gn=).
  *
  * The listeners are delegated from document and registered once, because the
  * menu and the list are replaced on each swap.
  */
+
+import {
+  colorProperties,
+  customColors,
+  DEFAULT_VERSUS_COLORS,
+  parseStoredColors,
+  presetColors,
+  VERSUS_COLOR_PRESETS,
+  VERSUS_COLORS_KEY,
+  type StoredVersusColors,
+} from "../utils/versusColors";
 
 const PANEL_ID = "compare-panel";
 
@@ -26,7 +37,7 @@ let requestSeq = 0;
 /** The settings the Stats tab's fragment route reads, from a page URL. */
 function fragmentQuery(pageUrl: URL, extra: Record<string, string> = {}): string {
   const q = new URLSearchParams(extra);
-  for (const key of ["with", "gf", "gs", "gn"]) {
+  for (const key of ["with", "gf", "gg", "gs", "gn"]) {
     const value = pageUrl.searchParams.get(key);
     if (value) q.set(key, value);
   }
@@ -59,6 +70,7 @@ async function compareWith(select: HTMLSelectElement) {
     if (seq !== requestSeq) return;
     if (res.ok) {
       host.innerHTML = await res.text();
+      syncColorControls();
       ok = true;
     }
   } catch {
@@ -89,7 +101,7 @@ async function showGames(pageUrl: URL) {
   if (!host || !groupId || !list) return;
   // Keep the page's own params (and path), take the list's from the link
   const next = new URL(window.location.href);
-  for (const key of ["tab", "with", "gf", "gs", "gn"]) {
+  for (const key of ["tab", "with", "gf", "gg", "gs", "gn"]) {
     const value = pageUrl.searchParams.get(key);
     if (value) next.searchParams.set(key, value);
     else next.searchParams.delete(key);
@@ -116,6 +128,50 @@ async function showGames(pageUrl: URL) {
   if (error) error.hidden = false;
 }
 
+// ── Side colours ──
+// The pick lives in localStorage and on <html> as --gv-pick-*, which outlive
+// every swap of the tab. CompareTab's inline script applies it before paint;
+// this keeps the picker's controls in step and handles changes.
+
+function storedColors(): StoredVersusColors | null {
+  try {
+    return parseStoredColors(localStorage.getItem(VERSUS_COLORS_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function currentColors(): StoredVersusColors {
+  return storedColors() ?? presetColors(DEFAULT_VERSUS_COLORS);
+}
+
+function applyColors(c: StoredVersusColors | null) {
+  const root = document.documentElement.style;
+  for (const name of Object.keys(colorProperties(presetColors(DEFAULT_VERSUS_COLORS)))) root.removeProperty(name);
+  if (c) for (const [name, value] of Object.entries(colorProperties(c))) root.setProperty(name, value);
+  try {
+    if (c) localStorage.setItem(VERSUS_COLORS_KEY, JSON.stringify(c));
+    else localStorage.removeItem(VERSUS_COLORS_KEY);
+  } catch {
+    // Private mode and the like: the colours still apply for this visit
+  }
+  syncColorControls();
+}
+
+/** Mark the chosen preset and show the colours in use in the custom pickers. */
+function syncColorControls() {
+  const c = currentColors();
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  const host = panel();
+  host?.querySelectorAll<HTMLElement>("[data-gv-preset]").forEach((btn) => {
+    btn.setAttribute("aria-pressed", String(btn.dataset.gvPreset === c.preset));
+  });
+  host?.querySelectorAll<HTMLInputElement>("[data-gv-color]").forEach((input) => {
+    const side = input.dataset.gvColor === "r" ? "r" : "l";
+    input.value = dark ? (side === "l" ? c.ld ?? c.l : c.rd ?? c.r) : c[side];
+  });
+}
+
 export function initGroupCompare() {
   if ((window as any).__gvInit) return;
   (window as any).__gvInit = true;
@@ -127,18 +183,60 @@ export function initGroupCompare() {
       void compareWith(select);
       return;
     }
-    // A new sort starts the list again from one page
-    const sort = target?.closest<HTMLSelectElement>("[data-gv-sort]");
-    if (sort && panel()?.contains(sort)) {
+    // A new filter, genre or sort starts the list again from one page
+    const menu = target?.closest<HTMLSelectElement>("[data-gv-filter], [data-gv-genre], [data-gv-sort]");
+    if (menu && panel()?.contains(menu)) {
+      const [param, fallback] = menu.matches("[data-gv-filter]") ? ["gf", "all"]
+        : menu.matches("[data-gv-genre]") ? ["gg", ""]
+        : ["gs", "gap"];
       const url = new URL(window.location.href);
-      if (sort.value === "gap") url.searchParams.delete("gs");
-      else url.searchParams.set("gs", sort.value);
+      if (menu.value === fallback) url.searchParams.delete(param);
+      else url.searchParams.set(param, menu.value);
       url.searchParams.delete("gn");
       void showGames(url);
     }
   });
 
-  // Filter chips and "Show more" are real links; take them over to swap in place
+  // A custom colour, live as the picker moves
+  document.addEventListener("input", (event) => {
+    const input = (event.target as HTMLElement | null)?.closest<HTMLInputElement>("[data-gv-color]");
+    if (!input || !panel()?.contains(input)) return;
+    // Keep the other side as it looks now, in this theme's shade
+    const c = currentColors();
+    const dark = document.documentElement.getAttribute("data-theme") === "dark";
+    const shown = dark ? { ...c, l: c.ld ?? c.l, r: c.rd ?? c.r } : c;
+    applyColors(customColors(shown, input.dataset.gvColor === "r" ? "r" : "l", input.value));
+  });
+
+  document.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement | null;
+    const host = panel();
+    const preset = target?.closest<HTMLElement>("[data-gv-preset]");
+    if (preset && host?.contains(preset)) {
+      const p = VERSUS_COLOR_PRESETS.find((x) => x.id === preset.dataset.gvPreset);
+      // The default is no stored pick at all, so the page's own colours apply
+      if (p) applyColors(p.id === DEFAULT_VERSUS_COLORS.id ? null : presetColors(p));
+      return;
+    }
+    if (target?.closest("[data-gv-colors-reset]") && host?.contains(target)) {
+      applyColors(null);
+      return;
+    }
+    // Clicking anywhere else closes the picker
+    host?.querySelectorAll<HTMLDetailsElement>("details[data-gv-colors][open]").forEach((d) => {
+      if (!d.contains(target)) d.open = false;
+    });
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    panel()?.querySelectorAll<HTMLDetailsElement>("details[data-gv-colors][open]").forEach((d) => {
+      d.open = false;
+      d.querySelector("summary")?.focus();
+    });
+  });
+  syncColorControls();
+
+  // "Show more" is a real link; take it over to swap in place
   document.addEventListener("click", (event) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const link = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[data-gv-games-link]");

@@ -9,6 +9,7 @@ import {
   filterVersusGames,
   gameDetails,
   parseVersusGameFilter,
+  parseVersusGameGenre,
   parseVersusGameLimit,
   parseVersusGameSort,
   sortVersusGames,
@@ -168,6 +169,15 @@ describe("games list settings", () => {
     expect(parseVersusGameFilter("theirs")).toBe("theirs");
     expect(parseVersusGameSort(null)).toBe("gap");
     expect(parseVersusGameSort("title")).toBe("title");
+    expect(parseVersusGameSort("top")).toBe("top");
+    // The old per-side sorts fall back rather than erroring
+    expect(parseVersusGameSort("subject-high")).toBe("gap");
+  });
+
+  it("takes a genre id and ignores anything else", () => {
+    expect(parseVersusGameGenre("8A1B2C3D-0000-4000-8000-000000000001")).toBe("8a1b2c3d-0000-4000-8000-000000000001");
+    expect(parseVersusGameGenre("rpg")).toBeNull();
+    expect(parseVersusGameGenre(null)).toBeNull();
   });
 
   it("rounds the length up to whole pages, within bounds", () => {
@@ -204,11 +214,17 @@ describe("filterVersusGames", () => {
 });
 
 describe("sortVersusGames", () => {
-  it("puts games with nothing to sort on last, then breaks ties stably", () => {
-    const { q, calls } = recorder();
-    sortVersusGames(q, "subject-low");
-    expect(calls[0]).toBe('order("subject_score",{"ascending":true,"nullsFirst":false})');
-    expect(calls.slice(-2)).toEqual(['order("other_count",{"ascending":false,"nullsFirst":false})', 'order("game_id")']);
+  it("ranks both sides together, taking turns at an equal rating", () => {
+    for (const [sort, ascending] of [["top", false], ["low", true]] as const) {
+      const { q, calls } = recorder();
+      sortVersusGames(q, sort);
+      expect(calls.slice(0, 3)).toEqual([
+        `order("rated",{"ascending":${ascending},"nullsFirst":false})`,
+        'order("turn",{"ascending":true,"nullsFirst":false})',
+        'order("rated_side",{"ascending":true,"nullsFirst":false})',
+      ]);
+      expect(calls.slice(-2)).toEqual(['order("other_count",{"ascending":false,"nullsFirst":false})', 'order("game_id")']);
+    }
   });
 
   it("orders the biggest gaps first by default", () => {

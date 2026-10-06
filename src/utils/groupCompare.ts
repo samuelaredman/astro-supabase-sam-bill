@@ -40,9 +40,7 @@ export const VERSUS_GAME_FILTERS = ["all", "shared", "disagree", "agree", "yours
 export type VersusGameFilter = (typeof VERSUS_GAME_FILTERS)[number];
 
 /** How the games list is ordered. Every one ends on stable tie-breaks. */
-export const VERSUS_GAME_SORTS = [
-  "gap", "subject-high", "subject-low", "other-high", "other-low", "most-reviewed", "title",
-] as const;
+export const VERSUS_GAME_SORTS = ["gap", "top", "low", "most-reviewed", "title"] as const;
 export type VersusGameSort = (typeof VERSUS_GAME_SORTS)[number];
 
 export function parseVersusGameFilter(raw: string | null | undefined): VersusGameFilter {
@@ -51,6 +49,13 @@ export function parseVersusGameFilter(raw: string | null | undefined): VersusGam
 
 export function parseVersusGameSort(raw: string | null | undefined): VersusGameSort {
   return (VERSUS_GAME_SORTS as readonly string[]).includes(raw ?? "") ? (raw as VersusGameSort) : "gap";
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** ?gg=, a genre id. Anything else means every genre; an id that isn't a genre just finds no games. */
+export function parseVersusGameGenre(raw: string | null | undefined): string | null {
+  return raw && UUID.test(raw) ? raw.toLowerCase() : null;
 }
 
 /** ?gn=, how many games to show: a whole number of pages, at least one, at most VERSUS_GAMES_MAX. */
@@ -74,18 +79,17 @@ export function filterVersusGames(query: any, filter: VersusGameFilter, minRevie
 }
 
 /**
- * Order a group_versus_games query. Games a sort has nothing to say about (no
- * gap, no score from that side) go last. The other side's "top rated" uses the
- * weighted average, so one 10 doesn't beat twenty 9s.
+ * Order a group_versus_games_ranked query. Games a sort has nothing to say
+ * about (no gap) go last. "top" and "low" are one ranking for both sides —
+ * a shared game at the two sides' average, any other at its one side's score
+ * — and at an equal rating the sides take turns (`turn`, then `rated_side`).
  */
 export function sortVersusGames(query: any, sort: VersusGameSort): any {
   const desc = { ascending: false, nullsFirst: false };
   const asc = { ascending: true, nullsFirst: false };
   switch (sort) {
-    case "subject-high": query = query.order("subject_score", desc).order("other_weighted", desc); break;
-    case "subject-low": query = query.order("subject_score", asc).order("other_weighted", asc); break;
-    case "other-high": query = query.order("other_weighted", desc).order("subject_score", desc); break;
-    case "other-low": query = query.order("other_weighted", asc).order("subject_score", asc); break;
+    case "top": query = query.order("rated", desc).order("turn", asc).order("rated_side", asc); break;
+    case "low": query = query.order("rated", asc).order("turn", asc).order("rated_side", asc); break;
     case "most-reviewed": query = query.order("other_count", desc).order("other_weighted", desc); break;
     case "title": query = query.order("title", asc); break;
     default: query = query.order("diff_abs", desc).order("pair_avg", desc).order("other_weighted", desc);
@@ -318,6 +322,10 @@ export interface TapeNames {
 export interface VersusGames {
   filter: VersusGameFilter;
   sort: VersusGameSort;
+  /** Only games in this genre (its id), or null for every genre. */
+  genre: string | null;
+  /** The genre menu's choices, A–Z. Empty when the group has a genre focus, which already narrows every game to one. */
+  genres: { id: string; name: string }[];
   /** How many were asked for — the next "Show more" asks for a page more. */
   limit: number;
   rows: VersusGameRow[];
@@ -541,6 +549,8 @@ export interface GroupVersusContext {
   gamesFilter?: string | null;
   gamesSort?: string | null;
   gamesLimit?: string | null;
+  /** The raw ?gg= value: a genre id to narrow the games list to. */
+  gamesGenre?: string | null;
   /** Only the games list is wanted (a filter or sort change): skip the rest of the tab's queries. */
   gamesOnly?: boolean;
 }
@@ -552,13 +562,26 @@ type VersusArgs = {
 
 /**
  * One view of the games list: the filtered, sorted page from
- * group_versus_games (with the total under the filter), then each listed
+ * group_versus_games_ranked (with the total under the filter), then each listed
  * game's hours, completion and platform from group_versus_game_details. A
  * failed details read only costs those extras; the scores still show.
  */
-async function loadVersusGames(db: any, args: VersusArgs, view: VersusGames, minReviews: number): Promise<VersusGames> {
-  const query = filterVersusGames(db.rpc("group_versus_games", args, { count: "exact" }), view.filter, minReviews);
-  const res = await sortVersusGames(query, view.sort).limit(view.limit);
+async function loadVersusGames(
+  db: any, args: VersusArgs, view: VersusGames, minReviews: number, hasGenreFocus: boolean,
+): Promise<VersusGames> {
+  // The genre menu narrows group_reviews() the same way a group's genre focus does
+  const listArgs = view.genre && !hasGenreFocus ? { ...args, p_genre_id: view.genre } : args;
+  const query = filterVersusGames(db.rpc("group_versus_games_ranked", listArgs, { count: "exact" }), view.filter, minReviews);
+  const [res, genresRes] = await Promise.all([
+    sortVersusGames(query, view.sort).limit(view.limit),
+    hasGenreFocus ? null : db.from("genres").select("id, name").order("name").limit(500),
+  ]);
+  if (genresRes?.error) console.error("[groupCompare] genres error:", JSON.stringify(genresRes.error));
+  view = {
+    ...view,
+    genre: hasGenreFocus ? null : view.genre,
+    genres: (genresRes?.data ?? []).filter((g: any) => g?.id && g?.name),
+  };
   if (res?.error) {
     console.error("[groupCompare] games error:", JSON.stringify(res.error));
     return { ...view, failed: true };
@@ -567,7 +590,7 @@ async function loadVersusGames(db: any, args: VersusArgs, view: VersusGames, min
   const detailRes = rows.length > 0
     ? await db.rpc("group_versus_game_details", {
       p_group_id: args.p_group_id, p_profile_id: args.p_profile_id, p_game_ids: rows.map((g) => g.game.id),
-      p_other_id: args.p_other_id, p_genre_id: args.p_genre_id, p_platform_id: args.p_platform_id,
+      p_other_id: args.p_other_id, p_genre_id: listArgs.p_genre_id, p_platform_id: args.p_platform_id,
     })
     : null;
   if (detailRes?.error) console.error("[groupCompare] game details error:", JSON.stringify(detailRes.error));
@@ -629,6 +652,8 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       filter: parseVersusGameFilter(ctx.gamesFilter),
       sort: parseVersusGameSort(ctx.gamesSort),
       limit: parseVersusGameLimit(ctx.gamesLimit),
+      genre: parseVersusGameGenre(ctx.gamesGenre),
+      genres: [],
       rows: [], total: 0, failed: false,
     },
     card: null, tape: [],
@@ -642,7 +667,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     p_genre_id: ctx.genreId ?? undefined,
     p_platform_id: ctx.genreId ? undefined : ctx.platformId ?? undefined,
   };
-  const gamesPromise = loadVersusGames(db, args, data.games, minReviews);
+  const gamesPromise = loadVersusGames(db, args, data.games, minReviews, !!ctx.genreId);
   if (ctx.gamesOnly) return { ...data, games: await gamesPromise };
 
   const [summaryRes, profileRes, genresRes, distRes, games] = await Promise.all([
