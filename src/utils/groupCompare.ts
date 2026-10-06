@@ -14,6 +14,8 @@
  * first paint and every later pick can't drift apart.
  */
 
+import { formatScore } from "./format";
+
 /**
  * Other members who must have reviewed a game before it counts as the
  * community's opinion. One: most games here have only a handful of reviews,
@@ -434,7 +436,7 @@ export function buildStatCard(a: VersusProfile, b: VersusProfile): StatCardRow[]
   return [
     row("games", "Games played", (p) => ({ value: count(p.gamesPlayed) })),
     row("rating", "Avg rating", (p) => p.avgScore == null ? none : ({
-      value: p.avgScore.toFixed(1),
+      value: formatScore(p.avgScore),
       sub: `${count(p.reviewCount)} review${p.reviewCount === 1 ? "" : "s"}`,
     }), true),
     row("achievements", "Avg achievement %", (p) => p.avgAchievementPct == null ? { ...none, sub: "None synced" } : ({
