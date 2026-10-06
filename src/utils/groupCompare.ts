@@ -50,6 +50,39 @@ export interface VersusGameRow {
   diff: number | null;
 }
 
+/** One side of the tale of the tape, from group_versus_profile. */
+export interface VersusProfile {
+  reviewCount: number;
+  topGenre: string | null;
+  topGenreCount: number;
+  topPlatform: string | null;
+  topPlatformCount: number;
+  topStudio: string | null;
+  topStudioCount: number;
+  avgReleaseYear: number | null;
+  avgHours: number | null;
+  hoursSum: number;
+  tens: number;
+  hotTakes: number;
+  /** Reviews of games someone else on the site reviewed too — what the hot-take rate is out of. */
+  hotTakeBase: number;
+  avgWords: number | null;
+}
+
+export interface TapeCell {
+  value: string;
+  sub?: string;
+}
+
+export interface TapeRow {
+  key: string;
+  label: string;
+  left: TapeCell;
+  right: TapeCell;
+  /** Which side to highlight: the bigger number, or "same" when both picked the same thing. */
+  lead: "left" | "right" | "same" | null;
+}
+
 export interface GroupVersusData {
   /** The left side. Null when the group has no members to compare. */
   subject: VersusMember | null;
@@ -75,6 +108,8 @@ export interface GroupVersusData {
   agreements: VersusGameRow[];
   /** The other side's favourites the subject hasn't reviewed. */
   unreviewed: VersusGameRow[];
+  /** The tale of the tape: both sides' profiles side by side. Empty when either side has no reviews. */
+  tape: TapeRow[];
 }
 
 /** Member ids with reviews, most active reviewer first, ties in a stable order. */
@@ -152,6 +187,102 @@ export function signedScore(n: number): string {
   return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded).toFixed(1)}`;
 }
 
+const pct = (n: number, of: number) => (of > 0 ? Math.round((n / of) * 100) : 0);
+const EMPTY: TapeCell = { value: "—" };
+
+/** "2010s" from an average release year. */
+export function decadeLabel(year: number | null): string | null {
+  if (year == null || !Number.isFinite(year)) return null;
+  return `${Math.floor(Math.round(year) / 10) * 10}s`;
+}
+
+/** The bigger side, when the gap is worth pointing at. */
+function leadOf(a: number | null, b: number | null, minGap: number): TapeRow["lead"] {
+  if (a == null || b == null || Math.abs(a - b) < minGap) return null;
+  return a > b ? "left" : "right";
+}
+
+/** A row picking a favourite (genre, platform, studio): "same" when both sides picked it. */
+function favouriteRow(
+  key: string, label: string,
+  a: { name: string | null; count: number; total: number }, b: { name: string | null; count: number; total: number },
+  sub: (count: number, total: number) => string
+): TapeRow {
+  const cell = (s: typeof a): TapeCell => (s.name ? { value: s.name, sub: sub(s.count, s.total) } : EMPTY);
+  return { key, label, left: cell(a), right: cell(b), lead: a.name && a.name === b.name ? "same" : null };
+}
+
+/**
+ * The tale of the tape, from the two sides' profiles. A side with no data for
+ * a row shows a dash, and a row with no data on either side is left out.
+ */
+export function buildTape(a: VersusProfile, b: VersusProfile): TapeRow[] {
+  if (a.reviewCount === 0 || b.reviewCount === 0) return [];
+  const share = (count: number, total: number) => `${pct(count, total)}% of reviews`;
+  const games = (count: number) => `${count} game${count === 1 ? "" : "s"}`;
+
+  const rows: TapeRow[] = [
+    favouriteRow("genre", "Favourite genre",
+      { name: a.topGenre, count: a.topGenreCount, total: a.reviewCount },
+      { name: b.topGenre, count: b.topGenreCount, total: b.reviewCount }, share),
+    favouriteRow("platform", "Go-to platform",
+      { name: a.topPlatform, count: a.topPlatformCount, total: a.reviewCount },
+      { name: b.topPlatform, count: b.topPlatformCount, total: b.reviewCount }, share),
+    favouriteRow("studio", "Favourite studio",
+      { name: a.topStudio, count: a.topStudioCount, total: a.reviewCount },
+      { name: b.topStudio, count: b.topStudioCount, total: b.reviewCount }, (n) => games(n)),
+  ];
+
+  const era = (p: VersusProfile): TapeCell => {
+    const decade = decadeLabel(p.avgReleaseYear);
+    return decade ? { value: decade, sub: `avg ${Math.round(p.avgReleaseYear!)}` } : EMPTY;
+  };
+  rows.push({
+    key: "era", label: "Era", left: era(a), right: era(b),
+    lead: decadeLabel(a.avgReleaseYear) && decadeLabel(a.avgReleaseYear) === decadeLabel(b.avgReleaseYear) ? "same" : null,
+  });
+
+  const hours = (p: VersusProfile): TapeCell =>
+    p.avgHours != null ? { value: `${Math.round(p.avgHours).toLocaleString("en-US")}h`, sub: `${p.hoursSum.toLocaleString("en-US")}h logged` } : EMPTY;
+  rows.push({ key: "hours", label: "Hours per game", left: hours(a), right: hours(b), lead: leadOf(a.avgHours, b.avgHours, 1) });
+
+  const tens = (p: VersusProfile): TapeCell => ({ value: `${pct(p.tens, p.reviewCount)}%`, sub: `${p.tens} of ${p.reviewCount}` });
+  rows.push({
+    key: "tens", label: "Perfect 10s", left: tens(a), right: tens(b),
+    lead: leadOf(pct(a.tens, a.reviewCount), pct(b.tens, b.reviewCount), 1),
+  });
+
+  const takes = (p: VersusProfile): TapeCell =>
+    p.hotTakeBase > 0 ? { value: `${pct(p.hotTakes, p.hotTakeBase)}%`, sub: `3+ from the crowd` } : EMPTY;
+  rows.push({
+    key: "takes", label: "Hot take rate", left: takes(a), right: takes(b),
+    lead: a.hotTakeBase > 0 && b.hotTakeBase > 0 ? leadOf(pct(a.hotTakes, a.hotTakeBase), pct(b.hotTakes, b.hotTakeBase), 1) : null,
+  });
+
+  const words = (p: VersusProfile): TapeCell =>
+    p.avgWords != null ? { value: Math.round(p.avgWords).toLocaleString("en-US"), sub: "words per review" } : EMPTY;
+  rows.push({ key: "words", label: "Review length", left: words(a), right: words(b), lead: leadOf(a.avgWords, b.avgWords, 5) });
+
+  return rows.filter((r) => r.left !== EMPTY || r.right !== EMPTY);
+}
+
+const toProfile = (row: any): VersusProfile => ({
+  reviewCount: row?.review_count ?? 0,
+  topGenre: row?.top_genre ?? null,
+  topGenreCount: row?.top_genre_count ?? 0,
+  topPlatform: row?.top_platform ?? null,
+  topPlatformCount: row?.top_platform_count ?? 0,
+  topStudio: row?.top_studio ?? null,
+  topStudioCount: row?.top_studio_count ?? 0,
+  avgReleaseYear: row?.avg_release_year ?? null,
+  avgHours: row?.avg_hours ?? null,
+  hoursSum: row?.hours_sum ?? 0,
+  tens: row?.tens ?? 0,
+  hotTakes: row?.hot_takes ?? 0,
+  hotTakeBase: row?.hot_take_base ?? 0,
+  avgWords: row?.avg_words ?? null,
+});
+
 const round1 = (n: number | null | undefined): number | null =>
   n == null ? null : Math.round(n * 10) / 10;
 
@@ -182,9 +313,9 @@ export interface GroupVersusContext {
 }
 
 /**
- * Everything the Stats tab renders. The summary is one row and every list is a
- * .limit()ed read of group_versus_games, so nothing here can reach Supabase's
- * 1000-row cap.
+ * Everything the Stats tab renders. The summary is one row, the profile two
+ * (one per side), and every list is a .limit()ed read of group_versus_games, so
+ * nothing here can reach Supabase's 1000-row cap.
  */
 export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVersusData> {
   const { db, groupId, members, memberStats, ownerProfileId = null, viewerProfileId = null } = ctx;
@@ -223,7 +354,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     failed: false,
     sharedGames: 0, subjectAvg: null, otherAvg: null, meanAbsDiff: null,
     agreementPct: 0, above: 0, below: 0, level: 0,
-    disagreements: [], agreements: [], unreviewed: [],
+    disagreements: [], agreements: [], unreviewed: [], tape: [],
   };
   if (!subject) return data;
 
@@ -238,7 +369,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
   // Scored by the subject and by enough of the other side to call it an opinion
   const shared = () => games().not("subject_score", "is", null).gte("other_count", minReviews);
 
-  const [summaryRes, disagreeRes, agreeRes, unreviewedRes] = await Promise.all([
+  const [summaryRes, disagreeRes, agreeRes, unreviewedRes, profileRes] = await Promise.all([
     db.rpc("group_versus_summary", { ...args, p_min_reviews: minReviews }).maybeSingle(),
     shared().gt("diff_abs", VERSUS_AGREE_GAP)
       .order("diff_abs", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
@@ -249,12 +380,14 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     games().is("subject_score", null).gte("other_count", minReviews)
       .order("other_weighted", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
       .limit(VERSUS_LIST_SHOWN),
+    db.rpc("group_versus_profile", args),
   ]);
   const results = [summaryRes, disagreeRes, agreeRes, unreviewedRes];
-  for (const res of results) {
+  for (const res of [...results, profileRes]) {
     if (res?.error) console.error("[groupCompare] versus error:", JSON.stringify(res.error));
   }
   if (results.some((res) => res?.error)) return { ...data, failed: true };
+  // A failed profile only costs the tale of the tape, not the whole tab
 
   const s = summaryRes?.data;
   return {
@@ -270,5 +403,9 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     disagreements: (disagreeRes?.data ?? []).map(toGameRow),
     agreements: (agreeRes?.data ?? []).map(toGameRow),
     unreviewed: (unreviewedRes?.data ?? []).map(toGameRow),
+    tape: buildTape(
+      toProfile((profileRes?.data ?? []).find((r: any) => r.side === "subject")),
+      toProfile((profileRes?.data ?? []).find((r: any) => r.side === "other")),
+    ),
   };
 }

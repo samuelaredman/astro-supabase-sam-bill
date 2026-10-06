@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   agreementLabel,
   agreementPercent,
+  buildTape,
+  decadeLabel,
   graderLabel,
   rankMemberIds,
   resolveVersusOpponent,
@@ -9,6 +11,7 @@ import {
   signedScore,
   versusOptions,
   type VersusMember,
+  type VersusProfile,
 } from "./groupCompare";
 
 const member = (id: string, over: Partial<VersusMember> = {}): VersusMember => ({
@@ -122,5 +125,55 @@ describe("signedScore", () => {
     expect(signedScore(1.46)).toBe("+1.5");
     expect(signedScore(-0.44)).toBe("−0.4");
     expect(signedScore(0.04)).toBe("0.0");
+  });
+});
+
+const profile = (over: Partial<VersusProfile> = {}): VersusProfile => ({
+  reviewCount: 20, topGenre: "RPG", topGenreCount: 8, topPlatform: "PS5", topPlatformCount: 10,
+  topStudio: "FromSoftware", topStudioCount: 3, avgReleaseYear: 2014.4, avgHours: 42, hoursSum: 840,
+  tens: 4, hotTakes: 3, hotTakeBase: 12, avgWords: 180, ...over,
+});
+
+describe("decadeLabel", () => {
+  it("rounds the average year into its decade", () => {
+    expect(decadeLabel(2014.4)).toBe("2010s");
+    expect(decadeLabel(1999.6)).toBe("2000s");
+    expect(decadeLabel(null)).toBeNull();
+  });
+});
+
+describe("buildTape", () => {
+  const row = (rows: ReturnType<typeof buildTape>, key: string) => rows.find((r) => r.key === key)!;
+
+  it("is empty when either side has no reviews", () => {
+    expect(buildTape(profile(), profile({ reviewCount: 0 }))).toEqual([]);
+  });
+
+  it("marks a shared favourite as the same", () => {
+    const rows = buildTape(profile(), profile({ topPlatform: "PC" }));
+    expect(row(rows, "genre").lead).toBe("same");
+    expect(row(rows, "platform").lead).toBeNull();
+    expect(row(rows, "genre").left).toEqual({ value: "RPG", sub: "40% of reviews" });
+  });
+
+  it("leads with the bigger number, and not on a tie", () => {
+    const rows = buildTape(profile({ avgHours: 80 }), profile({ avgHours: 20, tens: 4 }));
+    expect(row(rows, "hours").lead).toBe("left");
+    expect(row(rows, "hours").left.value).toBe("80h");
+    expect(row(rows, "tens").lead).toBeNull();
+  });
+
+  it("works out the hot take rate from the games others reviewed", () => {
+    const rows = buildTape(profile({ hotTakes: 3, hotTakeBase: 12 }), profile({ hotTakes: 0, hotTakeBase: 0 }));
+    expect(row(rows, "takes").left.value).toBe("25%");
+    expect(row(rows, "takes").right.value).toBe("—");
+    expect(row(rows, "takes").lead).toBeNull();
+  });
+
+  it("drops a row neither side has data for", () => {
+    const none = { topStudio: null, avgHours: null };
+    const rows = buildTape(profile(none), profile(none));
+    expect(rows.map((r) => r.key)).not.toContain("studio");
+    expect(rows.map((r) => r.key)).not.toContain("hours");
   });
 });
