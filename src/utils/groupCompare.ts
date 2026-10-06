@@ -93,11 +93,14 @@ export type TapeTile =
       kind: "dist"; key: string; icon: string; label: string;
       /** Share of each side's reviews at each score, index 0 = score 1, 0–100. */
       left: number[]; right: number[];
+      /** Reviews at each score, and in all, per side — for the bar readouts. */
+      leftCounts: number[]; rightCounts: number[];
+      leftTotal: number; rightTotal: number;
       leftAvg: number | null; rightAvg: number | null;
       /** Each side's most-given score. */
       leftMode: number; rightMode: number;
-      /** The tallest bucket on either side — the top of the chart. */
-      peak: number;
+      /** The top of the chart's axis: the tallest bar, rounded up to a ten. */
+      scale: number;
       headline: string;
     }
   | {
@@ -144,9 +147,11 @@ export function buildScoreDistribution(
   return {
     kind: "dist", key: "scores", icon: "📊", label: "How you score",
     left: l, right: r,
+    leftCounts: left, rightCounts: right,
+    leftTotal: lt, rightTotal: rt,
     leftAvg: avg(left, lt), rightAvg: avg(right, rt),
     leftMode: lm, rightMode: rm,
-    peak: Math.max(...l, ...r),
+    scale: Math.max(10, Math.ceil(Math.max(...l, ...r) / 10) * 10),
     headline,
   };
 }

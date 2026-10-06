@@ -49,54 +49,11 @@ const fmt = (score: number | null) =>
   score == null ? "—" : Number.isInteger(score) ? String(score) : score.toFixed(1);
 const cover = (g: VersusGameRow) => igdbCover(g.game.cover_img_url, "t_thumb");
 
-// ── Score distribution geometry (SVG units) ──
-// Text sits in HTML around the SVG, not inside it, so it stays readable when the chart scales down
-const DIST = { w: 600, h: 150, padX: 14, top: 6, bottom: 2 };
-const distPlotH = DIST.h - DIST.top - DIST.bottom;
-const distX = (score: number) => DIST.padX + ((score - 1) / 9) * (DIST.w - DIST.padX * 2);
-const distBase = DIST.top + distPlotH;
-
-/**
- * A smooth line through the points that never overshoots them (monotone cubic,
- * Fritsch–Carlson), so a curve can't dip below zero or bulge past a real value
- * between two scores.
- */
-function smoothPath(p: { x: number; y: number }[]): string {
-  const n = p.length;
-  const d = p.slice(0, -1).map((a, i) => (p[i + 1].y - a.y) / (p[i + 1].x - a.x));
-  const m = p.map((_, i) => (i === 0 ? d[0] : i === n - 1 ? d[n - 2] : d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2));
-  for (let i = 0; i < n - 1; i++) {
-    if (d[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
-    const a = m[i] / d[i], b = m[i + 1] / d[i], h = Math.hypot(a, b);
-    if (h > 3) { m[i] = (3 * a * d[i]) / h; m[i + 1] = (3 * b * d[i]) / h; }
-  }
-  let out = `M${p[0].x.toFixed(1)},${p[0].y.toFixed(1)}`;
-  for (let i = 0; i < n - 1; i++) {
-    const dx = (p[i + 1].x - p[i].x) / 3;
-    out += ` C${(p[i].x + dx).toFixed(1)},${(p[i].y + m[i] * dx).toFixed(1)} ${(p[i + 1].x - dx).toFixed(1)},${(p[i + 1].y - m[i + 1] * dx).toFixed(1)} ${p[i + 1].x.toFixed(1)},${p[i + 1].y.toFixed(1)}`;
-  }
-  return out;
-}
-
-function dist(t: Extract<TapeTile, { kind: "dist" }>) {
-  const top = t.peak * 1.1 || 1;
-  const y = (share: number) => distBase - (share / top) * distPlotH;
-  const line = (shares: number[]) => smoothPath(shares.map((v, i) => ({ x: distX(i + 1), y: y(v) })));
-  const area = (shares: number[]) =>
-    `${line(shares)} L${distX(10).toFixed(1)},${distBase} L${distX(1).toFixed(1)},${distBase} Z`;
-  const lx = t.leftAvg != null ? distX(t.leftAvg) : null;
-  const rx = t.rightAvg != null ? distX(t.rightAvg) : null;
-  const pct = (x: number) => `${((x / DIST.w) * 100).toFixed(2)}%`;
-  // Close averages: put the two labels on separate lines so they don't collide
-  const close = lx != null && rx != null && Math.abs(lx - rx) < DIST.w * 0.16;
-  return {
-    leftLine: line(t.left), rightLine: line(t.right),
-    leftArea: area(t.left), rightArea: area(t.right),
-    lx, rx, pct, close,
-    cols: t.left.map((v, i) => ({ score: i + 1, x: distX(i + 1), ly: y(v), ry: y(t.right[i]), l: v, r: t.right[i] })),
-    step: distX(2) - distX(1),
-  };
-}
+// ── Score histogram ──
+const reviewsLabel = (n: number) => `${n.toLocaleString()} review${n === 1 ? "" : "s"}`;
+const shareLabel = (share: number) => `${Math.round(share)}%`;
+/** Readouts near the edges open inwards so they stay inside the card. */
+const tipSide = (score: number) => (score <= 2 ? " gv-hist-tip-start" : score >= 9 ? " gv-hist-tip-end" : "");
 
 // ── Genre radar geometry (SVG units) ──
 const RADAR = { w: 300, h: 230, cx: 150, cy: 117, r: 78 };
@@ -230,54 +187,51 @@ const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubj
               <div class={`gv-tile gv-tile-${t.kind}`}>
                 <div class="gv-tile-label"><span class="gv-tile-icon" aria-hidden="true">{t.icon}</span>{t.label}</div>
 
-                {t.kind === "dist" && (() => {
-                  const g = dist(t);
-                  return (
-                    <>
-                      <div class={`gv-dist-avgs${g.close ? " gv-dist-avgs-stacked" : ""}`}>
-                        {g.rx != null && <span class="gv-dist-tag gv-dist-tag-r" style={`left:${g.pct(g.rx)}`}><i class="gv-dot gv-dot-r"></i>{otherShort} avg {t.rightAvg?.toFixed(1)}</span>}
-                        {g.lx != null && <span class="gv-dist-tag gv-dist-tag-l" style={`left:${g.pct(g.lx)}`}><i class="gv-dot gv-dot-l"></i>{subjectName} avg {t.leftAvg?.toFixed(1)}</span>}
+                {t.kind === "dist" && (
+                  <>
+                    <div class="gv-hist-key">
+                      <span><i class="gv-dot gv-dot-l"></i><strong>{subjectName}</strong> avg {t.leftAvg?.toFixed(1) ?? "—"} · {reviewsLabel(t.leftTotal)}</span>
+                      <span><i class="gv-dot gv-dot-r"></i><strong>{otherShort}</strong> avg {t.rightAvg?.toFixed(1) ?? "—"} · {reviewsLabel(t.rightTotal)}</span>
+                    </div>
+                    <div class="gv-hist">
+                      <div class="gv-hist-axis" aria-hidden="true">
+                        <span style="bottom:100%">{t.scale}%</span>
+                        <span style="bottom:50%">{t.scale / 2}%</span>
+                        <span style="bottom:0">0%</span>
                       </div>
-                      <svg class="gv-dist" viewBox={`0 0 ${DIST.w} ${DIST.h}`} role="img" aria-label={`Score distribution. ${subjectName}: average ${t.leftAvg}, most often ${t.leftMode}. ${otherShort}: average ${t.rightAvg}, most often ${t.rightMode}.`}>
-                        <defs>
-                          <linearGradient id="gvDistL" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0" style="stop-color:var(--gv-l);stop-opacity:.34" />
-                            <stop offset="1" style="stop-color:var(--gv-l);stop-opacity:0" />
-                          </linearGradient>
-                          <linearGradient id="gvDistR" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0" style="stop-color:var(--gv-r);stop-opacity:.28" />
-                            <stop offset="1" style="stop-color:var(--gv-r);stop-opacity:0" />
-                          </linearGradient>
-                        </defs>
-                        <line class="gv-dist-base" x1={DIST.padX} x2={DIST.w - DIST.padX} y1={distBase} y2={distBase} />
-                        <path class="gv-dist-area" d={g.rightArea} fill="url(#gvDistR)" />
-                        <path class="gv-dist-area" d={g.leftArea} fill="url(#gvDistL)" />
-                        <path class="gv-dist-line gv-dist-r" d={g.rightLine} />
-                        <path class="gv-dist-line gv-dist-l" d={g.leftLine} />
-                        {g.rx != null && <line class="gv-dist-avg gv-dist-r" x1={g.rx} x2={g.rx} y1="0" y2={distBase} />}
-                        {g.lx != null && <line class="gv-dist-avg gv-dist-l" x1={g.lx} x2={g.lx} y1="0" y2={distBase} />}
-                        {g.cols.map((c) => (
-                          <g class="gv-dist-col">
-                            <title>{`Score ${c.score}: ${subjectName} ${c.l}% · ${otherShort} ${c.r}%`}</title>
-                            <rect x={c.x - g.step / 2} y="0" width={g.step} height={DIST.h} />
-                            <line class="gv-dist-guide" x1={c.x} x2={c.x} y1="0" y2={distBase} />
-                            <circle class="gv-dist-pt gv-dist-r" cx={c.x} cy={c.ry} r="4" />
-                            <circle class="gv-dist-pt gv-dist-l" cx={c.x} cy={c.ly} r="4" />
-                          </g>
-                        ))}
-                      </svg>
-                      <div class="gv-dist-xs" aria-hidden="true">
-                        {g.cols.map((c) => <span style={`left:${g.pct(c.x)}`}>{c.score}</span>)}
+                      <div class="gv-hist-plot">
+                        <i class="gv-hist-grid" style="bottom:100%" aria-hidden="true"></i>
+                        <i class="gv-hist-grid" style="bottom:50%" aria-hidden="true"></i>
+                        {t.left.map((l, i) => {
+                          const r = t.right[i];
+                          return (
+                            <div
+                              class="gv-hist-col"
+                              tabindex="0"
+                              aria-label={`Score ${i + 1}: ${subjectName} ${shareLabel(l)} (${reviewsLabel(t.leftCounts[i])}), ${otherShort} ${shareLabel(r)} (${reviewsLabel(t.rightCounts[i])})`}
+                            >
+                              <div class={`gv-hist-tip${tipSide(i + 1)}`} aria-hidden="true">
+                                <strong>Score {i + 1}</strong>
+                                <span><i class="gv-dot gv-dot-l"></i>{subjectName} {shareLabel(l)} · {reviewsLabel(t.leftCounts[i])}</span>
+                                <span><i class="gv-dot gv-dot-r"></i>{otherShort} {shareLabel(r)} · {reviewsLabel(t.rightCounts[i])}</span>
+                              </div>
+                              <span class="gv-hist-bar gv-hist-l" style={`height:${(l / t.scale) * 100}%`} aria-hidden="true">
+                                {l >= 1 && <b>{shareLabel(l)}</b>}
+                              </span>
+                              <span class="gv-hist-bar gv-hist-r" style={`height:${(r / t.scale) * 100}%`} aria-hidden="true">
+                                {r >= 1 && <b>{shareLabel(r)}</b>}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
-                      <table class="gv-sr">
-                        <caption>Share of each side's reviews at each score</caption>
-                        <thead><tr><th>Score</th><th>{subjectName}</th><th>{otherShort}</th></tr></thead>
-                        <tbody>{t.left.map((l, i) => <tr><td>{i + 1}</td><td>{l}%</td><td>{t.right[i]}%</td></tr>)}</tbody>
-                      </table>
-                      <div class="gv-tile-note">{t.headline} · across all reviews in the group</div>
-                    </>
-                  );
-                })()}
+                      <div class="gv-hist-xs" aria-hidden="true">
+                        {t.left.map((_, i) => <span><em class={scoreClass(i + 1)}>{i + 1}</em></span>)}
+                      </div>
+                    </div>
+                    <div class="gv-tile-note">Bar height is the share of each side's own reviews at that score. {t.headline}.</div>
+                  </>
+                )}
 
                 {t.kind === "radar" && (() => {
                   const g = radar(t);

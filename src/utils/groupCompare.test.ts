@@ -247,7 +247,8 @@ describe("buildScoreDistribution", () => {
     expect(d.leftAvg).toBe(8.3);
     expect(d.rightAvg).toBe(7);
     expect([d.leftMode, d.rightMode]).toEqual([8, 7]);
-    expect(d.peak).toBe(75);
+    expect(d.scale).toBe(80);
+    expect([d.leftTotal, d.leftCounts[7], d.rightTotal, d.rightCounts[6]]).toEqual([4, 3, 10, 6]);
     expect(d.headline).toBe("Your most common score is 8; the community's is 7");
   });
 
