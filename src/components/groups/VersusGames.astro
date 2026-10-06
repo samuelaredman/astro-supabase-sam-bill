@@ -80,29 +80,31 @@ const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n ==
 const cover = (g: VersusGameRow) => igdbCover(g.game.cover_img_url, "t_cover_big");
 
 /**
- * One side's stats in a face-off, nearest the cover first. The labels are the
- * same on both sides so the rows line up; the community's numbers are
- * averages (hours, achieved) or its most common pick (platform), which the
- * key says once.
+ * One side of a face-off: the score, big, beside the cover, and the rest as a
+ * list further out. The labels are the same on both sides so the rows line
+ * up; the community's numbers are averages (hours, achieved) or its most
+ * common pick (platform), which the key says once.
  */
-type FaceStat = { key: string; label: string; value: string; sub?: string; badge?: string };
-function faceStats(g: VersusGameRow, side: "subject" | "other"): FaceStat[] {
+type FaceRow = { key: string; label: string; value: string; meter?: number };
+function faceSide(g: VersusGameRow, side: "subject" | "other") {
   const isCommunity = side === "other" && !opponent;
   const d = side === "subject" ? g.subjectDetail : g.otherDetail;
   const score = side === "subject" ? g.subjectScore : g.otherScore;
-  const stats: FaceStat[] = [{
-    key: "score",
-    label: "Score",
-    value: fmt(score),
-    sub: score == null ? "Not reviewed" : isCommunity ? `avg of ${plural(g.otherCount, "review")}` : undefined,
-    badge: badge(score) || "gv-score-none",
-  }];
-  if (!d) return stats;
-  return stats.concat([
+  const rows: FaceRow[] = !d ? [] : [
     { key: "hours", label: "Hours", value: d.avgHours != null ? `${Math.round(d.avgHours).toLocaleString()}h` : "—" },
-    { key: "ach", label: "Achieved", value: d.achievementPct != null ? `${Math.round(d.achievementPct * 100)}%` : "—" },
+    {
+      key: "ach", label: "Achieved",
+      value: d.achievementPct != null ? `${Math.round(d.achievementPct * 100)}%` : "—",
+      meter: d.achievementPct != null ? Math.round(d.achievementPct * 100) : undefined,
+    },
     { key: "platform", label: "Platform", value: d.platform ?? "—" },
-  ]);
+  ];
+  return {
+    score: fmt(score),
+    badge: badge(score) || "gv-score-none",
+    scoreSub: score == null ? "Not reviewed" : isCommunity ? `avg of ${plural(g.otherCount, "review")}` : null,
+    rows,
+  };
 }
 ---
 
@@ -139,20 +141,30 @@ function faceStats(g: VersusGameRow, side: "subject" | "other"): FaceStat[] {
     <>
       <div class="gv-faceoffs">
         {games.rows.map((g) => (
-          <a class="gv-face" href={`/games/${g.game.slug}`}>
-            {(["subject", "other"] as const).map((side) => (
-              <dl class={`gv-face-side gv-face-${side === "subject" ? "l" : "r"}`} aria-label={side === "subject" ? subjectName : otherShort}>
-                {faceStats(g, side).map((st) => (
-                  <div class={`gv-face-stat gv-face-${st.key}`}>
-                    <dt>{st.label}</dt>
-                    <dd>
-                      {st.badge ? <span class={`score-badge ${st.badge}`}>{st.value}</span> : st.value}
-                      {st.sub && <small>{st.sub}</small>}
-                    </dd>
+          <a class="gv-face" href={`/games/${g.game.slug}`} style={cover(g) ? `--gv-art:url("${cover(g)}")` : undefined}>
+            {(["subject", "other"] as const).map((side) => {
+              const f = faceSide(g, side);
+              return (
+                <div class={`gv-face-side gv-face-${side === "subject" ? "l" : "r"}`} aria-label={side === "subject" ? subjectName : otherShort} role="group">
+                  <div class="gv-face-score">
+                    <span class="gv-face-lbl">Score</span>
+                    <span class={`score-badge ${f.badge}`}>{f.score}</span>
+                    {f.scoreSub && <small>{f.scoreSub}</small>}
                   </div>
-                ))}
-              </dl>
-            ))}
+                  {f.rows.length > 0 && (
+                    <dl class="gv-face-list">
+                      {f.rows.map((r) => (
+                        <div class={`gv-face-row gv-face-${r.key}`}>
+                          <dt class="gv-face-lbl">{r.label}</dt>
+                          <dd>{r.value}</dd>
+                          {r.meter != null && <span class="gv-face-meter" aria-hidden="true"><i style={`width:${r.meter}%`}></i></span>}
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+                </div>
+              );
+            })}
             <div class="gv-face-game">
               {cover(g) ? <img class="gv-face-cover" src={cover(g)!} alt="" loading="lazy" /> : <span class="gv-face-cover"></span>}
               <span class="gv-face-title">{g.game.title}</span>
