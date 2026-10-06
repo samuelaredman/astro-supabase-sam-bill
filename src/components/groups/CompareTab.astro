@@ -1,9 +1,9 @@
 ---
 /**
  * The group Stats tab: you vs the community, or you vs one member you pick
- * (the creator, say). One matchup, one scoreboard, and three short lists:
- * where you disagree most, where you agree, and what they love that you
- * haven't reviewed.
+ * (the creator, say). A stat card for each side with what they share between
+ * them, the score and genre charts, and three short lists: where you disagree
+ * most, where you agree, and what they love that you haven't reviewed.
  *
  * Rendered both by the group page (first paint) and by the partial route
  * /groups/[id]/compare that the "compare with" menu re-fetches, from the same
@@ -12,9 +12,9 @@
  * in later is styled. Behaviour is delegated from src/scripts/group-compare.ts.
  */
 import { igdbImage as igdbCover, scoreClass } from "../../utils/format";
+import StatRows from "./StatRows.astro";
 import {
   agreementLabel,
-  graderLabel,
   shortGenre,
   signedScore,
   type GroupVersusData,
@@ -27,13 +27,13 @@ interface Props {
   data: GroupVersusData;
   /** The group being compared — the menu re-fetches /groups/<id>/compare. */
   groupId: string;
-  /** Shown under the scoreboard when the group has a genre/platform focus. */
+  /** Shown between the stat cards when the group has a genre/platform focus. */
   focusLabel?: string | null;
 }
 const { data, groupId, focusLabel } = Astro.props;
 const {
   subject, opponent, options, viewerIsGuest, minReviews, failed, sharedGames,
-  subjectAvg, otherAvg, meanAbsDiff, agreementPct, disagreements, agreements, unreviewed, tape,
+  meanAbsDiff, agreementPct, disagreements, agreements, unreviewed, card, tape,
 } = data;
 
 const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
@@ -44,7 +44,6 @@ const otherName = opponent ? `@${opponent.username}` : "the community";
 const otherShort = opponent ? `@${opponent.username}` : "Community";
 const optionLabel = (m: VersusMember) => `@${m.username}${m.isOwner ? " (owner)" : ""}`;
 
-const grader = graderLabel(subjectName, otherName, subjectAvg, otherAvg);
 const badge = (score: number | null) => (score != null ? scoreClass(Math.round(score)) : "");
 const fmt = (score: number | null) =>
   score == null ? "—" : Number.isInteger(score) ? String(score) : score.toFixed(1);
@@ -142,7 +141,6 @@ const emptyMessage = !subject
     : opponent
       ? `${subjectName} and ${otherName} haven't reviewed any of the same games yet.`
       : `None of ${subjectGames} games has been reviewed by ${others} yet. Try comparing with a member instead.`;
-const sharedLabel = sharedGames === 1 ? "shared game" : "shared games";
 
 const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubject: boolean }[] = [
   { title: "Biggest disagreements", rows: disagreements, showDiff: true, showSubject: true },
@@ -159,81 +157,69 @@ const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubj
     <div class="empty-tab">Nobody in this group has reviewed a game yet.</div>
   ) : (
     <>
-      {/* ── The matchup ── */}
-      <div class="gv-matchup">
-        <div class="gv-side">
-          <span class="gv-av">
-            {subject.avatar_url ? <img src={subject.avatar_url} alt="" loading="lazy" /> : initials(subject.username)}
-          </span>
-          <span class="gv-side-text">
+      {/* ── Stat cards: each side's own numbers, with what they share in the middle ── */}
+      <div class="gv-head">
+        <section class="gv-card gv-card-l" aria-label={`${subjectName}'s stats`}>
+          <div class="gv-card-top">
+            <span class="gv-av">
+              {subject.avatar_url ? <img src={subject.avatar_url} alt="" loading="lazy" /> : initials(subject.username)}
+            </span>
             <span class="gv-name">{subjectName}</span>
-            <span class="gv-sub">{plural(subject.reviewCount, "review")}</span>
-          </span>
+          </div>
+          {card && <StatRows rows={card} side="left" />}
+        </section>
+
+        <div class="gv-mid">
+          <span class="gv-vs">vs</span>
+          {sharedGames === 0 ? (
+            <p class="gv-mid-empty">{emptyMessage}</p>
+          ) : (
+            <>
+              {meanAbsDiff != null && <div class="gv-verdict-title">{agreementLabel(meanAbsDiff)}</div>}
+              <dl class="gv-mid-facts">
+                <div><dt>Shared games</dt><dd>{sharedGames.toLocaleString()}</dd></div>
+                <div><dt>Within a point</dt><dd>{agreementPct}%</dd></div>
+                <div><dt>Avg gap</dt><dd>{meanAbsDiff != null ? meanAbsDiff.toFixed(1) : "—"}</dd></div>
+              </dl>
+            </>
+          )}
+          {focusLabel && <span class="gv-mid-focus">{focusLabel}</span>}
         </div>
 
-        <span class="gv-vs">vs</span>
-
-        <div class="gv-side gv-side-other">
-          <span class="gv-av">
-            {opponent
-              ? (opponent.avatar_url ? <img src={opponent.avatar_url} alt="" loading="lazy" /> : initials(opponent.username))
-              : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
-          </span>
-          <label class="gv-pick">
-            <span class="gv-pick-lbl">Compare with</span>
-            <select class="gv-select" data-gv-with aria-label="Compare with">
-              <option value="" selected={!opponent}>The community</option>
-              {options.length > 0 && (
-                <optgroup label="Members">
-                  {options.map((m) => (
-                    <option value={m.id} selected={opponent?.id === m.id}>{optionLabel(m)}</option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
-          </label>
-        </div>
+        <section class="gv-card gv-card-r" aria-label={`${otherShort} stats`}>
+          <div class="gv-card-top">
+            <span class="gv-av">
+              {opponent
+                ? (opponent.avatar_url ? <img src={opponent.avatar_url} alt="" loading="lazy" /> : initials(opponent.username))
+                : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
+            </span>
+            <label class="gv-pick">
+              <span class="gv-pick-lbl">Compare with</span>
+              <select class="gv-select" data-gv-with aria-label="Compare with">
+                <option value="" selected={!opponent}>The community</option>
+                {options.length > 0 && (
+                  <optgroup label="Members">
+                    {options.map((m) => (
+                      <option value={m.id} selected={opponent?.id === m.id}>{optionLabel(m)}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </label>
+          </div>
+          {card && <StatRows rows={card} side="right" />}
+        </section>
       </div>
 
       {viewerIsGuest && (
         <div class="gv-note">Showing {subjectName}. Join the group and review a few games to compare yourself.</div>
       )}
 
-      {sharedGames === 0 ? (
-        <div class="empty-tab">
-          {emptyMessage}
-        </div>
-      ) : (
-        <>
-          {/* ── Scoreboard ── */}
-          <div class="gv-board">
-            <div class="gv-score">
-              <span class={`gv-score-val ${badge(subjectAvg) || "gv-score-none"}`}>{fmt(subjectAvg)}</span>
-              <span class="gv-score-lbl">{subjectName}</span>
-            </div>
-            <div class="gv-verdict">
-              <div class="gv-verdict-title">{meanAbsDiff != null ? agreementLabel(meanAbsDiff) : "—"}</div>
-              {grader && <div class="gv-verdict-sub">{grader}</div>}
-            </div>
-            <div class="gv-score">
-              <span class={`gv-score-val ${badge(otherAvg) || "gv-score-none"}`}>{fmt(otherAvg)}</span>
-              <span class="gv-score-lbl">{otherShort}</span>
-            </div>
-          </div>
-          <div class="gv-facts">
-            <span><strong>{sharedGames.toLocaleString()}</strong> {sharedLabel}</span>
-            <span><strong>{agreementPct}%</strong> within a point</span>
-            {meanAbsDiff != null && <span><strong>{meanAbsDiff.toFixed(1)}</strong> average gap</span>}
-            {focusLabel && <span>{focusLabel}</span>}
-          </div>
-        </>
-      )}
-
-      {/* ── Tale of the tape: each side's own habits, no shared games needed ── */}
+      {/* ── Charts: each side's own habits, no shared games needed ── */}
       {tape.length > 0 && (
         <section class="gv-tape">
           <div class="gv-tape-head">
-            <span class="gv-tape-title">Tale of the tape</span>
+            <span class="gv-tape-title">How you play</span>
             <span class="gv-key">
               <span class="gv-key-item"><i class="gv-dot gv-dot-l"></i>{subjectName}</span>
               <span class="gv-key-item"><i class="gv-dot gv-dot-r"></i>{otherShort}</span>
@@ -338,30 +324,6 @@ const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubj
                   </div>
                 ))}
 
-                {t.kind === "bar" && (
-                  <>
-                    <div class="gv-tug-vals">
-                      <span class="gv-tug-val gv-tug-l">{t.left.value}{t.left.sub && <small> {t.left.sub}</small>}</span>
-                      <span class="gv-tug-val gv-tug-r">{t.right.value}{t.right.sub && <small> {t.right.sub}</small>}</span>
-                    </div>
-                    <div class="gv-tug" role="img" aria-label={`${t.left.value} vs ${t.right.value}`}>
-                      <span class="gv-tug-fill" style={`width:${t.leftShare}%`}></span>
-                    </div>
-                    <div class="gv-tile-note">{t.headline}</div>
-                  </>
-                )}
-
-                {t.kind === "era" && (
-                  <>
-                    <div class="gv-era" role="img" aria-label={`${t.left?.year ?? "—"} vs ${t.right?.year ?? "—"}`}>
-                      <span class="gv-era-line"></span>
-                      {t.left && <span class="gv-era-pin gv-era-l" style={`left:${t.left.pos}%`}><span>{t.left.year}</span></span>}
-                      {t.right && <span class="gv-era-pin gv-era-r" style={`left:${t.right.pos}%`}><span>{t.right.year}</span></span>}
-                    </div>
-                    <div class="gv-era-ends"><span>{t.from}</span><span>{t.to}</span></div>
-                    {t.headline && <div class="gv-tile-note">{t.headline}</div>}
-                  </>
-                )}
               </div>
             ))}
           </div>

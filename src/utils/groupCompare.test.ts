@@ -2,16 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   agreementLabel,
   agreementPercent,
-  barHeadline,
   buildGenreRadar,
   buildScoreDistribution,
+  buildStatCard,
   buildTape,
-  decadeLabel,
-  graderLabel,
   rankMemberIds,
   resolveVersusOpponent,
   resolveVersusSubject,
-  ratioLabel,
   scoreBuckets,
   shortGenre,
   sideScores,
@@ -109,24 +106,6 @@ describe("agreementLabel", () => {
   });
 });
 
-describe("graderLabel", () => {
-  it("speaks to the viewer", () => {
-    expect(graderLabel("You", "the community", 8, 7)).toBe("You score more generously than the community");
-  });
-
-  it("names a member", () => {
-    expect(graderLabel("@creator", "@sam", 6, 7.5)).toBe("@creator scores tougher than @sam");
-  });
-
-  it("calls a small gap the same", () => {
-    expect(graderLabel("You", "@sam", 7.1, 7)).toBe("You and @sam score about the same");
-  });
-
-  it("says nothing without both averages", () => {
-    expect(graderLabel("You", "@sam", null, 7)).toBeNull();
-  });
-});
-
 describe("signedScore", () => {
   it("signs and rounds to one decimal", () => {
     expect(signedScore(1.46)).toBe("+1.5");
@@ -136,45 +115,32 @@ describe("signedScore", () => {
 });
 
 const profile = (over: Partial<VersusProfile> = {}): VersusProfile => ({
-  reviewCount: 20, topGenre: "RPG", topGenreCount: 8, topPlatform: "PS5", topPlatformCount: 10,
-  topStudio: "FromSoftware", topStudioCount: 3, avgReleaseYear: 2014.4, avgHours: 42, hoursSum: 840,
-  tens: 4, hotTakes: 3, hotTakeBase: 12, avgWords: 180, ...over,
+  reviewCount: 20, gamesPlayed: 20, avgScore: 7.45, topGenre: "RPG", topGenreCount: 8,
+  avgHours: 41.6, tens: 4, avgAchievementPct: 0.634, achievementGames: 12, ...over,
 });
 
-describe("decadeLabel", () => {
-  it("rounds the average year into its decade", () => {
-    expect(decadeLabel(2014.4)).toBe("2010s");
-    expect(decadeLabel(1999.6)).toBe("2000s");
-    expect(decadeLabel(null)).toBeNull();
-  });
-});
+describe("buildStatCard", () => {
+  const side = (rows: ReturnType<typeof buildStatCard>, key: string) => rows.find((r) => r.key === key)!;
 
-describe("ratioLabel", () => {
-  it("keeps one decimal for small ratios and drops it for big ones", () => {
-    expect(ratioLabel(1.84)).toBe("1.8×");
-    expect(ratioLabel(2)).toBe("2.0×");
-    expect(ratioLabel(3.4)).toBe("3×");
-  });
-});
-
-describe("barHeadline", () => {
-  const you = { subject: "You", other: "The community" };
-  const verb = { you: "play", they: "plays", more: "longer per game" };
-
-  it("names whoever has more, with how many times more", () => {
-    expect(barHeadline(60, 30, you, verb, "Same")).toBe("You play 2.0× longer per game");
-    expect(barHeadline(10, 40, you, verb, "Same")).toBe("The community plays 4× longer per game");
+  it("gives both sides the same rows, in order", () => {
+    const rows = buildStatCard(profile(), profile({ gamesPlayed: 1203, reviewCount: 1400 }));
+    expect(rows.map((r) => r.key)).toEqual(["games", "rating", "achievements", "hours", "tens"]);
+    expect(side(rows, "games")).toMatchObject({ left: { value: "20" }, right: { value: "1,203" } });
   });
 
-  it("calls anything within 15% the same", () => {
-    expect(barHeadline(50, 46, you, verb, "Same pace")).toBe("Same pace");
+  it("formats each stat", () => {
+    const rows = buildStatCard(profile(), profile());
+    expect(side(rows, "rating")).toMatchObject({ score: true, left: { value: "7.5", sub: "20 reviews" } });
+    expect(side(rows, "achievements").left).toEqual({ value: "63%", sub: "across 12 games" });
+    expect(side(rows, "hours").left).toEqual({ value: "42h" });
+    expect(side(rows, "tens").left).toEqual({ value: "4", sub: "20% of reviews" });
   });
 
-  it("says only, mid-sentence, when one side has none", () => {
-    const tens = { you: "hand out 10s", they: "hands out 10s", more: "as often" };
-    expect(barHeadline(12, 0, you, tens, "Same")).toBe("Only you hand out 10s");
-    expect(barHeadline(0, 12, you, tens, "Same")).toBe("Only the community hands out 10s");
-    expect(barHeadline(0, 0, you, tens, "No 10s")).toBe("No 10s");
+  it("shows a dash where a side has no data", () => {
+    const rows = buildStatCard(profile({ avgScore: null, avgHours: null, avgAchievementPct: null, achievementGames: 0 }), profile());
+    expect(side(rows, "rating").left).toEqual({ value: "—" });
+    expect(side(rows, "achievements").left).toEqual({ value: "—", sub: "None synced" });
+    expect(side(rows, "hours").left).toEqual({ value: "—" });
   });
 });
 
@@ -187,27 +153,10 @@ describe("buildTape", () => {
   });
 
   it("merges a shared favourite and keeps different ones apart", () => {
-    const tiles = buildTape(profile(), profile({ topPlatform: "PC" }), names);
-    expect(tile(tiles, "genre")).toMatchObject({ kind: "pick", same: true, left: { value: "RPG", sub: "40%" } });
-    expect(tile(tiles, "platform")).toMatchObject({ kind: "pick", same: false, right: { value: "PC" } });
-  });
-
-  it("splits a bar by share, with a headline", () => {
-    const t = tile(buildTape(profile({ avgHours: 75 }), profile({ avgHours: 25 }), names), "hours");
-    expect(t).toMatchObject({ kind: "bar", leftShare: 75, left: { value: "75h" }, right: { value: "25h" } });
-    expect(t.kind === "bar" && t.headline).toBe("You play 3× longer per game");
-  });
-
-  it("places both sides on the era timeline", () => {
-    const t = tile(buildTape(profile({ avgReleaseYear: 2020 }), profile({ avgReleaseYear: 2000 }), names, 2026), "era");
-    expect(t).toMatchObject({ kind: "era", from: 1980, to: 2026, headline: "You play 20 years newer" });
-    if (t.kind === "era") expect(Math.round(t.left!.pos)).toBe(87);
-  });
-
-  it("leaves out a bar that only one side has data for", () => {
-    const tiles = buildTape(profile({ hotTakeBase: 0 }), profile({ avgHours: null }), names);
-    expect(tiles.map((t) => t.key)).not.toContain("takes");
-    expect(tiles.map((t) => t.key)).not.toContain("hours");
+    expect(tile(buildTape(profile(), profile(), names), "genre"))
+      .toMatchObject({ kind: "pick", same: true, left: { value: "RPG", sub: "40%" } });
+    expect(tile(buildTape(profile(), profile({ topGenre: "Shooter" }), names), "genre"))
+      .toMatchObject({ kind: "pick", same: false, right: { value: "Shooter" } });
   });
 });
 
@@ -253,10 +202,10 @@ describe("buildGenreRadar", () => {
 
   it("replaces the favourite-genre tile when it can be drawn", () => {
     const genres = { left: [g("RPG", 8), g("Indie", 4), g("Shooter", 2)], right: [g("RPG", 5)] };
-    const keys = buildTape(profile(), profile(), { subject: "You", other: "@sam" }, 2026, genres).map((t) => t.key);
+    const keys = buildTape(profile(), profile(), { subject: "You", other: "@sam" }, genres).map((t) => t.key);
     expect(keys).toContain("genres");
     expect(keys).not.toContain("genre");
-    const fallback = buildTape(profile(), profile(), { subject: "You", other: "@sam" }, 2026).map((t) => t.key);
+    const fallback = buildTape(profile(), profile(), { subject: "You", other: "@sam" }).map((t) => t.key);
     expect(fallback).toContain("genre");
   });
 });

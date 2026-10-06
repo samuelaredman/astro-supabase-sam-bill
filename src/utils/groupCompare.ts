@@ -50,23 +50,30 @@ export interface VersusGameRow {
   diff: number | null;
 }
 
-/** One side of the tale of the tape, from group_versus_profile. */
+/** One side's numbers, from group_versus_profile. */
 export interface VersusProfile {
   reviewCount: number;
+  /** Distinct games — the community pools everyone's reviews, so this can be fewer than reviewCount. */
+  gamesPlayed: number;
+  avgScore: number | null;
   topGenre: string | null;
   topGenreCount: number;
-  topPlatform: string | null;
-  topPlatformCount: number;
-  topStudio: string | null;
-  topStudioCount: number;
-  avgReleaseYear: number | null;
   avgHours: number | null;
-  hoursSum: number;
   tens: number;
-  hotTakes: number;
-  /** Reviews of games someone else on the site reviewed too — what the hot-take rate is out of. */
-  hotTakeBase: number;
-  avgWords: number | null;
+  /** Average share of each reviewed game's achievements earned, 0–1; null with no synced sets. */
+  avgAchievementPct: number | null;
+  /** Reviewed games with a synced achievement set — what avgAchievementPct is out of. */
+  achievementGames: number;
+}
+
+/** One row of a side's stat card. */
+export interface StatCardRow {
+  key: string;
+  label: string;
+  left: TapeSide;
+  right: TapeSide;
+  /** Colour the values like a score. */
+  score?: boolean;
 }
 
 /** One side's value on a tile. */
@@ -76,10 +83,10 @@ export interface TapeSide {
 }
 
 /**
- * A tile on the tale of the tape. Each kind has its own little visual:
- * - pick: each side's favourite (genre, platform, studio), merged into one when they match
- * - bar: a tug-of-war bar split by who has more, with a one-line takeaway
- * - era: both sides placed on a release-year timeline
+ * A chart under the stat cards. Each kind has its own little visual:
+ * - dist: both sides' score distributions as two lines
+ * - radar: both sides' top genres
+ * - pick: each side's favourite genre, merged into one when they match
  */
 export type TapeTile =
   | {
@@ -100,15 +107,7 @@ export type TapeTile =
       /** The outer ring's value — the biggest share, rounded up to a ten. */
       scale: number;
     }
-  | { kind: "pick"; key: string; icon: string; label: string; left: TapeSide | null; right: TapeSide | null; same: boolean }
-  | { kind: "bar"; key: string; icon: string; label: string; left: TapeSide; right: TapeSide; leftShare: number; headline: string }
-  | {
-      kind: "era"; key: string; icon: string; label: string;
-      /** Average release year, and where it sits along the axis, 0–100. */
-      left: { year: number; pos: number } | null;
-      right: { year: number; pos: number } | null;
-      from: number; to: number; headline: string;
-    };
+  | { kind: "pick"; key: string; icon: string; label: string; left: TapeSide | null; right: TapeSide | null; same: boolean };
 
 /** Fewer reviews than this on a side make a distribution too lumpy to read. */
 export const DIST_MIN_REVIEWS = 3;
@@ -228,7 +227,9 @@ export interface GroupVersusData {
   agreements: VersusGameRow[];
   /** The other side's favourites the subject hasn't reviewed. */
   unreviewed: VersusGameRow[];
-  /** The tale of the tape: both sides' profiles as tiles. Empty when either side has no reviews. */
+  /** Both sides' stat cards, row by row. Null when the profile couldn't be read. */
+  card: StatCardRow[] | null;
+  /** The charts under the cards. Empty when either side has no reviews. */
   tape: TapeTile[];
 }
 
@@ -292,15 +293,6 @@ export function agreementLabel(meanAbsDiff: number): string {
   return "Opposite taste";
 }
 
-/** "You score more generously than the community", or null when it can't be said. */
-export function graderLabel(subjectName: string, otherName: string, subjectAvg: number | null, otherAvg: number | null): string | null {
-  if (subjectAvg == null || otherAvg == null) return null;
-  const delta = subjectAvg - otherAvg;
-  const verb = subjectName === "You" ? "score" : "scores";
-  if (Math.abs(delta) < 0.3) return `${subjectName} and ${otherName} score about the same`;
-  return `${subjectName} ${verb} ${delta > 0 ? "more generously" : "tougher"} than ${otherName}`;
-}
-
 /** A score gap with its sign, one decimal: "+1.5", "−0.4", "0.0". */
 export function signedScore(n: number): string {
   const rounded = Math.round(n * 10) / 10;
@@ -309,49 +301,41 @@ export function signedScore(n: number): string {
 
 const pct = (n: number, of: number) => (of > 0 ? Math.round((n / of) * 100) : 0);
 
-/** "2010s" from an average release year. */
-export function decadeLabel(year: number | null): string | null {
-  if (year == null || !Number.isFinite(year)) return null;
-  return `${Math.floor(Math.round(year) / 10) * 10}s`;
-}
-
-/** "1.8×", or "3×" once the gap is big enough that a decimal is noise. */
-export function ratioLabel(ratio: number): string {
-  return ratio >= 3 ? `${Math.round(ratio)}×` : `${(Math.round(ratio * 10) / 10).toFixed(1)}×`;
-}
-
-/** "You play" / "@sam plays" / "The community plays". */
-function says(name: string, you: string, they: string): string {
-  return `${name} ${name === "You" ? you : they}`;
-}
+const count = (n: number) => n.toLocaleString("en-US");
 
 /**
- * The takeaway under a bar: who has more and by how much. Close enough
- * (within 15%) reads as a tie; nothing at all on one side reads as "only".
+ * The two stat cards, as rows: the same stat for each side, so the cards line
+ * up. A stat a side has no data for reads "—".
  */
-export function barHeadline(
-  a: number, b: number, names: TapeNames,
-  verb: { you: string; they: string; more: string },
-  same: string,
-): string {
-  if (a === 0 && b === 0) return same;
-  const [winner, hi, lo] = a >= b ? [names.subject, a, b] : [names.other, b, a];
-  if (lo === 0) {
-    // Mid-sentence: "Only you …", "Only the community …"
-    const mid = winner === "You" ? "you" : winner.replace(/^The /, "the ");
-    return `Only ${mid} ${winner === "You" ? verb.you : verb.they}`;
-  }
-  const ratio = hi / lo;
-  if (ratio < 1.15) return same;
-  return `${says(winner, verb.you, verb.they)} ${ratioLabel(ratio)} ${verb.more}`;
+export function buildStatCard(a: VersusProfile, b: VersusProfile): StatCardRow[] {
+  const row = (key: string, label: string, side: (p: VersusProfile) => TapeSide, score = false): StatCardRow =>
+    ({ key, label, left: side(a), right: side(b), ...(score ? { score } : {}) });
+  const none = { value: "—" };
+  return [
+    row("games", "Games played", (p) => ({ value: count(p.gamesPlayed) })),
+    row("rating", "Avg rating", (p) => p.avgScore == null ? none : ({
+      value: p.avgScore.toFixed(1),
+      sub: `${count(p.reviewCount)} review${p.reviewCount === 1 ? "" : "s"}`,
+    }), true),
+    row("achievements", "Avg achievement %", (p) => p.avgAchievementPct == null ? { ...none, sub: "None synced" } : ({
+      value: `${Math.round(p.avgAchievementPct * 100)}%`,
+      sub: `across ${count(p.achievementGames)} game${p.achievementGames === 1 ? "" : "s"}`,
+    })),
+    row("hours", "Avg hrs per game", (p) => p.avgHours == null ? none : ({ value: `${count(Math.round(p.avgHours))}h` })),
+    row("tens", "Perfect 10s", (p) => ({
+      value: count(p.tens),
+      ...(p.reviewCount > 0 ? { sub: `${pct(p.tens, p.reviewCount)}% of reviews` } : {}),
+    })),
+  ];
 }
 
 /**
- * The tale of the tape, from the two sides' profiles. A tile is left out when
- * neither side has the data for it (a bar needs both sides).
+ * The charts under the stat cards: the score distribution, and the genres as
+ * a radar when there are enough to make a shape, otherwise each side's
+ * favourite. Empty when either side has no reviews.
  */
 export function buildTape(
-  a: VersusProfile, b: VersusProfile, names: TapeNames, thisYear = new Date().getFullYear(),
+  a: VersusProfile, b: VersusProfile, names: TapeNames,
   genres: { left: VersusGenreCount[]; right: VersusGenreCount[] } = { left: [], right: [] },
   scores: { left: number[]; right: number[] } | null = null,
 ): TapeTile[] {
@@ -361,69 +345,16 @@ export function buildTape(
   const dist = scores ? buildScoreDistribution(scores.left, scores.right, names) : null;
   if (dist) tiles.push(dist);
 
-  // Genres as a radar when there are enough to make a shape, otherwise as a favourite pick
   const radar = buildGenreRadar(genres.left, genres.right, a.reviewCount, b.reviewCount);
-  if (radar) tiles.push({ kind: "radar", key: "genres", icon: "🎮", label: "Top genres", ...radar });
-
-  const pick = (key: string, icon: string, label: string, an: string | null, ac: number, bn: string | null, bc: number, sub: (n: number, total: number) => string) => {
-    if (!an && !bn) return;
+  if (radar) {
+    tiles.push({ kind: "radar", key: "genres", icon: "🎮", label: "Top genres", ...radar });
+  } else if (a.topGenre || b.topGenre) {
+    const fav = (p: VersusProfile) => (p.topGenre ? { value: p.topGenre, sub: `${pct(p.topGenreCount, p.reviewCount)}%` } : null);
     tiles.push({
-      kind: "pick", key, icon, label,
-      left: an ? { value: an, sub: sub(ac, a.reviewCount) } : null,
-      right: bn ? { value: bn, sub: sub(bc, b.reviewCount) } : null,
-      same: !!an && an === bn,
+      kind: "pick", key: "genre", icon: "🎮", label: "Favourite genre",
+      left: fav(a), right: fav(b), same: !!a.topGenre && a.topGenre === b.topGenre,
     });
-  };
-  const share = (n: number, total: number) => `${pct(n, total)}%`;
-  const games = (n: number) => `${n} game${n === 1 ? "" : "s"}`;
-  if (!radar) pick("genre", "🎮", "Favourite genre", a.topGenre, a.topGenreCount, b.topGenre, b.topGenreCount, share);
-  pick("platform", "🕹️", "Go-to platform", a.topPlatform, a.topPlatformCount, b.topPlatform, b.topPlatformCount, share);
-  pick("studio", "🏢", "Favourite studio", a.topStudio, a.topStudioCount, b.topStudio, b.topStudioCount, (n) => games(n));
-
-  // Era: both sides on a timeline from 1980 (earlier if needed) to this year
-  const ay = a.avgReleaseYear, by = b.avgReleaseYear;
-  if (ay != null || by != null) {
-    const years = [ay, by].filter((y): y is number => y != null);
-    const from = Math.min(1980, Math.floor(Math.min(...years) / 5) * 5);
-    const to = Math.max(thisYear, Math.ceil(Math.max(...years)));
-    const at = (y: number | null) => (y == null ? null : { year: Math.round(y), pos: ((y - from) / (to - from)) * 100 });
-    let headline = "";
-    if (ay != null && by != null) {
-      const gap = Math.round(Math.abs(ay - by));
-      headline = gap < 2
-        ? `Same era: the ${decadeLabel((ay + by) / 2)}`
-        : `${says(ay > by ? names.subject : names.other, "play", "plays")} ${gap} years newer`;
-    }
-    tiles.push({ kind: "era", key: "era", icon: "📅", label: "Era", left: at(ay), right: at(by), from, to, headline });
   }
-
-  const bar = (key: string, icon: string, label: string, av: number | null, bv: number | null, fmt: (v: number) => TapeSide, headline: (x: number, y: number) => string) => {
-    if (av == null || bv == null) return;
-    const total = av + bv;
-    tiles.push({
-      kind: "bar", key, icon, label,
-      left: fmt(av), right: fmt(bv),
-      leftShare: total > 0 ? Math.round((av / total) * 100) : 50,
-      headline: headline(av, bv),
-    });
-  };
-
-  bar("hours", "⏱️", "Hours per game", a.avgHours, b.avgHours,
-    (v) => ({ value: `${Math.round(v).toLocaleString("en-US")}h` }),
-    (x, y) => barHeadline(x, y, names, { you: "play", they: "plays", more: "longer per game" }, "Same pace per game"));
-
-  const tensA = pct(a.tens, a.reviewCount), tensB = pct(b.tens, b.reviewCount);
-  bar("tens", "💯", "Perfect 10s", tensA, tensB,
-    (v) => ({ value: `${v}%` }),
-    (x, y) => barHeadline(x, y, names, { you: "hand out 10s", they: "hands out 10s", more: "as often" }, x === 0 ? "No 10s on either side" : "Just as generous with 10s"));
-
-  bar("takes", "🌶️", "Hot takes", a.hotTakeBase > 0 ? pct(a.hotTakes, a.hotTakeBase) : null, b.hotTakeBase > 0 ? pct(b.hotTakes, b.hotTakeBase) : null,
-    (v) => ({ value: `${v}%` }),
-    (x, y) => barHeadline(x, y, names, { you: "go against the crowd", they: "goes against the crowd", more: "more often" }, x === 0 ? "Nobody goes against the crowd" : "Equally contrarian"));
-
-  bar("words", "✍️", "Review length", a.avgWords, b.avgWords,
-    (v) => ({ value: `${Math.round(v).toLocaleString("en-US")}`, sub: "words" }),
-    (x, y) => barHeadline(x, y, names, { you: "write", they: "writes", more: "as much" }, "About the same length"));
 
   return tiles;
 }
@@ -447,19 +378,14 @@ const genreCounts = (rows: any[] | null | undefined, side: string): VersusGenreC
 
 const toProfile = (row: any): VersusProfile => ({
   reviewCount: row?.review_count ?? 0,
+  gamesPlayed: row?.games_played ?? 0,
+  avgScore: row?.avg_score ?? null,
   topGenre: row?.top_genre ?? null,
   topGenreCount: row?.top_genre_count ?? 0,
-  topPlatform: row?.top_platform ?? null,
-  topPlatformCount: row?.top_platform_count ?? 0,
-  topStudio: row?.top_studio ?? null,
-  topStudioCount: row?.top_studio_count ?? 0,
-  avgReleaseYear: row?.avg_release_year ?? null,
   avgHours: row?.avg_hours ?? null,
-  hoursSum: row?.hours_sum ?? 0,
   tens: row?.tens ?? 0,
-  hotTakes: row?.hot_takes ?? 0,
-  hotTakeBase: row?.hot_take_base ?? 0,
-  avgWords: row?.avg_words ?? null,
+  avgAchievementPct: row?.avg_achievement_pct ?? null,
+  achievementGames: row?.achievement_games ?? 0,
 });
 
 const round1 = (n: number | null | undefined): number | null =>
@@ -534,7 +460,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     failed: false,
     sharedGames: 0, subjectAvg: null, otherAvg: null, meanAbsDiff: null,
     agreementPct: 0, above: 0, below: 0, level: 0,
-    disagreements: [], agreements: [], unreviewed: [], tape: [],
+    disagreements: [], agreements: [], unreviewed: [], card: null, tape: [],
   };
   if (!subject) return data;
 
@@ -575,7 +501,9 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     if (res?.error) console.error("[groupCompare] versus error:", JSON.stringify(res.error));
   }
   if (results.some((res) => res?.error)) return { ...data, failed: true };
-  // A failed profile only costs the tale of the tape, not the whole tab
+  // A failed profile only costs the stat cards and charts, not the whole tab
+  const left = toProfile((profileRes?.data ?? []).find((r: any) => r.side === "subject"));
+  const right = toProfile((profileRes?.data ?? []).find((r: any) => r.side === "other"));
 
   const s = summaryRes?.data;
   return {
@@ -591,14 +519,13 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     disagreements: (disagreeRes?.data ?? []).map(toGameRow),
     agreements: (agreeRes?.data ?? []).map(toGameRow),
     unreviewed: (unreviewedRes?.data ?? []).map(toGameRow),
+    card: profileRes?.error ? null : buildStatCard(left, right),
     tape: buildTape(
-      toProfile((profileRes?.data ?? []).find((r: any) => r.side === "subject")),
-      toProfile((profileRes?.data ?? []).find((r: any) => r.side === "other")),
+      left, right,
       {
         subject: subject.isViewer ? "You" : `@${subject.username}`,
         other: opponent ? `@${opponent.username}` : "The community",
       },
-      undefined,
       {
         left: genreCounts(genresRes?.data, "subject"),
         right: genreCounts(genresRes?.data, "other"),

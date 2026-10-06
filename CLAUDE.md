@@ -285,10 +285,11 @@ supabase/
 - **The Stats tab (`?tab=compare`) is "you vs someone".** The viewer (a visitor sees the owner, or on the
   site group the most active reviewer) against the community — everyone else in the group — or one member
   picked in the "compare with" menu, kept in `?with=` so a comparison is a shareable link. It shows a
-  scoreboard (both averages over shared games, agreement, gap), a "tale of the tape" comparing each side's
-  own habits (a top-genres radar from `group_versus_genres`, migration `20261005000004`; favourite
-  platform and studio, era, hours per game, 10s, hot-take rate, review length from `group_versus_profile`,
-  migration `20261005000003`; all built into tiles by `buildTape()`, and needing no shared games), and
+  stat card for each side (games played, average rating, average achievement %, hours per game and 10s,
+  from `group_versus_profile`, migration `20261006000001`, built into rows by `buildStatCard()`), with what
+  the two share in the middle (shared games, % within a point, average gap). Under them are the charts: the
+  score distribution and a top-genres radar (`group_versus_genres`, migration `20261005000004`), built by
+  `buildTape()`. The cards and charts need no shared games. Last come
   three five-game lists: biggest
   disagreements, where you agree, and what the other side loves that you haven't reviewed.
   `loadGroupVersus()` (`src/utils/groupCompare.ts`) builds it from `group_versus_games` /
