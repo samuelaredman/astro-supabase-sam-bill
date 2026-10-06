@@ -8,7 +8,8 @@
  * (?with=), so a comparison is a link someone can share.
  *
  * The games list swaps on its own, from /groups/[id]/compare?part=games, with
- * its filter, genre, sort and length in the URL too (?gf= / ?gg= / ?gs= / ?gn=).
+ * its search, filter, genre, sort and length in the URL too
+ * (?gq= / ?gf= / ?gg= / ?gs= / ?gn=).
  *
  * The listeners are delegated from document and registered once, because the
  * menu and the list are replaced on each swap.
@@ -37,7 +38,7 @@ let requestSeq = 0;
 /** The settings the Stats tab's fragment route reads, from a page URL. */
 function fragmentQuery(pageUrl: URL, extra: Record<string, string> = {}): string {
   const q = new URLSearchParams(extra);
-  for (const key of ["with", "gf", "gg", "gs", "gn"]) {
+  for (const key of ["with", "gq", "gf", "gg", "gs", "gn"]) {
     const value = pageUrl.searchParams.get(key);
     if (value) q.set(key, value);
   }
@@ -101,7 +102,7 @@ async function showGames(pageUrl: URL) {
   if (!host || !groupId || !list) return;
   // Keep the page's own params (and path), take the list's from the link
   const next = new URL(window.location.href);
-  for (const key of ["tab", "with", "gf", "gg", "gs", "gn"]) {
+  for (const key of ["tab", "with", "gq", "gf", "gg", "gs", "gn"]) {
     const value = pageUrl.searchParams.get(key);
     if (value) next.searchParams.set(key, value);
     else next.searchParams.delete(key);
@@ -116,7 +117,20 @@ async function showGames(pageUrl: URL) {
     });
     if (seq !== gamesSeq) return;
     if (res.ok) {
-      list.outerHTML = await res.text();
+      const html = await res.text();
+      if (seq !== gamesSeq) return;
+      // Someone typing in the search box keeps their place, and anything typed
+      // since this request went out (the next one is on its way)
+      const current = host.querySelector<HTMLElement>("[data-gv-games]");
+      const box = document.activeElement as HTMLInputElement | null;
+      const typing = box?.matches?.("[data-gv-search]") && current?.contains(box) ? box : null;
+      (current ?? list).outerHTML = html;
+      const next = host.querySelector<HTMLInputElement>("[data-gv-search]");
+      if (typing && next) {
+        next.value = typing.value;
+        next.focus();
+        next.setSelectionRange(typing.selectionStart, typing.selectionEnd);
+      }
       return;
     }
   } catch {
@@ -197,6 +211,31 @@ export function initGroupCompare() {
     }
   });
 
+  // Searching: as you type, once you pause
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  const search = (value: string) => {
+    clearTimeout(searchTimer);
+    const url = new URL(window.location.href);
+    const q = value.trim();
+    if (q) url.searchParams.set("gq", q);
+    else url.searchParams.delete("gq");
+    url.searchParams.delete("gn");
+    if (url.searchParams.get("gq") === new URL(window.location.href).searchParams.get("gq")) return;
+    void showGames(url);
+  };
+  document.addEventListener("input", (event) => {
+    const box = (event.target as HTMLElement | null)?.closest<HTMLInputElement>("[data-gv-search]");
+    if (!box || !panel()?.contains(box)) return;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => search(box.value), 300);
+  });
+  document.addEventListener("submit", (event) => {
+    const form = (event.target as HTMLElement | null)?.closest<HTMLFormElement>("[data-gv-search-form]");
+    if (!form || !panel()?.contains(form)) return;
+    event.preventDefault();
+    search(form.querySelector<HTMLInputElement>("[data-gv-search]")?.value ?? "");
+  });
+
   // A custom colour, live as the picker moves
   document.addEventListener("input", (event) => {
     const input = (event.target as HTMLElement | null)?.closest<HTMLInputElement>("[data-gv-color]");
@@ -236,12 +275,17 @@ export function initGroupCompare() {
   });
   syncColorControls();
 
-  // "Show more" is a real link; take it over to swap in place
+  // "Show more" and the shared-games / within-a-point numbers are real links; take them over to swap in place
   document.addEventListener("click", (event) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const link = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[data-gv-games-link]");
     if (!link || !panel()?.contains(link)) return;
     event.preventDefault();
+    // The shared-games and within-a-point numbers jump down to the list too
+    if (link.hasAttribute("data-gv-jump")) {
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      document.getElementById("gv-games")?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    }
     void showGames(new URL(link.href));
   });
 }

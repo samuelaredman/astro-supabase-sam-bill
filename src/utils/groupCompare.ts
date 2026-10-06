@@ -58,6 +58,19 @@ export function parseVersusGameGenre(raw: string | null | undefined): string | n
   return raw && UUID.test(raw) ? raw.toLowerCase() : null;
 }
 
+/** The longest title search kept. */
+export const VERSUS_SEARCH_MAX = 80;
+
+/**
+ * ?gq=, a title search, made safe for a PostgREST ilike pattern: its
+ * wildcards (% _ *) and the characters that end a filter value are dropped,
+ * spaces collapsed. Null when nothing is left.
+ */
+export function parseVersusGameSearch(raw: string | null | undefined): string | null {
+  const q = (raw ?? "").replace(/[%_*\\,()"]/g, " ").replace(/\s+/g, " ").trim().slice(0, VERSUS_SEARCH_MAX).trim();
+  return q || null;
+}
+
 /** ?gn=, how many games to show: a whole number of pages, at least one, at most VERSUS_GAMES_MAX. */
 export function parseVersusGameLimit(raw: string | null | undefined): number {
   const n = Number.parseInt(raw ?? "", 10);
@@ -324,6 +337,8 @@ export interface VersusGames {
   sort: VersusGameSort;
   /** Only games in this genre (its id), or null for every genre. */
   genre: string | null;
+  /** Only games whose title contains this, or null for every title. */
+  search: string | null;
   /** The genre menu's choices, A–Z. Empty when the group has a genre focus, which already narrows every game to one. */
   genres: { id: string; name: string }[];
   /** How many were asked for — the next "Show more" asks for a page more. */
@@ -551,6 +566,8 @@ export interface GroupVersusContext {
   gamesLimit?: string | null;
   /** The raw ?gg= value: a genre id to narrow the games list to. */
   gamesGenre?: string | null;
+  /** The raw ?gq= value: text to find in game titles. */
+  gamesSearch?: string | null;
   /** Only the games list is wanted (a filter or sort change): skip the rest of the tab's queries. */
   gamesOnly?: boolean;
 }
@@ -571,7 +588,8 @@ async function loadVersusGames(
 ): Promise<VersusGames> {
   // The genre menu narrows group_reviews() the same way a group's genre focus does
   const listArgs = view.genre && !hasGenreFocus ? { ...args, p_genre_id: view.genre } : args;
-  const query = filterVersusGames(db.rpc("group_versus_games_ranked", listArgs, { count: "exact" }), view.filter, minReviews);
+  let query = filterVersusGames(db.rpc("group_versus_games_ranked", listArgs, { count: "exact" }), view.filter, minReviews);
+  if (view.search) query = query.ilike("title", `%${view.search}%`);
   const [res, genresRes] = await Promise.all([
     sortVersusGames(query, view.sort).limit(view.limit),
     hasGenreFocus ? null : db.from("genres").select("id, name").order("name").limit(500),
@@ -653,6 +671,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       sort: parseVersusGameSort(ctx.gamesSort),
       limit: parseVersusGameLimit(ctx.gamesLimit),
       genre: parseVersusGameGenre(ctx.gamesGenre),
+      search: parseVersusGameSearch(ctx.gamesSearch),
       genres: [],
       rows: [], total: 0, failed: false,
     },

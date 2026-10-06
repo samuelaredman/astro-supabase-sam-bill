@@ -10,6 +10,7 @@ import {
   gameDetails,
   parseVersusGameFilter,
   parseVersusGameGenre,
+  parseVersusGameSearch,
   parseVersusGameLimit,
   parseVersusGameSort,
   sortVersusGames,
@@ -178,6 +179,13 @@ describe("games list settings", () => {
     expect(parseVersusGameGenre("8A1B2C3D-0000-4000-8000-000000000001")).toBe("8a1b2c3d-0000-4000-8000-000000000001");
     expect(parseVersusGameGenre("rpg")).toBeNull();
     expect(parseVersusGameGenre(null)).toBeNull();
+  });
+
+  it("keeps a title search safe for an ilike pattern", () => {
+    expect(parseVersusGameSearch("  elden   ring ")).toBe("elden ring");
+    expect(parseVersusGameSearch("100%_*,()")).toBe("100");
+    expect(parseVersusGameSearch("   ")).toBeNull();
+    expect(parseVersusGameSearch("x".repeat(200))).toHaveLength(80);
   });
 
   it("rounds the length up to whole pages, within bounds", () => {
