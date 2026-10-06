@@ -15,8 +15,10 @@ import { igdbImage as igdbCover, scoreClass } from "../../utils/format";
 import {
   agreementLabel,
   graderLabel,
+  shortGenre,
   signedScore,
   type GroupVersusData,
+  type TapeTile,
   type VersusGameRow,
   type VersusMember,
 } from "../../utils/groupCompare";
@@ -47,6 +49,35 @@ const badge = (score: number | null) => (score != null ? scoreClass(Math.round(s
 const fmt = (score: number | null) =>
   score == null ? "—" : Number.isInteger(score) ? String(score) : score.toFixed(1);
 const cover = (g: VersusGameRow) => igdbCover(g.game.cover_img_url, "t_thumb");
+
+// ── Genre radar geometry (SVG units) ──
+const RADAR = { w: 300, h: 230, cx: 150, cy: 117, r: 78 };
+const radarAngle = (i: number, n: number) => -Math.PI / 2 + (2 * Math.PI * i) / n;
+const radarPoint = (i: number, n: number, value: number, scale: number) => {
+  const a = radarAngle(i, n);
+  const d = (Math.min(value, scale) / scale) * RADAR.r;
+  return { x: RADAR.cx + Math.cos(a) * d, y: RADAR.cy + Math.sin(a) * d };
+};
+const pts = (list: { x: number; y: number }[]) => list.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+function radar(t: Extract<TapeTile, { kind: "radar" }>) {
+  const n = t.axes.length;
+  const rings = [1 / 3, 2 / 3, 1].map((f) => pts(t.axes.map((_, i) => radarPoint(i, n, f * t.scale, t.scale))));
+  const spokes = t.axes.map((_, i) => radarPoint(i, n, t.scale, t.scale));
+  const left = t.axes.map((a, i) => radarPoint(i, n, a.left, t.scale));
+  const right = t.axes.map((a, i) => radarPoint(i, n, a.right, t.scale));
+  const labels = t.axes.map((a, i) => {
+    const ang = radarAngle(i, n);
+    const cos = Math.cos(ang), sin = Math.sin(ang);
+    return {
+      text: shortGenre(a.genre),
+      full: a.genre,
+      x: RADAR.cx + cos * (RADAR.r + 12),
+      y: RADAR.cy + sin * (RADAR.r + 12) + (sin > 0.5 ? 9 : sin < -0.5 ? -3 : 4),
+      anchor: cos > 0.3 ? "start" : cos < -0.3 ? "end" : "middle",
+    };
+  });
+  return { rings, spokes, left, right, labels };
+}
 
 // Possessives and "hasn't" built here rather than in the markup, where nested
 // template strings with apostrophes trip the Astro parser
@@ -163,6 +194,34 @@ const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubj
             {tape.map((t) => (
               <div class={`gv-tile gv-tile-${t.kind}`}>
                 <div class="gv-tile-label"><span class="gv-tile-icon" aria-hidden="true">{t.icon}</span>{t.label}</div>
+
+                {t.kind === "radar" && (() => {
+                  const g = radar(t);
+                  return (
+                    <>
+                      <svg class="gv-radar" viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} role="img" aria-label={`Top genres: ${t.axes.map((a) => `${a.genre} ${subjectName} ${a.left}%, ${otherShort} ${a.right}%`).join("; ")}`}>
+                        {g.rings.map((ring) => <polygon class="gv-radar-ring" points={ring} />)}
+                        {g.spokes.map((p) => <line class="gv-radar-spoke" x1={RADAR.cx} y1={RADAR.cy} x2={p.x} y2={p.y} />)}
+                        <polygon class="gv-radar-area gv-radar-r" points={pts(g.right)} />
+                        <polygon class="gv-radar-area gv-radar-l" points={pts(g.left)} />
+                        {t.axes.map((a, i) => (
+                          <g class="gv-radar-axis">
+                            <title>{`${a.genre}: ${subjectName} ${a.left}% · ${otherShort} ${a.right}%`}</title>
+                            <circle class="gv-radar-dot gv-radar-r" cx={g.right[i].x} cy={g.right[i].y} r="4" />
+                            <circle class="gv-radar-dot gv-radar-l" cx={g.left[i].x} cy={g.left[i].y} r="4" />
+                            <text class="gv-radar-label" x={g.labels[i].x} y={g.labels[i].y} text-anchor={g.labels[i].anchor}>{g.labels[i].text}</text>
+                          </g>
+                        ))}
+                      </svg>
+                      <table class="gv-sr">
+                        <caption>Share of each side's reviews by genre</caption>
+                        <thead><tr><th>Genre</th><th>{subjectName}</th><th>{otherShort}</th></tr></thead>
+                        <tbody>{t.axes.map((a) => <tr><td>{a.genre}</td><td>{a.left}%</td><td>{a.right}%</td></tr>)}</tbody>
+                      </table>
+                      <div class="gv-tile-note">Share of reviews in each genre · outer ring {t.scale}%</div>
+                    </>
+                  );
+                })()}
 
                 {t.kind === "pick" && (t.same ? (
                   <div class="gv-fav-same">

@@ -3,6 +3,7 @@ import {
   agreementLabel,
   agreementPercent,
   barHeadline,
+  buildGenreRadar,
   buildTape,
   decadeLabel,
   graderLabel,
@@ -10,6 +11,7 @@ import {
   resolveVersusOpponent,
   resolveVersusSubject,
   ratioLabel,
+  shortGenre,
   signedScore,
   versusOptions,
   type VersusMember,
@@ -203,5 +205,55 @@ describe("buildTape", () => {
     const tiles = buildTape(profile({ hotTakeBase: 0 }), profile({ avgHours: null }), names);
     expect(tiles.map((t) => t.key)).not.toContain("takes");
     expect(tiles.map((t) => t.key)).not.toContain("hours");
+  });
+});
+
+describe("shortGenre", () => {
+  it.each([
+    ["Role-playing (RPG)", "RPG"],
+    ["Real Time Strategy (RTS)", "RTS"],
+    ["Hack and slash/Beat 'em up", "Hack and slash"],
+    ["Point-and-click", "Point-and-click"],
+    ["Indie", "Indie"],
+  ])("shortens %s to %s", (name, short) => {
+    expect(shortGenre(name)).toBe(short);
+  });
+});
+
+describe("buildGenreRadar", () => {
+  const g = (genre: string, reviewCount: number) => ({ genre, reviewCount });
+
+  it("plots each side as a share of its own reviews, strongest genres first", () => {
+    const radar = buildGenreRadar(
+      [g("RPG", 8), g("Indie", 4), g("Shooter", 2)],
+      [g("Indie", 50), g("Platform", 30), g("RPG", 10)],
+      20, 100,
+    )!;
+    expect(radar.axes).toEqual([
+      { genre: "Indie", left: 20, right: 50 },
+      { genre: "RPG", left: 40, right: 10 },
+      { genre: "Platform", left: 0, right: 30 },
+      { genre: "Shooter", left: 10, right: 0 },
+    ]);
+    expect(radar.scale).toBe(50);
+  });
+
+  it("caps the spokes", () => {
+    const many = ["A", "B", "C", "D", "E", "F", "G", "H"].map((x, i) => g(x, 10 - i));
+    expect(buildGenreRadar(many, many, 50, 50)!.axes).toHaveLength(6);
+  });
+
+  it("is null with too few genres for a shape, or no reviews", () => {
+    expect(buildGenreRadar([g("RPG", 3)], [g("Indie", 2)], 5, 5)).toBeNull();
+    expect(buildGenreRadar([g("A", 1), g("B", 1), g("C", 1)], [], 3, 0)).toBeNull();
+  });
+
+  it("replaces the favourite-genre tile when it can be drawn", () => {
+    const genres = { left: [g("RPG", 8), g("Indie", 4), g("Shooter", 2)], right: [g("RPG", 5)] };
+    const keys = buildTape(profile(), profile(), { subject: "You", other: "@sam" }, 2026, genres).map((t) => t.key);
+    expect(keys).toContain("genres");
+    expect(keys).not.toContain("genre");
+    const fallback = buildTape(profile(), profile(), { subject: "You", other: "@sam" }, 2026).map((t) => t.key);
+    expect(fallback).toContain("genre");
   });
 });

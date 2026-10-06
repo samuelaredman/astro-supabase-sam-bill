@@ -82,6 +82,13 @@ export interface TapeSide {
  * - era: both sides placed on a release-year timeline
  */
 export type TapeTile =
+  | {
+      kind: "radar"; key: string; icon: string; label: string;
+      /** One spoke per genre: each side's share of its own reviews, 0–100. */
+      axes: { genre: string; left: number; right: number }[];
+      /** The outer ring's value — the biggest share, rounded up to a ten. */
+      scale: number;
+    }
   | { kind: "pick"; key: string; icon: string; label: string; left: TapeSide | null; right: TapeSide | null; same: boolean }
   | { kind: "bar"; key: string; icon: string; label: string; left: TapeSide; right: TapeSide; leftShare: number; headline: string }
   | {
@@ -91,6 +98,51 @@ export type TapeTile =
       right: { year: number; pos: number } | null;
       from: number; to: number; headline: string;
     };
+
+/** A side's most-reviewed genres, from group_versus_genres. */
+export interface VersusGenreCount {
+  genre: string;
+  reviewCount: number;
+}
+
+/** Spokes on the genre radar. */
+export const RADAR_MAX_AXES = 6;
+/** Fewer genres than this don't make a shape worth drawing; the tile falls back to the favourite pick. */
+export const RADAR_MIN_AXES = 3;
+
+/**
+ * The genre radar's spokes: the genres that matter most to either side,
+ * ranked by the two sides' shares added together, each side as a share of
+ * its own reviews so a community of hundreds and one member compare fairly.
+ * Null when there aren't enough genres to draw a shape.
+ */
+export function buildGenreRadar(
+  left: VersusGenreCount[], right: VersusGenreCount[], leftTotal: number, rightTotal: number,
+): { axes: { genre: string; left: number; right: number }[]; scale: number } | null {
+  if (leftTotal <= 0 || rightTotal <= 0) return null;
+  const share = (list: VersusGenreCount[], total: number) =>
+    new Map(list.map((g) => [g.genre, Math.round((g.reviewCount / total) * 100)]));
+  const l = share(left, leftTotal), r = share(right, rightTotal);
+  const genres = [...new Set([...l.keys(), ...r.keys()])];
+  const axes = genres
+    .map((genre) => ({ genre, left: l.get(genre) ?? 0, right: r.get(genre) ?? 0 }))
+    .sort((x, y) => y.left + y.right - (x.left + x.right) || x.genre.localeCompare(y.genre))
+    .slice(0, RADAR_MAX_AXES);
+  if (axes.length < RADAR_MIN_AXES) return null;
+  const top = Math.max(...axes.flatMap((a) => [a.left, a.right]));
+  return { axes, scale: Math.max(10, Math.ceil(top / 10) * 10) };
+}
+
+/**
+ * A genre name short enough for a radar spoke: IGDB's "Role-playing (RPG)"
+ * becomes "RPG", "Real Time Strategy (RTS)" "RTS", and "Hack and slash/Beat
+ * 'em up" "Hack and slash".
+ */
+export function shortGenre(name: string): string {
+  const abbr = name.match(/\(([A-Z0-9]{2,5})\)\s*$/);
+  if (abbr) return abbr[1];
+  return name.replace(/\s*\(.*?\)\s*/g, " ").split("/")[0].trim();
+}
 
 /** How a tile's sentences name the two sides: "You" / "@sam" / "The community". */
 export interface TapeNames {
@@ -247,9 +299,14 @@ export function barHeadline(
  */
 export function buildTape(
   a: VersusProfile, b: VersusProfile, names: TapeNames, thisYear = new Date().getFullYear(),
+  genres: { left: VersusGenreCount[]; right: VersusGenreCount[] } = { left: [], right: [] },
 ): TapeTile[] {
   if (a.reviewCount === 0 || b.reviewCount === 0) return [];
   const tiles: TapeTile[] = [];
+
+  // Genres as a radar when there are enough to make a shape, otherwise as a favourite pick
+  const radar = buildGenreRadar(genres.left, genres.right, a.reviewCount, b.reviewCount);
+  if (radar) tiles.push({ kind: "radar", key: "genres", icon: "🎮", label: "Top genres", ...radar });
 
   const pick = (key: string, icon: string, label: string, an: string | null, ac: number, bn: string | null, bc: number, sub: (n: number, total: number) => string) => {
     if (!an && !bn) return;
@@ -262,7 +319,7 @@ export function buildTape(
   };
   const share = (n: number, total: number) => `${pct(n, total)}%`;
   const games = (n: number) => `${n} game${n === 1 ? "" : "s"}`;
-  pick("genre", "🎮", "Favourite genre", a.topGenre, a.topGenreCount, b.topGenre, b.topGenreCount, share);
+  if (!radar) pick("genre", "🎮", "Favourite genre", a.topGenre, a.topGenreCount, b.topGenre, b.topGenreCount, share);
   pick("platform", "🕹️", "Go-to platform", a.topPlatform, a.topPlatformCount, b.topPlatform, b.topPlatformCount, share);
   pick("studio", "🏢", "Favourite studio", a.topStudio, a.topStudioCount, b.topStudio, b.topStudioCount, (n) => games(n));
 
@@ -314,6 +371,9 @@ export function buildTape(
   return tiles;
 }
 
+const genreCounts = (rows: any[] | null | undefined, side: string): VersusGenreCount[] =>
+  (rows ?? []).filter((r) => r.side === side).map((r) => ({ genre: r.genre, reviewCount: r.review_count }));
+
 const toProfile = (row: any): VersusProfile => ({
   reviewCount: row?.review_count ?? 0,
   topGenre: row?.top_genre ?? null,
@@ -362,8 +422,9 @@ export interface GroupVersusContext {
 
 /**
  * Everything the Stats tab renders. The summary is one row, the profile two
- * (one per side), and every list is a .limit()ed read of group_versus_games, so
- * nothing here can reach Supabase's 1000-row cap.
+ * (one per side), the genres at most RADAR_MAX_AXES per side, and every list
+ * is a .limit()ed read of group_versus_games, so nothing here can reach
+ * Supabase's 1000-row cap.
  */
 export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVersusData> {
   const { db, groupId, members, memberStats, ownerProfileId = null, viewerProfileId = null } = ctx;
@@ -417,7 +478,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
   // Scored by the subject and by enough of the other side to call it an opinion
   const shared = () => games().not("subject_score", "is", null).gte("other_count", minReviews);
 
-  const [summaryRes, disagreeRes, agreeRes, unreviewedRes, profileRes] = await Promise.all([
+  const [summaryRes, disagreeRes, agreeRes, unreviewedRes, profileRes, genresRes] = await Promise.all([
     db.rpc("group_versus_summary", { ...args, p_min_reviews: minReviews }).maybeSingle(),
     shared().gt("diff_abs", VERSUS_AGREE_GAP)
       .order("diff_abs", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
@@ -429,9 +490,10 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       .order("other_weighted", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
       .limit(VERSUS_LIST_SHOWN),
     db.rpc("group_versus_profile", args),
+    db.rpc("group_versus_genres", { ...args, p_limit: RADAR_MAX_AXES }),
   ]);
   const results = [summaryRes, disagreeRes, agreeRes, unreviewedRes];
-  for (const res of [...results, profileRes]) {
+  for (const res of [...results, profileRes, genresRes]) {
     if (res?.error) console.error("[groupCompare] versus error:", JSON.stringify(res.error));
   }
   if (results.some((res) => res?.error)) return { ...data, failed: true };
@@ -457,6 +519,11 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       {
         subject: subject.isViewer ? "You" : `@${subject.username}`,
         other: opponent ? `@${opponent.username}` : "The community",
+      },
+      undefined,
+      {
+        left: genreCounts(genresRes?.data, "subject"),
+        right: genreCounts(genresRes?.data, "other"),
       },
     ),
   };

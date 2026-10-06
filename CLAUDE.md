@@ -276,7 +276,8 @@ supabase/
 - **Stats come from the `group_*` SQL functions** (migrations `20260911120000` and `20260912000000`):
   `group_review_summary`, `group_member_review_stats`, `group_game_review_stats`,
   `group_game_member_scores`, `group_split_decision`, `group_hot_take`, `group_score_distribution`,
-  plus the Stats tab's `group_versus_games`, `group_versus_summary` and `group_versus_profile` — all reading through
+  plus the Stats tab's `group_versus_games`, `group_versus_summary`, `group_versus_profile` and
+  `group_versus_genres` — all reading through
   `group_reviews(group, genre?, platform?)`, which applies "published, by a current member, inside the
   group's focus". Site-wide numbers (Hot Take's community side) come from `game_review_stats`, per the
   review-stats rule. Service role only. Never `.in('profile_id', memberIds)` over reviews: it truncates
@@ -285,9 +286,10 @@ supabase/
   site group the most active reviewer) against the community — everyone else in the group — or one member
   picked in the "compare with" menu, kept in `?with=` so a comparison is a shareable link. It shows a
   scoreboard (both averages over shared games, agreement, gap), a "tale of the tape" comparing each side's
-  own habits (favourite genre, platform and studio, era, hours per game, 10s, hot-take rate, review length;
-  `group_versus_profile`, migration `20261005000003`, built into tiles by `buildTape()`, and needing no
-  shared games), and three five-game lists: biggest
+  own habits (a top-genres radar from `group_versus_genres`, migration `20261005000004`; favourite
+  platform and studio, era, hours per game, 10s, hot-take rate, review length from `group_versus_profile`,
+  migration `20261005000003`; all built into tiles by `buildTape()`, and needing no shared games), and
+  three five-game lists: biggest
   disagreements, where you agree, and what the other side loves that you haven't reviewed.
   `loadGroupVersus()` (`src/utils/groupCompare.ts`) builds it from `group_versus_games` /
   `group_versus_summary` (migration `20261005000002`), which never count the subject on the other side;
