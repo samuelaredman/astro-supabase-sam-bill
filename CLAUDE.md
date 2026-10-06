@@ -289,15 +289,18 @@ supabase/
   from `group_versus_profile`, migration `20261006000001`, built into rows by `buildStatCard()`), with what
   the two share in the middle (shared games, % within a point, average gap). Under them are the charts: the
   score distribution and a top-genres radar (`group_versus_genres`, migration `20261005000004`), built by
-  `buildTape()`. The cards and charts need no shared games. Last come
-  three five-game lists: biggest
-  disagreements, where you agree, and what the other side loves that you haven't reviewed.
+  `buildTape()`. The cards and charts need no shared games. Last comes every game either side reviewed
+  (`VersusGames.astro`), as face-offs — cover in the middle, each side's score, hours, achievement % and
+  platform either side, the extras read for just the listed games from `group_versus_game_details`
+  (migration `20261006000002`). Filter chips (all, shared, disagree, agree, only you, only them), a sort
+  menu and "Show more" live in `?gf=` / `?gs=` / `?gn=` (`filterVersusGames()` / `sortVersusGames()`) and
+  re-fetch just the list from `/groups/[id]/compare?part=games`.
   `loadGroupVersus()` (`src/utils/groupCompare.ts`) builds it from `group_versus_games` /
   `group_versus_summary` (migration `20261005000002`), which never count the subject on the other side;
   the community needs `COMMUNITY_MIN_REVIEWS` other reviews before a game counts. `CompareTab.astro`
   renders it, the page calls both for the first paint, and the menu re-fetches the partial route
   `/groups/[id]/compare`. Behaviour is delegated once from `src/scripts/group-compare.ts`; the CSS lives in
-  the page's global block. Every list is a `.limit()`ed read, which keeps it clear of the 1000-row cap.
+  the page's global block. The games list is a `.limit()`ed read (`VERSUS_GAMES_MAX`), which keeps it clear of the 1000-row cap.
 - **The Feed tab (`?tab=feed`) is the group's activity.** Everyone, members included, lands on
   Overview; the Feed loads only when it's the tab in the URL. `loadGroupFeed()`
   (`src/utils/groupFeed.ts`) builds a page and `FeedTab.astro` renders it; filter changes and further

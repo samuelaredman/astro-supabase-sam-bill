@@ -21,8 +21,75 @@
  */
 export const COMMUNITY_MIN_REVIEWS = 1;
 
-/** Games in each list on the tab. */
-export const VERSUS_LIST_SHOWN = 5;
+/** Games shown at first, and added by each "Show more". */
+export const VERSUS_GAMES_PAGE = 10;
+/** The most games one view will show, however many times "Show more" is pressed. */
+export const VERSUS_GAMES_MAX = 200;
+
+/**
+ * Which games the games list shows:
+ * - all: every game either side reviewed (the other side enough to count)
+ * - shared: both sides reviewed it
+ * - disagree / agree: shared, more than / at most VERSUS_AGREE_GAP apart
+ * - yours: only the subject reviewed it
+ * - theirs: only the other side did
+ */
+export const VERSUS_GAME_FILTERS = ["all", "shared", "disagree", "agree", "yours", "theirs"] as const;
+export type VersusGameFilter = (typeof VERSUS_GAME_FILTERS)[number];
+
+/** How the games list is ordered. Every one ends on stable tie-breaks. */
+export const VERSUS_GAME_SORTS = [
+  "gap", "subject-high", "subject-low", "other-high", "other-low", "most-reviewed", "title",
+] as const;
+export type VersusGameSort = (typeof VERSUS_GAME_SORTS)[number];
+
+export function parseVersusGameFilter(raw: string | null | undefined): VersusGameFilter {
+  return (VERSUS_GAME_FILTERS as readonly string[]).includes(raw ?? "") ? (raw as VersusGameFilter) : "all";
+}
+
+export function parseVersusGameSort(raw: string | null | undefined): VersusGameSort {
+  return (VERSUS_GAME_SORTS as readonly string[]).includes(raw ?? "") ? (raw as VersusGameSort) : "gap";
+}
+
+/** ?gn=, how many games to show: a whole number of pages, at least one, at most VERSUS_GAMES_MAX. */
+export function parseVersusGameLimit(raw: string | null | undefined): number {
+  const n = Number.parseInt(raw ?? "", 10);
+  if (!Number.isFinite(n) || n <= VERSUS_GAMES_PAGE) return VERSUS_GAMES_PAGE;
+  return Math.min(VERSUS_GAMES_MAX, Math.ceil(n / VERSUS_GAMES_PAGE) * VERSUS_GAMES_PAGE);
+}
+
+/** Narrow a group_versus_games query to one filter. */
+export function filterVersusGames(query: any, filter: VersusGameFilter, minReviews: number): any {
+  const shared = () => query.not("subject_score", "is", null).gte("other_count", minReviews);
+  switch (filter) {
+    case "shared": return shared();
+    case "disagree": return shared().gt("diff_abs", VERSUS_AGREE_GAP);
+    case "agree": return shared().lte("diff_abs", VERSUS_AGREE_GAP);
+    case "yours": return query.not("subject_score", "is", null).lt("other_count", minReviews);
+    case "theirs": return query.is("subject_score", null).gte("other_count", minReviews);
+    default: return query.or(`subject_score.not.is.null,other_count.gte.${minReviews}`);
+  }
+}
+
+/**
+ * Order a group_versus_games query. Games a sort has nothing to say about (no
+ * gap, no score from that side) go last. The other side's "top rated" uses the
+ * weighted average, so one 10 doesn't beat twenty 9s.
+ */
+export function sortVersusGames(query: any, sort: VersusGameSort): any {
+  const desc = { ascending: false, nullsFirst: false };
+  const asc = { ascending: true, nullsFirst: false };
+  switch (sort) {
+    case "subject-high": query = query.order("subject_score", desc).order("other_weighted", desc); break;
+    case "subject-low": query = query.order("subject_score", asc).order("other_weighted", asc); break;
+    case "other-high": query = query.order("other_weighted", desc).order("subject_score", desc); break;
+    case "other-low": query = query.order("other_weighted", asc).order("subject_score", asc); break;
+    case "most-reviewed": query = query.order("other_count", desc).order("other_weighted", desc); break;
+    case "title": query = query.order("title", asc); break;
+    default: query = query.order("diff_abs", desc).order("pair_avg", desc).order("other_weighted", desc);
+  }
+  return query.order("other_count", desc).order("game_id");
+}
 
 /** Members the "compare with" menu offers. The owner and the current pick are always in it. */
 export const VERSUS_OPTIONS_SHOWN = 60;
@@ -48,6 +115,45 @@ export interface VersusGameRow {
   otherCount: number;
   /** subjectScore − otherScore, null unless both exist. */
   diff: number | null;
+  /** Each side's hours, completion and platform; absent when they couldn't be read. */
+  subjectDetail?: GameSideDetail;
+  otherDetail?: GameSideDetail;
+}
+
+/** One side's numbers for one game, from group_versus_game_details. */
+export interface GameSideDetail {
+  /** The side's reviews of the game — the community's can be many. */
+  reviewCount: number;
+  /** Average logged play time, and how many reviews logged any. */
+  avgHours: number | null;
+  hoursCount: number;
+  /** Average share of the game's achievements earned, 0–1, and how many people it's over. */
+  achievementPct: number | null;
+  achievementCount: number;
+  /** The platform the side's reviews say they played on most. */
+  platform: string | null;
+}
+
+const EMPTY_DETAIL: GameSideDetail = {
+  reviewCount: 0, avgHours: null, hoursCount: 0, achievementPct: null, achievementCount: 0, platform: null,
+};
+
+/** group_versus_game_details' rows, keyed by game, then side. */
+export function gameDetails(rows: any[] | null | undefined): Map<string, { subject: GameSideDetail; other: GameSideDetail }> {
+  const out = new Map<string, { subject: GameSideDetail; other: GameSideDetail }>();
+  for (const r of rows ?? []) {
+    const entry = out.get(r.game_id) ?? { subject: EMPTY_DETAIL, other: EMPTY_DETAIL };
+    entry[r.side === "subject" ? "subject" : "other"] = {
+      reviewCount: r.review_count ?? 0,
+      avgHours: r.avg_hours ?? null,
+      hoursCount: r.hours_count ?? 0,
+      achievementPct: r.avg_achievement_pct ?? null,
+      achievementCount: r.achievement_count ?? 0,
+      platform: r.top_platform ?? null,
+    };
+    out.set(r.game_id, entry);
+  }
+  return out;
 }
 
 /** One side's numbers, from group_versus_profile. */
@@ -207,6 +313,17 @@ export interface TapeNames {
   other: string;
 }
 
+export interface VersusGames {
+  filter: VersusGameFilter;
+  sort: VersusGameSort;
+  /** How many were asked for — the next "Show more" asks for a page more. */
+  limit: number;
+  rows: VersusGameRow[];
+  /** Games under the filter in all, for "Showing 10 of 31". */
+  total: number;
+  failed: boolean;
+}
+
 export interface GroupVersusData {
   /** The left side. Null when the group has no members to compare. */
   subject: VersusMember | null;
@@ -228,10 +345,8 @@ export interface GroupVersusData {
   above: number;
   below: number;
   level: number;
-  disagreements: VersusGameRow[];
-  agreements: VersusGameRow[];
-  /** The other side's favourites the subject hasn't reviewed. */
-  unreviewed: VersusGameRow[];
+  /** The games list: one page (or a few) of the games under the chosen filter and sort. */
+  games: VersusGames;
   /** Both sides' stat cards, row by row. Null when the profile couldn't be read. */
   card: StatCardRow[] | null;
   /** The charts under the cards. Empty when either side has no reviews. */
@@ -420,13 +535,56 @@ export interface GroupVersusContext {
   viewerProfileId?: string | null;
   /** The raw ?with= value. */
   withParam?: string | null;
+  /** The raw ?gf=, ?gs= and ?gn= values: the games list's filter, sort and length. */
+  gamesFilter?: string | null;
+  gamesSort?: string | null;
+  gamesLimit?: string | null;
+  /** Only the games list is wanted (a filter or sort change): skip the rest of the tab's queries. */
+  gamesOnly?: boolean;
+}
+
+type VersusArgs = {
+  p_group_id: string; p_profile_id: string; p_other_id?: string;
+  p_genre_id?: string; p_platform_id?: string;
+};
+
+/**
+ * One view of the games list: the filtered, sorted page from
+ * group_versus_games (with the total under the filter), then each listed
+ * game's hours, completion and platform from group_versus_game_details. A
+ * failed details read only costs those extras; the scores still show.
+ */
+async function loadVersusGames(db: any, args: VersusArgs, view: VersusGames, minReviews: number): Promise<VersusGames> {
+  const query = filterVersusGames(db.rpc("group_versus_games", args, { count: "exact" }), view.filter, minReviews);
+  const res = await sortVersusGames(query, view.sort).limit(view.limit);
+  if (res?.error) {
+    console.error("[groupCompare] games error:", JSON.stringify(res.error));
+    return { ...view, failed: true };
+  }
+  const rows: VersusGameRow[] = (res?.data ?? []).map(toGameRow);
+  const detailRes = rows.length > 0
+    ? await db.rpc("group_versus_game_details", {
+      p_group_id: args.p_group_id, p_profile_id: args.p_profile_id, p_game_ids: rows.map((g) => g.game.id),
+      p_other_id: args.p_other_id, p_genre_id: args.p_genre_id, p_platform_id: args.p_platform_id,
+    })
+    : null;
+  if (detailRes?.error) console.error("[groupCompare] game details error:", JSON.stringify(detailRes.error));
+  const details = gameDetails(detailRes?.error ? null : detailRes?.data);
+  return {
+    ...view,
+    total: res?.count ?? rows.length,
+    rows: rows.map((g) => {
+      const d = details.get(g.game.id);
+      return d ? { ...g, subjectDetail: d.subject, otherDetail: d.other } : g;
+    }),
+  };
 }
 
 /**
  * Everything the Stats tab renders. The summary is one row, the profile two
- * (one per side), the genres at most RADAR_MAX_AXES per side, and every list
- * is a .limit()ed read of group_versus_games, so nothing here can reach
- * Supabase's 1000-row cap.
+ * (one per side), the genres at most RADAR_MAX_AXES per side, and the games
+ * list a .limit()ed read of group_versus_games (VERSUS_GAMES_MAX at most), so
+ * nothing here can reach Supabase's 1000-row cap.
  */
 export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVersusData> {
   const { db, groupId, members, memberStats, ownerProfileId = null, viewerProfileId = null } = ctx;
@@ -465,7 +623,13 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     failed: false,
     sharedGames: 0, subjectAvg: null, otherAvg: null, meanAbsDiff: null,
     agreementPct: 0, above: 0, below: 0, level: 0,
-    disagreements: [], agreements: [], unreviewed: [], card: null, tape: [],
+    games: {
+      filter: parseVersusGameFilter(ctx.gamesFilter),
+      sort: parseVersusGameSort(ctx.gamesSort),
+      limit: parseVersusGameLimit(ctx.gamesLimit),
+      rows: [], total: 0, failed: false,
+    },
+    card: null, tape: [],
   };
   if (!subject) return data;
 
@@ -476,21 +640,11 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     p_genre_id: ctx.genreId ?? undefined,
     p_platform_id: ctx.genreId ? undefined : ctx.platformId ?? undefined,
   };
-  const games = () => db.rpc("group_versus_games", args);
-  // Scored by the subject and by enough of the other side to call it an opinion
-  const shared = () => games().not("subject_score", "is", null).gte("other_count", minReviews);
+  const gamesPromise = loadVersusGames(db, args, data.games, minReviews);
+  if (ctx.gamesOnly) return { ...data, games: await gamesPromise };
 
-  const [summaryRes, disagreeRes, agreeRes, unreviewedRes, profileRes, genresRes, distRes] = await Promise.all([
+  const [summaryRes, profileRes, genresRes, distRes, games] = await Promise.all([
     db.rpc("group_versus_summary", { ...args, p_min_reviews: minReviews }).maybeSingle(),
-    shared().gt("diff_abs", VERSUS_AGREE_GAP)
-      .order("diff_abs", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
-      .limit(VERSUS_LIST_SHOWN),
-    shared().lte("diff_abs", VERSUS_AGREE_GAP)
-      .order("pair_avg", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
-      .limit(VERSUS_LIST_SHOWN),
-    games().is("subject_score", null).gte("other_count", minReviews)
-      .order("other_weighted", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
-      .limit(VERSUS_LIST_SHOWN),
     db.rpc("group_versus_profile", args),
     db.rpc("group_versus_genres", { ...args, p_limit: RADAR_MAX_AXES }),
     // The whole group plus the named sides; the community is the group minus the subject
@@ -500,12 +654,12 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       p_genre_id: args.p_genre_id,
       p_platform_id: args.p_platform_id,
     }),
+    gamesPromise,
   ]);
-  const results = [summaryRes, disagreeRes, agreeRes, unreviewedRes];
-  for (const res of [...results, profileRes, genresRes, distRes]) {
+  for (const res of [summaryRes, profileRes, genresRes, distRes]) {
     if (res?.error) console.error("[groupCompare] versus error:", JSON.stringify(res.error));
   }
-  if (results.some((res) => res?.error)) return { ...data, failed: true };
+  if (summaryRes?.error) return { ...data, failed: true };
   // A failed profile only costs the stat cards and charts, not the whole tab
   const left = toProfile((profileRes?.data ?? []).find((r: any) => r.side === "subject"));
   const right = toProfile((profileRes?.data ?? []).find((r: any) => r.side === "other"));
@@ -521,9 +675,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     above: s?.above ?? 0,
     below: s?.below ?? 0,
     level: s?.level ?? 0,
-    disagreements: (disagreeRes?.data ?? []).map(toGameRow),
-    agreements: (agreeRes?.data ?? []).map(toGameRow),
-    unreviewed: (unreviewedRes?.data ?? []).map(toGameRow),
+    games,
     card: profileRes?.error ? null : buildStatCard(left, right),
     tape: buildTape(
       left, right,

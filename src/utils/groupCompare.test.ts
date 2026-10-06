@@ -6,6 +6,12 @@ import {
   buildScoreDistribution,
   buildStatCard,
   buildTape,
+  filterVersusGames,
+  gameDetails,
+  parseVersusGameFilter,
+  parseVersusGameLimit,
+  parseVersusGameSort,
+  sortVersusGames,
   rankMemberIds,
   resolveVersusOpponent,
   resolveVersusSubject,
@@ -141,6 +147,88 @@ describe("buildStatCard", () => {
     expect(side(rows, "rating").left).toEqual({ value: "—" });
     expect(side(rows, "achievements").left).toEqual({ value: "—", sub: "None synced" });
     expect(side(rows, "hours").left).toEqual({ value: "—" });
+  });
+});
+
+/** A stand-in PostgREST query that records each call. */
+const recorder = () => {
+  const calls: string[] = [];
+  const q: any = new Proxy({}, {
+    get: (_, name: string) => (...args: any[]) => {
+      calls.push(`${name}(${args.map((a) => JSON.stringify(a)).join(",")})`);
+      return q;
+    },
+  });
+  return { q, calls };
+};
+
+describe("games list settings", () => {
+  it("falls back to all, biggest gap and one page", () => {
+    expect(parseVersusGameFilter("nope")).toBe("all");
+    expect(parseVersusGameFilter("theirs")).toBe("theirs");
+    expect(parseVersusGameSort(null)).toBe("gap");
+    expect(parseVersusGameSort("title")).toBe("title");
+  });
+
+  it("rounds the length up to whole pages, within bounds", () => {
+    expect(parseVersusGameLimit(null)).toBe(10);
+    expect(parseVersusGameLimit("-5")).toBe(10);
+    expect(parseVersusGameLimit("11")).toBe(20);
+    expect(parseVersusGameLimit("30")).toBe(30);
+    expect(parseVersusGameLimit("9999")).toBe(200);
+  });
+});
+
+describe("filterVersusGames", () => {
+  const run = (f: Parameters<typeof filterVersusGames>[1]) => {
+    const { q, calls } = recorder();
+    filterVersusGames(q, f, 1);
+    return calls;
+  };
+
+  it("keeps any game either side reviewed for all", () => {
+    expect(run("all")).toEqual(['or("subject_score.not.is.null,other_count.gte.1")']);
+  });
+
+  it("needs both sides for shared, and splits them on the gap", () => {
+    const shared = ['not("subject_score","is",null)', 'gte("other_count",1)'];
+    expect(run("shared")).toEqual(shared);
+    expect(run("disagree")).toEqual([...shared, 'gt("diff_abs",1)']);
+    expect(run("agree")).toEqual([...shared, 'lte("diff_abs",1)']);
+  });
+
+  it("keeps one side only for yours and theirs", () => {
+    expect(run("yours")).toEqual(['not("subject_score","is",null)', 'lt("other_count",1)']);
+    expect(run("theirs")).toEqual(['is("subject_score",null)', 'gte("other_count",1)']);
+  });
+});
+
+describe("sortVersusGames", () => {
+  it("puts games with nothing to sort on last, then breaks ties stably", () => {
+    const { q, calls } = recorder();
+    sortVersusGames(q, "subject-low");
+    expect(calls[0]).toBe('order("subject_score",{"ascending":true,"nullsFirst":false})');
+    expect(calls.slice(-2)).toEqual(['order("other_count",{"ascending":false,"nullsFirst":false})', 'order("game_id")']);
+  });
+
+  it("orders the biggest gaps first by default", () => {
+    const { q, calls } = recorder();
+    sortVersusGames(q, "gap");
+    expect(calls[0]).toBe('order("diff_abs",{"ascending":false,"nullsFirst":false})');
+  });
+});
+
+describe("gameDetails", () => {
+  it("keys each game's rows by side, with nulls kept as nulls", () => {
+    const d = gameDetails([
+      { game_id: "g", side: "subject", review_count: 1, avg_hours: 40, hours_count: 1, avg_achievement_pct: 0.5, achievement_count: 1, top_platform: "PS5" },
+      { game_id: "g", side: "other", review_count: 12, avg_hours: null, hours_count: 0, avg_achievement_pct: null, achievement_count: 0, top_platform: null },
+    ]);
+    expect(d.get("g")).toEqual({
+      subject: { reviewCount: 1, avgHours: 40, hoursCount: 1, achievementPct: 0.5, achievementCount: 1, platform: "PS5" },
+      other: { reviewCount: 12, avgHours: null, hoursCount: 0, achievementPct: null, achievementCount: 0, platform: null },
+    });
+    expect(gameDetails(null).size).toBe(0);
   });
 });
 

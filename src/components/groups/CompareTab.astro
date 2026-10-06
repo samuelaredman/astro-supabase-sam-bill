@@ -2,8 +2,8 @@
 /**
  * The group Stats tab: you vs the community, or you vs one member you pick
  * (the creator, say). A stat card for each side with what they share between
- * them, the score and genre charts, and three short lists: where you disagree
- * most, where you agree, and what they love that you haven't reviewed.
+ * them, the score and genre charts, and every game either side reviewed as
+ * face-offs, with filters and sorts (VersusGames.astro).
  *
  * Rendered both by the group page (first paint) and by the partial route
  * /groups/[id]/compare that the "compare with" menu re-fetches, from the same
@@ -11,15 +11,14 @@
  * page's global block, like the other group tab components, so markup swapped
  * in later is styled. Behaviour is delegated from src/scripts/group-compare.ts.
  */
-import { igdbImage as igdbCover, scoreClass } from "../../utils/format";
+import { scoreClass } from "../../utils/format";
 import StatRows from "./StatRows.astro";
+import VersusGames from "./VersusGames.astro";
 import {
   agreementLabel,
   shortGenre,
-  signedScore,
   type GroupVersusData,
   type TapeTile,
-  type VersusGameRow,
   type VersusMember,
 } from "../../utils/groupCompare";
 
@@ -33,21 +32,16 @@ interface Props {
 const { data, groupId, focusLabel } = Astro.props;
 const {
   subject, opponent, options, viewerIsGuest, minReviews, failed, sharedGames,
-  meanAbsDiff, agreementPct, disagreements, agreements, unreviewed, card, tape,
+  meanAbsDiff, agreementPct, card, tape,
 } = data;
 
 const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
-const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
 
 const subjectName = subject ? (subject.isViewer ? "You" : `@${subject.username}`) : "";
 const otherName = opponent ? `@${opponent.username}` : "the community";
 const otherShort = opponent ? `@${opponent.username}` : "Community";
 const optionLabel = (m: VersusMember) => `@${m.username}${m.isOwner ? " (owner)" : ""}`;
 
-const badge = (score: number | null) => (score != null ? scoreClass(Math.round(score)) : "");
-const fmt = (score: number | null) =>
-  score == null ? "—" : Number.isInteger(score) ? String(score) : score.toFixed(1);
-const cover = (g: VersusGameRow) => igdbCover(g.game.cover_img_url, "t_thumb");
 
 // ── Score histogram ──
 const reviewsLabel = (n: number) => `${n.toLocaleString()} review${n === 1 ? "" : "s"}`;
@@ -84,9 +78,8 @@ function radar(t: Extract<TapeTile, { kind: "radar" }>) {
   return { rings, spokes, left, right, labels };
 }
 
-// Possessives and "hasn't" built here rather than in the markup, where nested
+// Possessives built here rather than in the markup, where nested
 // template strings with apostrophes trip the Astro parser
-const subjectHasnt = subject?.isViewer ? "you haven't" : `${subjectName} hasn't`;
 const subjectGames = subject?.isViewer ? "your" : `${subjectName}'s`;
 const others = minReviews === 1 ? "another member" : `${minReviews}+ other members`;
 const emptyMessage = !subject
@@ -98,15 +91,6 @@ const emptyMessage = !subject
     : opponent
       ? `${subjectName} and ${otherName} haven't reviewed any of the same games yet.`
       : `None of ${subjectGames} games has been reviewed by ${others} yet. Try comparing with a member instead.`;
-
-const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubject: boolean }[] = [
-  { title: "Biggest disagreements", rows: disagreements, showDiff: true, showSubject: true },
-  { title: "Where you agree", rows: agreements, showDiff: false, showSubject: true },
-  {
-    title: `${opponent ? `@${opponent.username}` : "The community"} loves, ${subjectHasnt} reviewed`,
-    rows: unreviewed, showDiff: false, showSubject: false,
-  },
-];
 ---
 
 <div class="gv-root" data-gv-group={groupId}>
@@ -285,42 +269,8 @@ const lists: { title: string; rows: VersusGameRow[]; showDiff: boolean; showSubj
       )}
 
       {/* ── The lists ── */}
-      {lists.filter((l) => l.rows.length > 0).map((list) => (
-        <section class="gv-list">
-          <div class="gv-list-head">
-            <span class="gv-list-title">{list.title}</span>
-            <span class="gv-cols" aria-hidden="true">
-              {list.showSubject && (
-                <span class="gv-col" title={subjectName}>
-                  <span class="gv-col-av">{subject.avatar_url ? <img src={subject.avatar_url} alt="" loading="lazy" /> : initials(subject.username)}</span>
-                </span>
-              )}
-              <span class="gv-col" title={opponent ? `@${opponent.username}` : "Community average"}>
-                {opponent
-                  ? <span class="gv-col-av">{opponent.avatar_url ? <img src={opponent.avatar_url} alt="" loading="lazy" /> : initials(opponent.username)}</span>
-                  : "Avg"}
-              </span>
-              {list.showDiff && <span class="gv-col gv-col-diff"></span>}
-            </span>
-          </div>
-          {list.rows.map((g) => (
-            <a class="gv-row" href={`/games/${g.game.slug}`}>
-              {cover(g) ? <img class="gv-cover" src={cover(g)!} alt="" loading="lazy" /> : <span class="gv-cover"></span>}
-              <span class="gv-title">{g.game.title}</span>
-              <span class="gv-cols">
-                {list.showSubject && <span class={`score-badge ${badge(g.subjectScore)}`}>{fmt(g.subjectScore)}</span>}
-                <span
-                  class={`score-badge ${badge(g.otherScore)}`}
-                  title={opponent ? undefined : `Average of ${plural(g.otherCount, "review")}`}
-                >{fmt(g.otherScore)}</span>
-                {list.showDiff && g.diff != null && (
-                  <span class={`gv-diff ${g.diff > 0 ? "gv-diff-up" : "gv-diff-down"}`}>{signedScore(g.diff)}</span>
-                )}
-              </span>
-            </a>
-          ))}
-        </section>
-      ))}
+      {/* ── Every game either side reviewed, filtered and sorted ── */}
+      <VersusGames data={data} />
 
       <div class="gv-error" data-gv-error hidden>Couldn't load that comparison. Try again.</div>
     </>
