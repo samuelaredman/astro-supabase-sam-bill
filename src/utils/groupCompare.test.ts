@@ -4,6 +4,7 @@ import {
   agreementPercent,
   barHeadline,
   buildGenreRadar,
+  buildScoreDistribution,
   buildTape,
   decadeLabel,
   graderLabel,
@@ -11,7 +12,9 @@ import {
   resolveVersusOpponent,
   resolveVersusSubject,
   ratioLabel,
+  scoreBuckets,
   shortGenre,
+  sideScores,
   signedScore,
   versusOptions,
   type VersusMember,
@@ -255,5 +258,57 @@ describe("buildGenreRadar", () => {
     expect(keys).not.toContain("genre");
     const fallback = buildTape(profile(), profile(), { subject: "You", other: "@sam" }, 2026).map((t) => t.key);
     expect(fallback).toContain("genre");
+  });
+});
+
+describe("scoreBuckets", () => {
+  it("fills ten slots and ignores anything off the scale", () => {
+    expect(scoreBuckets([{ score: 1, review_count: 2 }, { score: 10, review_count: 5 }, { score: 11, review_count: 9 }]))
+      .toEqual([2, 0, 0, 0, 0, 0, 0, 0, 0, 5]);
+  });
+});
+
+describe("sideScores", () => {
+  const rows = [
+    { profile_id: null, score: 8, review_count: 10 },
+    { profile_id: null, score: 5, review_count: 4 },
+    { profile_id: "me", score: 8, review_count: 3 },
+    { profile_id: "sam", score: 5, review_count: 2 },
+  ];
+
+  it("takes the subject out of the group for the community", () => {
+    const { left, right } = sideScores(rows, "me", null);
+    expect(left[7]).toBe(3);
+    expect(right[7]).toBe(7);
+    expect(right[4]).toBe(4);
+  });
+
+  it("uses the member's own rows against a member", () => {
+    expect(sideScores(rows, "me", "sam").right[4]).toBe(2);
+  });
+});
+
+describe("buildScoreDistribution", () => {
+  const b = (counts: Record<number, number>) => Array.from({ length: 10 }, (_, i) => counts[i + 1] ?? 0);
+  const names = { subject: "You", other: "The community" };
+
+  it("turns counts into shares with averages and most-given scores", () => {
+    const d = buildScoreDistribution(b({ 8: 3, 9: 1 }), b({ 6: 2, 7: 6, 8: 2 }), names)!;
+    expect(d.left[7]).toBe(75);
+    expect(d.leftAvg).toBe(8.3);
+    expect(d.rightAvg).toBe(7);
+    expect([d.leftMode, d.rightMode]).toEqual([8, 7]);
+    expect(d.peak).toBe(75);
+    expect(d.headline).toBe("Your most common score is 8; the community's is 7");
+  });
+
+  it("says when both sides give the same score most", () => {
+    expect(buildScoreDistribution(b({ 8: 4 }), b({ 8: 9, 6: 1 }), names)!.headline).toBe("You both give 8 most often");
+    expect(buildScoreDistribution(b({ 8: 4 }), b({ 8: 9 }), { subject: "@a", other: "@b" })!.headline)
+      .toBe("@a and @b both give 8 most often");
+  });
+
+  it("needs a few reviews on each side", () => {
+    expect(buildScoreDistribution(b({ 8: 2 }), b({ 7: 9 }), names)).toBeNull();
   });
 });

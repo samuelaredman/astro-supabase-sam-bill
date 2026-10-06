@@ -83,6 +83,17 @@ export interface TapeSide {
  */
 export type TapeTile =
   | {
+      kind: "dist"; key: string; icon: string; label: string;
+      /** Share of each side's reviews at each score, index 0 = score 1, 0–100. */
+      left: number[]; right: number[];
+      leftAvg: number | null; rightAvg: number | null;
+      /** Each side's most-given score. */
+      leftMode: number; rightMode: number;
+      /** The tallest bucket on either side — the top of the chart. */
+      peak: number;
+      headline: string;
+    }
+  | {
       kind: "radar"; key: string; icon: string; label: string;
       /** One spoke per genre: each side's share of its own reviews, 0–100. */
       axes: { genre: string; left: number; right: number }[];
@@ -98,6 +109,48 @@ export type TapeTile =
       right: { year: number; pos: number } | null;
       from: number; to: number; headline: string;
     };
+
+/** Fewer reviews than this on a side make a distribution too lumpy to read. */
+export const DIST_MIN_REVIEWS = 3;
+
+/** Reviews at each score as a 10-slot array, index 0 = score 1. */
+export function scoreBuckets(rows: { score: number; review_count: number }[]): number[] {
+  const out = new Array(10).fill(0);
+  for (const r of rows) if (r.score >= 1 && r.score <= 10) out[r.score - 1] += r.review_count;
+  return out;
+}
+
+/**
+ * The score distribution tile: each side's reviews at each score as a share of
+ * its own reviews, with averages and most-given scores. Null when either side
+ * has too few reviews for the shape to mean anything.
+ */
+export function buildScoreDistribution(
+  left: number[], right: number[], names: TapeNames,
+): Extract<TapeTile, { kind: "dist" }> | null {
+  const total = (b: number[]) => b.reduce((x, y) => x + y, 0);
+  const lt = total(left), rt = total(right);
+  if (lt < DIST_MIN_REVIEWS || rt < DIST_MIN_REVIEWS) return null;
+  const shares = (b: number[], t: number) => b.map((n) => Math.round((n / t) * 1000) / 10);
+  const avg = (b: number[], t: number) => Math.round((b.reduce((sum, n, i) => sum + n * (i + 1), 0) / t) * 10) / 10;
+  // Ties go to the higher score
+  const mode = (b: number[]) => b.reduce((best, n, i) => (n >= b[best] ? i : best), 0) + 1;
+  const l = shares(left, lt), r = shares(right, rt);
+  const lm = mode(left), rm = mode(right);
+  // Mid-sentence the community is lower-case: "…; the community's is 7"
+  const other = names.other.replace(/^The /, "the ");
+  const headline = lm === rm
+    ? `${names.subject === "You" ? "You both" : `${names.subject} and ${other} both`} give ${lm} most often`
+    : `${names.subject === "You" ? "Your" : `${names.subject}'s`} most common score is ${lm}; ${other}'s is ${rm}`;
+  return {
+    kind: "dist", key: "scores", icon: "📊", label: "How you score",
+    left: l, right: r,
+    leftAvg: avg(left, lt), rightAvg: avg(right, rt),
+    leftMode: lm, rightMode: rm,
+    peak: Math.max(...l, ...r),
+    headline,
+  };
+}
 
 /** A side's most-reviewed genres, from group_versus_genres. */
 export interface VersusGenreCount {
@@ -300,9 +353,13 @@ export function barHeadline(
 export function buildTape(
   a: VersusProfile, b: VersusProfile, names: TapeNames, thisYear = new Date().getFullYear(),
   genres: { left: VersusGenreCount[]; right: VersusGenreCount[] } = { left: [], right: [] },
+  scores: { left: number[]; right: number[] } | null = null,
 ): TapeTile[] {
   if (a.reviewCount === 0 || b.reviewCount === 0) return [];
   const tiles: TapeTile[] = [];
+
+  const dist = scores ? buildScoreDistribution(scores.left, scores.right, names) : null;
+  if (dist) tiles.push(dist);
 
   // Genres as a radar when there are enough to make a shape, otherwise as a favourite pick
   const radar = buildGenreRadar(genres.left, genres.right, a.reviewCount, b.reviewCount);
@@ -369,6 +426,20 @@ export function buildTape(
     (x, y) => barHeadline(x, y, names, { you: "write", they: "writes", more: "as much" }, "About the same length"));
 
   return tiles;
+}
+
+/**
+ * Each side's score buckets from group_score_distribution's rows: profile_id
+ * null is the whole group, so the community is that minus the subject.
+ */
+export function sideScores(
+  rows: { profile_id: string | null; score: number; review_count: number }[],
+  subjectId: string, opponentId: string | null,
+): { left: number[]; right: number[] } {
+  const of = (id: string | null) => scoreBuckets(rows.filter((r) => r.profile_id === id));
+  const left = of(subjectId);
+  const right = opponentId ? of(opponentId) : of(null).map((n, i) => Math.max(0, n - left[i]));
+  return { left, right };
 }
 
 const genreCounts = (rows: any[] | null | undefined, side: string): VersusGenreCount[] =>
@@ -478,7 +549,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
   // Scored by the subject and by enough of the other side to call it an opinion
   const shared = () => games().not("subject_score", "is", null).gte("other_count", minReviews);
 
-  const [summaryRes, disagreeRes, agreeRes, unreviewedRes, profileRes, genresRes] = await Promise.all([
+  const [summaryRes, disagreeRes, agreeRes, unreviewedRes, profileRes, genresRes, distRes] = await Promise.all([
     db.rpc("group_versus_summary", { ...args, p_min_reviews: minReviews }).maybeSingle(),
     shared().gt("diff_abs", VERSUS_AGREE_GAP)
       .order("diff_abs", { ascending: false }).order("other_count", { ascending: false }).order("game_id")
@@ -491,9 +562,16 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       .limit(VERSUS_LIST_SHOWN),
     db.rpc("group_versus_profile", args),
     db.rpc("group_versus_genres", { ...args, p_limit: RADAR_MAX_AXES }),
+    // The whole group plus the named sides; the community is the group minus the subject
+    db.rpc("group_score_distribution", {
+      p_group_id: groupId,
+      p_profile_ids: opponent ? [subject.id, opponent.id] : [subject.id],
+      p_genre_id: args.p_genre_id,
+      p_platform_id: args.p_platform_id,
+    }),
   ]);
   const results = [summaryRes, disagreeRes, agreeRes, unreviewedRes];
-  for (const res of [...results, profileRes, genresRes]) {
+  for (const res of [...results, profileRes, genresRes, distRes]) {
     if (res?.error) console.error("[groupCompare] versus error:", JSON.stringify(res.error));
   }
   if (results.some((res) => res?.error)) return { ...data, failed: true };
@@ -525,6 +603,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
         left: genreCounts(genresRes?.data, "subject"),
         right: genreCounts(genresRes?.data, "other"),
       },
+      distRes?.error ? null : sideScores(distRes?.data ?? [], subject.id, opponent?.id ?? null),
     ),
   };
 }
