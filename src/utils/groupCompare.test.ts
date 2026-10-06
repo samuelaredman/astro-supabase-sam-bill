@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   agreementLabel,
   agreementPercent,
+  barHeadline,
   buildTape,
   decadeLabel,
   graderLabel,
   rankMemberIds,
   resolveVersusOpponent,
   resolveVersusSubject,
+  ratioLabel,
   signedScore,
   versusOptions,
   type VersusMember,
@@ -142,38 +144,64 @@ describe("decadeLabel", () => {
   });
 });
 
+describe("ratioLabel", () => {
+  it("keeps one decimal for small ratios and drops it for big ones", () => {
+    expect(ratioLabel(1.84)).toBe("1.8×");
+    expect(ratioLabel(2)).toBe("2.0×");
+    expect(ratioLabel(3.4)).toBe("3×");
+  });
+});
+
+describe("barHeadline", () => {
+  const you = { subject: "You", other: "The community" };
+  const verb = { you: "play", they: "plays", more: "longer per game" };
+
+  it("names whoever has more, with how many times more", () => {
+    expect(barHeadline(60, 30, you, verb, "Same")).toBe("You play 2.0× longer per game");
+    expect(barHeadline(10, 40, you, verb, "Same")).toBe("The community plays 4× longer per game");
+  });
+
+  it("calls anything within 15% the same", () => {
+    expect(barHeadline(50, 46, you, verb, "Same pace")).toBe("Same pace");
+  });
+
+  it("says only, mid-sentence, when one side has none", () => {
+    const tens = { you: "hand out 10s", they: "hands out 10s", more: "as often" };
+    expect(barHeadline(12, 0, you, tens, "Same")).toBe("Only you hand out 10s");
+    expect(barHeadline(0, 12, you, tens, "Same")).toBe("Only the community hands out 10s");
+    expect(barHeadline(0, 0, you, tens, "No 10s")).toBe("No 10s");
+  });
+});
+
 describe("buildTape", () => {
-  const row = (rows: ReturnType<typeof buildTape>, key: string) => rows.find((r) => r.key === key)!;
+  const names = { subject: "You", other: "@sam" };
+  const tile = (tiles: ReturnType<typeof buildTape>, key: string) => tiles.find((t) => t.key === key)!;
 
   it("is empty when either side has no reviews", () => {
-    expect(buildTape(profile(), profile({ reviewCount: 0 }))).toEqual([]);
+    expect(buildTape(profile(), profile({ reviewCount: 0 }), names)).toEqual([]);
   });
 
-  it("marks a shared favourite as the same", () => {
-    const rows = buildTape(profile(), profile({ topPlatform: "PC" }));
-    expect(row(rows, "genre").lead).toBe("same");
-    expect(row(rows, "platform").lead).toBeNull();
-    expect(row(rows, "genre").left).toEqual({ value: "RPG", sub: "40% of reviews" });
+  it("merges a shared favourite and keeps different ones apart", () => {
+    const tiles = buildTape(profile(), profile({ topPlatform: "PC" }), names);
+    expect(tile(tiles, "genre")).toMatchObject({ kind: "pick", same: true, left: { value: "RPG", sub: "40%" } });
+    expect(tile(tiles, "platform")).toMatchObject({ kind: "pick", same: false, right: { value: "PC" } });
   });
 
-  it("leads with the bigger number, and not on a tie", () => {
-    const rows = buildTape(profile({ avgHours: 80 }), profile({ avgHours: 20, tens: 4 }));
-    expect(row(rows, "hours").lead).toBe("left");
-    expect(row(rows, "hours").left.value).toBe("80h");
-    expect(row(rows, "tens").lead).toBeNull();
+  it("splits a bar by share, with a headline", () => {
+    const t = tile(buildTape(profile({ avgHours: 75 }), profile({ avgHours: 25 }), names), "hours");
+    expect(t).toMatchObject({ kind: "bar", leftShare: 75, left: { value: "75h" }, right: { value: "25h" } });
+    expect(t.kind === "bar" && t.headline).toBe("You play 3× longer per game");
   });
 
-  it("works out the hot take rate from the games others reviewed", () => {
-    const rows = buildTape(profile({ hotTakes: 3, hotTakeBase: 12 }), profile({ hotTakes: 0, hotTakeBase: 0 }));
-    expect(row(rows, "takes").left.value).toBe("25%");
-    expect(row(rows, "takes").right.value).toBe("—");
-    expect(row(rows, "takes").lead).toBeNull();
+  it("places both sides on the era timeline", () => {
+    const t = tile(buildTape(profile({ avgReleaseYear: 2020 }), profile({ avgReleaseYear: 2000 }), names, 2026), "era");
+    expect(t).toMatchObject({ kind: "era", from: 1980, to: 2026, headline: "You play 20 years newer" });
+    if (t.kind === "era") expect(Math.round(t.left!.pos)).toBe(87);
   });
 
-  it("drops a row neither side has data for", () => {
-    const none = { topStudio: null, avgHours: null };
-    const rows = buildTape(profile(none), profile(none));
-    expect(rows.map((r) => r.key)).not.toContain("studio");
-    expect(rows.map((r) => r.key)).not.toContain("hours");
+  it("leaves out a bar that only one side has data for", () => {
+    const tiles = buildTape(profile({ hotTakeBase: 0 }), profile({ avgHours: null }), names);
+    expect(tiles.map((t) => t.key)).not.toContain("takes");
+    expect(tiles.map((t) => t.key)).not.toContain("hours");
   });
 });

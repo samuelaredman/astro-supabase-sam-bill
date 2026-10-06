@@ -286,7 +286,7 @@ supabase/
   picked in the "compare with" menu, kept in `?with=` so a comparison is a shareable link. It shows a
   scoreboard (both averages over shared games, agreement, gap), a "tale of the tape" comparing each side's
   own habits (favourite genre, platform and studio, era, hours per game, 10s, hot-take rate, review length;
-  `group_versus_profile`, migration `20261005000003`, built into rows by `buildTape()`, and needing no
+  `group_versus_profile`, migration `20261005000003`, built into tiles by `buildTape()`, and needing no
   shared games), and three five-game lists: biggest
   disagreements, where you agree, and what the other side loves that you haven't reviewed.
   `loadGroupVersus()` (`src/utils/groupCompare.ts`) builds it from `group_versus_games` /

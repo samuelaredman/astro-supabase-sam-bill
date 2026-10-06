@@ -69,18 +69,33 @@ export interface VersusProfile {
   avgWords: number | null;
 }
 
-export interface TapeCell {
+/** One side's value on a tile. */
+export interface TapeSide {
   value: string;
   sub?: string;
 }
 
-export interface TapeRow {
-  key: string;
-  label: string;
-  left: TapeCell;
-  right: TapeCell;
-  /** Which side to highlight: the bigger number, or "same" when both picked the same thing. */
-  lead: "left" | "right" | "same" | null;
+/**
+ * A tile on the tale of the tape. Each kind has its own little visual:
+ * - pick: each side's favourite (genre, platform, studio), merged into one when they match
+ * - bar: a tug-of-war bar split by who has more, with a one-line takeaway
+ * - era: both sides placed on a release-year timeline
+ */
+export type TapeTile =
+  | { kind: "pick"; key: string; icon: string; label: string; left: TapeSide | null; right: TapeSide | null; same: boolean }
+  | { kind: "bar"; key: string; icon: string; label: string; left: TapeSide; right: TapeSide; leftShare: number; headline: string }
+  | {
+      kind: "era"; key: string; icon: string; label: string;
+      /** Average release year, and where it sits along the axis, 0–100. */
+      left: { year: number; pos: number } | null;
+      right: { year: number; pos: number } | null;
+      from: number; to: number; headline: string;
+    };
+
+/** How a tile's sentences name the two sides: "You" / "@sam" / "The community". */
+export interface TapeNames {
+  subject: string;
+  other: string;
 }
 
 export interface GroupVersusData {
@@ -108,8 +123,8 @@ export interface GroupVersusData {
   agreements: VersusGameRow[];
   /** The other side's favourites the subject hasn't reviewed. */
   unreviewed: VersusGameRow[];
-  /** The tale of the tape: both sides' profiles side by side. Empty when either side has no reviews. */
-  tape: TapeRow[];
+  /** The tale of the tape: both sides' profiles as tiles. Empty when either side has no reviews. */
+  tape: TapeTile[];
 }
 
 /** Member ids with reviews, most active reviewer first, ties in a stable order. */
@@ -188,7 +203,6 @@ export function signedScore(n: number): string {
 }
 
 const pct = (n: number, of: number) => (of > 0 ? Math.round((n / of) * 100) : 0);
-const EMPTY: TapeCell = { value: "—" };
 
 /** "2010s" from an average release year. */
 export function decadeLabel(year: number | null): string | null {
@@ -196,74 +210,108 @@ export function decadeLabel(year: number | null): string | null {
   return `${Math.floor(Math.round(year) / 10) * 10}s`;
 }
 
-/** The bigger side, when the gap is worth pointing at. */
-function leadOf(a: number | null, b: number | null, minGap: number): TapeRow["lead"] {
-  if (a == null || b == null || Math.abs(a - b) < minGap) return null;
-  return a > b ? "left" : "right";
+/** "1.8×", or "3×" once the gap is big enough that a decimal is noise. */
+export function ratioLabel(ratio: number): string {
+  return ratio >= 3 ? `${Math.round(ratio)}×` : `${(Math.round(ratio * 10) / 10).toFixed(1)}×`;
 }
 
-/** A row picking a favourite (genre, platform, studio): "same" when both sides picked it. */
-function favouriteRow(
-  key: string, label: string,
-  a: { name: string | null; count: number; total: number }, b: { name: string | null; count: number; total: number },
-  sub: (count: number, total: number) => string
-): TapeRow {
-  const cell = (s: typeof a): TapeCell => (s.name ? { value: s.name, sub: sub(s.count, s.total) } : EMPTY);
-  return { key, label, left: cell(a), right: cell(b), lead: a.name && a.name === b.name ? "same" : null };
+/** "You play" / "@sam plays" / "The community plays". */
+function says(name: string, you: string, they: string): string {
+  return `${name} ${name === "You" ? you : they}`;
 }
 
 /**
- * The tale of the tape, from the two sides' profiles. A side with no data for
- * a row shows a dash, and a row with no data on either side is left out.
+ * The takeaway under a bar: who has more and by how much. Close enough
+ * (within 15%) reads as a tie; nothing at all on one side reads as "only".
  */
-export function buildTape(a: VersusProfile, b: VersusProfile): TapeRow[] {
+export function barHeadline(
+  a: number, b: number, names: TapeNames,
+  verb: { you: string; they: string; more: string },
+  same: string,
+): string {
+  if (a === 0 && b === 0) return same;
+  const [winner, hi, lo] = a >= b ? [names.subject, a, b] : [names.other, b, a];
+  if (lo === 0) {
+    // Mid-sentence: "Only you …", "Only the community …"
+    const mid = winner === "You" ? "you" : winner.replace(/^The /, "the ");
+    return `Only ${mid} ${winner === "You" ? verb.you : verb.they}`;
+  }
+  const ratio = hi / lo;
+  if (ratio < 1.15) return same;
+  return `${says(winner, verb.you, verb.they)} ${ratioLabel(ratio)} ${verb.more}`;
+}
+
+/**
+ * The tale of the tape, from the two sides' profiles. A tile is left out when
+ * neither side has the data for it (a bar needs both sides).
+ */
+export function buildTape(
+  a: VersusProfile, b: VersusProfile, names: TapeNames, thisYear = new Date().getFullYear(),
+): TapeTile[] {
   if (a.reviewCount === 0 || b.reviewCount === 0) return [];
-  const share = (count: number, total: number) => `${pct(count, total)}% of reviews`;
-  const games = (count: number) => `${count} game${count === 1 ? "" : "s"}`;
+  const tiles: TapeTile[] = [];
 
-  const rows: TapeRow[] = [
-    favouriteRow("genre", "Favourite genre",
-      { name: a.topGenre, count: a.topGenreCount, total: a.reviewCount },
-      { name: b.topGenre, count: b.topGenreCount, total: b.reviewCount }, share),
-    favouriteRow("platform", "Go-to platform",
-      { name: a.topPlatform, count: a.topPlatformCount, total: a.reviewCount },
-      { name: b.topPlatform, count: b.topPlatformCount, total: b.reviewCount }, share),
-    favouriteRow("studio", "Favourite studio",
-      { name: a.topStudio, count: a.topStudioCount, total: a.reviewCount },
-      { name: b.topStudio, count: b.topStudioCount, total: b.reviewCount }, (n) => games(n)),
-  ];
-
-  const era = (p: VersusProfile): TapeCell => {
-    const decade = decadeLabel(p.avgReleaseYear);
-    return decade ? { value: decade, sub: `avg ${Math.round(p.avgReleaseYear!)}` } : EMPTY;
+  const pick = (key: string, icon: string, label: string, an: string | null, ac: number, bn: string | null, bc: number, sub: (n: number, total: number) => string) => {
+    if (!an && !bn) return;
+    tiles.push({
+      kind: "pick", key, icon, label,
+      left: an ? { value: an, sub: sub(ac, a.reviewCount) } : null,
+      right: bn ? { value: bn, sub: sub(bc, b.reviewCount) } : null,
+      same: !!an && an === bn,
+    });
   };
-  rows.push({
-    key: "era", label: "Era", left: era(a), right: era(b),
-    lead: decadeLabel(a.avgReleaseYear) && decadeLabel(a.avgReleaseYear) === decadeLabel(b.avgReleaseYear) ? "same" : null,
-  });
+  const share = (n: number, total: number) => `${pct(n, total)}%`;
+  const games = (n: number) => `${n} game${n === 1 ? "" : "s"}`;
+  pick("genre", "🎮", "Favourite genre", a.topGenre, a.topGenreCount, b.topGenre, b.topGenreCount, share);
+  pick("platform", "🕹️", "Go-to platform", a.topPlatform, a.topPlatformCount, b.topPlatform, b.topPlatformCount, share);
+  pick("studio", "🏢", "Favourite studio", a.topStudio, a.topStudioCount, b.topStudio, b.topStudioCount, (n) => games(n));
 
-  const hours = (p: VersusProfile): TapeCell =>
-    p.avgHours != null ? { value: `${Math.round(p.avgHours).toLocaleString("en-US")}h`, sub: `${p.hoursSum.toLocaleString("en-US")}h logged` } : EMPTY;
-  rows.push({ key: "hours", label: "Hours per game", left: hours(a), right: hours(b), lead: leadOf(a.avgHours, b.avgHours, 1) });
+  // Era: both sides on a timeline from 1980 (earlier if needed) to this year
+  const ay = a.avgReleaseYear, by = b.avgReleaseYear;
+  if (ay != null || by != null) {
+    const years = [ay, by].filter((y): y is number => y != null);
+    const from = Math.min(1980, Math.floor(Math.min(...years) / 5) * 5);
+    const to = Math.max(thisYear, Math.ceil(Math.max(...years)));
+    const at = (y: number | null) => (y == null ? null : { year: Math.round(y), pos: ((y - from) / (to - from)) * 100 });
+    let headline = "";
+    if (ay != null && by != null) {
+      const gap = Math.round(Math.abs(ay - by));
+      headline = gap < 2
+        ? `Same era: the ${decadeLabel((ay + by) / 2)}`
+        : `${says(ay > by ? names.subject : names.other, "play", "plays")} ${gap} years newer`;
+    }
+    tiles.push({ kind: "era", key: "era", icon: "📅", label: "Era", left: at(ay), right: at(by), from, to, headline });
+  }
 
-  const tens = (p: VersusProfile): TapeCell => ({ value: `${pct(p.tens, p.reviewCount)}%`, sub: `${p.tens} of ${p.reviewCount}` });
-  rows.push({
-    key: "tens", label: "Perfect 10s", left: tens(a), right: tens(b),
-    lead: leadOf(pct(a.tens, a.reviewCount), pct(b.tens, b.reviewCount), 1),
-  });
+  const bar = (key: string, icon: string, label: string, av: number | null, bv: number | null, fmt: (v: number) => TapeSide, headline: (x: number, y: number) => string) => {
+    if (av == null || bv == null) return;
+    const total = av + bv;
+    tiles.push({
+      kind: "bar", key, icon, label,
+      left: fmt(av), right: fmt(bv),
+      leftShare: total > 0 ? Math.round((av / total) * 100) : 50,
+      headline: headline(av, bv),
+    });
+  };
 
-  const takes = (p: VersusProfile): TapeCell =>
-    p.hotTakeBase > 0 ? { value: `${pct(p.hotTakes, p.hotTakeBase)}%`, sub: `3+ from the crowd` } : EMPTY;
-  rows.push({
-    key: "takes", label: "Hot take rate", left: takes(a), right: takes(b),
-    lead: a.hotTakeBase > 0 && b.hotTakeBase > 0 ? leadOf(pct(a.hotTakes, a.hotTakeBase), pct(b.hotTakes, b.hotTakeBase), 1) : null,
-  });
+  bar("hours", "⏱️", "Hours per game", a.avgHours, b.avgHours,
+    (v) => ({ value: `${Math.round(v).toLocaleString("en-US")}h` }),
+    (x, y) => barHeadline(x, y, names, { you: "play", they: "plays", more: "longer per game" }, "Same pace per game"));
 
-  const words = (p: VersusProfile): TapeCell =>
-    p.avgWords != null ? { value: Math.round(p.avgWords).toLocaleString("en-US"), sub: "words per review" } : EMPTY;
-  rows.push({ key: "words", label: "Review length", left: words(a), right: words(b), lead: leadOf(a.avgWords, b.avgWords, 5) });
+  const tensA = pct(a.tens, a.reviewCount), tensB = pct(b.tens, b.reviewCount);
+  bar("tens", "💯", "Perfect 10s", tensA, tensB,
+    (v) => ({ value: `${v}%` }),
+    (x, y) => barHeadline(x, y, names, { you: "hand out 10s", they: "hands out 10s", more: "as often" }, x === 0 ? "No 10s on either side" : "Just as generous with 10s"));
 
-  return rows.filter((r) => r.left !== EMPTY || r.right !== EMPTY);
+  bar("takes", "🌶️", "Hot takes", a.hotTakeBase > 0 ? pct(a.hotTakes, a.hotTakeBase) : null, b.hotTakeBase > 0 ? pct(b.hotTakes, b.hotTakeBase) : null,
+    (v) => ({ value: `${v}%` }),
+    (x, y) => barHeadline(x, y, names, { you: "go against the crowd", they: "goes against the crowd", more: "more often" }, x === 0 ? "Nobody goes against the crowd" : "Equally contrarian"));
+
+  bar("words", "✍️", "Review length", a.avgWords, b.avgWords,
+    (v) => ({ value: `${Math.round(v).toLocaleString("en-US")}`, sub: "words" }),
+    (x, y) => barHeadline(x, y, names, { you: "write", they: "writes", more: "as much" }, "About the same length"));
+
+  return tiles;
 }
 
 const toProfile = (row: any): VersusProfile => ({
@@ -406,6 +454,10 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     tape: buildTape(
       toProfile((profileRes?.data ?? []).find((r: any) => r.side === "subject")),
       toProfile((profileRes?.data ?? []).find((r: any) => r.side === "other")),
+      {
+        subject: subject.isViewer ? "You" : `@${subject.username}`,
+        other: opponent ? `@${opponent.username}` : "The community",
+      },
     ),
   };
 }
