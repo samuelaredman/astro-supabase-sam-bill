@@ -292,8 +292,11 @@ supabase/
   `buildTape()`. The cards and charts need no shared games. Last comes every game either side reviewed
   (`VersusGames.astro`), as face-offs — cover in the middle, each side's score, hours, achievement % and
   platform either side, the extras read for just the listed games from `group_versus_game_details`
-  (migration `20261006000002`). A title search, a filter menu (all, shared, disagree, agree, only you, only them), a
-  genre menu (hidden under a genre focus), a sort menu and "Show more" live in `?gq=` / `?gf=` / `?gg=` / `?gs=` / `?gn=` (`filterVersusGames()` / `sortVersusGames()`) and
+  (migration `20261006000002`). Above the cards, two tab-wide filters narrow every number on the tab — cards, middle numbers,
+  histogram, radar and list: "Games" (`?sc=` all / shared / disagree / agree; `group_versus_scope()` and the
+  `p_scope` parameter, migration `20261006000004`) and "Genre" (`?gg=`, through `p_genre_id`; hidden under a
+  genre focus). The list adds a title search, an "only you / only them" menu (all-games scope only), a sort menu
+  and "Show more", in `?gq=` / `?gf=` / `?gs=` / `?gn=` (`filterVersusGames()` / `sortVersusGames()`) and
   re-fetch just the list from `/groups/[id]/compare?part=games`. The list reads `group_versus_games_ranked`
   (migration `20261006000003`), whose `rated` / `turn` / `rated_side` give one top/lowest-rated ranking for
   both sides, taking turns at an equal rating.

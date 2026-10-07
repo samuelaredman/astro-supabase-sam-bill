@@ -2,11 +2,12 @@
 /**
  * The Stats tab's games list: every game either side reviewed, as face-offs —
  * cover in the middle, each side's score, hours, achievement % and platform
- * either side — under a title search, a filter, a genre and a sort, a page at a time.
+ * either side — under the tab's scope and genre (set above the cards), plus
+ * its own title search, "only you / only them" filter and sort, a page at a time.
  *
  * Rendered inside CompareTab, and on its own by /groups/[id]/compare?part=games
  * when the filter, sort or "Show more" changes (src/scripts/group-compare.ts
- * swaps it in place). The view rides in ?gq= / ?gf= / ?gg= / ?gs= / ?gn=, so it's
+ * swaps it in place). The view rides in ?sc= / ?gg= / ?gq= / ?gf= / ?gs= / ?gn=, so it's
  * shareable; "Show more" is a real link, so it works without the script.
  */
 import { formatScore, igdbImage as igdbCover, scoreClass } from "../../utils/format";
@@ -19,6 +20,7 @@ import {
   type VersusGameFilter,
   type VersusGameRow,
   type VersusGameSort,
+  type VersusScope,
 } from "../../utils/groupCompare";
 
 interface Props {
@@ -32,11 +34,9 @@ const otherShort = opponent ? `@${opponent.username}` : "Community";
 const subjectLower = subject?.isViewer ? "you" : subjectName;
 const otherLower = opponent ? `@${opponent.username}` : "the community";
 
+// Only under the "all" scope: every other scope is shared games already
 const filters: { key: VersusGameFilter; label: string }[] = [
   { key: "all", label: "All games" },
-  { key: "shared", label: "Shared games" },
-  { key: "disagree", label: "Disagree" },
-  { key: "agree", label: "Agree" },
   { key: "yours", label: `Only ${subjectLower}` },
   { key: "theirs", label: `Only ${otherLower}` },
 ];
@@ -48,7 +48,7 @@ const sorts: { key: VersusGameSort; label: string }[] = [
   ...(opponent ? [] : [{ key: "most-reviewed" as const, label: "Most reviewed" }]),
   { key: "title", label: "A–Z" },
 ];
-const emptyText: Record<VersusGameFilter, string> = {
+const emptyText: Record<VersusScope | VersusGameFilter, string> = {
   all: "No games reviewed yet.",
   shared: `${subjectName} and ${otherLower} haven't reviewed any of the same games yet.`,
   disagree: `No games ${subjectLower} and ${otherLower} are more than a point apart on.`,
@@ -56,6 +56,7 @@ const emptyText: Record<VersusGameFilter, string> = {
   yours: `Every game ${subjectLower} reviewed, ${otherLower} reviewed too.`,
   theirs: `${subjectName} reviewed every game ${otherLower} did.`,
 };
+const emptyKey = data.scope !== "all" ? data.scope : games.filter;
 
 /** A link to this view with some of the list's settings changed. */
 function viewHref(change: { gf?: string; gs?: string; gn?: number }) {
@@ -64,12 +65,13 @@ function viewHref(change: { gf?: string; gs?: string; gn?: number }) {
   const gf = change.gf ?? games.filter, gs = change.gs ?? games.sort;
   if (gf !== "all") q.set("gf", gf);
   if (gs !== "gap") q.set("gs", gs);
-  if (games.genre) q.set("gg", games.genre);
+  if (data.scope !== "all") q.set("sc", data.scope);
+  if (data.genre) q.set("gg", data.genre);
   if (games.search) q.set("gq", games.search);
   if (change.gn && change.gn > VERSUS_GAMES_PAGE) q.set("gn", String(change.gn));
   return `?${q}`;
 }
-const genreName = games.genres.find((g) => g.id === games.genre)?.name ?? null;
+const genreName = data.genres.find((g) => g.id === data.genre)?.name ?? null;
 const moreLimit = Math.min(games.limit + VERSUS_GAMES_PAGE, VERSUS_GAMES_MAX);
 const hasMore = games.rows.length < games.total && games.limit < VERSUS_GAMES_MAX;
 
@@ -121,7 +123,8 @@ function faceSide(g: VersusGameRow, side: "subject" | "other") {
       <input type="hidden" name="tab" value="compare" />
       {opponent && <input type="hidden" name="with" value={opponent.id} />}
       {games.filter !== "all" && <input type="hidden" name="gf" value={games.filter} />}
-      {games.genre && <input type="hidden" name="gg" value={games.genre} />}
+      {data.scope !== "all" && <input type="hidden" name="sc" value={data.scope} />}
+      {data.genre && <input type="hidden" name="gg" value={data.genre} />}
       {games.sort !== "gap" && <input type="hidden" name="gs" value={games.sort} />}
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input
@@ -135,18 +138,11 @@ function faceSide(g: VersusGameRow, side: "subject" | "other") {
         data-gv-search
       />
     </form>
-    <label class="gv-sort">
-      <span>Show</span>
-      <select class="gv-select" data-gv-filter aria-label="Filter games">
-        {filters.map((f) => <option value={f.key} selected={f.key === games.filter}>{f.label}</option>)}
-      </select>
-    </label>
-    {games.genres.length > 0 && (
+    {data.scope === "all" && (
       <label class="gv-sort">
-        <span>Genre</span>
-        <select class="gv-select" data-gv-genre aria-label="Genre">
-          <option value="" selected={!games.genre}>All genres</option>
-          {games.genres.map((g) => <option value={g.id} selected={g.id === games.genre}>{g.name}</option>)}
+        <span>Show</span>
+        <select class="gv-select" data-gv-filter aria-label="Filter games">
+          {filters.map((f) => <option value={f.key} selected={f.key === games.filter}>{f.label}</option>)}
         </select>
       </label>
     )}
@@ -163,7 +159,7 @@ function faceSide(g: VersusGameRow, side: "subject" | "other") {
   ) : games.rows.length === 0 ? (
     <p class="gv-games-empty">
       {games.search ? `No games matching “${games.search}”${genreName ? ` in ${genreName}` : ""}.`
-        : genreName ? `No ${genreName} games here.` : emptyText[games.filter]}
+        : genreName ? `No ${genreName} games here.` : emptyText[emptyKey]}
     </p>
   ) : (
     <>

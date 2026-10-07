@@ -38,7 +38,7 @@ let requestSeq = 0;
 /** The settings the Stats tab's fragment route reads, from a page URL. */
 function fragmentQuery(pageUrl: URL, extra: Record<string, string> = {}): string {
   const q = new URLSearchParams(extra);
-  for (const key of ["with", "gq", "gf", "gg", "gs", "gn"]) {
+  for (const key of ["with", "sc", "gg", "gq", "gf", "gs", "gn"]) {
     const value = pageUrl.searchParams.get(key);
     if (value) q.set(key, value);
   }
@@ -46,31 +46,50 @@ function fragmentQuery(pageUrl: URL, extra: Record<string, string> = {}): string
   return str ? `?${str}` : "";
 }
 
-/** Compare with someone else (a member's id, or "" for the community): re-fetch the whole tab. */
-async function compareWith(withId: string) {
-  const host = panel();
-  const groupId = host?.querySelector<HTMLElement>("[data-gv-group]")?.dataset.gvGroup;
-  if (!host || !groupId) return;
-
-  // Keep the address bar shareable, without filling up the back button. The
-  // games list keeps its filter and sort, but starts again from one page.
+/** Compare with someone else (a member's id, or "" for the community). */
+function compareWith(withId: string) {
+  // The games list keeps its filters and sort, but starts again from one page
   const pageUrl = new URL(window.location.href);
   pageUrl.searchParams.set("tab", "compare");
   if (withId) pageUrl.searchParams.set("with", withId);
   else pageUrl.searchParams.delete("with");
   pageUrl.searchParams.delete("gn");
-  history.replaceState(null, "", pageUrl);
+  return refreshTab(pageUrl);
+}
+
+/**
+ * Show the whole tab for another view (who you compare with, the tab-wide
+ * scope or genre): re-fetch it from /groups/[id]/compare and swap it in. The
+ * address bar takes on the view, so it stays shareable without filling up the
+ * back button. `jump` scrolls to the games list once it's in.
+ */
+async function refreshTab(pageUrl: URL, jump = false) {
+  const host = panel();
+  const groupId = host?.querySelector<HTMLElement>("[data-gv-group]")?.dataset.gvGroup;
+  if (!host || !groupId) return;
+  const next = new URL(window.location.href);
+  for (const key of ["tab", "with", "sc", "gg", "gq", "gf", "gs", "gn"]) {
+    const value = pageUrl.searchParams.get(key);
+    if (value) next.searchParams.set(key, value);
+    else next.searchParams.delete(key);
+  }
+  next.hash = "";
+  history.replaceState(null, "", next);
 
   const seq = ++requestSeq;
   host.classList.add("gv-busy");
   let ok = false;
   try {
-    const res = await fetch(`/groups/${groupId}/compare${fragmentQuery(pageUrl)}`, { headers: { Accept: "text/html" } });
+    const res = await fetch(`/groups/${groupId}/compare${fragmentQuery(next)}`, { headers: { Accept: "text/html" } });
     if (seq !== requestSeq) return;
     if (res.ok) {
       host.innerHTML = await res.text();
       syncColorControls();
       ok = true;
+      if (jump) {
+        const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        document.getElementById("gv-games")?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+      }
     }
   } catch {
     // Keep the comparison that's on screen rather than blanking it
@@ -100,7 +119,7 @@ async function showGames(pageUrl: URL) {
   if (!host || !groupId || !list) return;
   // Keep the page's own params (and path), take the list's from the link
   const next = new URL(window.location.href);
-  for (const key of ["tab", "with", "gq", "gf", "gg", "gs", "gn"]) {
+  for (const key of ["tab", "with", "sc", "gg", "gq", "gf", "gs", "gn"]) {
     const value = pageUrl.searchParams.get(key);
     if (value) next.searchParams.set(key, value);
     else next.searchParams.delete(key);
@@ -248,12 +267,23 @@ export function initGroupCompare() {
 
   document.addEventListener("change", (event) => {
     const target = event.target as HTMLElement | null;
-    // A new filter, genre or sort starts the list again from one page
-    const menu = target?.closest<HTMLSelectElement>("[data-gv-filter], [data-gv-genre], [data-gv-sort]");
+    // The tab-wide scope and genre change every number on the tab
+    const wide = target?.closest<HTMLSelectElement>("[data-gv-scope], [data-gv-genre]");
+    if (wide && panel()?.contains(wide)) {
+      const [param, fallback] = wide.matches("[data-gv-scope]") ? ["sc", "all"] : ["gg", ""];
+      const url = new URL(window.location.href);
+      if (wide.value === fallback) url.searchParams.delete(param);
+      else url.searchParams.set(param, wide.value);
+      url.searchParams.delete("gn");
+      // "Only you / only them" only exists under every game
+      if (param === "sc" && wide.value !== "all") url.searchParams.delete("gf");
+      void refreshTab(url);
+      return;
+    }
+    // A new list filter or sort starts the list again from one page
+    const menu = target?.closest<HTMLSelectElement>("[data-gv-filter], [data-gv-sort]");
     if (menu && panel()?.contains(menu)) {
-      const [param, fallback] = menu.matches("[data-gv-filter]") ? ["gf", "all"]
-        : menu.matches("[data-gv-genre]") ? ["gg", ""]
-        : ["gs", "gap"];
+      const [param, fallback] = menu.matches("[data-gv-filter]") ? ["gf", "all"] : ["gs", "gap"];
       const url = new URL(window.location.href);
       if (menu.value === fallback) url.searchParams.delete(param);
       else url.searchParams.set(param, menu.value);
@@ -383,17 +413,20 @@ export function initGroupCompare() {
   });
   syncColorControls();
 
-  // "Show more" and the shared-games / within-a-point numbers are real links; take them over to swap in place
+  // "Show more", the shared-games / within-a-point numbers and "Clear filters" are real links; take them over to swap in place
   document.addEventListener("click", (event) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const link = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>("a[data-gv-games-link]");
+    const target = event.target as HTMLElement | null;
+    // The shared-games / within-a-point numbers and "Clear filters" change the whole tab
+    const tabLink = target?.closest<HTMLAnchorElement>("a[data-gv-tab-link]");
+    if (tabLink && panel()?.contains(tabLink)) {
+      event.preventDefault();
+      void refreshTab(new URL(tabLink.href), tabLink.hasAttribute("data-gv-jump"));
+      return;
+    }
+    const link = target?.closest<HTMLAnchorElement>("a[data-gv-games-link]");
     if (!link || !panel()?.contains(link)) return;
     event.preventDefault();
-    // The shared-games and within-a-point numbers jump down to the list too
-    if (link.hasAttribute("data-gv-jump")) {
-      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      document.getElementById("gv-games")?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
-    }
     void showGames(new URL(link.href));
   });
 }

@@ -11,7 +11,8 @@ import {
   normalizeMemberQuery,
   searchVersusMembers,
   parseVersusGameFilter,
-  parseVersusGameGenre,
+  parseVersusGenre,
+  parseVersusScope,
   parseVersusGameSearch,
   parseVersusGameLimit,
   parseVersusGameSort,
@@ -178,9 +179,9 @@ describe("games list settings", () => {
   });
 
   it("takes a genre id and ignores anything else", () => {
-    expect(parseVersusGameGenre("8A1B2C3D-0000-4000-8000-000000000001")).toBe("8a1b2c3d-0000-4000-8000-000000000001");
-    expect(parseVersusGameGenre("rpg")).toBeNull();
-    expect(parseVersusGameGenre(null)).toBeNull();
+    expect(parseVersusGenre("8A1B2C3D-0000-4000-8000-000000000001")).toBe("8a1b2c3d-0000-4000-8000-000000000001");
+    expect(parseVersusGenre("rpg")).toBeNull();
+    expect(parseVersusGenre(null)).toBeNull();
   });
 
   it("keeps a title search safe for an ilike pattern", () => {
@@ -200,9 +201,9 @@ describe("games list settings", () => {
 });
 
 describe("filterVersusGames", () => {
-  const run = (f: Parameters<typeof filterVersusGames>[1]) => {
+  const run = (scope: Parameters<typeof filterVersusGames>[1], filter: Parameters<typeof filterVersusGames>[2] = "all") => {
     const { q, calls } = recorder();
-    filterVersusGames(q, f, 1);
+    filterVersusGames(q, scope, filter, 1);
     return calls;
   };
 
@@ -218,8 +219,21 @@ describe("filterVersusGames", () => {
   });
 
   it("keeps one side only for yours and theirs", () => {
-    expect(run("yours")).toEqual(['not("subject_score","is",null)', 'lt("other_count",1)']);
-    expect(run("theirs")).toEqual(['is("subject_score",null)', 'gte("other_count",1)']);
+    expect(run("all", "yours")).toEqual(['not("subject_score","is",null)', 'lt("other_count",1)']);
+    expect(run("all", "theirs")).toEqual(['is("subject_score",null)', 'gte("other_count",1)']);
+  });
+
+  it("ignores the list's own filter under a narrower scope", () => {
+    expect(run("shared", "yours")).toEqual(run("shared"));
+  });
+});
+
+describe("parseVersusScope", () => {
+  it("reads ?sc=, then an older link's ?gf=, else all", () => {
+    expect(parseVersusScope("agree")).toBe("agree");
+    expect(parseVersusScope(null, "disagree")).toBe("disagree");
+    expect(parseVersusScope(null, "yours")).toBe("all");
+    expect(parseVersusScope("nope")).toBe("all");
   });
 });
 
@@ -357,21 +371,17 @@ describe("scoreBuckets", () => {
 
 describe("sideScores", () => {
   const rows = [
-    { profile_id: null, score: 8, review_count: 10 },
-    { profile_id: null, score: 5, review_count: 4 },
-    { profile_id: "me", score: 8, review_count: 3 },
-    { profile_id: "sam", score: 5, review_count: 2 },
+    { side: "subject", score: 8, review_count: 3 },
+    { side: "other", score: 8, review_count: 7 },
+    { side: "other", score: 5, review_count: 4 },
   ];
 
-  it("takes the subject out of the group for the community", () => {
-    const { left, right } = sideScores(rows, "me", null);
+  it("buckets each side's rows", () => {
+    const { left, right } = sideScores(rows);
     expect(left[7]).toBe(3);
     expect(right[7]).toBe(7);
     expect(right[4]).toBe(4);
-  });
-
-  it("uses the member's own rows against a member", () => {
-    expect(sideScores(rows, "me", "sam").right[4]).toBe(2);
+    expect(left[4]).toBe(0);
   });
 });
 

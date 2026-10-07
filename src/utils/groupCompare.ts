@@ -29,15 +29,33 @@ export const VERSUS_GAMES_PAGE = 10;
 export const VERSUS_GAMES_MAX = 200;
 
 /**
- * Which games the games list shows:
+ * The tab-wide "Games" filter (?sc=), which narrows every stat on the tab —
+ * the cards, the middle numbers, the charts and the list — to:
  * - all: every game either side reviewed (the other side enough to count)
  * - shared: both sides reviewed it
  * - disagree / agree: shared, more than / at most VERSUS_AGREE_GAP apart
+ * The SQL side is group_versus_scope() (migration 20261006000004).
+ */
+export const VERSUS_SCOPES = ["all", "shared", "disagree", "agree"] as const;
+export type VersusScope = (typeof VERSUS_SCOPES)[number];
+
+/**
+ * The games list's own filter (?gf=), only offered under the "all" scope,
+ * since the other scopes are shared games by definition:
+ * - all: every game in the scope
  * - yours: only the subject reviewed it
  * - theirs: only the other side did
  */
-export const VERSUS_GAME_FILTERS = ["all", "shared", "disagree", "agree", "yours", "theirs"] as const;
+export const VERSUS_GAME_FILTERS = ["all", "yours", "theirs"] as const;
 export type VersusGameFilter = (typeof VERSUS_GAME_FILTERS)[number];
+
+/** ?sc=. Links from before the scope moved tab-wide carried it in ?gf=, so that's read too. */
+export function parseVersusScope(raw: string | null | undefined, legacyFilter?: string | null): VersusScope {
+  for (const v of [raw, legacyFilter]) {
+    if ((VERSUS_SCOPES as readonly string[]).includes(v ?? "")) return v as VersusScope;
+  }
+  return "all";
+}
 
 /** How the games list is ordered. Every one ends on stable tie-breaks. */
 export const VERSUS_GAME_SORTS = ["gap", "top", "low", "most-reviewed", "title"] as const;
@@ -53,8 +71,8 @@ export function parseVersusGameSort(raw: string | null | undefined): VersusGameS
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** ?gg=, a genre id. Anything else means every genre; an id that isn't a genre just finds no games. */
-export function parseVersusGameGenre(raw: string | null | undefined): string | null {
+/** ?gg=, the tab-wide genre: a genre id. Anything else means every genre; an id that isn't a genre just finds no games. */
+export function parseVersusGenre(raw: string | null | undefined): string | null {
   return raw && UUID.test(raw) ? raw.toLowerCase() : null;
 }
 
@@ -78,13 +96,18 @@ export function parseVersusGameLimit(raw: string | null | undefined): number {
   return Math.min(VERSUS_GAMES_MAX, Math.ceil(n / VERSUS_GAMES_PAGE) * VERSUS_GAMES_PAGE);
 }
 
-/** Narrow a group_versus_games query to one filter. */
-export function filterVersusGames(query: any, filter: VersusGameFilter, minReviews: number): any {
+/**
+ * Narrow a group_versus_games query to the tab's scope and, under the "all"
+ * scope, the list's own filter. Mirrors group_versus_scope() in SQL.
+ */
+export function filterVersusGames(query: any, scope: VersusScope, filter: VersusGameFilter, minReviews: number): any {
   const shared = () => query.not("subject_score", "is", null).gte("other_count", minReviews);
-  switch (filter) {
+  switch (scope) {
     case "shared": return shared();
     case "disagree": return shared().gt("diff_abs", VERSUS_AGREE_GAP);
     case "agree": return shared().lte("diff_abs", VERSUS_AGREE_GAP);
+  }
+  switch (filter) {
     case "yours": return query.not("subject_score", "is", null).lt("other_count", minReviews);
     case "theirs": return query.is("subject_score", null).gte("other_count", minReviews);
     default: return query.or(`subject_score.not.is.null,other_count.gte.${minReviews}`);
@@ -335,12 +358,8 @@ export interface TapeNames {
 export interface VersusGames {
   filter: VersusGameFilter;
   sort: VersusGameSort;
-  /** Only games in this genre (its id), or null for every genre. */
-  genre: string | null;
   /** Only games whose title contains this, or null for every title. */
   search: string | null;
-  /** The genre menu's choices, A–Z. Empty when the group has a genre focus, which already narrows every game to one. */
-  genres: { id: string; name: string }[];
   /** How many were asked for — the next "Show more" asks for a page more. */
   limit: number;
   rows: VersusGameRow[];
@@ -350,6 +369,12 @@ export interface VersusGames {
 }
 
 export interface GroupVersusData {
+  /** The tab-wide "Games" filter. */
+  scope: VersusScope;
+  /** The tab-wide genre filter (its id), or null for every genre. */
+  genre: string | null;
+  /** The genre menu's choices, A–Z. Empty when the group has a genre focus, which already narrows everything to one. */
+  genres: { id: string; name: string }[];
   /** The left side. Null when the group has no members to compare. */
   subject: VersusMember | null;
   /** The right side; null means the community. */
@@ -529,18 +554,14 @@ export function buildTape(
   return tiles;
 }
 
-/**
- * Each side's score buckets from group_score_distribution's rows: profile_id
- * null is the whole group, so the community is that minus the subject.
- */
+/** Each side's score buckets from group_versus_score_distribution's rows. */
 export function sideScores(
-  rows: { profile_id: string | null; score: number; review_count: number }[],
-  subjectId: string, opponentId: string | null,
+  rows: { side: string; score: number; review_count: number }[],
 ): { left: number[]; right: number[] } {
-  const of = (id: string | null) => scoreBuckets(rows.filter((r) => r.profile_id === id));
-  const left = of(subjectId);
-  const right = opponentId ? of(opponentId) : of(null).map((n, i) => Math.max(0, n - left[i]));
-  return { left, right };
+  return {
+    left: scoreBuckets(rows.filter((r) => r.side === "subject")),
+    right: scoreBuckets(rows.filter((r) => r.side === "other")),
+  };
 }
 
 const genreCounts = (rows: any[] | null | undefined, side: string): VersusGenreCount[] =>
@@ -585,12 +606,13 @@ export interface GroupVersusContext {
   viewerProfileId?: string | null;
   /** The raw ?with= value. */
   withParam?: string | null;
+  /** The raw ?sc= and ?gg= values: the tab-wide scope and genre. */
+  scopeParam?: string | null;
+  genreParam?: string | null;
   /** The raw ?gf=, ?gs= and ?gn= values: the games list's filter, sort and length. */
   gamesFilter?: string | null;
   gamesSort?: string | null;
   gamesLimit?: string | null;
-  /** The raw ?gg= value: a genre id to narrow the games list to. */
-  gamesGenre?: string | null;
   /** The raw ?gq= value: text to find in game titles. */
   gamesSearch?: string | null;
   /** Only the games list is wanted (a filter or sort change): skip the rest of the tab's queries. */
@@ -609,22 +631,13 @@ type VersusArgs = {
  * failed details read only costs those extras; the scores still show.
  */
 async function loadVersusGames(
-  db: any, args: VersusArgs, view: VersusGames, minReviews: number, hasGenreFocus: boolean,
+  db: any, args: VersusArgs, view: VersusGames, scope: VersusScope, minReviews: number,
 ): Promise<VersusGames> {
-  // The genre menu narrows group_reviews() the same way a group's genre focus does
-  const listArgs = view.genre && !hasGenreFocus ? { ...args, p_genre_id: view.genre } : args;
-  let query = filterVersusGames(db.rpc("group_versus_games_ranked", listArgs, { count: "exact" }), view.filter, minReviews);
+  // Under a narrower scope the list's own filter has nothing to do
+  if (scope !== "all") view = { ...view, filter: "all" };
+  let query = filterVersusGames(db.rpc("group_versus_games_ranked", args, { count: "exact" }), scope, view.filter, minReviews);
   if (view.search) query = query.ilike("title", `%${view.search}%`);
-  const [res, genresRes] = await Promise.all([
-    sortVersusGames(query, view.sort).limit(view.limit),
-    hasGenreFocus ? null : db.from("genres").select("id, name").order("name").limit(500),
-  ]);
-  if (genresRes?.error) console.error("[groupCompare] genres error:", JSON.stringify(genresRes.error));
-  view = {
-    ...view,
-    genre: hasGenreFocus ? null : view.genre,
-    genres: (genresRes?.data ?? []).filter((g: any) => g?.id && g?.name),
-  };
+  const res = await sortVersusGames(query, view.sort).limit(view.limit);
   if (res?.error) {
     console.error("[groupCompare] games error:", JSON.stringify(res.error));
     return { ...view, failed: true };
@@ -633,7 +646,7 @@ async function loadVersusGames(
   const detailRes = rows.length > 0
     ? await db.rpc("group_versus_game_details", {
       p_group_id: args.p_group_id, p_profile_id: args.p_profile_id, p_game_ids: rows.map((g) => g.game.id),
-      p_other_id: args.p_other_id, p_genre_id: listArgs.p_genre_id, p_platform_id: args.p_platform_id,
+      p_other_id: args.p_other_id, p_genre_id: args.p_genre_id, p_platform_id: args.p_platform_id,
     })
     : null;
   if (detailRes?.error) console.error("[groupCompare] game details error:", JSON.stringify(detailRes.error));
@@ -648,12 +661,6 @@ async function loadVersusGames(
   };
 }
 
-/**
- * Everything the Stats tab renders. The summary is one row, the profile two
- * (one per side), the genres at most RADAR_MAX_AXES per side, and the games
- * list a .limit()ed read of group_versus_games (VERSUS_GAMES_MAX at most), so
- * nothing here can reach Supabase's 1000-row cap.
- */
 /**
  * Who's on each side: every member ranked by reviews, the subject (the viewer,
  * or for a visitor the owner or the most active reviewer) and the opponent
@@ -690,6 +697,13 @@ export function versusSides(ctx: Pick<GroupVersusContext, "members" | "memberSta
   };
 }
 
+/**
+ * Everything the Stats tab renders, under its scope and genre. The summary is
+ * one row, the profile two (one per side), the genres at most RADAR_MAX_AXES
+ * per side, the score distribution at most twenty, and the games list a
+ * .limit()ed read (VERSUS_GAMES_MAX at most), so nothing here can reach
+ * Supabase's 1000-row cap.
+ */
 export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVersusData> {
   const { db, groupId, viewerProfileId = null } = ctx;
   const { ranked, byId, subject, opponent } = versusSides(ctx);
@@ -697,7 +711,15 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
   const opponentId = opponent?.id ?? null;
   const minReviews = opponent ? 1 : COMMUNITY_MIN_REVIEWS;
 
+  // A group's genre focus already narrows everything to one genre, so it has no genre menu
+  const hasGenreFocus = !!ctx.genreId;
+  const scope = parseVersusScope(ctx.scopeParam, ctx.gamesFilter);
+  const genre = hasGenreFocus ? null : parseVersusGenre(ctx.genreParam);
+
   const data: GroupVersusData = {
+    scope,
+    genre,
+    genres: [],
     subject,
     opponent,
     options: versusOptions(ranked, subjectId, opponentId),
@@ -710,9 +732,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
       filter: parseVersusGameFilter(ctx.gamesFilter),
       sort: parseVersusGameSort(ctx.gamesSort),
       limit: parseVersusGameLimit(ctx.gamesLimit),
-      genre: parseVersusGameGenre(ctx.gamesGenre),
       search: parseVersusGameSearch(ctx.gamesSearch),
-      genres: [],
       rows: [], total: 0, failed: false,
     },
     card: null, tape: [],
@@ -723,24 +743,31 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     p_group_id: groupId,
     p_profile_id: subject.id,
     p_other_id: opponent?.id ?? undefined,
-    p_genre_id: ctx.genreId ?? undefined,
+    // The genre menu narrows group_reviews() the same way a group's genre focus does
+    p_genre_id: ctx.genreId ?? genre ?? undefined,
+    // A group's genre focus wins over its platform focus; the genre menu doesn't
     p_platform_id: ctx.genreId ? undefined : ctx.platformId ?? undefined,
   };
-  const gamesPromise = loadVersusGames(db, args, data.games, minReviews, !!ctx.genreId);
-  if (ctx.gamesOnly) return { ...data, games: await gamesPromise };
+  const scoped = { ...args, p_scope: scope, p_min_reviews: minReviews };
+  const gamesPromise = loadVersusGames(db, args, data.games, scope, minReviews);
+  const genreMenuPromise = hasGenreFocus ? null : db.from("genres").select("id, name").order("name").limit(500);
+  const genreMenu = async () => {
+    const res = await genreMenuPromise;
+    if (res?.error) console.error("[groupCompare] genres error:", JSON.stringify(res.error));
+    return (res?.data ?? []).filter((g: any) => g?.id && g?.name);
+  };
+  if (ctx.gamesOnly) {
+    const [games, genres] = await Promise.all([gamesPromise, genreMenu()]);
+    return { ...data, games, genres };
+  }
 
-  const [summaryRes, profileRes, genresRes, distRes, games] = await Promise.all([
-    db.rpc("group_versus_summary", { ...args, p_min_reviews: minReviews }).maybeSingle(),
-    db.rpc("group_versus_profile", args),
-    db.rpc("group_versus_genres", { ...args, p_limit: RADAR_MAX_AXES }),
-    // The whole group plus the named sides; the community is the group minus the subject
-    db.rpc("group_score_distribution", {
-      p_group_id: groupId,
-      p_profile_ids: opponent ? [subject.id, opponent.id] : [subject.id],
-      p_genre_id: args.p_genre_id,
-      p_platform_id: args.p_platform_id,
-    }),
+  const [summaryRes, profileRes, genresRes, distRes, games, genres] = await Promise.all([
+    db.rpc("group_versus_summary", { ...args, p_min_reviews: minReviews, p_scope: scope }).maybeSingle(),
+    db.rpc("group_versus_profile", scoped),
+    db.rpc("group_versus_genres", { ...scoped, p_limit: RADAR_MAX_AXES }),
+    db.rpc("group_versus_score_distribution", scoped),
     gamesPromise,
+    genreMenu(),
   ]);
   for (const res of [summaryRes, profileRes, genresRes, distRes]) {
     if (res?.error) console.error("[groupCompare] versus error:", JSON.stringify(res.error));
@@ -751,8 +778,21 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
   const right = toProfile((profileRes?.data ?? []).find((r: any) => r.side === "other"));
 
   const s = summaryRes?.data;
+  const tape = buildTape(
+    left, right,
+    {
+      subject: subject.isViewer ? "You" : `@${subject.username}`,
+      other: opponent ? `@${opponent.username}` : "The community",
+    },
+    {
+      left: genreCounts(genresRes?.data, "subject"),
+      right: genreCounts(genresRes?.data, "other"),
+    },
+    distRes?.error ? null : sideScores(distRes?.data ?? []),
+  );
   return {
     ...data,
+    genres,
     sharedGames: s?.shared_games ?? 0,
     subjectAvg: round1(s?.subject_avg),
     otherAvg: round1(s?.other_avg),
@@ -763,17 +803,7 @@ export async function loadGroupVersus(ctx: GroupVersusContext): Promise<GroupVer
     level: s?.level ?? 0,
     games,
     card: profileRes?.error ? null : buildStatCard(left, right),
-    tape: buildTape(
-      left, right,
-      {
-        subject: subject.isViewer ? "You" : `@${subject.username}`,
-        other: opponent ? `@${opponent.username}` : "The community",
-      },
-      {
-        left: genreCounts(genresRes?.data, "subject"),
-        right: genreCounts(genresRes?.data, "other"),
-      },
-      distRes?.error ? null : sideScores(distRes?.data ?? [], subject.id, opponent?.id ?? null),
-    ),
+    // Under one genre the genre charts would only show that genre: keep the histogram
+    tape: genre ? tape.filter((t) => t.kind === "dist") : tape,
   };
 }
