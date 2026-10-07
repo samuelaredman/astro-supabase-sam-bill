@@ -1,21 +1,22 @@
 ---
 /**
  * The group Games tab (?tab=games): the games the group's creator features,
- * each with its video, note, poll and how the group did on it. Built by
+ * each with its video, note, question and how the group did on it. Built by
  * loadGroupFeaturedGames() (src/utils/groupFeaturedGames.ts).
  *
  * The video reuses the review card's player markup (.rc-video), so
  * src/scripts/review-card.ts fills in its title and swaps in the player on
- * click. Polls reuse the Overview poll classes and the page's votePoll /
- * togglePollClosed / deletePoll. The feature form, edit and remove are
- * src/scripts/group-games.ts; the CSS lives in the page's global block.
+ * click. A question's options reuse the Overview poll classes and the page's
+ * votePoll / togglePollClosed / deletePoll. The feature form, edit and remove,
+ * and written answers are src/scripts/group-games.ts; the CSS lives in the
+ * page's global block.
  */
 import { formatScore, scoreClass, timeAgo, igdbImage } from "../../utils/format";
 import { youTubeThumbUrl, youTubeWatchUrl } from "../../utils/youtube";
 import {
   formatHours,
   FEATURED_NOTE_MAX,
-  FEATURED_POLL_PRESETS,
+  POLL_ANSWER_MAX,
   POLL_OPTION_MAX,
   POLL_QUESTION_MAX,
   type GroupGamesData,
@@ -32,7 +33,8 @@ interface Props {
 }
 const { data, groupId, groupName, canFeature, isMember, viewerProfileId, isAdminOrOwner } = Astro.props;
 
-const presetsJson = JSON.stringify(FEATURED_POLL_PRESETS);
+/** Answers shown before "Show all". */
+const ANSWERS_SHOWN = 3;
 const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 ---
@@ -51,15 +53,12 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
   </div>
 
   {canFeature && (
-    <form class="gg-form compose-form" id="gg-feature-form" hidden data-presets={presetsJson}>
+    <form class="gg-form compose-form" id="gg-feature-form" hidden>
       <label class="gg-label" for="gg-game-input">Game</label>
-      <div class="gg-game-pick">
-        <input id="gg-game-input" class="compose-input gg-input" type="text" placeholder="Search for a game…" autocomplete="off" />
-        <div class="gg-game-chosen" id="gg-game-chosen" hidden>
-          <span id="gg-game-chosen-title"></span>
-          <button type="button" class="gg-link-btn" data-gg-action="clear-game">Change</button>
-        </div>
-        <div class="gg-search-results" id="gg-search-results"></div>
+      {/* Same search as the Write a review composer (src/pages/index.astro) */}
+      <div class="autocomplete-wrap">
+        <input id="gg-game-input" class="compose-input gg-input" type="text" placeholder="Search for a game..." autocomplete="off" />
+        <div class="autocomplete-results" id="gg-search-results"></div>
       </div>
 
       <label class="gg-label" for="gg-video-input">YouTube video <span class="gg-optional">optional</span></label>
@@ -68,16 +67,11 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
       <label class="gg-label" for="gg-note-input">Note <span class="gg-optional">optional</span></label>
       <textarea id="gg-note-input" class="compose-input" maxlength={FEATURED_NOTE_MAX} placeholder="What was it like? The verdict, the hardest part, what to watch for…"></textarea>
 
-      <label class="gg-label" for="gg-poll-preset">Poll <span class="gg-optional">optional</span></label>
-      <select id="gg-poll-preset" class="compose-input gg-input gg-select">
-        <option value="">No poll</option>
-        {FEATURED_POLL_PRESETS.map((p) => <option value={p.id}>{p.label} — {p.question}</option>)}
-        <option value="custom">Write my own</option>
-      </select>
-      <div class="gg-poll-fields" id="gg-poll-fields" hidden>
-        <input id="gg-poll-question" class="compose-input gg-input" type="text" maxlength={POLL_QUESTION_MAX} placeholder="Ask the community something…" />
+      <label class="gg-label" for="gg-poll-question">Question for the community <span class="gg-optional">optional</span></label>
+      <input id="gg-poll-question" class="compose-input gg-input" type="text" maxlength={POLL_QUESTION_MAX} placeholder="Ask something — members answer in their own words" />
+      <div class="gg-poll-fields">
         <div class="gg-poll-options" id="gg-poll-options" data-max-length={POLL_OPTION_MAX}></div>
-        <button type="button" class="btn-copy gg-small-btn" data-gg-action="add-option">+ Option</button>
+        <button type="button" class="gg-link-btn gg-add-option" data-gg-action="add-option">+ Add options to vote on</button>
       </div>
 
       <div class="gg-form-actions">
@@ -250,10 +244,29 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
                     : poll.options.map((o) => (
                         <button type="button" class="poll-option" onclick={`votePoll('${poll.id}', '${o.id}')`}>{o.label}</button>
                       ))}
+
+                  {isMember && !poll.closed && (
+                    <form class="gg-answer-form" data-gg-answer={poll.id}>
+                      <textarea class="compose-input gg-answer-input" name="body" maxlength={POLL_ANSWER_MAX} rows="2"
+                        placeholder={poll.myAnswer ? "Edit your answer…" : "Your answer…"}>{poll.myAnswer?.body ?? ""}</textarea>
+                      <div class="gg-answer-actions">
+                        <button type="submit" class="btn-copy gg-small-btn">{poll.myAnswer ? "Update answer" : "Answer"}</button>
+                        {poll.myAnswer && (
+                          <button type="button" class="announcement-action" data-gg-action="delete-answer" data-id={poll.myAnswer.id}>Delete my answer</button>
+                        )}
+                      </div>
+                      <p class="gg-error" hidden></p>
+                    </form>
+                  )}
+
                   <div class="poll-meta">
                     <span>
-                      {plural(poll.totalVotes, "vote")}{poll.closed ? " · Closed" : ""}
-                      {!isMember && !poll.closed && " · join the group to vote"}
+                      {[
+                        poll.options.length > 0 ? plural(poll.totalVotes, "vote") : null,
+                        plural(poll.answers.length, "answer"),
+                        poll.closed ? "Closed" : null,
+                      ].filter(Boolean).join(" · ")}
+                      {!isMember && !poll.closed && " · join the group to answer"}
                     </span>
                     {canManagePoll && (
                       <span class="poll-meta-actions">
@@ -262,6 +275,39 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
                       </span>
                     )}
                   </div>
+
+                  {poll.answers.length > 0 && (() => {
+                    const renderAnswer = (a: (typeof poll.answers)[number]) => (
+                      <li class="gg-answer" data-answer-id={a.id}>
+                        <a class="member-avatar gg-answer-avatar" href={`/reviewers/${a.username}`}>
+                          {a.avatarUrl ? <img src={a.avatarUrl} alt="" loading="lazy" /> : initials(a.username)}
+                        </a>
+                        <div class="gg-answer-main">
+                          <div class="gg-answer-head">
+                            <a href={`/reviewers/${a.username}`} class="gg-answer-name">@{a.username}</a>
+                            <span class="gg-answer-time">{timeAgo(a.createdAt)}{a.edited ? " · edited" : ""}</span>
+                            {canManagePoll && a.profileId !== viewerProfileId && (
+                              <button type="button" class="announcement-action gg-answer-remove" data-gg-action="delete-answer" data-id={a.id}>Remove</button>
+                            )}
+                          </div>
+                          <p class="gg-answer-body">{a.body}</p>
+                        </div>
+                      </li>
+                    );
+                    const shown = poll.answers.slice(0, ANSWERS_SHOWN);
+                    const rest = poll.answers.slice(ANSWERS_SHOWN);
+                    return (
+                      <div class="gg-answers">
+                        <ul class="gg-answer-list">{shown.map(renderAnswer)}</ul>
+                        {rest.length > 0 && (
+                          <details class="gg-answers-more">
+                            <summary>Show all {poll.answers.length} answers</summary>
+                            <ul class="gg-answer-list">{rest.map(renderAnswer)}</ul>
+                          </details>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 

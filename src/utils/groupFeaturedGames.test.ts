@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildFeaturedStats,
-  FEATURED_POLL_PRESETS,
   formatHours,
   readFeaturedNote,
   readFeaturedPoll,
+  readPollAnswer,
   summarizePoll,
   type FeaturedStatsRow,
 } from "./groupFeaturedGames";
@@ -78,8 +78,9 @@ describe("readFeaturedPoll", () => {
       .toEqual({ poll: { question: "Keep or refund?", options: ["Keep", "Refund"] } });
   });
 
-  it("needs a question and 2–6 different options", () => {
+  it("needs a question, and 2–6 different options if it has any", () => {
     expect(readFeaturedPoll({ question: "", options: ["a", "b"] })).toHaveProperty("error");
+    expect(readFeaturedPoll({ question: "" })).toHaveProperty("error");
     expect(readFeaturedPoll({ question: "Q", options: ["a"] })).toHaveProperty("error");
     expect(readFeaturedPoll({ question: "Q", options: ["a", "b", "c", "d", "e", "f", "g"] })).toHaveProperty("error");
     expect(readFeaturedPoll({ question: "Q", options: ["Yes", "yes"] })).toHaveProperty("error");
@@ -92,12 +93,23 @@ describe("readFeaturedPoll", () => {
     expect(readFeaturedPoll({ question: "Q", options: ["x".repeat(81), "b"] })).toHaveProperty("error");
   });
 
-  it("accepts every preset as it stands", () => {
-    for (const p of FEATURED_POLL_PRESETS) {
-      expect(readFeaturedPoll({ question: p.question, options: [...p.options] })).toEqual({
-        poll: { question: p.question, options: [...p.options] },
-      });
-    }
+  it("takes a question with no options, for written answers only", () => {
+    expect(readFeaturedPoll({ question: "What beat you?" })).toEqual({ poll: { question: "What beat you?", options: [] } });
+    expect(readFeaturedPoll({ question: "What beat you?", options: ["", " "] }))
+      .toEqual({ poll: { question: "What beat you?", options: [] } });
+  });
+});
+
+describe("readPollAnswer", () => {
+  it("trims an answer, and treats an empty one as deleting it", () => {
+    expect(readPollAnswer("  Took me 80 hours. ")).toEqual({ body: "Took me 80 hours." });
+    expect(readPollAnswer("   ")).toEqual({ body: null });
+    expect(readPollAnswer(null)).toEqual({ body: null });
+  });
+
+  it("refuses an answer that's too long or not text", () => {
+    expect(readPollAnswer("x".repeat(501))).toHaveProperty("error");
+    expect(readPollAnswer(42)).toHaveProperty("error");
   });
 });
 
@@ -134,6 +146,27 @@ describe("summarizePoll", () => {
     expect(s.totalVotes).toBe(3);
     expect(s.options.map((o) => [o.label, o.count, o.pct])).toEqual([["Keep", 2, 67], ["Refund", 1, 33]]);
     expect(s.myOptionId).toBe("o2");
+  });
+
+  it("puts the viewer's answer first, then the newest, and skips deleted profiles", () => {
+    const answer = (id: string, profile: string, at: string, edited = false) => ({
+      id, poll_id: "poll1", profile_id: profile, body: id, created_at: at,
+      updated_at: edited ? "2026-10-06T12:00:00Z" : at,
+      profiles: { username: profile, avatar_url: null },
+    });
+    const rows = [
+      answer("old", "a", "2026-10-01T00:00:00Z"),
+      answer("mine", "me", "2026-10-02T00:00:00Z", true),
+      answer("new", "b", "2026-10-03T00:00:00Z"),
+      { ...answer("gone", "c", "2026-10-04T00:00:00Z"), profiles: null },
+      { ...answer("elsewhere", "d", "2026-10-05T00:00:00Z"), poll_id: "other" },
+    ];
+    const s = summarizePoll(poll, options, votes, "me", rows);
+    expect(s.answers.map((a) => a.id)).toEqual(["mine", "new", "old"]);
+    expect(s.myAnswer?.id).toBe("mine");
+    expect(s.myAnswer?.edited).toBe(true);
+    expect(s.answers[1].edited).toBe(false);
+    expect(summarizePoll(poll, options, votes, null, rows).myAnswer).toBeNull();
   });
 
   it("has no vote of mine for a visitor, and 0% everywhere with no votes", () => {

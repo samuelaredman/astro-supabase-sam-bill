@@ -1179,6 +1179,48 @@ export type Database = {
           },
         ]
       }
+      group_poll_answers: {
+        Row: {
+          body: string
+          created_at: string
+          id: string
+          poll_id: string
+          profile_id: string
+          updated_at: string
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          id?: string
+          poll_id: string
+          profile_id: string
+          updated_at?: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          id?: string
+          poll_id?: string
+          profile_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_answers_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "group_polls"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answers_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_poll_options: {
         Row: {
           id: string

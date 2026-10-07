@@ -1,22 +1,18 @@
 /**
- * The group Games tab's feature form, and editing / removing a featured game
- * (src/components/groups/GamesTab.astro). Everything goes through
- * /api/groups/featured-games/* and reloads the page on success, which stays on
+ * The group Games tab's feature form, editing / removing a featured game, and
+ * members' written answers to its question (src/components/groups/GamesTab.astro).
+ * Everything goes through /api/groups/featured-games/* or
+ * /api/groups/polls/answer and reloads the page on success, which stays on
  * ?tab=games.
  *
  * The listeners are delegated from document and registered once; they do
  * nothing on pages without the tab.
  */
 
-interface Preset {
-  id: string;
-  question: string;
-  options: string[];
-}
-
 interface SearchResult {
   id: string;
   title: string;
+  cover_img_url: string | null;
   year: number | null;
   source: "db" | "igdb";
   igdb_id?: number;
@@ -25,6 +21,8 @@ interface SearchResult {
 /** The game picked in the feature form: a Chekpoint game, or an IGDB result to import. */
 let chosen: { gameId?: string; igdbId?: number; title: string } | null = null;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+/** The picked game's title: typing anything else in the box un-picks it. */
+let chosenTitle = "";
 let searchSeq = 0;
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T | null {
@@ -57,43 +55,67 @@ function groupId(): string | null {
 }
 
 // ── Game search ────────────────────────────────────────────────────────────
+// Looks and behaves like the Write a review composer's search
+// (src/pages/index.astro): a dropdown of cover, title and year, with "Add to
+// Chekpoint" on IGDB results, which the create route imports.
 
-function setChosen(game: typeof chosen) {
-  chosen = game;
-  const input = byId<HTMLInputElement>("gg-game-input");
-  const box = byId("gg-game-chosen");
-  const title = byId("gg-game-chosen-title");
-  const results = byId("gg-search-results");
-  if (results) results.replaceChildren();
-  if (input) input.hidden = !!game;
-  if (box) box.hidden = !game;
-  if (title) title.textContent = game?.title ?? "";
-  if (!game && input) { input.value = ""; input.focus(); }
+function closeResults() {
+  byId("gg-search-results")?.classList.remove("open");
+}
+
+function el(tag: string, className: string, text?: string): HTMLElement {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function resultItem(game: SearchResult): HTMLElement {
+  const item = el("div", "autocomplete-item");
+  const cover = el("div", "autocomplete-item-cover");
+  const coverUrl = game.cover_img_url ? game.cover_img_url.replace(/t_[a-z0-9_]+/, "t_cover_big") : null;
+  if (coverUrl) {
+    const img = document.createElement("img");
+    img.src = coverUrl;
+    img.alt = "";
+    img.loading = "lazy";
+    cover.appendChild(img);
+  } else {
+    cover.textContent = "🎮";
+  }
+  const info = el("div", "autocomplete-item-info");
+  info.appendChild(el("div", "autocomplete-item-title", game.title));
+  const meta: (string | number)[] = [];
+  if (game.source === "igdb") meta.push("Add to Chekpoint");
+  if (game.year) meta.push(game.year);
+  if (meta.length) info.appendChild(el("div", "autocomplete-item-meta", meta.join(" · ")));
+  item.append(cover, info);
+  item.addEventListener("click", () => {
+    const input = byId<HTMLInputElement>("gg-game-input");
+    if (input) input.value = game.title;
+    chosenTitle = game.title;
+    chosen = game.source === "igdb"
+      ? { igdbId: Number(game.igdb_id ?? game.id), title: game.title }
+      : { gameId: game.id, title: game.title };
+    closeResults();
+  });
+  return item;
 }
 
 async function searchGames(q: string) {
   const results = byId("gg-search-results");
   if (!results) return;
   const seq = ++searchSeq;
-  if (q.length < 2) { results.replaceChildren(); return; }
   let games: SearchResult[] = [];
   try {
     const res = await fetch(`/api/games/search?q=${encodeURIComponent(q)}`);
     if (res.ok) games = await res.json();
-  } catch { /* leave the list empty */ }
+  } catch { /* shown as no games found */ }
   if (seq !== searchSeq) return; // a newer search is on its way
-  results.replaceChildren(...games.slice(0, 6).map((g) => {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "gg-search-result";
-    btn.textContent = g.year ? `${g.title} (${g.year})` : g.title;
-    btn.addEventListener("click", () => {
-      setChosen(g.source === "igdb"
-        ? { igdbId: Number(g.igdb_id ?? g.id), title: g.title }
-        : { gameId: g.id, title: g.title });
-    });
-    return btn;
-  }));
+  results.replaceChildren(...(games.length
+    ? games.map(resultItem)
+    : [el("div", "autocomplete-empty", "No games found")]));
+  results.classList.add("open");
 }
 
 // ── Poll fields ────────────────────────────────────────────────────────────
@@ -110,31 +132,14 @@ function addOptionInput(value = "") {
   box.appendChild(input);
 }
 
-function applyPreset(id: string) {
-  const form = byId("gg-feature-form");
-  const fields = byId("gg-poll-fields");
-  const question = byId<HTMLInputElement>("gg-poll-question");
-  const box = byId("gg-poll-options");
-  if (!form || !fields || !question || !box) return;
-  fields.hidden = !id;
-  box.replaceChildren();
-  if (!id) return;
-  let presets: Preset[] = [];
-  try { presets = JSON.parse(form.dataset.presets ?? "[]"); } catch { /* none */ }
-  const preset = presets.find((p) => p.id === id);
-  question.value = preset?.question ?? "";
-  (preset?.options ?? ["", ""]).forEach((o) => addOptionInput(o));
-}
-
+/** The question and any options; null when the creator didn't ask anything. */
 function readPoll(): { question: string; options: string[] } | null {
-  const preset = byId<HTMLSelectElement>("gg-poll-preset")?.value;
-  if (!preset) return null;
-  return {
-    question: byId<HTMLInputElement>("gg-poll-question")?.value.trim() ?? "",
-    options: Array.from(document.querySelectorAll<HTMLInputElement>(".gg-poll-option"))
-      .map((i) => i.value.trim())
-      .filter(Boolean),
-  };
+  const question = byId<HTMLInputElement>("gg-poll-question")?.value.trim() ?? "";
+  const options = Array.from(document.querySelectorAll<HTMLInputElement>(".gg-poll-option"))
+    .map((i) => i.value.trim())
+    .filter(Boolean);
+  if (!question && options.length === 0) return null;
+  return { question, options };
 }
 
 // ── Submit ─────────────────────────────────────────────────────────────────
@@ -144,10 +149,10 @@ async function submitFeature(form: HTMLFormElement) {
   if (errEl) errEl.hidden = true;
   const group = groupId();
   if (!group) return;
-  if (!chosen) return showError(errEl, "Pick a game first.");
+  if (!chosen) return showError(errEl, "Pick a game from the search results.");
   const poll = readPoll();
-  if (poll && !poll.question) return showError(errEl, "Add a question for the poll, or choose No poll.");
-  if (poll && poll.options.length < 2) return showError(errEl, "The poll needs at least 2 options.");
+  if (poll && !poll.question) return showError(errEl, "Write the question your options answer.");
+  if (poll && poll.options.length === 1) return showError(errEl, "Add a second option, or remove it to only take written answers.");
 
   const submit = form.querySelector<HTMLButtonElement>("button[type=submit]");
   if (submit) submit.disabled = true;
@@ -182,10 +187,33 @@ async function submitEdit(form: HTMLFormElement) {
   showError(errEl, result.error ?? "Couldn't save.");
 }
 
+async function submitAnswer(form: HTMLFormElement) {
+  const pollId = form.dataset.ggAnswer;
+  if (!pollId) return;
+  const errEl = form.querySelector(".gg-error");
+  if (errEl instanceof HTMLElement) errEl.hidden = true;
+  const body = String(new FormData(form).get("body") ?? "").trim();
+  if (!body) return showError(errEl, "Write an answer first.");
+  const submit = form.querySelector<HTMLButtonElement>("button[type=submit]");
+  if (submit) submit.disabled = true;
+  const result = await post("/api/groups/polls/answer", { poll_id: pollId, body });
+  if (result.ok) return window.location.reload();
+  if (submit) submit.disabled = false;
+  showError(errEl, result.error ?? "Couldn't save your answer.");
+}
+
+async function deleteAnswer(btn: HTMLElement) {
+  const id = btn.dataset.id;
+  if (!id || !confirm("Delete this answer?")) return;
+  const result = await post("/api/groups/polls/answer", { action: "delete", answer_id: id });
+  if (result.ok) return window.location.reload();
+  alert(result.error ?? "Couldn't delete the answer.");
+}
+
 async function removeFeatured(btn: HTMLElement) {
   const id = btn.dataset.id;
   if (!id) return;
-  if (!confirm(`Remove ${btn.dataset.title ?? "this game"} from the Games tab? Its poll will be deleted too.`)) return;
+  if (!confirm(`Remove ${btn.dataset.title ?? "this game"} from the Games tab? Its question and answers will be deleted too.`)) return;
   const result = await post("/api/groups/featured-games/delete", { id });
   if (result.ok) return window.location.reload();
   alert(result.error ?? "Couldn't remove the game.");
@@ -195,6 +223,7 @@ async function removeFeatured(btn: HTMLElement) {
 
 document.addEventListener("click", (e) => {
   const target = e.target as HTMLElement | null;
+  if (!target?.closest("#gg-feature-form .autocomplete-wrap")) closeResults();
   const btn = target?.closest<HTMLElement>("[data-gg-action]");
   if (!btn) return;
   switch (btn.dataset.ggAction) {
@@ -205,10 +234,15 @@ document.addEventListener("click", (e) => {
       if (!form.hidden) byId("gg-game-input")?.focus();
       return;
     }
-    case "clear-game":
-      return setChosen(null);
-    case "add-option":
+    case "add-option": {
+      // The first click adds a pair: a vote needs at least two options
+      const box = byId("gg-poll-options");
+      if (box && box.children.length === 0) addOptionInput();
       return addOptionInput();
+    }
+    case "delete-answer":
+      void deleteAnswer(btn);
+      return;
     case "edit": {
       const form = document.querySelector<HTMLElement>(`[data-gg-edit="${btn.dataset.id}"]`);
       if (form) form.hidden = !form.hidden;
@@ -224,13 +258,15 @@ document.addEventListener("input", (e) => {
   const target = e.target as HTMLElement | null;
   if (target?.id !== "gg-game-input") return;
   const q = (target as HTMLInputElement).value.trim();
+  if (q !== chosenTitle) chosen = null;
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => void searchGames(q), 250);
+  if (q.length < 2) { searchSeq++; closeResults(); return; }
+  searchTimer = setTimeout(() => void searchGames(q), 150);
 });
 
-document.addEventListener("change", (e) => {
-  const target = e.target as HTMLElement | null;
-  if (target?.id === "gg-poll-preset") applyPreset((target as HTMLSelectElement).value);
+// Enter in the game search picks nothing and mustn't submit the feature form
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.target as HTMLElement | null)?.id === "gg-game-input") e.preventDefault();
 });
 
 document.addEventListener("submit", (e) => {
@@ -242,5 +278,8 @@ document.addEventListener("submit", (e) => {
   } else if (form.dataset.ggEdit) {
     e.preventDefault();
     void submitEdit(form);
+  } else if (form.dataset.ggAnswer) {
+    e.preventDefault();
+    void submitAnswer(form);
   }
 });
