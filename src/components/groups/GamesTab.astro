@@ -96,6 +96,8 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
         const gameHref = fg.game.slug ? `/games/${fg.game.slug}` : null;
         // The game page opens its review composer (or sign-in prompt) for ?review=1
         const reviewHref = fg.game.slug ? `/games/${fg.game.slug}?review=1` : null;
+        // The group's reviews of just this game, on the Feed tab
+        const readReviewsHref = `/groups/${groupId}?tab=feed&game=${fg.game.id}`;
         const poll = fg.poll;
         const showResults = poll && (poll.closed || !!poll.myOptionId || !isMember);
         const canManagePoll = poll && (isAdminOrOwner || poll.profileId === viewerProfileId);
@@ -113,6 +115,12 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
                     <span class="gg-kicker-pill">Featured</span>
                     <span>{timeAgo(fg.createdAt)} ago</span>
                     {fg.game.year && <span>· {fg.game.year}</span>}
+                    {canFeature && (
+                      <div class="gg-manage">
+                        <button type="button" class="announcement-action" data-gg-action="edit" data-id={fg.id}>Edit</button>
+                        <button type="button" class="announcement-action" data-gg-action="remove" data-id={fg.id} data-title={fg.game.title}>Remove</button>
+                      </div>
+                    )}
                   </div>
                   {gameHref
                     ? <a class="gg-game-title" href={gameHref}>{fg.game.title}</a>
@@ -127,15 +135,21 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
                         </a>
                       )
                       : reviewHref && <a class="btn-primary gg-review-btn" href={reviewHref}>Review it</a>}
-                    {gameHref && <a class="gg-ghost-btn" href={gameHref}>Game page</a>}
+                    {s.reviewCount > 0 && (
+                      <a class="gg-ghost-btn" href={readReviewsHref}>Read reviews <span class="gg-btn-count">{s.reviewCount}</span></a>
+                    )}
+                    {gameHref && <a class="gg-ghost-btn gg-game-btn" href={gameHref}>Game page</a>}
                   </div>
                 </div>
-                {canFeature && (
-                  <div class="gg-manage">
-                    <button type="button" class="announcement-action" data-gg-action="edit" data-id={fg.id}>Edit</button>
-                    <button type="button" class="announcement-action" data-gg-action="remove" data-id={fg.id} data-title={fg.game.title}>Remove</button>
-                  </div>
-                )}
+                {/* The group's rating, front and centre */}
+                <a class={`gg-score${s.avgScore == null ? " gg-score-none" : ""}`}
+                  href={s.reviewCount > 0 ? readReviewsHref : (reviewHref ?? undefined)}>
+                  <span class={`gg-score-num${s.avgScore != null ? ` ${scoreClass(s.avgScore)}` : ""}`}>{formatScore(s.avgScore)}</span>
+                  <span class="gg-score-text">
+                    <span class="gg-score-label">Community rating</span>
+                    <span class="gg-score-sub">{s.reviewCount > 0 ? `from ${plural(s.reviewCount, "review")}` : "No reviews yet — be the first"}</span>
+                  </span>
+                </a>
               </div>
             </header>
 
@@ -179,28 +193,26 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
                 <section class="gg-community" aria-label="How the community did">
                   <div class="gg-community-top">
                     <div class="gg-section-label">The community <span class="gg-section-sub">· {plural(s.memberCount, "member")}</span></div>
-                    <div class="gg-headline">
-                      <span class="gg-headline-num">{s.played}</span>
-                      <span class="gg-headline-text">
-                        played it{s.playedPct != null && s.played > 0 ? <> · <strong>{s.playedPct}%</strong> of the community</> : ""}
-                      </span>
-                    </div>
-                    {s.played > 0 ? (
-                      <>
-                        <div class="gg-progress" role="img"
-                          aria-label={`${s.full} of ${s.played} players went for 100%, ${s.completed - s.full} more finished it`}>
-                          <span class="gg-progress-full" style={`width:${(s.full / s.played) * 100}%`}></span>
-                          <span class="gg-progress-done" style={`width:${((s.completed - s.full) / s.played) * 100}%`}></span>
-                        </div>
-                        <ul class="gg-legend">
-                          <li><span class="gg-dot gg-dot-full"></span><strong>{s.fullPct}%</strong> 100% / platinum</li>
-                          <li><span class="gg-dot gg-dot-done"></span><strong>{s.completedPct}%</strong> finished</li>
-                          <li><span class="gg-dot"></span>{s.played - s.completed} not finished</li>
-                        </ul>
-                      </>
-                    ) : (
-                      <p class="gg-nobody">Nobody in the group has played it yet.</p>
-                    )}
+                    <ul class="gg-rings">
+                      {[
+                        { label: "Played", pct: s.playedPct, sub: `${s.played} of ${s.memberCount}`, tone: "soft" },
+                        { label: "Finished", pct: s.completedPct, sub: s.played > 0 ? `${s.completed} of ${s.played} players` : "nobody yet", tone: "mid" },
+                        { label: "100% / Plat", pct: s.fullPct, sub: s.played > 0 ? plural(s.full, "player") : "nobody yet", tone: "full" },
+                      ].map((r) => (
+                        <li class={`gg-ring gg-ring-${r.tone}`}>
+                          <svg viewBox="0 0 36 36" aria-hidden="true">
+                            <circle class="gg-ring-track" cx="18" cy="18" r="15.5" pathLength="100" />
+                            {(r.pct ?? 0) > 0 && (
+                              <circle class="gg-ring-fill" cx="18" cy="18" r="15.5" pathLength="100"
+                                stroke-dasharray={`${r.pct} 100`} />
+                            )}
+                          </svg>
+                          <span class="gg-ring-pct">{r.pct != null ? `${r.pct}%` : "—"}</span>
+                          <span class="gg-ring-label">{r.label}</span>
+                          <span class="gg-ring-sub">{r.sub}</span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
 
                   {fg.fullMembers.length > 0 && (
@@ -219,14 +231,6 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
                   )}
 
                   <dl class="gg-mini">
-                    <div>
-                      <dt>Avg rating <span>{plural(s.reviewCount, "review")}</span></dt>
-                      <dd>
-                        {s.avgScore != null
-                          ? <span class={`gg-mini-score ${scoreClass(s.avgScore)}`}>{formatScore(s.avgScore)}</span>
-                          : "—"}
-                      </dd>
-                    </div>
                     <div>
                       <dt>Achievements <span>{s.achievementCount > 0 ? `${s.achievementCount} synced` : "none synced"}</span></dt>
                       <dd>{s.avgAchievementPct != null ? `${s.avgAchievementPct}%` : "—"}</dd>

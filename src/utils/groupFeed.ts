@@ -9,6 +9,10 @@
  *
  * Aggregation and filtering happen in group_feed() (migration 20260912000001). The page and the partial route
  * /groups/[id]/feed both call loadGroupFeed() and render the same components.
+ *
+ * ?game=<id> narrows the feed to one game — the Games tab's "Read reviews". The
+ * group's genre/platform focus is skipped then, like the Games tab's numbers,
+ * so the reviews listed are the ones behind its rating.
  */
 
 /** Reviews per page. */
@@ -46,6 +50,8 @@ export const GROUP_FEED_SELECT = `
 
 export interface GroupFeedData {
   reviews: any[];
+  /** The one game the feed is narrowed to (?game=), if any. */
+  game: { id: string; title: string; slug: string | null } | null;
   /** game_id → the viewer's own published score, for the comparison line. */
   viewerScores: Record<string, number>;
   viewerProfileId: string | null;
@@ -67,6 +73,13 @@ export function isFeedFilter(value: unknown): value is FeedFilter {
 export function parseFeedFilter(input: unknown, hasViewer: boolean): FeedFilter {
   if (!hasViewer) return "all";
   return isFeedFilter(input) ? input : "all";
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A game id from the query string (?game=), or null for anything that isn't one. */
+export function parseFeedGame(input: unknown): string | null {
+  return typeof input === "string" && UUID.test(input) ? input.toLowerCase() : null;
 }
 
 /** A page offset from the query string — never negative, never a fraction. */
@@ -95,6 +108,8 @@ export interface GroupFeedContext {
   genreId?: string | null;
   platformId?: string | null;
   viewerProfileId?: string | null;
+  /** Narrow to one game's reviews (?game=); skips the genre/platform focus. */
+  gameId?: string | null;
   filter: FeedFilter;
   offset: number;
 }
@@ -109,20 +124,32 @@ export interface GroupFeedContext {
 export async function loadGroupFeed(ctx: GroupFeedContext): Promise<GroupFeedData> {
   const { db, groupId, viewerProfileId = null, filter, offset } = ctx;
 
-  const focus = {
-    p_genre_id: ctx.genreId ?? undefined,
-    p_platform_id: ctx.genreId ? undefined : ctx.platformId ?? undefined,
-  };
+  // A game the group never reviewed is still a valid filter; one that doesn't
+  // exist isn't, and the feed falls back to everything
+  let game: GroupFeedData["game"] = null;
+  if (ctx.gameId) {
+    const { data: g } = await db.from("games").select("id, title, slug").eq("id", ctx.gameId).maybeSingle();
+    game = g ?? null;
+  }
+
+  const focus = game
+    ? {}
+    : {
+        p_genre_id: ctx.genreId ?? undefined,
+        p_platform_id: ctx.genreId ? undefined : ctx.platformId ?? undefined,
+      };
 
   // One row past the page tells us whether there's another page, without a count
-  const { data: rows, error } = await db
+  let query = db
     .rpc("group_feed", {
       p_group_id: groupId,
       p_viewer_profile_id: viewerProfileId ?? undefined,
       p_filter: filter,
       ...focus,
     })
-    .select(GROUP_FEED_SELECT)
+    .select(GROUP_FEED_SELECT);
+  if (game) query = query.eq("game_id", game.id);
+  const { data: rows, error } = await query
     .order("published_at", { ascending: false })
     .order("id")
     .range(offset, offset + FEED_PAGE_SIZE);
@@ -149,6 +176,7 @@ export async function loadGroupFeed(ctx: GroupFeedContext): Promise<GroupFeedDat
 
   return {
     reviews,
+    game,
     viewerScores,
     viewerProfileId,
     filter,

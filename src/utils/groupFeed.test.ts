@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseFeedFilter,
+  parseFeedGame,
   parseFeedOffset,
   scoreComparison,
 } from "./groupFeed";
@@ -62,5 +63,18 @@ describe("scoreComparison", () => {
 
   it("counts a score of zero as a real score, not a missing one", () => {
     expect(scoreComparison(0, 5)).toEqual({ gap: 5, verdict: "disagree" });
+  });
+});
+
+describe("parseFeedGame", () => {
+  it("takes a game id, lowercased", () => {
+    expect(parseFeedGame("0B8F2C1E-3A4D-4E5F-8A9B-1C2D3E4F5A6B")).toBe("0b8f2c1e-3a4d-4e5f-8a9b-1c2d3e4f5a6b");
+  });
+
+  it("ignores anything that isn't one", () => {
+    expect(parseFeedGame(null)).toBeNull();
+    expect(parseFeedGame("")).toBeNull();
+    expect(parseFeedGame("elden-ring")).toBeNull();
+    expect(parseFeedGame("0b8f2c1e-3a4d-4e5f-8a9b-1c2d3e4f5a6b,or(1=1)")).toBeNull();
   });
 });

@@ -327,7 +327,9 @@ supabase/
   shows once a game is featured (before that, only to those who can feature one), and
   `stats_config.show_games` turns it off. `loadGroupFeaturedGames()` (`src/utils/groupFeaturedGames.ts`)
   builds it only when it's the open tab, `GamesTab.astro` renders it, and `src/scripts/group-games.ts`
-  runs the form. "Review it" links to `/games/[slug]?review=1`, which opens the review composer.
+  runs the form. "Review it" links to `/games/[slug]?review=1`, which opens the review composer, and the
+  community rating / "Read reviews" open the Feed narrowed to that game (`?tab=feed&game=<id>`, a filter on
+  `group_feed()`'s rows that skips the group's focus, like the Games tab's numbers).
 - **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
   not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
   so we can moderate the groups we run without joining them. Owner-only actions (delete, transfer,

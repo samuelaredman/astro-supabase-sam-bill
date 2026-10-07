@@ -23,6 +23,14 @@ function showFeedError(show: boolean) {
   if (el) el.hidden = !show;
 }
 
+/** The feed fragment's query: the filter, plus the game it's narrowed to (if any). */
+function feedQuery(filter: string, extra: Record<string, string> = {}): string {
+  const q = new URLSearchParams({ filter, ...extra });
+  const game = root()?.dataset.gfGame;
+  if (game) q.set("game", game);
+  return q.toString();
+}
+
 /** Latest request wins: an earlier, slower response must not overwrite it. */
 let requestSeq = 0;
 
@@ -51,7 +59,7 @@ async function applyFilter(filter: string) {
   host.classList.add("gf-busy");
   showFeedError(false);
   try {
-    const res = await fetch(`/groups/${groupId}/feed?filter=${encodeURIComponent(filter)}`, {
+    const res = await fetch(`/groups/${groupId}/feed?${feedQuery(filter)}`, {
       headers: { Accept: "text/html" },
     });
     if (seq !== requestSeq) return;
@@ -78,7 +86,7 @@ async function loadMore(button: HTMLElement) {
   showFeedError(false);
   try {
     const res = await fetch(
-      `/groups/${groupId}/feed?filter=${encodeURIComponent(filter)}&offset=${encodeURIComponent(offset)}`,
+      `/groups/${groupId}/feed?${feedQuery(filter, { offset })}`,
       { headers: { Accept: "text/html" } }
     );
     if (!res.ok) throw new Error(String(res.status));
