@@ -58,7 +58,7 @@ const minAllowedRank = rankConstraint === null ? 1 : rankConstraint + 1;
 let groupRoles: any[] = [];
 try {
   const { data: roles } = await db.from("group_roles")
-    .select("id, name, color, role_rank, can_manage_roles, can_invite, can_remove_members, can_edit_group, can_manage_sessions, can_manage_watchlist, is_view_only")
+    .select("id, name, color, role_rank, can_manage_roles, can_invite, can_remove_members, can_edit_group, can_manage_sessions, can_manage_watchlist, can_feature_games, is_view_only")
     .eq("group_id", id).order("role_rank", { ascending: true });
   groupRoles = roles ?? [];
 } catch { /* migration may not be applied yet */ }
@@ -91,7 +91,7 @@ const [{ data: genres }, { data: platforms }] = await Promise.all([
 const defaultStats = {
   show_top_games: true, show_top_rated: true, show_hot_take: true,
   show_critic_spectrum: true, show_recent_reviews: true,
-  show_score_compare: true, show_sessions: true, show_watchlist: true,
+  show_score_compare: true, show_sessions: true, show_watchlist: true, show_games: true,
   show_announcements: true, show_polls: true,
   show_consensus: true, show_divergent: true, show_hidden_gems: true, show_score_distribution: true,
   focus_genre_id: null, focus_platform_id: null,
@@ -331,6 +331,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
                   <span class={`perm-chip${r.can_edit_group ? " active" : ""}`}>Can edit group</span>
                   <span class={`perm-chip${r.can_manage_sessions ? " active" : ""}`}>Sessions</span>
                   <span class={`perm-chip${r.can_manage_watchlist ? " active" : ""}`}>Watchlist</span>
+                  <span class={`perm-chip${r.can_feature_games ? " active" : ""}`}>Feature games</span>
                 </div>
                 {isSelfRole && <div style="font-size:11px;color:var(--text-tertiary);margin-top:6px">← Your current role</div>}
                 {canEditRole && (
@@ -363,6 +364,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
                     <label class="perm-check-row"><input type="checkbox" id={`edit-editgrp-${r.id}`} checked={r.can_edit_group} /> Can edit group</label>
                     <label class="perm-check-row"><input type="checkbox" id={`edit-sessions-${r.id}`} checked={r.can_manage_sessions} /> Manage sessions</label>
                     <label class="perm-check-row"><input type="checkbox" id={`edit-watchlist-${r.id}`} checked={r.can_manage_watchlist} /> Manage watchlist</label>
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-feature-${r.id}`} checked={r.can_feature_games} /> Feature games</label>
                     {isOwner && <label class="perm-check-row"><input type="checkbox" id={`edit-manageroles-${r.id}`} checked={r.can_manage_roles} /> Can manage roles</label>}
                   </div>
                   <div style="display:flex;gap:8px">
@@ -407,6 +409,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
             <label class="perm-check-row"><input type="checkbox" id="new-can-edit" /> Can edit group</label>
             <label class="perm-check-row"><input type="checkbox" id="new-manage-sessions" checked /> Manage sessions</label>
             <label class="perm-check-row"><input type="checkbox" id="new-manage-watchlist" checked /> Manage watchlist</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-feature-games" /> Feature games</label>
             <label class="perm-check-row"><input type="checkbox" id="new-manage-roles" /> Can manage roles</label>
           </div>
           <div class="role-form-actions">
@@ -473,6 +476,10 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
         <label class="toggle-row">
           <input type="checkbox" id="sc-compare" checked={statsConfig.show_score_compare} />
           Score Compare tab
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="sc-games" checked={statsConfig.show_games} />
+          Games tab
         </label>
         {/* Sessions is switched off for now (SESSIONS_ENABLED in groups/[id]/index.astro) */}
         <label class="toggle-row" style="display:none">
@@ -685,6 +692,7 @@ async function saveStatsConfig() {
     show_recent_reviews:  get('sc-reviews')?.checked ?? true,
     show_score_compare:   get('sc-compare')?.checked ?? true,
     show_sessions:        get('sc-sessions')?.checked ?? true,
+    show_games:           get('sc-games')?.checked ?? true,
     show_watchlist:       get('sc-watchlist')?.checked ?? true,
     show_announcements:   get('sc-announcements')?.checked ?? true,
     show_polls:           get('sc-polls')?.checked ?? true,
@@ -726,8 +734,8 @@ function getSelectedColor(containerId) {
 function toggleViewOnly(roleId, prefix) {
   const viewOnly = document.getElementById(prefix === 'new' ? 'new-view-only' : `edit-view-${roleId}`)?.checked;
   const writeIds = prefix === 'new'
-    ? ['new-can-invite','new-can-remove','new-can-edit','new-manage-sessions','new-manage-watchlist','new-manage-roles']
-    : [`edit-invite-${roleId}`,`edit-remove-${roleId}`,`edit-editgrp-${roleId}`,`edit-sessions-${roleId}`,`edit-watchlist-${roleId}`,`edit-manageroles-${roleId}`];
+    ? ['new-can-invite','new-can-remove','new-can-edit','new-manage-sessions','new-manage-watchlist','new-feature-games','new-manage-roles']
+    : [`edit-invite-${roleId}`,`edit-remove-${roleId}`,`edit-editgrp-${roleId}`,`edit-sessions-${roleId}`,`edit-watchlist-${roleId}`,`edit-feature-${roleId}`,`edit-manageroles-${roleId}`];
   writeIds.forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.disabled = viewOnly; if (viewOnly) el.checked = false; }
@@ -757,6 +765,7 @@ async function createRole() {
     can_edit_group:       document.getElementById('new-can-edit')?.checked,
     can_manage_sessions:  document.getElementById('new-manage-sessions')?.checked,
     can_manage_watchlist: document.getElementById('new-manage-watchlist')?.checked,
+    can_feature_games:    document.getElementById('new-feature-games')?.checked,
     is_view_only:         document.getElementById('new-view-only')?.checked,
   };
   const res = await fetch('/api/groups/roles/manage', {
@@ -789,6 +798,7 @@ async function saveRoleEdit(roleId) {
     can_edit_group:       document.getElementById(`edit-editgrp-${roleId}`)?.checked,
     can_manage_sessions:  document.getElementById(`edit-sessions-${roleId}`)?.checked,
     can_manage_watchlist: document.getElementById(`edit-watchlist-${roleId}`)?.checked,
+    can_feature_games:    document.getElementById(`edit-feature-${roleId}`)?.checked,
     is_view_only:         document.getElementById(`edit-view-${roleId}`)?.checked,
   };
   const res = await fetch('/api/groups/roles/manage', {

@@ -971,6 +971,58 @@ export type Database = {
           },
         ]
       }
+      group_featured_games: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          game_id: string
+          group_id: string
+          id: string
+          note: string | null
+          youtube_video_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          game_id: string
+          group_id: string
+          id?: string
+          note?: string | null
+          youtube_video_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          game_id?: string
+          group_id?: string
+          id?: string
+          note?: string | null
+          youtube_video_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_featured_games_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_featured_games_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_featured_games_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_invites: {
         Row: {
           created_at: string
@@ -1206,6 +1258,7 @@ export type Database = {
         Row: {
           closed: boolean
           created_at: string
+          featured_game_id: string | null
           group_id: string
           id: string
           profile_id: string
@@ -1214,6 +1267,7 @@ export type Database = {
         Insert: {
           closed?: boolean
           created_at?: string
+          featured_game_id?: string | null
           group_id: string
           id?: string
           profile_id: string
@@ -1222,12 +1276,20 @@ export type Database = {
         Update: {
           closed?: boolean
           created_at?: string
+          featured_game_id?: string | null
           group_id?: string
           id?: string
           profile_id?: string
           question?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "group_polls_featured_game_id_fkey"
+            columns: ["featured_game_id"]
+            isOneToOne: true
+            referencedRelation: "group_featured_games"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "group_polls_group_id_fkey"
             columns: ["group_id"]
@@ -1247,6 +1309,7 @@ export type Database = {
       group_roles: {
         Row: {
           can_edit_group: boolean
+          can_feature_games: boolean
           can_invite: boolean
           can_manage_roles: boolean
           can_manage_sessions: boolean
@@ -1262,6 +1325,7 @@ export type Database = {
         }
         Insert: {
           can_edit_group?: boolean
+          can_feature_games?: boolean
           can_invite?: boolean
           can_manage_roles?: boolean
           can_manage_sessions?: boolean
@@ -1277,6 +1341,7 @@ export type Database = {
         }
         Update: {
           can_edit_group?: boolean
+          can_feature_games?: boolean
           can_invite?: boolean
           can_manage_roles?: boolean
           can_manage_sessions?: boolean
@@ -3988,6 +4053,23 @@ export type Database = {
           score_variance: number
           slug: string
           title: string
+        }[]
+      }
+      group_featured_game_stats: {
+        Args: { p_game_ids: string[]; p_group_id: string }
+        Returns: {
+          achievement_count: number
+          avg_achievement_pct: number
+          avg_hours: number
+          avg_score: number
+          completed_count: number
+          full_count: number
+          full_profile_ids: string[]
+          game_id: string
+          hours_count: number
+          member_count: number
+          played_count: number
+          review_count: number
         }[]
       }
       group_feed: {

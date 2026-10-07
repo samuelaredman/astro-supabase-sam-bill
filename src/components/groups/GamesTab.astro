@@ -1,0 +1,285 @@
+---
+/**
+ * The group Games tab (?tab=games): the games the group's creator features,
+ * each with its video, note, poll and how the group did on it. Built by
+ * loadGroupFeaturedGames() (src/utils/groupFeaturedGames.ts).
+ *
+ * The video reuses the review card's player markup (.rc-video), so
+ * src/scripts/review-card.ts fills in its title and swaps in the player on
+ * click. Polls reuse the Overview poll classes and the page's votePoll /
+ * togglePollClosed / deletePoll. The feature form, edit and remove are
+ * src/scripts/group-games.ts; the CSS lives in the page's global block.
+ */
+import { formatScore, scoreClass, timeAgo, igdbImage } from "../../utils/format";
+import { youTubeThumbUrl, youTubeWatchUrl } from "../../utils/youtube";
+import {
+  formatHours,
+  FEATURED_NOTE_MAX,
+  FEATURED_POLL_PRESETS,
+  POLL_OPTION_MAX,
+  POLL_QUESTION_MAX,
+  type GroupGamesData,
+} from "../../utils/groupFeaturedGames";
+
+interface Props {
+  data: GroupGamesData;
+  groupId: string;
+  groupName: string;
+  canFeature: boolean;
+  isMember: boolean;
+  viewerProfileId: string | null;
+  isAdminOrOwner: boolean;
+}
+const { data, groupId, groupName, canFeature, isMember, viewerProfileId, isAdminOrOwner } = Astro.props;
+
+const presetsJson = JSON.stringify(FEATURED_POLL_PRESETS);
+const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+---
+
+<div class="gg" data-group-id={groupId}>
+  <div class="gg-head">
+    <div>
+      <h2 class="gg-title">Featured games</h2>
+      <p class="gg-sub">
+        Games from {groupName}'s videos — and how the community did on them.
+      </p>
+    </div>
+    {canFeature && (
+      <button type="button" class="btn-primary gg-add-btn" data-gg-action="toggle-form">+ Feature a game</button>
+    )}
+  </div>
+
+  {canFeature && (
+    <form class="gg-form compose-form" id="gg-feature-form" hidden data-presets={presetsJson}>
+      <label class="gg-label" for="gg-game-input">Game</label>
+      <div class="gg-game-pick">
+        <input id="gg-game-input" class="compose-input gg-input" type="text" placeholder="Search for a game…" autocomplete="off" />
+        <div class="gg-game-chosen" id="gg-game-chosen" hidden>
+          <span id="gg-game-chosen-title"></span>
+          <button type="button" class="gg-link-btn" data-gg-action="clear-game">Change</button>
+        </div>
+        <div class="gg-search-results" id="gg-search-results"></div>
+      </div>
+
+      <label class="gg-label" for="gg-video-input">YouTube video <span class="gg-optional">optional</span></label>
+      <input id="gg-video-input" class="compose-input gg-input" type="url" placeholder="https://www.youtube.com/watch?v=…" />
+
+      <label class="gg-label" for="gg-note-input">Note <span class="gg-optional">optional</span></label>
+      <textarea id="gg-note-input" class="compose-input" maxlength={FEATURED_NOTE_MAX} placeholder="What was it like? The verdict, the hardest part, what to watch for…"></textarea>
+
+      <label class="gg-label" for="gg-poll-preset">Poll <span class="gg-optional">optional</span></label>
+      <select id="gg-poll-preset" class="compose-input gg-input gg-select">
+        <option value="">No poll</option>
+        {FEATURED_POLL_PRESETS.map((p) => <option value={p.id}>{p.label} — {p.question}</option>)}
+        <option value="custom">Write my own</option>
+      </select>
+      <div class="gg-poll-fields" id="gg-poll-fields" hidden>
+        <input id="gg-poll-question" class="compose-input gg-input" type="text" maxlength={POLL_QUESTION_MAX} placeholder="Ask the community something…" />
+        <div class="gg-poll-options" id="gg-poll-options" data-max-length={POLL_OPTION_MAX}></div>
+        <button type="button" class="btn-copy gg-small-btn" data-gg-action="add-option">+ Option</button>
+      </div>
+
+      <div class="gg-form-actions">
+        <button type="submit" class="btn-primary">Feature it</button>
+        <button type="button" class="gg-link-btn" data-gg-action="toggle-form">Cancel</button>
+      </div>
+      <p class="gg-error" id="gg-form-error" hidden></p>
+    </form>
+  )}
+
+  {data.games.length === 0 ? (
+    <div class="empty-tab gg-empty">
+      {canFeature
+        ? "Feature the games from your videos — a 100% run, a refund verdict, a first playthrough — and see how many of your community played them, finished them and what they thought."
+        : "No featured games yet."}
+    </div>
+  ) : (
+    <div class="gg-list">
+      {data.games.map((fg) => {
+        const s = fg.stats;
+        const cover = igdbImage(fg.game.coverImgUrl, "t_cover_big");
+        const gameHref = fg.game.slug ? `/games/${fg.game.slug}` : null;
+        // The game page opens its review composer (or sign-in prompt) for ?review=1
+        const reviewHref = fg.game.slug ? `/games/${fg.game.slug}?review=1` : null;
+        const poll = fg.poll;
+        const showResults = poll && (poll.closed || !!poll.myOptionId || !isMember);
+        const canManagePoll = poll && (isAdminOrOwner || poll.profileId === viewerProfileId);
+        return (
+          <article class="gg-card card" data-featured-id={fg.id}>
+            {fg.youtubeVideoId && (
+              <div class="gg-media">
+                <div class="rc-video gg-video" data-video-id={fg.youtubeVideoId}>
+                  <button type="button" class="rc-video-thumb" aria-label="Play video">
+                    <img src={youTubeThumbUrl(fg.youtubeVideoId)} alt="" loading="lazy" width="320" height="180" />
+                    <span class="rc-video-play" aria-hidden="true">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    </span>
+                    <span class="rc-video-duration" hidden></span>
+                  </button>
+                  <a class="rc-video-info" href={youTubeWatchUrl(fg.youtubeVideoId)} target="_blank" rel="noopener noreferrer">
+                    <span class="rc-video-title">YouTube video</span>
+                    <span class="rc-video-meta">youtube.com</span>
+                    <span class="rc-video-stats" hidden></span>
+                    <span class="rc-video-desc" hidden></span>
+                  </a>
+                </div>
+              </div>
+            )}
+
+            <div class="gg-body">
+              <header class="gg-game">
+                {cover
+                  ? <img class="gg-cover" src={cover} alt="" loading="lazy" width="54" height="72" />
+                  : <div class="gg-cover gg-cover-empty" aria-hidden="true"></div>}
+                <div class="gg-game-text">
+                  {gameHref
+                    ? <a class="gg-game-title" href={gameHref}>{fg.game.title}</a>
+                    : <span class="gg-game-title">{fg.game.title}</span>}
+                  <div class="gg-game-meta">
+                    {fg.game.year && <span>{fg.game.year}</span>}
+                    <span>Featured {timeAgo(fg.createdAt)} ago</span>
+                  </div>
+                </div>
+                {canFeature && (
+                  <div class="gg-manage">
+                    <button type="button" class="announcement-action" data-gg-action="edit" data-id={fg.id}>Edit</button>
+                    <button type="button" class="announcement-action" data-gg-action="remove" data-id={fg.id} data-title={fg.game.title}>Remove</button>
+                  </div>
+                )}
+              </header>
+
+              {fg.note && <p class="gg-note">{fg.note}</p>}
+
+              {canFeature && (
+                <form class="gg-edit compose-form" data-gg-edit={fg.id} hidden>
+                  <label class="gg-label">YouTube video</label>
+                  <input class="compose-input gg-input" name="youtube_url" type="url"
+                    value={fg.youtubeVideoId ? youTubeWatchUrl(fg.youtubeVideoId) : ""} placeholder="https://www.youtube.com/watch?v=…" />
+                  <label class="gg-label">Note</label>
+                  <textarea class="compose-input" name="note" maxlength={FEATURED_NOTE_MAX}>{fg.note ?? ""}</textarea>
+                  <div class="gg-form-actions">
+                    <button type="submit" class="btn-primary">Save</button>
+                    <button type="button" class="gg-link-btn" data-gg-action="edit" data-id={fg.id}>Cancel</button>
+                  </div>
+                  <p class="gg-error" hidden></p>
+                </form>
+              )}
+
+              <div class="gg-section-label">
+                The community <span class="gg-section-sub">· {plural(s.memberCount, "member")}</span>
+              </div>
+              <dl class="gg-stats">
+                <div class="gg-stat">
+                  <dt>Played</dt>
+                  <dd>
+                    <span class="gg-stat-val">{s.played}</span>
+                    <span class="gg-stat-sub">{s.playedPct != null ? `${s.playedPct}% of members` : "—"}</span>
+                  </dd>
+                </div>
+                <div class="gg-stat">
+                  <dt>Finished</dt>
+                  <dd>
+                    <span class="gg-stat-val">{s.completedPct != null ? `${s.completedPct}%` : "—"}</span>
+                    <span class="gg-stat-sub">{s.played > 0 ? `${s.completed} of ${s.played}` : "nobody yet"}</span>
+                  </dd>
+                </div>
+                <div class="gg-stat">
+                  <dt>100% / Platinum</dt>
+                  <dd>
+                    <span class="gg-stat-val">{s.fullPct != null ? `${s.fullPct}%` : "—"}</span>
+                    <span class="gg-stat-sub">{s.played > 0 ? plural(s.full, "member") : "nobody yet"}</span>
+                  </dd>
+                </div>
+                <div class="gg-stat">
+                  <dt>Avg rating</dt>
+                  <dd>
+                    <span class={`gg-stat-val${s.avgScore != null ? ` gg-stat-score ${scoreClass(s.avgScore)}` : ""}`}>{formatScore(s.avgScore)}</span>
+                    <span class="gg-stat-sub">{plural(s.reviewCount, "review")}</span>
+                  </dd>
+                </div>
+                <div class="gg-stat">
+                  <dt>Avg achievements</dt>
+                  <dd>
+                    <span class="gg-stat-val">{s.avgAchievementPct != null ? `${s.avgAchievementPct}%` : "—"}</span>
+                    <span class="gg-stat-sub">{s.achievementCount > 0 ? `from ${plural(s.achievementCount, "player")}` : "no synced data"}</span>
+                  </dd>
+                </div>
+                <div class="gg-stat">
+                  <dt>Avg time</dt>
+                  <dd>
+                    <span class="gg-stat-val">{formatHours(s.avgHours)}</span>
+                    <span class="gg-stat-sub">{s.hoursCount > 0 ? `from ${plural(s.hoursCount, "player")}` : "no hours yet"}</span>
+                  </dd>
+                </div>
+              </dl>
+
+              {s.played > 0 && (
+                <div class="gg-progress" role="img"
+                  aria-label={`${s.completed} of ${s.played} players finished it, ${s.full} went for 100%`}>
+                  <span class="gg-progress-full" style={`width:${s.fullPct ?? 0}%`}></span>
+                  <span class="gg-progress-done" style={`width:${Math.max(0, (s.completedPct ?? 0) - (s.fullPct ?? 0))}%`}></span>
+                </div>
+              )}
+
+              {fg.fullMembers.length > 0 && (
+                <div class="gg-club">
+                  <div class="gg-club-avatars">
+                    {fg.fullMembers.map((m) => (
+                      <a class="member-avatar gg-club-avatar" href={`/reviewers/${m.username}`} title={`@${m.username}`}>
+                        {m.avatarUrl ? <img src={m.avatarUrl} alt={`@${m.username}`} loading="lazy" /> : initials(m.username)}
+                      </a>
+                    ))}
+                  </div>
+                  <span class="gg-club-label">
+                    {s.full > fg.fullMembers.length ? `+${s.full - fg.fullMembers.length} more ` : ""}went for 100%
+                  </span>
+                </div>
+              )}
+
+              {poll && (
+                <div class="gg-poll poll-item" data-poll-id={poll.id}>
+                  <div class="poll-question">{poll.question}</div>
+                  {showResults
+                    ? poll.options.map((o) => (
+                        <div class={`poll-result${o.id === poll.myOptionId ? " voted" : ""}`}>
+                          <div class="poll-result-bar" style={`width:${o.pct}%`}></div>
+                          <div class="poll-result-label"><span>{o.label}</span><span>{o.pct}%</span></div>
+                        </div>
+                      ))
+                    : poll.options.map((o) => (
+                        <button type="button" class="poll-option" onclick={`votePoll('${poll.id}', '${o.id}')`}>{o.label}</button>
+                      ))}
+                  <div class="poll-meta">
+                    <span>
+                      {plural(poll.totalVotes, "vote")}{poll.closed ? " · Closed" : ""}
+                      {!isMember && !poll.closed && " · join the group to vote"}
+                    </span>
+                    {canManagePoll && (
+                      <span class="poll-meta-actions">
+                        <button class="announcement-action" onclick={`togglePollClosed('${poll.id}', ${!poll.closed})`}>{poll.closed ? "Reopen" : "Close"}</button>
+                        <button class="announcement-action" onclick={`deletePoll('${poll.id}')`}>Delete</button>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div class="gg-actions">
+                {fg.myReview
+                  ? (
+                    <a class="gg-my-review" href={`/reviews/${fg.myReview.id}`}>
+                      <span class={`score-badge ${scoreClass(fg.myReview.score)}`}>{fg.myReview.score}</span>
+                      Your review
+                    </a>
+                  )
+                  : reviewHref && <a class="btn-primary gg-review-btn" href={reviewHref}>Review it</a>}
+                {gameHref && <a class="gg-link-btn" href={gameHref}>Game page</a>}
+              </div>
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  )}
+</div>

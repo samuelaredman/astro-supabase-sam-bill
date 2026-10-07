@@ -313,6 +313,19 @@ supabase/
   Each card carries the viewer's own score for that game — the point of the tab, and the one thing a
   chat app can't show. The filters ("We disagree", "Haven't played") are applied inside `group_feed()`,
   not after the rows arrive: filtering a page of 20 in JS shows a handful of rows and pages wrongly.
+- **The Games tab (`?tab=games`) is the creator's featured games** — the games from their videos (a
+  100% run, a refund verdict, a first playthrough), each with an optional YouTube video, note and poll,
+  and how the group did on it: played, finished, 100% / platinum, average rating, achievement % and
+  hours, from `group_featured_game_stats()` (migration `20261006000007`). Library data counts only for
+  public libraries and never for hidden games; ratings come through `group_reviews()` without the
+  group's focus. Rows live in `group_featured_games` (migration `20261006000005`); a game's poll is an
+  ordinary `group_polls` row with `featured_game_id` set, so it votes through `/api/groups/polls/*` and
+  Overview's Polls card leaves it out. Owners, admins and roles with `can_feature_games` (migration
+  `20261006000006`) feature games via `/api/groups/featured-games/(create, update, delete)`. The tab
+  shows once a game is featured (before that, only to those who can feature one), and
+  `stats_config.show_games` turns it off. `loadGroupFeaturedGames()` (`src/utils/groupFeaturedGames.ts`)
+  builds it only when it's the open tab, `GamesTab.astro` renders it, and `src/scripts/group-games.ts`
+  runs the form. "Review it" links to `/games/[slug]?review=1`, which opens the review composer.
 - **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
   not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
   so we can moderate the groups we run without joining them. Owner-only actions (delete, transfer,
