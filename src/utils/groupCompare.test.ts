@@ -300,6 +300,12 @@ describe("buildTape", () => {
   const names = { subject: "You", other: "@sam" };
   const tile = (tiles: ReturnType<typeof buildTape>, key: string) => tiles.find((t) => t.key === key)!;
 
+  it("gives the score chart the profiles' exact averages, not the whole-score buckets'", () => {
+    const scores = { left: [0, 0, 0, 0, 0, 0, 0, 0, 5, 0], right: [0, 0, 0, 0, 0, 0, 5, 0, 0, 0] };
+    const d = tile(buildTape(profile({ avgScore: 9.3 }), profile({ avgScore: 6.84 }), names, undefined, scores), "scores");
+    expect(d).toMatchObject({ leftAvg: 9.3, rightAvg: 6.84 });
+  });
+
   it("is empty when either side has no reviews", () => {
     expect(buildTape(profile(), profile({ reviewCount: 0 }), names)).toEqual([]);
   });

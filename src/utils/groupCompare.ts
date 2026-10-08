@@ -537,8 +537,10 @@ export function buildTape(
   if (a.reviewCount === 0 || b.reviewCount === 0) return [];
   const tiles: TapeTile[] = [];
 
+  // The buckets are whole scores, so the legend's averages come from the
+  // profiles instead: the same reviews, at their real one-decimal scores
   const dist = scores ? buildScoreDistribution(scores.left, scores.right, names) : null;
-  if (dist) tiles.push(dist);
+  if (dist) tiles.push({ ...dist, leftAvg: a.avgScore ?? dist.leftAvg, rightAvg: b.avgScore ?? dist.rightAvg });
 
   const radar = buildGenreRadar(genres.left, genres.right, a.reviewCount, b.reviewCount);
   if (radar) {
