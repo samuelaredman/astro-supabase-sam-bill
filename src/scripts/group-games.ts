@@ -210,6 +210,71 @@ async function deleteAnswer(btn: HTMLElement) {
   alert(result.error ?? "Couldn't delete the answer.");
 }
 
+/** Toggle an upvote in place: the count and pressed state flip at once, then settle on the server's count. */
+async function toggleUpvote(btn: HTMLElement) {
+  const id = btn.dataset.id;
+  if (!id || btn.hasAttribute("disabled") || btn.dataset.busy === "1") return;
+  const countEl = btn.querySelector(".gg-upvote-count");
+  const was = btn.getAttribute("aria-pressed") === "true";
+  const before = Number(countEl?.textContent) || 0;
+  btn.dataset.busy = "1";
+  btn.setAttribute("aria-pressed", was ? "false" : "true");
+  if (countEl) countEl.textContent = String(Math.max(0, before + (was ? -1 : 1)));
+  try {
+    const res = await fetch("/api/groups/polls/answer-vote", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer_id: id }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? "Couldn't save your upvote.");
+    btn.setAttribute("aria-pressed", data.upvoted ? "true" : "false");
+    if (countEl) countEl.textContent = String(data.count);
+  } catch (err) {
+    btn.setAttribute("aria-pressed", was ? "true" : "false");
+    if (countEl) countEl.textContent = String(before);
+    alert(err instanceof Error ? err.message : "Couldn't save your upvote.");
+  } finally {
+    btn.dataset.busy = "";
+  }
+}
+
+function toggleReplies(btn: HTMLElement) {
+  const box = document.querySelector<HTMLElement>(`[data-gg-replies="${btn.dataset.id}"]`);
+  if (!box) return;
+  box.hidden = !box.hidden;
+  btn.setAttribute("aria-expanded", box.hidden ? "false" : "true");
+  if (!box.hidden) box.querySelector<HTMLInputElement>("input[name=body]")?.focus();
+}
+
+function toggleMoreAnswers(btn: HTMLElement) {
+  const list = document.querySelector<HTMLElement>(`[data-gg-more-answers="${btn.dataset.id}"]`);
+  if (!list) return;
+  list.hidden = !list.hidden;
+  btn.textContent = (list.hidden ? btn.dataset.labelMore : btn.dataset.labelLess) ?? btn.textContent;
+}
+
+async function submitReply(form: HTMLFormElement) {
+  const answerId = form.dataset.ggReply;
+  if (!answerId) return;
+  const errEl = form.querySelector(".gg-error");
+  if (errEl instanceof HTMLElement) errEl.hidden = true;
+  const body = String(new FormData(form).get("body") ?? "").trim();
+  if (!body) return showError(errEl, "Write a reply first.");
+  const submit = form.querySelector<HTMLButtonElement>("button[type=submit]");
+  if (submit) submit.disabled = true;
+  const result = await post("/api/groups/polls/answer-reply", { answer_id: answerId, body });
+  if (result.ok) return window.location.reload();
+  if (submit) submit.disabled = false;
+  showError(errEl, result.error ?? "Couldn't post your reply.");
+}
+
+async function deleteReply(btn: HTMLElement) {
+  const id = btn.dataset.id;
+  if (!id || !confirm("Delete this reply?")) return;
+  const result = await post("/api/groups/polls/answer-reply", { action: "delete", reply_id: id });
+  if (result.ok) return window.location.reload();
+  alert(result.error ?? "Couldn't delete the reply.");
+}
+
 async function removeFeatured(btn: HTMLElement) {
   const id = btn.dataset.id;
   if (!id) return;
@@ -257,6 +322,16 @@ document.addEventListener("click", (e) => {
     case "delete-answer":
       void deleteAnswer(btn);
       return;
+    case "upvote":
+      void toggleUpvote(btn);
+      return;
+    case "replies":
+      return toggleReplies(btn);
+    case "more-answers":
+      return toggleMoreAnswers(btn);
+    case "delete-reply":
+      void deleteReply(btn);
+      return;
     case "edit": {
       const form = document.querySelector<HTMLElement>(`[data-gg-edit="${btn.dataset.id}"]`);
       if (form) form.hidden = !form.hidden;
@@ -295,5 +370,8 @@ document.addEventListener("submit", (e) => {
   } else if (form.dataset.ggAnswer) {
     e.preventDefault();
     void submitAnswer(form);
+  } else if (form.dataset.ggReply) {
+    e.preventDefault();
+    void submitReply(form);
   }
 });

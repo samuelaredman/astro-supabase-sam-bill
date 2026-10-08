@@ -1179,6 +1179,78 @@ export type Database = {
           },
         ]
       }
+      group_poll_answer_replies: {
+        Row: {
+          answer_id: string
+          body: string
+          created_at: string
+          id: string
+          profile_id: string
+        }
+        Insert: {
+          answer_id: string
+          body: string
+          created_at?: string
+          id?: string
+          profile_id: string
+        }
+        Update: {
+          answer_id?: string
+          body?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_answer_replies_answer_id_fkey"
+            columns: ["answer_id"]
+            isOneToOne: false
+            referencedRelation: "group_poll_answers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answer_replies_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_poll_answer_votes: {
+        Row: {
+          answer_id: string
+          created_at: string
+          profile_id: string
+        }
+        Insert: {
+          answer_id: string
+          created_at?: string
+          profile_id: string
+        }
+        Update: {
+          answer_id?: string
+          created_at?: string
+          profile_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_answer_votes_answer_id_fkey"
+            columns: ["answer_id"]
+            isOneToOne: false
+            referencedRelation: "group_poll_answers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answer_votes_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_poll_answers: {
         Row: {
           body: string

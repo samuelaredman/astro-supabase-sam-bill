@@ -12,7 +12,10 @@
  * poll with featured_game_id set (migration 20261006000005), so voting, closing
  * and deleting go through /api/groups/polls/*. Its options are optional, and
  * members can always answer in their own words too (group_poll_answers,
- * migration 20261006000008, through /api/groups/polls/answer).
+ * migration 20261006000008, through /api/groups/polls/answer). Answers can be
+ * upvoted and replied to (migration 20261007000002,
+ * /api/groups/polls/answer-vote and /answer-reply); the card ranks them by
+ * upvotes.
  *
  * The page (src/pages/groups/[id]/index.astro) calls loadGroupFeaturedGames()
  * only when it's the tab in the URL, and src/components/groups/GamesTab.astro
@@ -33,6 +36,7 @@ export const POLL_OPTION_MAX = 80;
 export const POLL_OPTIONS_MIN = 2;
 export const POLL_OPTIONS_MAX = 6;
 export const POLL_ANSWER_MAX = 500;
+export const POLL_REPLY_MAX = 500;
 
 export interface FeaturedPollInput {
   question: string;
@@ -128,6 +132,26 @@ export async function createFeaturedPoll(
     return optError;
   }
   return null;
+}
+
+/**
+ * Whether someone can remove others' answers and replies on a question: its
+ * author, the group's owners and admins (site admins count), and roles that can
+ * edit the group — the same people who can close or delete it.
+ */
+export async function canModeratePoll(
+  db: SupabaseAdmin,
+  poll: { group_id: string; profile_id: string },
+  profileId: string,
+): Promise<boolean> {
+  if (poll.profile_id === profileId) return true;
+  const authority = await getGroupAuthority(db, poll.group_id, profileId);
+  if (!authority) return false;
+  if (["owner", "admin"].includes(authority.role)) return true;
+  if (!authority.custom_role_id) return false;
+  const { data: role } = await db.from("group_roles")
+    .select("can_edit_group").eq("id", authority.custom_role_id).maybeSingle();
+  return !!role?.can_edit_group;
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
@@ -244,6 +268,15 @@ export interface FeaturedPollOption {
   pct: number;
 }
 
+export interface FeaturedReply {
+  id: string;
+  profileId: string;
+  username: string;
+  avatarUrl: string | null;
+  body: string;
+  createdAt: string;
+}
+
 export interface FeaturedAnswer {
   id: string;
   profileId: string;
@@ -252,6 +285,11 @@ export interface FeaturedAnswer {
   body: string;
   createdAt: string;
   edited: boolean;
+  upvotes: number;
+  /** Whether the viewer upvoted it. */
+  myUpvote: boolean;
+  /** Oldest first, like a conversation. */
+  replies: FeaturedReply[];
 }
 
 export interface FeaturedPoll {
@@ -263,7 +301,7 @@ export interface FeaturedPoll {
   myOptionId: string | null;
   /** Empty when the question only takes written answers. */
   options: FeaturedPollOption[];
-  /** Written answers, the viewer's first, then newest first. */
+  /** Written answers, most upvoted first, then newest. */
   answers: FeaturedAnswer[];
   myAnswer: FeaturedAnswer | null;
 }
@@ -278,9 +316,20 @@ export interface AnswerRow {
   profiles: { username: string; avatar_url: string | null } | null;
 }
 
+export interface AnswerVoteRow { answer_id: string; profile_id: string }
+export interface ReplyRow {
+  id: string;
+  answer_id: string;
+  profile_id: string;
+  body: string;
+  created_at: string;
+  profiles: { username: string; avatar_url: string | null } | null;
+}
+
 /**
  * A question with its options in order, each option's share of the votes, and
- * its written answers — the viewer's first, then newest first.
+ * its written answers with their upvotes and replies — most upvoted first, then
+ * newest.
  */
 export function summarizePoll(
   poll: { id: string; question: string; closed: boolean; profile_id: string },
@@ -288,23 +337,39 @@ export function summarizePoll(
   votes: { poll_id: string; option_id: string; profile_id: string }[],
   viewerProfileId: string | null,
   answerRows: AnswerRow[] = [],
+  answerVotes: AnswerVoteRow[] = [],
+  replyRows: ReplyRow[] = [],
 ): FeaturedPoll {
   const mine = votes.filter((v) => v.poll_id === poll.id);
   const total = mine.length;
   const answers: FeaturedAnswer[] = answerRows
     .filter((a) => a.poll_id === poll.id && a.profiles)
-    .sort((a, b) =>
-      Number(b.profile_id === viewerProfileId) - Number(a.profile_id === viewerProfileId)
-      || b.created_at.localeCompare(a.created_at))
-    .map((a) => ({
-      id: a.id,
-      profileId: a.profile_id,
-      username: a.profiles!.username,
-      avatarUrl: a.profiles!.avatar_url,
-      body: a.body,
-      createdAt: a.created_at,
-      edited: a.updated_at !== a.created_at,
-    }));
+    .map((a) => {
+      const ups = answerVotes.filter((v) => v.answer_id === a.id);
+      return {
+        id: a.id,
+        profileId: a.profile_id,
+        username: a.profiles!.username,
+        avatarUrl: a.profiles!.avatar_url,
+        body: a.body,
+        createdAt: a.created_at,
+        edited: a.updated_at !== a.created_at,
+        upvotes: ups.length,
+        myUpvote: !!viewerProfileId && ups.some((v) => v.profile_id === viewerProfileId),
+        replies: replyRows
+          .filter((r) => r.answer_id === a.id && r.profiles)
+          .sort((x, y) => x.created_at.localeCompare(y.created_at))
+          .map((r) => ({
+            id: r.id,
+            profileId: r.profile_id,
+            username: r.profiles!.username,
+            avatarUrl: r.profiles!.avatar_url,
+            body: r.body,
+            createdAt: r.created_at,
+          })),
+      };
+    })
+    .sort((a, b) => b.upvotes - a.upvotes || b.createdAt.localeCompare(a.createdAt));
   return {
     id: poll.id,
     question: poll.question,
@@ -396,8 +461,10 @@ export async function loadGroupFeaturedGames(opts: {
   const pollRows: any[] = pollsRes.data ?? [];
   const pollIds = pollRows.map((p) => p.id);
 
-  // Votes and answers are paged: fifty questions in a big group pass the 1000-row cap
-  const [optionsRes, voteRows, answerRows] = pollIds.length
+  // Votes, answers, upvotes and replies are paged: fifty questions in a big group
+  // pass the 1000-row cap. Upvotes and replies are read through their answer's
+  // question, so the request doesn't carry every answer id.
+  const [optionsRes, voteRows, answerRows, answerVoteRows, replyRows] = pollIds.length
     ? await Promise.all([
         db.from("group_poll_options").select("id, poll_id, label, position").in("poll_id", pollIds),
         fetchAll<any>((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
@@ -405,8 +472,14 @@ export async function loadGroupFeaturedGames(opts: {
         fetchAll<AnswerRow>((from, to) => db.from("group_poll_answers")
           .select("id, poll_id, profile_id, body, created_at, updated_at, profiles ( username, avatar_url )")
           .in("poll_id", pollIds).order("id").range(from, to)),
+        fetchAll<AnswerVoteRow>((from, to) => db.from("group_poll_answer_votes")
+          .select("answer_id, profile_id, group_poll_answers!inner ( poll_id )")
+          .in("group_poll_answers.poll_id", pollIds).order("answer_id").order("profile_id").range(from, to)),
+        fetchAll<ReplyRow>((from, to) => db.from("group_poll_answer_replies")
+          .select("id, answer_id, profile_id, body, created_at, profiles ( username, avatar_url ), group_poll_answers!inner ( poll_id )")
+          .in("group_poll_answers.poll_id", pollIds).order("id").range(from, to)),
       ])
-    : [{ data: [] }, [], []];
+    : [{ data: [] }, [], [], [], []];
 
   const stageIds = (row: FeaturedStatsRow | undefined, stage: FeaturedStage): string[] =>
     ((stage === "full" ? row?.full_profile_ids : stage === "completed" ? row?.completed_profile_ids : row?.played_profile_ids) ?? [])
@@ -452,7 +525,7 @@ export async function loadGroupFeaturedGames(opts: {
         full: membersOf(statsRow, "full"),
       },
       scoreCounts: normalizeScoreCounts(statsRow?.score_counts),
-      poll: poll ? summarizePoll(poll, optionsRes.data ?? [], voteRows, viewerProfileId, answerRows) : null,
+      poll: poll ? summarizePoll(poll, optionsRes.data ?? [], voteRows, viewerProfileId, answerRows, answerVoteRows, replyRows) : null,
       myReview: review ? { id: review.id, score: review.score } : null,
     };
   });

@@ -170,7 +170,7 @@ describe("summarizePoll", () => {
     expect(s.myOptionId).toBe("o2");
   });
 
-  it("puts the viewer's answer first, then the newest, and skips deleted profiles", () => {
+  it("ranks answers by upvotes, then newest, and skips deleted profiles", () => {
     const answer = (id: string, profile: string, at: string, edited = false) => ({
       id, poll_id: "poll1", profile_id: profile, body: id, created_at: at,
       updated_at: edited ? "2026-10-06T12:00:00Z" : at,
@@ -183,12 +183,30 @@ describe("summarizePoll", () => {
       { ...answer("gone", "c", "2026-10-04T00:00:00Z"), profiles: null },
       { ...answer("elsewhere", "d", "2026-10-05T00:00:00Z"), poll_id: "other" },
     ];
-    const s = summarizePoll(poll, options, votes, "me", rows);
-    expect(s.answers.map((a) => a.id)).toEqual(["mine", "new", "old"]);
+    const ups = [
+      { answer_id: "old", profile_id: "b" }, { answer_id: "old", profile_id: "me" },
+      { answer_id: "mine", profile_id: "a" },
+    ];
+    const s = summarizePoll(poll, options, votes, "me", rows, ups);
+    expect(s.answers.map((a) => [a.id, a.upvotes])).toEqual([["old", 2], ["mine", 1], ["new", 0]]);
+    expect(s.answers[0].myUpvote).toBe(true);
+    expect(s.answers[1].myUpvote).toBe(false);
     expect(s.myAnswer?.id).toBe("mine");
     expect(s.myAnswer?.edited).toBe(true);
-    expect(s.answers[1].edited).toBe(false);
-    expect(summarizePoll(poll, options, votes, null, rows).myAnswer).toBeNull();
+    expect(s.answers[2].edited).toBe(false);
+    expect(summarizePoll(poll, options, votes, null, rows, ups).myAnswer).toBeNull();
+  });
+
+  it("puts each answer's replies under it, oldest first", () => {
+    const rows = [{ id: "a1", poll_id: "poll1", profile_id: "a", body: "x", created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z", profiles: { username: "a", avatar_url: null } }];
+    const reply = (id: string, at: string, answer = "a1") => ({
+      id, answer_id: answer, profile_id: "r", body: id, created_at: at, profiles: { username: "r", avatar_url: null },
+    });
+    const s = summarizePoll(poll, options, votes, "me", rows, [], [
+      reply("second", "2026-10-03T00:00:00Z"), reply("first", "2026-10-02T00:00:00Z"), reply("other", "2026-10-02T00:00:00Z", "zz"),
+    ]);
+    expect(s.answers[0].replies.map((r) => r.id)).toEqual(["first", "second"]);
   });
 
   it("has no vote of mine for a visitor, and 0% everywhere with no votes", () => {

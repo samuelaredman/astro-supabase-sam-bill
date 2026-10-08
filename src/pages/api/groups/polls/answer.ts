@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json, getGroupAuthority } from "../../../../utils/api";
-import { readPollAnswer } from "../../../../utils/groupFeaturedGames";
+import { requireAuth, json } from "../../../../utils/api";
+import { canModeratePoll, readPollAnswer } from "../../../../utils/groupFeaturedGames";
 
 /**
  * A written answer to a group question (a featured game's question on the Games
@@ -22,16 +22,8 @@ export const POST: APIRoute = async (context) => {
       .eq("id", body.answer_id).maybeSingle();
     if (!answer?.group_polls) return json({ error: "Answer not found" }, 404);
 
-    let canDelete = answer.profile_id === profile.id || answer.group_polls.profile_id === profile.id;
-    if (!canDelete) {
-      const authority = await getGroupAuthority(db, answer.group_polls.group_id, profile.id);
-      canDelete = ["owner", "admin"].includes(authority?.role ?? "");
-      if (!canDelete && authority?.custom_role_id) {
-        const { data: cr } = await db.from("group_roles")
-          .select("can_edit_group").eq("id", authority.custom_role_id).maybeSingle();
-        canDelete = !!cr?.can_edit_group;
-      }
-    }
+    const canDelete = answer.profile_id === profile.id
+      || await canModeratePoll(db, answer.group_polls, profile.id);
     if (!canDelete) return json({ error: "Not authorized" }, 403);
 
     const { error } = await db.from("group_poll_answers").delete().eq("id", answer.id);

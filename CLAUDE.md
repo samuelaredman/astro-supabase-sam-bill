@@ -326,7 +326,9 @@ supabase/
   an ordinary `group_polls` row with `featured_game_id` set, so it votes through `/api/groups/polls/*` and
   Overview's Polls card leaves it out. Its options are optional (none = written answers only), and
   members can always write one answer each (`group_poll_answers`, migration `20261006000008`, via
-  `/api/groups/polls/answer`). Owners, admins and roles with `can_feature_games` (migration
+  `/api/groups/polls/answer`). Answers can be upvoted and replied to (`group_poll_answer_votes` /
+  `group_poll_answer_replies`, migration `20261007000002`, via `/api/groups/polls/answer-vote` and
+  `/answer-reply`); the card puts the question beside its top three answers by upvotes, with "View all". Owners, admins and roles with `can_feature_games` (migration
   `20261006000006`) feature games via `/api/groups/featured-games/(create, update, delete)`. The tab
   shows once a game is featured (before that, only to those who can feature one), and
   `stats_config.show_games` turns it off. `loadGroupFeaturedGames()` (`src/utils/groupFeaturedGames.ts`)
