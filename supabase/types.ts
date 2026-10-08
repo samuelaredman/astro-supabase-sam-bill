@@ -1623,7 +1623,11 @@ export type Database = {
           is_site_group: boolean
           join_prompt: string | null
           name: string
+          overview_hidden: string[] | null
+          overview_order: string[]
           requires_approval: boolean
+          showcase_video_id: string | null
+          showcase_video_mode: string | null
           slug: string | null
           stats_config: Json | null
           visibility: string
@@ -1640,7 +1644,11 @@ export type Database = {
           is_site_group?: boolean
           join_prompt?: string | null
           name: string
+          overview_hidden?: string[] | null
+          overview_order?: string[]
           requires_approval?: boolean
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           slug?: string | null
           stats_config?: Json | null
           visibility?: string
@@ -1657,7 +1665,11 @@ export type Database = {
           is_site_group?: boolean
           join_prompt?: string | null
           name?: string
+          overview_hidden?: string[] | null
+          overview_order?: string[]
           requires_approval?: boolean
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           slug?: string | null
           stats_config?: Json | null
           visibility?: string

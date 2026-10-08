@@ -1,6 +1,8 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, getGroupAuthority } from "../../../utils/api";
 import { validateName } from "../../../utils/moderation/nameRules";
+import { groupOwnerYouTube, readGroupShowcaseKeys } from "../../../utils/groupShowcases";
+import { parseYouTubeId } from "../../../utils/youtube";
 
 function randomCode(len = 8) {
   return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
@@ -21,6 +23,7 @@ export const POST: APIRoute = async (context) => {
   const isAdmin = membership.role === "admin";
 
   // Custom role holders with can_edit_group may update name/description/join_prompt/stats_config
+  // and the Overview's showcases (order, hidden sections, video)
   let hasEditGroup = false;
   if (!isOwner && !isAdmin && membership.custom_role_id) {
     const { data: cr } = await db.from("group_roles")
@@ -41,6 +44,32 @@ export const POST: APIRoute = async (context) => {
   if (description !== undefined)  updates.description = description?.trim() || null;
   if (join_prompt !== undefined)  updates.join_prompt = join_prompt?.trim() || null;
   if (stats_config !== undefined) updates.stats_config = stats_config;
+
+  // Overview showcases, from "Customize" on the Overview (src/utils/groupShowcases.ts)
+  if ("overview_order" in body) {
+    const order = readGroupShowcaseKeys(body.overview_order);
+    if (!order) return json({ error: "Invalid section order" }, 400);
+    updates.overview_order = order;
+  }
+  if ("overview_hidden" in body) {
+    const hidden = readGroupShowcaseKeys(body.overview_hidden);
+    if (!hidden) return json({ error: "Invalid hidden sections" }, 400);
+    updates.overview_hidden = hidden;
+  }
+  // The Overview video: 'latest' = the owner's newest upload, 'featured' = one link, null = off
+  if ("showcase_video_mode" in body) {
+    const mode = body.showcase_video_mode || null;
+    if (mode !== null && mode !== "latest" && mode !== "featured")
+      return json({ error: "Invalid video option" }, 400);
+    if (mode === "featured") {
+      const videoId = parseYouTubeId(typeof body.showcase_video_url === "string" ? body.showcase_video_url : "");
+      if (!videoId) return json({ error: "That doesn't look like a YouTube video link." }, 400);
+      updates.showcase_video_id = videoId;
+    }
+    if (mode === "latest" && !(await groupOwnerYouTube(db, group_id))?.youtubeUrl)
+      return json({ error: "The group owner needs a YouTube channel in their profile links first." }, 400);
+    updates.showcase_video_mode = mode;
+  }
 
   // Visibility, join settings, and invite regeneration require at least owner/admin
   if (visibility !== undefined && !isOwner && !isAdmin)

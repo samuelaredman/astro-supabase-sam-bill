@@ -17,7 +17,9 @@ import {
 } from '../../../utils/groupFeed';
 import FeedTab from '../../../components/groups/FeedTab.astro';
 import GamesTab from '../../../components/groups/GamesTab.astro';
-import { canFeatureGames, loadGroupFeaturedGames, type GroupGamesData } from '../../../utils/groupFeaturedGames';
+import { buildFeaturedStats, canFeatureGames, formatHours, loadGroupFeaturedGames, type FeaturedStats, type GroupGamesData } from '../../../utils/groupFeaturedGames';
+import { groupOwnerYouTube, groupShowcaseLabel, readGroupShowcaseHidden, readGroupShowcaseOrder, showcaseColumn, type GroupShowcaseKey } from '../../../utils/groupShowcases';
+import ShowcaseSection from '../../../components/profile/ShowcaseSection.astro';
 import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 import { getPageUser } from "../../../utils/pageAuth";
@@ -44,7 +46,7 @@ const db = getSupabaseAdmin();
 
 let { data: group, error: groupError } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt, is_site_group")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt, is_site_group, overview_order, overview_hidden, showcase_video_mode, showcase_video_id")
   .eq("id", id)
   .single();
 
@@ -55,7 +57,10 @@ if (!group && groupError) {
     .select("id, name, description, avatar_url, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt")
     .eq("id", id)
     .single();
-  if (fallback) group = { ...fallback, banner_url: null, banner_position: 'center', is_site_group: false };
+  if (fallback) group = {
+    ...fallback, banner_url: null, banner_position: 'center', is_site_group: false,
+    overview_order: [], overview_hidden: null, showcase_video_mode: null, showcase_video_id: null,
+  };
 }
 
 if (!group) return Astro.redirect("/groups");
@@ -171,6 +176,52 @@ const [canFeature, { count: featuredCount }] = canViewContent && statsConf.show_
     ])
   : [false, { count: 0 }];
 const showGames = canViewContent && statsConf.show_games && ((featuredCount ?? 0) > 0 || canFeature);
+// ── Overview showcases ──
+// The Overview's sections, ordered and hidden like a profile's showcases
+// (src/utils/groupShowcases.ts), by whoever can edit the group.
+let canEditOverview = isAdminOrOwner;
+if (!canEditOverview && authority?.custom_role_id) {
+  const { data: cr } = await db.from("group_roles")
+    .select("can_edit_group").eq("id", authority.custom_role_id).maybeSingle();
+  canEditOverview = !!cr?.can_edit_group;
+}
+const overviewOrder = readGroupShowcaseOrder(group.overview_order);
+const overviewHidden = readGroupShowcaseHidden(group.overview_hidden, group.stats_config as any);
+const overviewMain = showcaseColumn(overviewOrder, "main");
+const overviewSide = showcaseColumn(overviewOrder, "side");
+/** Rendered for visitors when not hidden; always for editors (dimmed in Customize when hidden). */
+const wantShowcase = (key: GroupShowcaseKey) => canEditOverview || !overviewHidden.has(key);
+const overviewHiddenJson = JSON.stringify([...overviewHidden]);
+const overviewOrderJson = JSON.stringify(overviewOrder);
+
+// Now featuring: the group's newest featured game (Games tab), with its numbers
+let nowFeaturing: { game: any; note: string | null; youtubeVideoId: string | null; stats: FeaturedStats } | null = null;
+if (canViewContent && statsConf.show_games && (featuredCount ?? 0) > 0 && wantShowcase("now_featuring")) {
+  const { data: nf } = await db.from("group_featured_games")
+    .select("game_id, note, youtube_video_id, games ( id, title, slug, cover_img_url, date_released )")
+    .eq("group_id", id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (nf?.games) {
+    const { data: nfStats } = await db.rpc("group_featured_game_stats", { p_group_id: id, p_game_ids: [nf.game_id] });
+    nowFeaturing = {
+      game: nf.games,
+      note: nf.note,
+      youtubeVideoId: nf.youtube_video_id,
+      stats: buildFeaturedStats((nfStats ?? [])[0], memberList.length),
+    };
+  }
+}
+
+// Video: the owner's latest upload (filled in by the page from
+// /api/groups/latest-video) or one featured video
+const videoOwner = canViewContent && (canEditOverview || group.showcase_video_mode === "latest") && wantShowcase("video")
+  ? await groupOwnerYouTube(db, id)
+  : null;
+const showcaseVideoMode: "latest" | "featured" | null =
+  group.showcase_video_mode === "latest" && videoOwner?.youtubeUrl ? "latest"
+  : group.showcase_video_mode === "featured" && group.showcase_video_id ? "featured"
+  : null;
+const showcaseVideoId: string | null = showcaseVideoMode === "featured" ? group.showcase_video_id : null;
+
 // A games link from before the tab was switched off (or emptied) lands on Overview
 if (activeTab === "games" && canViewContent && !showGames) return Astro.redirect(`/groups/${id}`);
 
@@ -1306,6 +1357,122 @@ const groupOgDescription = group.description
     .gg-bottom{grid-template-columns:minmax(0,1fr)}
     .gg-head{flex-direction:column}
   }
+
+  /* ── Overview showcases (like a profile's): Customize to reorder / hide ── */
+  .ov-customize-row{display:flex;justify-content:flex-end;margin:-4px 0 10px}
+  .ov-customize-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:border-color .15s,color .15s}
+  .ov-customize-btn:hover{border-color:var(--accent);color:var(--accent)}
+  body.editing-overview .ov-customize-row{display:none}
+  .edit-mode-bar{display:none;position:sticky;top:54px;z-index:25;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:14px;padding:10px 16px;align-items:center;justify-content:space-between;gap:12px;backdrop-filter:blur(12px)}
+  body.editing-overview .edit-mode-bar{display:flex}
+  .edit-mode-label{font-size:13px;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:8px}
+  .edit-mode-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse2 1.5s infinite}
+  @keyframes pulse2{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}
+  .edit-save-btn{padding:7px 18px;border-radius:20px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;border:none;background:var(--accent);color:white;transition:opacity .15s}
+  .edit-save-btn:hover{opacity:.88}
+  .edit-save-btn:disabled{opacity:.5;cursor:not-allowed}
+  .edit-cancel-btn{padding:7px 14px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text-secondary);transition:all .15s}
+  .edit-cancel-btn:hover{border-color:var(--text-tertiary)}
+  .sc-stack{display:flex;flex-direction:column;gap:14px;margin-bottom:14px}
+  .sc-stack .card{margin-bottom:0}
+  /* A section with nothing to show (no data yet) takes no space outside Customize */
+  body:not(.editing-overview) .sc-section:not(:has(> :not(.sc-edit-bar))){display:none}
+  body.editing-overview .sc-section:not(:has(> :not(.sc-edit-bar)))::after{content:"Nothing to show yet";display:block;padding:10px 12px;border:1px dashed var(--border);border-radius:10px;font-size:12px;color:var(--text-tertiary)}
+  .sc-edit-bar{display:none;align-items:center;gap:10px;padding:6px 6px 6px 12px;margin-bottom:8px;border:1px dashed color-mix(in srgb,var(--accent) 45%,var(--border));border-radius:10px;background:var(--accent-subtle)}
+  body.editing-overview .sc-edit-bar{display:flex}
+  .sc-edit-label{flex:1;min-width:0;display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-secondary)}
+  .sc-hidden-badge{display:none;font-size:10px;letter-spacing:.04em;padding:2px 7px;border-radius:999px;background:var(--tag-bg);color:var(--text-tertiary)}
+  .sc-edit-actions{display:flex;align-items:center;gap:4px}
+  .sc-move-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-secondary);cursor:pointer;transition:color .15s,border-color .15s}
+  .sc-move-btn:hover:not(:disabled){color:var(--accent);border-color:var(--accent)}
+  .sc-move-btn:disabled{opacity:.35;cursor:default}
+  .sc-toggle-btn{height:28px;padding:0 12px;margin-left:4px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:border-color .15s,filter .15s}
+  .sc-toggle-btn:hover{border-color:var(--text-tertiary)}
+  .sc-move-btn:focus-visible,.sc-toggle-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .sc-toggle-show{display:none}
+  .sc-is-hidden .sc-toggle-hide{display:none}
+  .sc-is-hidden .sc-toggle-show{display:inline}
+  .sc-is-hidden .sc-toggle-btn{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+  .sc-is-hidden .sc-toggle-btn:hover{filter:brightness(1.1)}
+  .sc-is-hidden .sc-hidden-badge{display:inline-block}
+  .sc-section.sc-is-hidden{display:none}
+  body.editing-overview .sc-section.sc-is-hidden{display:block}
+  body.editing-overview .sc-is-hidden > :not(.sc-edit-bar){opacity:.4;filter:grayscale(.7);pointer-events:none;user-select:none}
+  .fav-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px;text-align:center;gap:10px;cursor:pointer;transition:background .15s;border-radius:14px;text-decoration:none;color:inherit}
+  .fav-empty:hover{background:var(--bg-hover)}
+  .fav-empty-icon{width:44px;height:44px;border-radius:12px;background:var(--tag-bg);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;transition:border-color .15s}
+  .fav-empty:hover .fav-empty-icon{border-color:var(--accent)}
+  .fg-change-btn{background:none;border:none;cursor:pointer;font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.1em;font-family:inherit}
+  /* Now featuring — styled like a profile's favorite game */
+  .nf-card{position:relative;overflow:hidden;min-height:176px;border-radius:14px;border:1px solid var(--border);background:var(--bg-card)}
+  .nf-bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 20%;display:block;opacity:.45;border:none;border-radius:0}
+  .nf-overlay{position:absolute;inset:0;background:linear-gradient(to bottom,transparent 10%,rgba(13,13,15,.96) 78%)}
+  .nf-content{position:relative;display:flex;gap:16px;align-items:flex-end;padding:16px;min-height:176px;box-sizing:border-box}
+  .nf-cover{width:68px;height:91px;border-radius:9px;object-fit:cover;border:1px solid rgba(96,80,200,.4);box-shadow:0 4px 20px rgba(0,0,0,.8);flex-shrink:0;display:block;background:var(--tag-bg)}
+  .nf-info{flex:1;min-width:0}
+  .nf-label{display:flex;align-items:center;gap:6px;font-size:9px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.14em;margin-bottom:4px}
+  .nf-live-dot{width:6px;height:6px;border-radius:50%;background:#c4b5fd;box-shadow:0 0 0 3px rgba(196,181,253,.25)}
+  .nf-title{display:block;font-size:20px;font-weight:800;letter-spacing:-.3px;line-height:1.15;color:#f0ede8;text-decoration:none;margin-bottom:4px}
+  .nf-title:hover{color:#fff;text-decoration:none}
+  .nf-blurb{font-size:12px;color:rgba(240,237,232,.7);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:6px}
+  .nf-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:rgba(240,237,232,.65)}
+  .nf-stats strong{color:#f0ede8;font-weight:700}
+  .nf-cta{display:inline-block;margin-top:8px;font-size:12px;font-weight:600;color:#c4b5fd;text-decoration:none}
+  .nf-cta:hover{color:#ddd6fe;text-decoration:none}
+  .nf-score{flex-shrink:0;display:flex;align-items:center;justify-content:center;min-width:52px;height:46px;padding:0 8px;border-radius:12px;font-size:21px;font-weight:800;text-decoration:none}
+  @media (max-width:560px){.nf-cover{width:54px;height:72px}.nf-title{font-size:17px}.nf-score{min-width:44px;height:40px;font-size:18px}}
+  /* Video showcase — the same as a profile's */
+  .vs-label{display:inline-flex;align-items:center;gap:7px}
+  .vs-live-dot{width:7px;height:7px;border-radius:50%;background:#ff0033;box-shadow:0 0 0 3px color-mix(in srgb,#ff0033 25%,transparent)}
+  .vs-player{position:relative;display:block;width:100%;aspect-ratio:16/9;padding:0;border:0;border-radius:12px;overflow:hidden;background:var(--bg-hover);cursor:pointer}
+  .vs-player img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s ease,filter .2s;border:none;border-radius:0}
+  .vs-player:hover img{transform:scale(1.02);filter:brightness(.85)}
+  .vs-player:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .vs-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:64px;height:44px;border-radius:12px;background:rgba(15,15,15,.8);color:#fff;display:flex;align-items:center;justify-content:center;transition:background .15s}
+  .vs-player:hover .vs-play{background:#ff0033}
+  .vs-duration{position:absolute;right:8px;bottom:8px;font-size:12px;font-weight:600;color:#fff;background:rgba(0,0,0,.8);padding:2px 6px;border-radius:4px}
+  .vs-duration[hidden]{display:none}
+  .vs-player--playing{cursor:default}
+  .vs-player--playing iframe{width:100%;height:100%;border:0;display:block}
+  .vs-body[data-state="loading"] .vs-player{animation:vs-pulse 1.4s ease-in-out infinite}
+  .vs-body[data-state="loading"] .vs-play{opacity:.4}
+  @keyframes vs-pulse{50%{opacity:.6}}
+  .vs-info{display:flex;flex-direction:column;gap:3px;margin-top:12px;text-decoration:none;color:inherit}
+  .vs-title{font-size:15px;font-weight:600;color:var(--text-primary);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .vs-info:hover .vs-title{color:var(--accent)}
+  .vs-meta{font-size:12px;color:var(--text-tertiary)}
+  .vs-meta:empty{display:none}
+  .vs-unavailable{font-size:13px;color:var(--text-secondary);padding:14px;background:var(--bg-hover);border:1px dashed var(--border);border-radius:12px;line-height:1.5}
+  .vs-unavailable[hidden],.vs-body[hidden]{display:none}
+  .vs-inline-link{background:none;border:none;padding:0;font:inherit;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+  .modal-backdrop{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:20px}
+  .modal-backdrop.open{display:flex}
+  .modal{background:var(--bg-card);border:1px solid var(--border);border-radius:20px;width:100%;max-width:520px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.8)}
+  .modal-header{padding:20px 20px 0;display:flex;align-items:center;justify-content:space-between}
+  .modal-title{font-size:19px;font-weight:700;letter-spacing:-.2px}
+  .modal-close{background:none;border:none;cursor:pointer;color:var(--text-tertiary);padding:6px;display:flex;transition:color .15s;font-size:20px;line-height:1}
+  .modal-close:hover{color:var(--text-primary)}
+  .modal-search-input{width:100%;box-sizing:border-box;background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:14px;font-family:inherit;color:var(--text-primary);outline:none;transition:border-color .15s}
+  .modal-search-input:focus{border-color:var(--accent)}
+  .vsm-body{padding:8px 20px 4px;display:flex;flex-direction:column;gap:10px}
+  .vsm-option{display:flex;gap:12px;align-items:flex-start;padding:14px;border:1px solid var(--border);border-radius:12px;cursor:pointer;transition:border-color .15s,background .15s}
+  .vsm-option:hover{border-color:color-mix(in srgb,var(--accent) 50%,var(--border))}
+  .vsm-option:has(input[type=radio]:checked){border-color:var(--accent);background:var(--accent-subtle)}
+  .vsm-option input[type=radio]{accent-color:var(--accent);margin-top:3px;flex-shrink:0}
+  .vsm-option--disabled{cursor:default;opacity:.75}
+  .vsm-option--disabled:hover{border-color:var(--border)}
+  .vsm-option-text{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+  .vsm-option-title{font-size:14px;font-weight:600;color:var(--text-primary)}
+  .vsm-option-desc{font-size:12px;color:var(--text-secondary);line-height:1.45}
+  .vsm-url{margin-top:8px;font-size:13px;padding:9px 12px}
+  .vsm-error{font-size:13px;color:#f87171}
+  .vsm-error[hidden]{display:none}
+  .vsm-footer{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px 18px}
+  .vsm-btn{font-family:inherit;font-size:13px;font-weight:600;padding:8px 16px;border-radius:10px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);cursor:pointer}
+  .vsm-btn:hover{border-color:var(--accent)}
+  .vsm-btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+  .vsm-btn--primary:hover{filter:brightness(1.1)}
+  .vsm-btn:disabled{opacity:.6;cursor:default}
 </style>
 
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet" />
@@ -1480,324 +1647,462 @@ const groupOgDescription = group.description
 
   <!-- Overview tab -->
   <div class={`tab-panel${activeTab === "overview" ? " active" : ""}`} id="tab-overview">
+    {canEditOverview && (
+      <>
+        <div class="ov-customize-row">
+          <button type="button" class="ov-customize-btn" onclick="enterOverviewEdit()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+            Customize
+          </button>
+        </div>
+        <div class="edit-mode-bar" id="overviewEditBar">
+          <div class="edit-mode-label">
+            <div class="edit-mode-dot"></div>
+            Customizing overview — move or hide sections
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="edit-cancel-btn" onclick="cancelOverviewEdit()">Cancel</button>
+            <button class="edit-save-btn" id="saveOverviewBtn" onclick="saveOverview()">Save changes</button>
+          </div>
+        </div>
+      </>
+    )}
     <div class="two-col">
       <!-- Left: top games + podium -->
       <div>
-        {statsConf.show_announcements && canSeeMemberContent && (
-          <div class="card">
-            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-              <span>Announcements</span>
-              {isAdminOrOwner && (
-                <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
-              )}
-            </div>
-
-            {isAdminOrOwner && (
-              <div id="announcement-form" class="compose-form" style="display:none">
-                <textarea id="announcement-body" class="compose-input" placeholder="Share an update with the group…" maxlength="2000"></textarea>
-                <div class="compose-row">
-                  <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="postAnnouncement()">Post</button>
-                  <label class="compose-check">
-                    <input type="checkbox" id="announcement-pinned" style="accent-color:var(--accent)" />
-                    Pin to top
-                  </label>
-                </div>
-                <div id="announcement-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
-              </div>
-            )}
-
-            {announcements.length === 0
-              ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
-              : announcements.map((a: any) => (
-                <div class="announcement-item" data-announcement-id={a.id}>
-                  <div class="announcement-head">
-                    <div class="announcement-avatar">
-                      {a.profiles?.avatar_url
-                        ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
-                        : getInitials(a.profiles?.username ?? "?")}
+        {/* SHOWCASES — in the saved order; reordered/hidden in Customize (src/utils/groupShowcases.ts) */}
+        <div class="sc-stack" id="showcaseStack">
+        {overviewMain.map((key) => (
+          key === "now_featuring" ? (
+            <ShowcaseSection section="now_featuring" label={groupShowcaseLabel("now_featuring")} hidden={overviewHidden.has("now_featuring")} isOwner={canEditOverview}>
+              {nowFeaturing ? (
+                <div class="nf-card">
+                  {nowFeaturing.game.cover_img_url && <img class="nf-bg" src={igdbCover(nowFeaturing.game.cover_img_url, "t_screenshot_big")!} alt="" />}
+                  <div class="nf-overlay"></div>
+                  <div class="nf-content">
+                    <a href={`/games/${nowFeaturing.game.slug}`}>
+                      {nowFeaturing.game.cover_img_url
+                        ? <img class="nf-cover" src={igdbCover(nowFeaturing.game.cover_img_url)!} alt={nowFeaturing.game.title} />
+                        : <div class="nf-cover" />}
+                    </a>
+                    <div class="nf-info">
+                      <div class="nf-label"><span class="nf-live-dot" aria-hidden="true"></span>Now featuring</div>
+                      <a href={`/games/${nowFeaturing.game.slug}`} class="nf-title">{nowFeaturing.game.title}</a>
+                      {nowFeaturing.note && <div class="nf-blurb">"{nowFeaturing.note}"</div>}
+                      <div class="nf-stats">
+                        {nowFeaturing.stats.played > 0
+                          ? <>
+                              <span><strong>{nowFeaturing.stats.played}</strong> played</span>
+                              {nowFeaturing.stats.completedPct != null && <span><strong>{nowFeaturing.stats.completedPct}%</strong> finished</span>}
+                              {nowFeaturing.stats.avgHours != null && <span><strong>{formatHours(nowFeaturing.stats.avgHours)}</strong> avg</span>}
+                            </>
+                          : <span>Be the first in the group to play it</span>}
+                      </div>
+                      <a class="nf-cta" href={`/groups/${group.id}?tab=games`}>See it on the Games tab →</a>
                     </div>
-                    <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
-                    <span class="announcement-time">· {timeAgo(a.created_at)}</span>
-                    {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
-                  </div>
-                  <div class="announcement-body">{a.body}</div>
-                  {isAdminOrOwner && (
-                    <div class="announcement-actions">
-                      <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
-                      <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
-                    </div>
-                  )}
-                </div>
-              ))
-            }
-          </div>
-        )}
-
-        {statsConf.show_top_games && topGames.length > 0 && (
-          <div>
-            <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
-              <span>Most Played by Group</span>
-              <a href={`/groups/${group.id}/top-games`} class="see-all-link">See all →</a>
-            </div>
-            <div class="games-grid">
-              {topGames.map((g: any) => (
-                <a class="game-thumb" href={`/games/${g.game.slug}`} title={g.game.title}>
-                  {igdbCover(g.game.cover_img_url)
-                    ? <img src={igdbCover(g.game.cover_img_url, "t_cover_small")!} alt={g.game.title} loading="lazy" />
-                    : <div class="game-thumb-placeholder">{g.game.title}</div>
-                  }
-                  <span class="game-count-badge">{g.count}</span>
-                </a>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {statsConf.show_top_rated && topRatedGames.length > 0 && (
-          <div style="margin-top:24px">
-            <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
-              <span>Top Rated by Group</span>
-              <a href={`/groups/${group.id}/top-rated`} class="see-all-link">See all →</a>
-            </div>
-            <div class="podium">
-              {topRatedGames.length >= 2 ? (
-                <a class="podium-slot" href={`/games/${topRatedGames[1].game.slug}`}>
-                  {igdbCover(topRatedGames[1].game.cover_img_url, "t_cover_small")
-                    ? <img class="podium-img podium-img-sm" src={igdbCover(topRatedGames[1].game.cover_img_url, "t_cover_small")!} alt={topRatedGames[1].game.title} loading="lazy" />
-                    : <div class="podium-placeholder podium-img-sm">{topRatedGames[1].game.title}</div>
-                  }
-                  <div class="podium-medal">🥈</div>
-                  <div class={`score-badge ${scoreClass(topRatedGames[1].avgScore)}`}>{formatScore(topRatedGames[1].avgScore)}</div>
-                  <div class="podium-title-text">{topRatedGames[1].game.title}</div>
-                  <div class="podium-stand podium-stand-silver">2nd</div>
-                </a>
-              ) : <div class="podium-slot" />}
-              <a class="podium-slot podium-gold" href={`/games/${topRatedGames[0].game.slug}`}>
-                {igdbCover(topRatedGames[0].game.cover_img_url, "t_cover_small")
-                  ? <img class="podium-img podium-img-lg" src={igdbCover(topRatedGames[0].game.cover_img_url, "t_cover_small")!} alt={topRatedGames[0].game.title} loading="lazy" />
-                  : <div class="podium-placeholder podium-img-lg">{topRatedGames[0].game.title}</div>
-                }
-                <div class="podium-medal">🥇</div>
-                <div class={`score-badge ${scoreClass(topRatedGames[0].avgScore)}`}>{formatScore(topRatedGames[0].avgScore)}</div>
-                <div class="podium-title-text">{topRatedGames[0].game.title}</div>
-                <div class="podium-stand podium-stand-gold">1st</div>
-              </a>
-              {topRatedGames.length >= 3 ? (
-                <a class="podium-slot" href={`/games/${topRatedGames[2].game.slug}`}>
-                  {igdbCover(topRatedGames[2].game.cover_img_url, "t_cover_small")
-                    ? <img class="podium-img podium-img-sm" src={igdbCover(topRatedGames[2].game.cover_img_url, "t_cover_small")!} alt={topRatedGames[2].game.title} loading="lazy" />
-                    : <div class="podium-placeholder podium-img-sm">{topRatedGames[2].game.title}</div>
-                  }
-                  <div class="podium-medal">🥉</div>
-                  <div class={`score-badge ${scoreClass(topRatedGames[2].avgScore)}`}>{formatScore(topRatedGames[2].avgScore)}</div>
-                  <div class="podium-title-text">{topRatedGames[2].game.title}</div>
-                  <div class="podium-stand podium-stand-bronze">3rd</div>
-                </a>
-              ) : <div class="podium-slot" />}
-            </div>
-          </div>
-        )}
-
-        {statsConf.show_hot_take && hotTake && (
-          <div class="card" style="margin-top:24px">
-            <div class="card-title">Group's Hot Take</div>
-            <a class="hot-take-inner" href={`/games/${hotTake.game.slug}`}>
-              {igdbCover(hotTake.game.cover_img_url, "t_cover_small")
-                ? <img class="hot-take-cover" src={igdbCover(hotTake.game.cover_img_url, "t_cover_small")!} alt={hotTake.game.title} loading="lazy" />
-                : <div class="hot-take-cover" />
-              }
-              <div class="hot-take-body">
-                <div class="hot-take-title">{hotTake.game.title}</div>
-                <div class="hot-take-scores">
-                  <div>
-                    <div class={`score-badge ${scoreClass(hotTake.groupAvg)}`}>{formatScore(hotTake.groupAvg)}</div>
-                    <div class="hot-take-lbl">Group</div>
-                  </div>
-                  <div class="hot-take-vs">vs</div>
-                  <div>
-                    <div class={`score-badge ${scoreClass(hotTake.commAvg)}`}>{formatScore(hotTake.commAvg)}</div>
-                    <div class="hot-take-lbl">World</div>
+                    {nowFeaturing.stats.avgScore != null && (
+                      <a class={`nf-score ${scoreClass(nowFeaturing.stats.avgScore)}`} href={`/groups/${group.id}?tab=feed&game=${nowFeaturing.game.id}`}
+                        title={`Community rating from ${nowFeaturing.stats.reviewCount} review${nowFeaturing.stats.reviewCount === 1 ? "" : "s"}`}>
+                        {formatScore(nowFeaturing.stats.avgScore)}
+                      </a>
+                    )}
                   </div>
                 </div>
-                <div class={`hot-take-delta ${hotTake.delta > 0 ? "delta-up" : "delta-down"}`}>
-                  {hotTake.delta > 0 ? "+" : ""}{formatScore(hotTake.delta)} vs the world
-                </div>
-              </div>
-            </a>
-          </div>
-        )}
-
-        {((statsConf.show_consensus && consensusRows.length > 0) || (statsConf.show_divergent && divergentRows.length > 0)) && (
-          <div class="card" style="margin-top:14px">
-            <div class="agreement-grid">
-              {statsConf.show_consensus && consensusRows.length > 0 && (
-                <div class="agreement-col">
-                  <div class="mini-card-header">
-                    <div class="card-title" style="margin-bottom:0">Consensus Picks</div>
-                    <a class="see-all-link" href={`/groups/${group.id}/consensus`}>See all →</a>
-                  </div>
-                  <div class="mini-rank-list">
-                    {consensusRows.map((r: any, i: number) => {
-                      const avg = +r.avg_score.toFixed(1);
-                      return (
-                        <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                          <div class="mini-rank-num">{i + 1}</div>
-                          {igdbCover(r.cover_img_url, "t_thumb")
-                            ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                            : <div class="mini-rank-cover mini-rank-cover-placeholder" />
-                          }
-                          <div class="mini-rank-info">
-                            <div class="mini-rank-title">{r.title}</div>
-                            <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
-                          </div>
-                          <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                        </a>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              {statsConf.show_divergent && divergentRows.length > 0 && (
-                <div class="agreement-col">
-                  <div class="mini-card-header">
-                    <div class="card-title" style="margin-bottom:0">Most Divisive</div>
-                    <a class="see-all-link" href={`/groups/${group.id}/divergent`}>See all →</a>
-                  </div>
-                  <div class="mini-rank-list">
-                    {divergentRows.map((r: any, i: number) => {
-                      const avg = +r.avg_score.toFixed(1);
-                      return (
-                        <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                          <div class="mini-rank-num">{i + 1}</div>
-                          {igdbCover(r.cover_img_url, "t_thumb")
-                            ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                            : <div class="mini-rank-cover mini-rank-cover-placeholder" />
-                          }
-                          <div class="mini-rank-info">
-                            <div class="mini-rank-title">{r.title}</div>
-                            <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
-                          </div>
-                          <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                        </a>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {statsConf.show_hidden_gems && hiddenGemRows.length > 0 && (
-          <div class="card" style="margin-top:14px">
-            <div class="mini-card-header">
-              <div class="card-title" style="margin-bottom:0">Hidden Gems</div>
-              <a class="see-all-link" href={`/groups/${group.id}/hidden-gems`}>See all →</a>
-            </div>
-            <div class="mini-rank-list">
-              {hiddenGemRows.map((r: any, i: number) => {
-                const avg = +r.group_avg.toFixed(1);
-                return (
-                  <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                    <div class="mini-rank-num">{i + 1}</div>
-                    {igdbCover(r.cover_img_url, "t_thumb")
-                      ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                      : <div class="mini-rank-cover mini-rank-cover-placeholder" />
-                    }
-                    <div class="mini-rank-info">
-                      <div class="mini-rank-title">{r.title}</div>
-                      <div class="mini-rank-meta">{r.group_count} group review{r.group_count !== 1 ? 's' : ''} · {r.community_count} elsewhere</div>
-                    </div>
-                    <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
+              ) : canEditOverview && statsConf.show_games ? (
+                <div class="card">
+                  <div class="card-title">Now featuring</div>
+                  <a class="fav-empty" href={`/groups/${group.id}?tab=games`}>
+                    <div class="fav-empty-icon">🎮</div>
+                    <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Feature a game</div>
+                    <div style="font-size:12px;color:var(--text-tertiary)">Your latest featured game shows here, with how the group did on it</div>
                   </a>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {statsConf.show_critic_spectrum && memberAvgScores.length >= 2 && (
-          <div class="card" style="margin-top:14px">
-            <div class="card-title">Critic Spectrum</div>
-            {scoreRange && (
-              <div class="range-row">
-                <a class="range-badge" href={`/reviewers/${scoreRange.toughest.username}`}>
-                  <div class="range-avatar">
-                    {scoreRange.toughest.avatar_url
-                      ? <img src={scoreRange.toughest.avatar_url} alt={scoreRange.toughest.username} />
-                      : getInitials(scoreRange.toughest.username)}
+                </div>
+              ) : null}
+            </ShowcaseSection>
+          ) :
+          key === "video" ? (
+            /* VIDEO — featured: id rendered here; latest: filled by JS from /api/groups/latest-video */
+            <ShowcaseSection section="video" label={groupShowcaseLabel("video")} hidden={overviewHidden.has("video")} isOwner={canEditOverview}>
+              {showcaseVideoMode ? (
+                <div class="card" id="videoShowcaseCard" data-mode={showcaseVideoMode} data-video-id={showcaseVideoId ?? ""} data-group-id={group.id}>
+                  <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+                    <span class="vs-label">
+                      {showcaseVideoMode === "latest" && <span class="vs-live-dot" aria-hidden="true"></span>}
+                      {showcaseVideoMode === "latest" ? "Latest video" : "Featured video"}
+                    </span>
+                    {canEditOverview && <button class="fg-change-btn" onclick="openVideoShowcasePicker()">Change</button>}
                   </div>
-                  <div class="range-info">
-                    <div class="range-lbl">Toughest Grader</div>
-                    <div class="range-name">@{scoreRange.toughest.username} · {formatScore(scoreRange.toughest.avgScore)}</div>
+                  <div class="vs-body" data-state={showcaseVideoMode === "featured" ? "ready" : "loading"}>
+                    <button type="button" class="vs-player" aria-label="Play video" onclick="playShowcaseVideo()">
+                      {showcaseVideoId && <img src={`https://i.ytimg.com/vi/${showcaseVideoId}/hqdefault.jpg`} alt="" loading="lazy" />}
+                      <span class="vs-play" aria-hidden="true">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      </span>
+                      <span class="vs-duration" hidden></span>
+                    </button>
+                    <a class="vs-info" href={showcaseVideoId ? `https://www.youtube.com/watch?v=${showcaseVideoId}` : (videoOwner?.youtubeUrl ?? "#")} target="_blank" rel="noopener noreferrer">
+                      <span class="vs-title">{showcaseVideoMode === "latest" ? "Loading latest upload…" : "YouTube video"}</span>
+                      <span class="vs-meta"></span>
+                    </a>
                   </div>
-                </a>
-                <a class="range-badge" href={`/reviewers/${scoreRange.easiest.username}`}>
-                  <div class="range-avatar">
-                    {scoreRange.easiest.avatar_url
-                      ? <img src={scoreRange.easiest.avatar_url} alt={scoreRange.easiest.username} />
-                      : getInitials(scoreRange.easiest.username)}
+                  <div class="vs-unavailable" hidden>
+                    {canEditOverview
+                      ? <>We couldn’t find any uploads on the owner’s YouTube channel. <button type="button" class="vs-inline-link" onclick="openVideoShowcasePicker()">Feature a specific video</button> instead?</>
+                      : "No videos yet."}
                   </div>
-                  <div class="range-info">
-                    <div class="range-lbl">Easiest Grader</div>
-                    <div class="range-name">@{scoreRange.easiest.username} · {formatScore(scoreRange.easiest.avgScore)}</div>
+                </div>
+              ) : canEditOverview ? (
+                <div class="card">
+                  <div class="card-title">Video</div>
+                  <div class="fav-empty" onclick="openVideoShowcasePicker()">
+                    <div class="fav-empty-icon">🎬</div>
+                    <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Showcase a video</div>
+                    <div style="font-size:12px;color:var(--text-tertiary)">Feature a favorite or always show the latest upload</div>
                   </div>
-                </a>
+                </div>
+              ) : null}
+            </ShowcaseSection>
+          ) :
+          key === "announcements" ? (
+            <ShowcaseSection section="announcements" label={groupShowcaseLabel("announcements")} hidden={overviewHidden.has("announcements")} isOwner={canEditOverview}>
+          {canSeeMemberContent && (
+            <div class="card">
+              <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Announcements</span>
+                {isAdminOrOwner && (
+                  <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+                )}
               </div>
-            )}
-            <div class="spectrum-wrap">
-              <div class="spectrum-edge-labels"><span>Harsh</span><span>Generous</span></div>
-              <div class="spectrum-track">
-                <div class="spectrum-bar"></div>
-                {(memberAvgScores as any[]).map((m: any) => {
-                  const pct = ((m.avgScore - 1) / 9) * 100;
-                  const isYou = currentProfile?.id === m.id;
+
+              {isAdminOrOwner && (
+                <div id="announcement-form" class="compose-form" style="display:none">
+                  <textarea id="announcement-body" class="compose-input" placeholder="Share an update with the group…" maxlength="2000"></textarea>
+                  <div class="compose-row">
+                    <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="postAnnouncement()">Post</button>
+                    <label class="compose-check">
+                      <input type="checkbox" id="announcement-pinned" style="accent-color:var(--accent)" />
+                      Pin to top
+                    </label>
+                  </div>
+                  <div id="announcement-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+                </div>
+              )}
+
+              {announcements.length === 0
+                ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
+                : announcements.map((a: any) => (
+                  <div class="announcement-item" data-announcement-id={a.id}>
+                    <div class="announcement-head">
+                      <div class="announcement-avatar">
+                        {a.profiles?.avatar_url
+                          ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
+                          : getInitials(a.profiles?.username ?? "?")}
+                      </div>
+                      <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
+                      <span class="announcement-time">· {timeAgo(a.created_at)}</span>
+                      {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
+                    </div>
+                    <div class="announcement-body">{a.body}</div>
+                    {isAdminOrOwner && (
+                      <div class="announcement-actions">
+                        <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
+                        <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
+                      </div>
+                    )}
+                  </div>
+                ))
+              }
+            </div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "top_games" ? (
+            <ShowcaseSection section="top_games" label={groupShowcaseLabel("top_games")} hidden={overviewHidden.has("top_games")} isOwner={canEditOverview}>
+          {topGames.length > 0 && (
+            <div>
+              <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Most Played by Group</span>
+                <a href={`/groups/${group.id}/top-games`} class="see-all-link">See all →</a>
+              </div>
+              <div class="games-grid">
+                {topGames.map((g: any) => (
+                  <a class="game-thumb" href={`/games/${g.game.slug}`} title={g.game.title}>
+                    {igdbCover(g.game.cover_img_url)
+                      ? <img src={igdbCover(g.game.cover_img_url, "t_cover_small")!} alt={g.game.title} loading="lazy" />
+                      : <div class="game-thumb-placeholder">{g.game.title}</div>
+                    }
+                    <span class="game-count-badge">{g.count}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "top_rated" ? (
+            <ShowcaseSection section="top_rated" label={groupShowcaseLabel("top_rated")} hidden={overviewHidden.has("top_rated")} isOwner={canEditOverview}>
+          {topRatedGames.length > 0 && (
+            <div>
+              <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Top Rated by Group</span>
+                <a href={`/groups/${group.id}/top-rated`} class="see-all-link">See all →</a>
+              </div>
+              <div class="podium">
+                {topRatedGames.length >= 2 ? (
+                  <a class="podium-slot" href={`/games/${topRatedGames[1].game.slug}`}>
+                    {igdbCover(topRatedGames[1].game.cover_img_url, "t_cover_small")
+                      ? <img class="podium-img podium-img-sm" src={igdbCover(topRatedGames[1].game.cover_img_url, "t_cover_small")!} alt={topRatedGames[1].game.title} loading="lazy" />
+                      : <div class="podium-placeholder podium-img-sm">{topRatedGames[1].game.title}</div>
+                    }
+                    <div class="podium-medal">🥈</div>
+                    <div class={`score-badge ${scoreClass(topRatedGames[1].avgScore)}`}>{formatScore(topRatedGames[1].avgScore)}</div>
+                    <div class="podium-title-text">{topRatedGames[1].game.title}</div>
+                    <div class="podium-stand podium-stand-silver">2nd</div>
+                  </a>
+                ) : <div class="podium-slot" />}
+                <a class="podium-slot podium-gold" href={`/games/${topRatedGames[0].game.slug}`}>
+                  {igdbCover(topRatedGames[0].game.cover_img_url, "t_cover_small")
+                    ? <img class="podium-img podium-img-lg" src={igdbCover(topRatedGames[0].game.cover_img_url, "t_cover_small")!} alt={topRatedGames[0].game.title} loading="lazy" />
+                    : <div class="podium-placeholder podium-img-lg">{topRatedGames[0].game.title}</div>
+                  }
+                  <div class="podium-medal">🥇</div>
+                  <div class={`score-badge ${scoreClass(topRatedGames[0].avgScore)}`}>{formatScore(topRatedGames[0].avgScore)}</div>
+                  <div class="podium-title-text">{topRatedGames[0].game.title}</div>
+                  <div class="podium-stand podium-stand-gold">1st</div>
+                </a>
+                {topRatedGames.length >= 3 ? (
+                  <a class="podium-slot" href={`/games/${topRatedGames[2].game.slug}`}>
+                    {igdbCover(topRatedGames[2].game.cover_img_url, "t_cover_small")
+                      ? <img class="podium-img podium-img-sm" src={igdbCover(topRatedGames[2].game.cover_img_url, "t_cover_small")!} alt={topRatedGames[2].game.title} loading="lazy" />
+                      : <div class="podium-placeholder podium-img-sm">{topRatedGames[2].game.title}</div>
+                    }
+                    <div class="podium-medal">🥉</div>
+                    <div class={`score-badge ${scoreClass(topRatedGames[2].avgScore)}`}>{formatScore(topRatedGames[2].avgScore)}</div>
+                    <div class="podium-title-text">{topRatedGames[2].game.title}</div>
+                    <div class="podium-stand podium-stand-bronze">3rd</div>
+                  </a>
+                ) : <div class="podium-slot" />}
+              </div>
+            </div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "hot_take" ? (
+            <ShowcaseSection section="hot_take" label={groupShowcaseLabel("hot_take")} hidden={overviewHidden.has("hot_take")} isOwner={canEditOverview}>
+          {hotTake && (
+            <div class="card">
+              <div class="card-title">Group's Hot Take</div>
+              <a class="hot-take-inner" href={`/games/${hotTake.game.slug}`}>
+                {igdbCover(hotTake.game.cover_img_url, "t_cover_small")
+                  ? <img class="hot-take-cover" src={igdbCover(hotTake.game.cover_img_url, "t_cover_small")!} alt={hotTake.game.title} loading="lazy" />
+                  : <div class="hot-take-cover" />
+                }
+                <div class="hot-take-body">
+                  <div class="hot-take-title">{hotTake.game.title}</div>
+                  <div class="hot-take-scores">
+                    <div>
+                      <div class={`score-badge ${scoreClass(hotTake.groupAvg)}`}>{formatScore(hotTake.groupAvg)}</div>
+                      <div class="hot-take-lbl">Group</div>
+                    </div>
+                    <div class="hot-take-vs">vs</div>
+                    <div>
+                      <div class={`score-badge ${scoreClass(hotTake.commAvg)}`}>{formatScore(hotTake.commAvg)}</div>
+                      <div class="hot-take-lbl">World</div>
+                    </div>
+                  </div>
+                  <div class={`hot-take-delta ${hotTake.delta > 0 ? "delta-up" : "delta-down"}`}>
+                    {hotTake.delta > 0 ? "+" : ""}{formatScore(hotTake.delta)} vs the world
+                  </div>
+                </div>
+              </a>
+            </div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "agreement" ? (
+            <ShowcaseSection section="agreement" label={groupShowcaseLabel("agreement")} hidden={overviewHidden.has("agreement")} isOwner={canEditOverview}>
+          {((consensusRows.length > 0) || (divergentRows.length > 0)) && (
+            <div class="card">
+              <div class="agreement-grid">
+                {consensusRows.length > 0 && (
+                  <div class="agreement-col">
+                    <div class="mini-card-header">
+                      <div class="card-title" style="margin-bottom:0">Consensus Picks</div>
+                      <a class="see-all-link" href={`/groups/${group.id}/consensus`}>See all →</a>
+                    </div>
+                    <div class="mini-rank-list">
+                      {consensusRows.map((r: any, i: number) => {
+                        const avg = +r.avg_score.toFixed(1);
+                        return (
+                          <a class="mini-rank-item" href={`/games/${r.slug}`}>
+                            <div class="mini-rank-num">{i + 1}</div>
+                            {igdbCover(r.cover_img_url, "t_thumb")
+                              ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
+                              : <div class="mini-rank-cover mini-rank-cover-placeholder" />
+                            }
+                            <div class="mini-rank-info">
+                              <div class="mini-rank-title">{r.title}</div>
+                              <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
+                            </div>
+                            <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {divergentRows.length > 0 && (
+                  <div class="agreement-col">
+                    <div class="mini-card-header">
+                      <div class="card-title" style="margin-bottom:0">Most Divisive</div>
+                      <a class="see-all-link" href={`/groups/${group.id}/divergent`}>See all →</a>
+                    </div>
+                    <div class="mini-rank-list">
+                      {divergentRows.map((r: any, i: number) => {
+                        const avg = +r.avg_score.toFixed(1);
+                        return (
+                          <a class="mini-rank-item" href={`/games/${r.slug}`}>
+                            <div class="mini-rank-num">{i + 1}</div>
+                            {igdbCover(r.cover_img_url, "t_thumb")
+                              ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
+                              : <div class="mini-rank-cover mini-rank-cover-placeholder" />
+                            }
+                            <div class="mini-rank-info">
+                              <div class="mini-rank-title">{r.title}</div>
+                              <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
+                            </div>
+                            <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "hidden_gems" ? (
+            <ShowcaseSection section="hidden_gems" label={groupShowcaseLabel("hidden_gems")} hidden={overviewHidden.has("hidden_gems")} isOwner={canEditOverview}>
+          {hiddenGemRows.length > 0 && (
+            <div class="card">
+              <div class="mini-card-header">
+                <div class="card-title" style="margin-bottom:0">Hidden Gems</div>
+                <a class="see-all-link" href={`/groups/${group.id}/hidden-gems`}>See all →</a>
+              </div>
+              <div class="mini-rank-list">
+                {hiddenGemRows.map((r: any, i: number) => {
+                  const avg = +r.group_avg.toFixed(1);
                   return (
-                    <a
-                      href={`/reviewers/${m.username}`}
-                      class:list={["spectrum-avatar", { "is-you": isYou }]}
-                      style={`left:${pct}%`}
-                      title={`@${m.username} — avg ${formatScore(m.avgScore)}${isYou ? ' (you)' : ''}`}
-                    >
-                      {m.avatar_url
-                        ? <img src={m.avatar_url} alt={m.username} />
-                        : <span>{getInitials(m.username)}</span>
+                    <a class="mini-rank-item" href={`/games/${r.slug}`}>
+                      <div class="mini-rank-num">{i + 1}</div>
+                      {igdbCover(r.cover_img_url, "t_thumb")
+                        ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
+                        : <div class="mini-rank-cover mini-rank-cover-placeholder" />
                       }
+                      <div class="mini-rank-info">
+                        <div class="mini-rank-title">{r.title}</div>
+                        <div class="mini-rank-meta">{r.group_count} group review{r.group_count !== 1 ? 's' : ''} · {r.community_count} elsewhere</div>
+                      </div>
+                      <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
                     </a>
                   );
                 })}
-                <div class="spectrum-ticks">
-                  <span style="left:0%">1</span>
-                  <span style="left:44.4%">5</span>
-                  <span style="left:100%">10</span>
+              </div>
+            </div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "critic_spectrum" ? (
+            <ShowcaseSection section="critic_spectrum" label={groupShowcaseLabel("critic_spectrum")} hidden={overviewHidden.has("critic_spectrum")} isOwner={canEditOverview}>
+          {memberAvgScores.length >= 2 && (
+            <div class="card">
+              <div class="card-title">Critic Spectrum</div>
+              {scoreRange && (
+                <div class="range-row">
+                  <a class="range-badge" href={`/reviewers/${scoreRange.toughest.username}`}>
+                    <div class="range-avatar">
+                      {scoreRange.toughest.avatar_url
+                        ? <img src={scoreRange.toughest.avatar_url} alt={scoreRange.toughest.username} />
+                        : getInitials(scoreRange.toughest.username)}
+                    </div>
+                    <div class="range-info">
+                      <div class="range-lbl">Toughest Grader</div>
+                      <div class="range-name">@{scoreRange.toughest.username} · {formatScore(scoreRange.toughest.avgScore)}</div>
+                    </div>
+                  </a>
+                  <a class="range-badge" href={`/reviewers/${scoreRange.easiest.username}`}>
+                    <div class="range-avatar">
+                      {scoreRange.easiest.avatar_url
+                        ? <img src={scoreRange.easiest.avatar_url} alt={scoreRange.easiest.username} />
+                        : getInitials(scoreRange.easiest.username)}
+                    </div>
+                    <div class="range-info">
+                      <div class="range-lbl">Easiest Grader</div>
+                      <div class="range-name">@{scoreRange.easiest.username} · {formatScore(scoreRange.easiest.avgScore)}</div>
+                    </div>
+                  </a>
+                </div>
+              )}
+              <div class="spectrum-wrap">
+                <div class="spectrum-edge-labels"><span>Harsh</span><span>Generous</span></div>
+                <div class="spectrum-track">
+                  <div class="spectrum-bar"></div>
+                  {(memberAvgScores as any[]).map((m: any) => {
+                    const pct = ((m.avgScore - 1) / 9) * 100;
+                    const isYou = currentProfile?.id === m.id;
+                    return (
+                      <a
+                        href={`/reviewers/${m.username}`}
+                        class:list={["spectrum-avatar", { "is-you": isYou }]}
+                        style={`left:${pct}%`}
+                        title={`@${m.username} — avg ${formatScore(m.avgScore)}${isYou ? ' (you)' : ''}`}
+                      >
+                        {m.avatar_url
+                          ? <img src={m.avatar_url} alt={m.username} />
+                          : <span>{getInitials(m.username)}</span>
+                        }
+                      </a>
+                    );
+                  })}
+                  <div class="spectrum-ticks">
+                    <span style="left:0%">1</span>
+                    <span style="left:44.4%">5</span>
+                    <span style="left:100%">10</span>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
-
-        {statsConf.show_score_distribution && scoreDistRows.some((r) => r.review_count > 0) && (
-          <div class="card" style="margin-top:14px">
-            <div class="card-title">Score Distribution</div>
-            <div class="hist-wrap">
-              {(() => {
-                const max = Math.max(...scoreDistRows.map((r) => r.review_count));
-                return scoreDistRows.map((r) => (
-                  <div class="hist-col" title={`Score ${r.score}: ${r.review_count} review${r.review_count !== 1 ? 's' : ''}`}>
-                    <div class="hist-col-fill">
-                      <div class={`hist-bar ${scoreClass(r.score)}`} style={`height:${max ? Math.max((r.review_count / max) * 100, r.review_count > 0 ? 3 : 0) : 0}%`}></div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "score_distribution" ? (
+            <ShowcaseSection section="score_distribution" label={groupShowcaseLabel("score_distribution")} hidden={overviewHidden.has("score_distribution")} isOwner={canEditOverview}>
+          {scoreDistRows.some((r) => r.review_count > 0) && (
+            <div class="card">
+              <div class="card-title">Score Distribution</div>
+              <div class="hist-wrap">
+                {(() => {
+                  const max = Math.max(...scoreDistRows.map((r) => r.review_count));
+                  return scoreDistRows.map((r) => (
+                    <div class="hist-col" title={`Score ${r.score}: ${r.review_count} review${r.review_count !== 1 ? 's' : ''}`}>
+                      <div class="hist-col-fill">
+                        <div class={`hist-bar ${scoreClass(r.score)}`} style={`height:${max ? Math.max((r.review_count / max) * 100, r.review_count > 0 ? 3 : 0) : 0}%`}></div>
+                      </div>
+                      <div class="hist-lbl">{r.score}</div>
                     </div>
-                    <div class="hist-lbl">{r.score}</div>
-                  </div>
-                ));
-              })()}
+                  ));
+                })()}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+            </ShowcaseSection>
+          ) :
+          null
+        ))}
+        </div>
 
-        {topGames.length === 0 && (activityReviews ?? []).length === 0 && (
-          <div class="empty-tab">No activity yet — members need to log reviews or sessions.</div>
-        )}
       </div>
 
       <!-- Right sidebar -->
@@ -1812,160 +2117,172 @@ const groupOgDescription = group.description
           </dl>
         </div>
 
-        <!-- Recent reviews -->
-        {statsConf.show_recent_reviews && (activityReviews ?? []).length > 0 && (
-          <div class="card">
-            <div class="card-title">Recent Reviews</div>
-            {(activityReviews ?? []).slice(0, 5).map((r: any) => (
-              <div class="activity-item">
-                <a href={`/games/${r.games?.slug}`} class="mini-cover">
-                  {igdbCover(r.games?.cover_img_url, "t_thumb")
-                    ? <img src={igdbCover(r.games?.cover_img_url, "t_thumb")!} alt={r.games?.title} loading="lazy" />
-                    : <span style="font-size:14px">🎮</span>
-                  }
-                </a>
-                <div style="flex:1;min-width:0">
-                  <a href={`/reviewers/${r.profiles?.username}`} style="font-size:12px;font-weight:600;color:inherit">@{r.profiles?.username}</a>
-                  <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
-                    <a href={`/games/${r.games?.slug}`} style="color:inherit">{r.games?.title}</a>
-                  </div>
-                  <div style="font-size:11px;color:var(--text-tertiary)">{timeAgo(r.published_at)}</div>
-                </div>
-                <div class={`mini-score ${scoreClass(r.score)}`}>{r.score}</div>
-              </div>
-            ))}
-            {(activityReviews ?? []).length > 5 && (
-              <div id="more-reviews" style="display:none">
-                {(activityReviews ?? []).slice(5).map((r: any) => (
-                  <div class="activity-item">
-                    <a href={`/games/${r.games?.slug}`} class="mini-cover">
-                      {igdbCover(r.games?.cover_img_url, "t_thumb")
-                        ? <img src={igdbCover(r.games?.cover_img_url, "t_thumb")!} alt={r.games?.title} loading="lazy" />
-                        : <span style="font-size:14px">🎮</span>
-                      }
-                    </a>
-                    <div style="flex:1;min-width:0">
-                      <a href={`/reviewers/${r.profiles?.username}`} style="font-size:12px;font-weight:600;color:inherit">@{r.profiles?.username}</a>
-                      <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
-                        <a href={`/games/${r.games?.slug}`} style="color:inherit">{r.games?.title}</a>
-                      </div>
-                      <div style="font-size:11px;color:var(--text-tertiary)">{timeAgo(r.published_at)}</div>
+        <div class="sc-stack" id="showcaseStackSide">
+        {overviewSide.map((key) => (
+          key === "recent_reviews" ? (
+            <ShowcaseSection section="recent_reviews" label={groupShowcaseLabel("recent_reviews")} hidden={overviewHidden.has("recent_reviews")} isOwner={canEditOverview}>
+                  {(activityReviews ?? []).length > 0 && (
+            <div class="card">
+              <div class="card-title">Recent Reviews</div>
+              {(activityReviews ?? []).slice(0, 5).map((r: any) => (
+                <div class="activity-item">
+                  <a href={`/games/${r.games?.slug}`} class="mini-cover">
+                    {igdbCover(r.games?.cover_img_url, "t_thumb")
+                      ? <img src={igdbCover(r.games?.cover_img_url, "t_thumb")!} alt={r.games?.title} loading="lazy" />
+                      : <span style="font-size:14px">🎮</span>
+                    }
+                  </a>
+                  <div style="flex:1;min-width:0">
+                    <a href={`/reviewers/${r.profiles?.username}`} style="font-size:12px;font-weight:600;color:inherit">@{r.profiles?.username}</a>
+                    <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
+                      <a href={`/games/${r.games?.slug}`} style="color:inherit">{r.games?.title}</a>
                     </div>
-                    <div class={`mini-score ${scoreClass(r.score)}`}>{r.score}</div>
+                    <div style="font-size:11px;color:var(--text-tertiary)">{timeAgo(r.published_at)}</div>
                   </div>
-                ))}
-              </div>
-            )}
-            {(activityReviews ?? []).length > 5 && (
-              <button id="see-more-reviews-btn" data-label={`See ${(activityReviews ?? []).length - 5} more`} onclick="toggleMoreReviews()" style="display:block;width:100%;margin-top:8px;padding:6px;border:none;border-radius:8px;background:var(--tag-bg);color:var(--accent);font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;text-align:center">
-                See {(activityReviews ?? []).length - 5} more
-              </button>
-            )}
-          </div>
-        )}
-
-        <!-- Want to Play -->
-        {statsConf.show_watchlist && <div class="card">
-          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span>Want to Play</span>
-            {isMember && (
-              <button onclick="openWatchlistSearch()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ Add</button>
-            )}
-          </div>
-          <div id="wl-search-box" style="display:none;margin-bottom:10px">
-            <div style="display:flex;gap:6px">
-              <input id="wl-game-input" class="invite-user-input" style="font-size:12px;padding:6px 10px" type="text" placeholder="Search for a game…" autocomplete="off" />
-              <button class="btn-copy" style="font-size:11px;padding:6px 10px" onclick="searchWatchlistGame()">Go</button>
-            </div>
-            <div id="wl-search-results" style="margin-top:6px;display:flex;flex-direction:column;gap:4px;"></div>
-          </div>
-          {(watchlistData ?? []).length === 0
-            ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No games added yet.</div>
-            : (watchlistData ?? []).slice(0, 8).map((w: any) => (
-              <div class="wl-item" data-wl-id={w.id} data-game-id={w.game_id}>
-                {igdbCover(w.games?.cover_img_url, "t_thumb")
-                  ? <img class="wl-cover" src={igdbCover(w.games?.cover_img_url, "t_thumb")!} alt={w.games?.title} loading="lazy" />
-                  : <div class="wl-cover" />
-                }
-                <a class="wl-title" href={`/games/${w.games?.slug}`} style="color:inherit;text-decoration:none">{w.games?.title}</a>
-                {isMember && (
-                  <button class="wl-remove" title="Remove" onclick={`removeFromWatchlist('${w.game_id}')`}>×</button>
-                )}
-              </div>
-            ))
-          }
-          {(watchlistData ?? []).length > 8 && (
-            <div style="font-size:12px;color:var(--text-tertiary);padding-top:8px;text-align:center">+{(watchlistData ?? []).length - 8} more</div>
-          )}
-        </div>}
-
-        <!-- Polls -->
-        {statsConf.show_polls && canSeeMemberContent && (
-          <div class="card">
-            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-              <span>Polls</span>
-              {isAdminOrOwner && (
-                <button onclick="togglePollForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+                  <div class={`mini-score ${scoreClass(r.score)}`}>{r.score}</div>
+                </div>
+              ))}
+              {(activityReviews ?? []).length > 5 && (
+                <div id="more-reviews" style="display:none">
+                  {(activityReviews ?? []).slice(5).map((r: any) => (
+                    <div class="activity-item">
+                      <a href={`/games/${r.games?.slug}`} class="mini-cover">
+                        {igdbCover(r.games?.cover_img_url, "t_thumb")
+                          ? <img src={igdbCover(r.games?.cover_img_url, "t_thumb")!} alt={r.games?.title} loading="lazy" />
+                          : <span style="font-size:14px">🎮</span>
+                        }
+                      </a>
+                      <div style="flex:1;min-width:0">
+                        <a href={`/reviewers/${r.profiles?.username}`} style="font-size:12px;font-weight:600;color:inherit">@{r.profiles?.username}</a>
+                        <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
+                          <a href={`/games/${r.games?.slug}`} style="color:inherit">{r.games?.title}</a>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-tertiary)">{timeAgo(r.published_at)}</div>
+                      </div>
+                      <div class={`mini-score ${scoreClass(r.score)}`}>{r.score}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(activityReviews ?? []).length > 5 && (
+                <button id="see-more-reviews-btn" data-label={`See ${(activityReviews ?? []).length - 5} more`} onclick="toggleMoreReviews()" style="display:block;width:100%;margin-top:8px;padding:6px;border:none;border-radius:8px;background:var(--tag-bg);color:var(--accent);font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;text-align:center">
+                  See {(activityReviews ?? []).length - 5} more
+                </button>
               )}
             </div>
-
-            {isAdminOrOwner && (
-              <div id="poll-form" class="compose-form" style="display:none">
-                <input id="poll-question" class="compose-input" style="min-height:auto" type="text" placeholder="Ask the group something…" maxlength="300" />
-                <div id="poll-options" style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
-                  <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
-                  <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
-                </div>
-                <div class="compose-row">
-                  <button class="btn-copy" style="font-size:11px;padding:5px 10px" onclick="addPollOption()">+ Option</button>
-                  <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="createPoll()">Create Poll</button>
-                </div>
-                <div id="poll-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+          )}
+            </ShowcaseSection>
+          ) :
+          key === "want_to_play" ? (
+            <ShowcaseSection section="want_to_play" label={groupShowcaseLabel("want_to_play")} hidden={overviewHidden.has("want_to_play")} isOwner={canEditOverview}>
+                  {<div class="card">
+            <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Want to Play</span>
+              {isMember && (
+                <button onclick="openWatchlistSearch()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ Add</button>
+              )}
+            </div>
+            <div id="wl-search-box" style="display:none;margin-bottom:10px">
+              <div style="display:flex;gap:6px">
+                <input id="wl-game-input" class="invite-user-input" style="font-size:12px;padding:6px 10px" type="text" placeholder="Search for a game…" autocomplete="off" />
+                <button class="btn-copy" style="font-size:11px;padding:6px 10px" onclick="searchWatchlistGame()">Go</button>
               </div>
-            )}
-
-            {polls.length === 0
-              ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No polls yet.</div>
-              : polls.map((p: any) => {
-                const hasVoted = !!p.myOptionId;
-                const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
-                const showResults = hasVoted || p.closed;
-                return (
-                  <div class="poll-item" data-poll-id={p.id}>
-                    <div class="poll-question">{p.question}</div>
-                    {showResults
-                      ? p.options.map((o: any) => {
-                          const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
-                          const isMine = o.id === p.myOptionId;
-                          return (
-                            <div class={`poll-result${isMine ? " voted" : ""}`}>
-                              <div class="poll-result-bar" style={`width:${pct}%`}></div>
-                              <div class="poll-result-label">
-                                <span>{o.label}{isMine ? " ✓" : ""}</span>
-                                <span>{pct}% ({o.count})</span>
-                              </div>
-                            </div>
-                          );
-                        })
-                      : p.options.map((o: any) => (
-                          <button class="poll-option" onclick={`votePoll('${p.id}', '${o.id}')`}>{o.label}</button>
-                        ))
-                    }
-                    <div class="poll-meta">
-                      <span>{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}{p.closed ? " · Closed" : ""}</span>
-                      {canManagePoll && (
-                        <span class="poll-meta-actions">
-                          <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
-                          <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
+              <div id="wl-search-results" style="margin-top:6px;display:flex;flex-direction:column;gap:4px;"></div>
+            </div>
+            {(watchlistData ?? []).length === 0
+              ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No games added yet.</div>
+              : (watchlistData ?? []).slice(0, 8).map((w: any) => (
+                <div class="wl-item" data-wl-id={w.id} data-game-id={w.game_id}>
+                  {igdbCover(w.games?.cover_img_url, "t_thumb")
+                    ? <img class="wl-cover" src={igdbCover(w.games?.cover_img_url, "t_thumb")!} alt={w.games?.title} loading="lazy" />
+                    : <div class="wl-cover" />
+                  }
+                  <a class="wl-title" href={`/games/${w.games?.slug}`} style="color:inherit;text-decoration:none">{w.games?.title}</a>
+                  {isMember && (
+                    <button class="wl-remove" title="Remove" onclick={`removeFromWatchlist('${w.game_id}')`}>×</button>
+                  )}
+                </div>
+              ))
             }
-          </div>
-        )}
+            {(watchlistData ?? []).length > 8 && (
+              <div style="font-size:12px;color:var(--text-tertiary);padding-top:8px;text-align:center">+{(watchlistData ?? []).length - 8} more</div>
+            )}
+          </div>}
+            </ShowcaseSection>
+          ) :
+          key === "polls" ? (
+            <ShowcaseSection section="polls" label={groupShowcaseLabel("polls")} hidden={overviewHidden.has("polls")} isOwner={canEditOverview}>
+                  {canSeeMemberContent && (
+            <div class="card">
+              <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Polls</span>
+                {isAdminOrOwner && (
+                  <button onclick="togglePollForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+                )}
+              </div>
+
+              {isAdminOrOwner && (
+                <div id="poll-form" class="compose-form" style="display:none">
+                  <input id="poll-question" class="compose-input" style="min-height:auto" type="text" placeholder="Ask the group something…" maxlength="300" />
+                  <div id="poll-options" style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+                    <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
+                    <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
+                  </div>
+                  <div class="compose-row">
+                    <button class="btn-copy" style="font-size:11px;padding:5px 10px" onclick="addPollOption()">+ Option</button>
+                    <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="createPoll()">Create Poll</button>
+                  </div>
+                  <div id="poll-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+                </div>
+              )}
+
+              {polls.length === 0
+                ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No polls yet.</div>
+                : polls.map((p: any) => {
+                  const hasVoted = !!p.myOptionId;
+                  const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+                  const showResults = hasVoted || p.closed;
+                  return (
+                    <div class="poll-item" data-poll-id={p.id}>
+                      <div class="poll-question">{p.question}</div>
+                      {showResults
+                        ? p.options.map((o: any) => {
+                            const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
+                            const isMine = o.id === p.myOptionId;
+                            return (
+                              <div class={`poll-result${isMine ? " voted" : ""}`}>
+                                <div class="poll-result-bar" style={`width:${pct}%`}></div>
+                                <div class="poll-result-label">
+                                  <span>{o.label}{isMine ? " ✓" : ""}</span>
+                                  <span>{pct}% ({o.count})</span>
+                                </div>
+                              </div>
+                            );
+                          })
+                        : p.options.map((o: any) => (
+                            <button class="poll-option" onclick={`votePoll('${p.id}', '${o.id}')`}>{o.label}</button>
+                          ))
+                      }
+                      <div class="poll-meta">
+                        <span>{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}{p.closed ? " · Closed" : ""}</span>
+                        {canManagePoll && (
+                          <span class="poll-meta-actions">
+                            <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
+                            <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              }
+            </div>
+          )}
+            </ShowcaseSection>
+          ) :
+          null
+        ))}
+        </div>
 
         <!-- Members -->
         <div class="card">
@@ -2706,6 +3023,272 @@ async function deletePoll(pollId) {
   else { const d = await res.json(); alert(d.error ?? 'Error'); }
 }
 window.deletePoll = deletePoll;
+</script>
+{canEditOverview && (
+  <div class="modal-backdrop" id="videoShowcaseModal" onclick="closeVideoShowcasePickerOnBackdrop(event)">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <div class="modal-title">Showcase a video</div>
+        <button class="modal-close" onclick="closeVideoShowcasePicker()">×</button>
+      </div>
+      <div class="vsm-body">
+        <label class={`vsm-option${!videoOwner?.youtubeUrl ? " vsm-option--disabled" : ""}`}>
+          <input type="radio" name="vsmMode" value="latest" checked={showcaseVideoMode === "latest"} disabled={!videoOwner?.youtubeUrl} />
+          <span class="vsm-option-text">
+            <span class="vsm-option-title">Latest upload</span>
+            <span class="vsm-option-desc">
+              {videoOwner?.youtubeUrl
+                ? `Always shows the newest video from @${videoOwner.username}'s YouTube channel.`
+                : "The group owner needs to add their YouTube channel to their profile links first."}
+            </span>
+          </span>
+        </label>
+        <label class="vsm-option">
+          <input type="radio" name="vsmMode" value="featured" checked={showcaseVideoMode === "featured" || (!showcaseVideoMode && !videoOwner?.youtubeUrl)} />
+          <span class="vsm-option-text">
+            <span class="vsm-option-title">Featured video</span>
+            <span class="vsm-option-desc">Pin one video for the group.</span>
+            <input type="url" class="modal-search-input vsm-url" id="vsmUrl" placeholder="Paste a YouTube link" autocomplete="off"
+              value={showcaseVideoId ? `https://www.youtube.com/watch?v=${showcaseVideoId}` : ""} />
+          </span>
+        </label>
+        {showcaseVideoMode && (
+          <label class="vsm-option">
+            <input type="radio" name="vsmMode" value="" />
+            <span class="vsm-option-text">
+              <span class="vsm-option-title">Don’t show a video</span>
+              <span class="vsm-option-desc">Remove the video from the Overview.</span>
+            </span>
+          </label>
+        )}
+        <div class="vsm-error" id="vsmError" hidden></div>
+      </div>
+      <div class="vsm-footer">
+        <button type="button" class="vsm-btn" onclick="closeVideoShowcasePicker()">Cancel</button>
+        <button type="button" class="vsm-btn vsm-btn--primary" id="vsmSave" onclick="saveVideoShowcase()">Save</button>
+      </div>
+    </div>
+  </div>
+)}
+
+<script is:inline define:vars={{ overviewHiddenJson, overviewOrderJson, overviewGroupId: group.id, canEditOverview }}>
+  // ── OVERVIEW SHOWCASES: Customize (order + hiding) ──
+  // Like Edit profile (see ShowcaseSection.astro): moving reorders a section
+  // within its column's stack, hiding flips .sc-is-hidden. Both are staged in
+  // the DOM; Save sends them, Cancel puts back what was last saved.
+  var savedOverviewHidden = JSON.parse(overviewHiddenJson || '[]')
+  var savedOverviewOrder = JSON.parse(overviewOrderJson || '[]')
+  var OVERVIEW_STACKS = ['showcaseStack', 'showcaseStackSide']
+  function stackSections(stackId) {
+    var stack = document.getElementById(stackId)
+    return stack ? Array.from(stack.querySelectorAll(':scope > .sc-section')) : []
+  }
+  function allOverviewSections() {
+    return OVERVIEW_STACKS.reduce(function(all, id) { return all.concat(stackSections(id)) }, [])
+  }
+  function refreshShowcaseMoveButtons() {
+    OVERVIEW_STACKS.forEach(function(id) {
+      var els = stackSections(id)
+      els.forEach(function(el, i) {
+        var up = el.querySelector('.sc-move-btn[data-dir="-1"]')
+        var down = el.querySelector('.sc-move-btn[data-dir="1"]')
+        if (up) up.disabled = i === 0
+        if (down) down.disabled = i === els.length - 1
+      })
+    })
+  }
+  function moveShowcase(key, dir) {
+    var el = allOverviewSections().find(function(s) { return s.dataset.showcase === key })
+    if (!el) return
+    var els = Array.from(el.parentElement.querySelectorAll(':scope > .sc-section'))
+    var target = els[els.indexOf(el) + dir]
+    if (!target) return
+    if (dir < 0) target.before(el); else target.after(el)
+    refreshShowcaseMoveButtons()
+    var btn = el.querySelector('.sc-move-btn[data-dir="' + dir + '"]')
+    if (btn && btn.disabled) btn = el.querySelector('.sc-move-btn[data-dir="' + (-dir) + '"]')
+    if (btn) btn.focus()
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+  function toggleShowcaseHidden(key) {
+    var el = allOverviewSections().find(function(s) { return s.dataset.showcase === key })
+    if (el) el.classList.toggle('sc-is-hidden')
+  }
+  function restoreOverview() {
+    OVERVIEW_STACKS.forEach(function(id) {
+      var stack = document.getElementById(id)
+      if (!stack) return
+      var byKey = {}
+      stackSections(id).forEach(function(el) { byKey[el.dataset.showcase] = el })
+      savedOverviewOrder.forEach(function(key) { if (byKey[key]) stack.appendChild(byKey[key]) })
+    })
+    allOverviewSections().forEach(function(el) {
+      el.classList.toggle('sc-is-hidden', savedOverviewHidden.indexOf(el.dataset.showcase) !== -1)
+    })
+    refreshShowcaseMoveButtons()
+  }
+  function enterOverviewEdit() {
+    document.body.classList.add('editing-overview')
+    refreshShowcaseMoveButtons()
+  }
+  function cancelOverviewEdit() {
+    restoreOverview()
+    document.body.classList.remove('editing-overview')
+  }
+  async function saveOverview() {
+    var btn = document.getElementById('saveOverviewBtn')
+    var order = allOverviewSections().map(function(el) { return el.dataset.showcase })
+    var hidden = allOverviewSections().filter(function(el) { return el.classList.contains('sc-is-hidden') }).map(function(el) { return el.dataset.showcase })
+    btn.disabled = true
+    btn.textContent = 'Saving…'
+    try {
+      var res = await fetch('/api/groups/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: overviewGroupId, overview_order: order, overview_hidden: hidden })
+      })
+      var data = await res.json().catch(function() { return {} })
+      if (!res.ok) throw new Error(data.error || 'Failed to save')
+      savedOverviewOrder = order
+      savedOverviewHidden = hidden
+      document.body.classList.remove('editing-overview')
+    } catch (e) {
+      alert(e && e.message ? e.message : 'Failed to save')
+    } finally {
+      btn.disabled = false
+      btn.textContent = 'Save changes'
+    }
+  }
+  window.moveShowcase = moveShowcase
+  window.toggleShowcaseHidden = toggleShowcaseHidden
+  window.enterOverviewEdit = enterOverviewEdit
+  window.cancelOverviewEdit = cancelOverviewEdit
+  window.saveOverview = saveOverview
+
+  // ── VIDEO SHOWCASE ── (the same as a profile's)
+  // Featured: the id is server-rendered. Latest: ask /api/groups/latest-video
+  // (CDN-cached per group) for the owner's newest upload. Either way the
+  // title/channel/views come from /api/youtube/meta.
+  function vsAgo(iso) {
+    var t = Date.parse(iso)
+    if (!t) return ''
+    var d = Math.floor((Date.now() - t) / 86400000)
+    if (d < 1) return 'today'
+    if (d < 2) return 'yesterday'
+    if (d < 30) return d + ' days ago'
+    if (d < 365) { var m = Math.floor(d / 30); return m + (m === 1 ? ' month ago' : ' months ago') }
+    var y = Math.floor(d / 365); return y + (y === 1 ? ' year ago' : ' years ago')
+  }
+  function vsShow(card, id, fallbackTitle) {
+    var body = card.querySelector('.vs-body')
+    var player = card.querySelector('.vs-player')
+    var link = card.querySelector('.vs-info')
+    var title = card.querySelector('.vs-title')
+    var meta = card.querySelector('.vs-meta')
+    card.dataset.videoId = id
+    if (!player.querySelector('img')) {
+      var img = document.createElement('img')
+      img.alt = ''
+      player.insertBefore(img, player.firstChild)
+    }
+    player.querySelector('img').src = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg'
+    link.href = 'https://www.youtube.com/watch?v=' + id
+    if (fallbackTitle) title.textContent = fallbackTitle
+    body.dataset.state = 'ready'
+    fetch('/api/youtube/meta?id=' + id)
+      .then(function(r) { return r.ok ? r.json() : null })
+      .then(function(m) {
+        if (!m || !m.title) return
+        title.textContent = m.title
+        player.setAttribute('aria-label', 'Play video: ' + m.title)
+        meta.textContent = [m.channel, m.views, m.published ? vsAgo(m.published) : null].filter(Boolean).join(' · ')
+        var dur = card.querySelector('.vs-duration')
+        if (m.duration && dur) { dur.textContent = m.duration; dur.hidden = false }
+      })
+      .catch(function() {})
+  }
+  function vsUnavailable(card) {
+    if (!canEditOverview) { card.closest('.sc-section').style.display = 'none'; return }
+    card.querySelector('.vs-body').hidden = true
+    card.querySelector('.vs-unavailable').hidden = false
+  }
+  ;(function initVideoShowcase() {
+    var card = document.getElementById('videoShowcaseCard')
+    if (!card) return
+    if (card.dataset.mode === 'featured') { if (card.dataset.videoId) vsShow(card, card.dataset.videoId); return }
+    fetch('/api/groups/latest-video?g=' + encodeURIComponent(card.dataset.groupId))
+      .then(function(r) { return r.ok ? r.json() : null })
+      .then(function(d) {
+        if (d && d.video && /^[A-Za-z0-9_-]{11}$/.test(d.video.id)) vsShow(card, d.video.id, d.video.title)
+        else vsUnavailable(card)
+      })
+      .catch(function() { vsUnavailable(card) })
+  })()
+  function playShowcaseVideo() {
+    var card = document.getElementById('videoShowcaseCard')
+    var id = card && card.dataset.videoId
+    if (!id || !/^[A-Za-z0-9_-]{11}$/.test(id)) return
+    var player = card.querySelector('.vs-player')
+    var frame = document.createElement('div')
+    frame.className = 'vs-player vs-player--playing'
+    var iframe = document.createElement('iframe')
+    iframe.src = 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0'
+    iframe.title = 'YouTube video'
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture'
+    iframe.allowFullscreen = true
+    frame.appendChild(iframe)
+    player.replaceWith(frame)
+  }
+  window.playShowcaseVideo = playShowcaseVideo
+
+  function openVideoShowcasePicker() {
+    var err = document.getElementById('vsmError')
+    if (err) err.hidden = true
+    document.getElementById('videoShowcaseModal').classList.add('open')
+  }
+  function closeVideoShowcasePicker() { document.getElementById('videoShowcaseModal').classList.remove('open') }
+  function closeVideoShowcasePickerOnBackdrop(e) { if (e.target === document.getElementById('videoShowcaseModal')) closeVideoShowcasePicker() }
+  ;(function wireVideoShowcaseModal() {
+    var url = document.getElementById('vsmUrl')
+    if (!url) return
+    // Typing a link means "featured" — select it so Save does what they expect.
+    url.addEventListener('focus', function() {
+      var r = document.querySelector('input[name="vsmMode"][value="featured"]')
+      if (r) r.checked = true
+    })
+    url.addEventListener('keydown', function(e) { if (e.key === 'Enter') saveVideoShowcase() })
+  })()
+  async function saveVideoShowcase() {
+    var picked = document.querySelector('input[name="vsmMode"]:checked')
+    var err = document.getElementById('vsmError')
+    var btn = document.getElementById('vsmSave')
+    err.hidden = true
+    if (!picked) { err.textContent = 'Choose an option.'; err.hidden = false; return }
+    var mode = picked.value || null
+    var videoUrl = (document.getElementById('vsmUrl').value || '').trim()
+    if (mode === 'featured' && !videoUrl) { err.textContent = 'Paste a YouTube link to feature.'; err.hidden = false; return }
+    btn.disabled = true
+    btn.textContent = 'Saving…'
+    try {
+      var res = await fetch('/api/groups/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: overviewGroupId, showcase_video_mode: mode, showcase_video_url: videoUrl })
+      })
+      var data = await res.json().catch(function() { return {} })
+      if (!res.ok) throw new Error(data.error || 'Failed to save')
+      location.reload()
+    } catch (e) {
+      err.textContent = e && e.message ? e.message : 'Failed to save'
+      err.hidden = false
+      btn.disabled = false
+      btn.textContent = 'Save'
+    }
+  }
+  window.openVideoShowcasePicker = openVideoShowcasePicker
+  window.closeVideoShowcasePicker = closeVideoShowcasePicker
+  window.closeVideoShowcasePickerOnBackdrop = closeVideoShowcasePickerOnBackdrop
+  window.saveVideoShowcase = saveVideoShowcase
 </script>
 <CropModal />
 </Layout>

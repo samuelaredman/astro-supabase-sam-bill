@@ -336,6 +336,15 @@ supabase/
   runs the form. "Review it" links to `/games/[slug]?review=1`, which opens the review composer, and the
   community rating / "Read reviews" open the Feed narrowed to that game (`?tab=feed&game=<id>`, a filter on
   `group_feed()`'s rows that skips the group's focus, like the Games tab's numbers).
+- **The Overview is showcases, like a profile's.** Its sections (`GROUP_SHOWCASE_SECTIONS` in
+  `src/utils/groupShowcases.ts`) render in two stacks — main column and sidebar — wrapped in the profile's
+  `ShowcaseSection.astro`. Whoever can edit the group (owner, admins, `can_edit_group` roles) gets
+  "Customize", which reorders sections within their column and hides them, saved as `groups.overview_order` /
+  `overview_hidden` through `/api/groups/update` (migration `20261008000000`). `overview_hidden` NULL means
+  never customized: `DEFAULT_HIDDEN_SHOWCASES` plus whatever the old `stats_config.show_*` switches turned
+  off (settings no longer shows those switches, only the tab toggles). New sections: "Now featuring" (the
+  newest Games tab game and its numbers) and a video like a profile's (`showcase_video_mode` 'latest' = the
+  owner's newest upload via `/api/groups/latest-video`, or 'featured'). "At a glance" and Members stay fixed.
 - **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
   not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
   so we can moderate the groups we run without joining them. Owner-only actions (delete, transfer,
