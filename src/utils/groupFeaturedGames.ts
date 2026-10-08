@@ -464,20 +464,29 @@ export async function loadGroupFeaturedGames(opts: {
   // Votes, answers, upvotes and replies are paged: fifty questions in a big group
   // pass the 1000-row cap. Upvotes and replies are read through their answer's
   // question, so the request doesn't carry every answer id.
+  //
+  // `profiles!profile_id` names the author: group_poll_answer_votes (answer +
+  // member as its key) is a second path from an answer to profiles, and a bare
+  // `profiles` embed is then ambiguous — PostgREST refuses the whole query.
+  // fetchAll() reads a failed page as "no rows", so failures are logged here.
+  const logged = (label: string) => (res: { data: any[] | null; error: unknown }) => {
+    if (res.error) console.error(`[groupFeaturedGames] ${label}:`, JSON.stringify(res.error));
+    return res;
+  };
   const [optionsRes, voteRows, answerRows, answerVoteRows, replyRows] = pollIds.length
     ? await Promise.all([
         db.from("group_poll_options").select("id, poll_id, label, position").in("poll_id", pollIds),
         fetchAll<any>((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
-          .in("poll_id", pollIds).order("id").range(from, to)),
+          .in("poll_id", pollIds).order("id").range(from, to).then(logged("poll votes"))),
         fetchAll<AnswerRow>((from, to) => db.from("group_poll_answers")
-          .select("id, poll_id, profile_id, body, created_at, updated_at, profiles ( username, avatar_url )")
-          .in("poll_id", pollIds).order("id").range(from, to)),
+          .select("id, poll_id, profile_id, body, created_at, updated_at, profiles!profile_id ( username, avatar_url )")
+          .in("poll_id", pollIds).order("id").range(from, to).then(logged("answers"))),
         fetchAll<AnswerVoteRow>((from, to) => db.from("group_poll_answer_votes")
           .select("answer_id, profile_id, group_poll_answers!inner ( poll_id )")
-          .in("group_poll_answers.poll_id", pollIds).order("answer_id").order("profile_id").range(from, to)),
+          .in("group_poll_answers.poll_id", pollIds).order("answer_id").order("profile_id").range(from, to).then(logged("answer upvotes"))),
         fetchAll<ReplyRow>((from, to) => db.from("group_poll_answer_replies")
-          .select("id, answer_id, profile_id, body, created_at, profiles ( username, avatar_url ), group_poll_answers!inner ( poll_id )")
-          .in("group_poll_answers.poll_id", pollIds).order("id").range(from, to)),
+          .select("id, answer_id, profile_id, body, created_at, profiles!profile_id ( username, avatar_url ), group_poll_answers!inner ( poll_id )")
+          .in("group_poll_answers.poll_id", pollIds).order("id").range(from, to).then(logged("answer replies"))),
       ])
     : [{ data: [] }, [], [], [], []];
 
