@@ -21,6 +21,10 @@ const row = (over: Partial<FeaturedStatsRow> = {}): FeaturedStatsRow => ({
   avg_achievement_pct: 0.6349,
   hours_count: 18,
   avg_hours: 37.26,
+  completed_hours_count: 12,
+  avg_completed_hours: 52.04,
+  full_hours_count: 6,
+  avg_full_hours: 88.96,
   full_profile_ids: ["p1", "p2"],
   ...over,
 });
@@ -36,13 +40,22 @@ describe("buildFeaturedStats", () => {
     expect(s.avgScore).toBeCloseTo(7.84);
     expect(s.avgAchievementPct).toBe(63);
     expect(s.avgHours).toBe(37.3);
+    expect(s.avgCompletedHours).toBe(52);
+    expect(s.avgFullHours).toBe(89);
+  });
+
+  it("has no finished / 100% time when none of those players have hours", () => {
+    const s = buildFeaturedStats(row({ completed_hours_count: 0, avg_completed_hours: null, full_hours_count: 0, avg_full_hours: null }));
+    expect(s.avgCompletedHours).toBeNull();
+    expect(s.avgFullHours).toBeNull();
+    expect(s.avgHours).toBe(37.3);
   });
 
   it("shows a game nobody has touched as zeros, with no shares or averages", () => {
     const s = buildFeaturedStats(undefined, 12);
     expect(s).toMatchObject({
       memberCount: 12, played: 0, playedPct: 0, completedPct: null, fullPct: null,
-      avgScore: null, avgAchievementPct: null, avgHours: null,
+      avgScore: null, avgAchievementPct: null, avgHours: null, avgCompletedHours: null, avgFullHours: null,
     });
   });
 

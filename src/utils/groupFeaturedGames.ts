@@ -3,9 +3,10 @@
  * 100%, review or play through — each with its video, a note, an optional question
  * and how the group did on it.
  *
- * The members' numbers come from group_featured_game_stats() (migration
- * 20261006000007): played, completed, 100% / platinum, average rating,
- * achievement % and hours. Nothing here counts review or library rows — see
+ * The members' numbers come from group_featured_game_stats() (migrations
+ * 20261006000007 and 20261007000000): played, completed, 100% / platinum,
+ * average rating, achievement % and hours — for everyone who played, those who
+ * finished and those who 100%'d. Nothing here counts review or library rows — see
  * "Review stats" in CLAUDE.md. A featured game's question is an ordinary group
  * poll with featured_game_id set (migration 20261006000005), so voting, closing
  * and deleting go through /api/groups/polls/*. Its options are optional, and
@@ -143,6 +144,11 @@ export interface FeaturedStatsRow {
   avg_achievement_pct: number | null;
   hours_count: number;
   avg_hours: number | null;
+  /** Hours of those who finished it / 100%'d it. */
+  completed_hours_count: number;
+  avg_completed_hours: number | null;
+  full_hours_count: number;
+  avg_full_hours: number | null;
   full_profile_ids: string[] | null;
 }
 
@@ -163,7 +169,19 @@ export interface FeaturedStats {
   /** Average achievement completion, 0–100. */
   avgAchievementPct: number | null;
   hoursCount: number;
+  /** Average hours of everyone who played it. */
   avgHours: number | null;
+  completedHoursCount: number;
+  /** Average hours of those who finished it. */
+  avgCompletedHours: number | null;
+  fullHoursCount: number;
+  /** Average hours of those who 100%'d or platinumed it. */
+  avgFullHours: number | null;
+}
+
+/** An average of hours to one decimal, or null when nobody's hours are behind it. */
+function avgHoursOf(count: number, avg: number | null | undefined): number | null {
+  return count > 0 && avg != null ? Math.round(avg * 10) / 10 : null;
 }
 
 function pct(part: number, whole: number): number | null {
@@ -179,6 +197,8 @@ export function buildFeaturedStats(row: FeaturedStatsRow | null | undefined, mem
   const reviewCount = row?.review_count ?? 0;
   const achievementCount = row?.achievement_count ?? 0;
   const hoursCount = row?.hours_count ?? 0;
+  const completedHoursCount = row?.completed_hours_count ?? 0;
+  const fullHoursCount = row?.full_hours_count ?? 0;
   return {
     memberCount: members,
     played,
@@ -194,7 +214,11 @@ export function buildFeaturedStats(row: FeaturedStatsRow | null | undefined, mem
       ? Math.round(row.avg_achievement_pct * 100)
       : null,
     hoursCount,
-    avgHours: hoursCount > 0 && row?.avg_hours != null ? Math.round(row.avg_hours * 10) / 10 : null,
+    avgHours: avgHoursOf(hoursCount, row?.avg_hours),
+    completedHoursCount,
+    avgCompletedHours: avgHoursOf(completedHoursCount, row?.avg_completed_hours),
+    fullHoursCount,
+    avgFullHours: avgHoursOf(fullHoursCount, row?.avg_full_hours),
   };
 }
 

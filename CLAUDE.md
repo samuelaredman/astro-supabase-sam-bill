@@ -316,7 +316,8 @@ supabase/
 - **The Games tab (`?tab=games`) is the creator's featured games** — the games from their videos (a
   100% run, a refund verdict, a first playthrough), each with an optional YouTube video, note and question,
   and how the group did on it: played, finished, 100% / platinum, average rating, achievement % and
-  hours, from `group_featured_game_stats()` (migration `20261006000007`). Library data counts only for
+  hours (overall, for those who finished and for those who 100%'d), from `group_featured_game_stats()`
+  (migration `20261006000007`, hours breakdown `20261007000000`). Library data counts only for
   public libraries and never for hidden games; ratings come through `group_reviews()` without the
   group's focus. Rows live in `group_featured_games` (migration `20261006000005`); a game's question is
   an ordinary `group_polls` row with `featured_game_id` set, so it votes through `/api/groups/polls/*` and

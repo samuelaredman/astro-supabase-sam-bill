@@ -4102,10 +4102,14 @@ export type Database = {
         Returns: {
           achievement_count: number
           avg_achievement_pct: number
+          avg_completed_hours: number
+          avg_full_hours: number
           avg_hours: number
           avg_score: number
           completed_count: number
+          completed_hours_count: number
           full_count: number
+          full_hours_count: number
           full_profile_ids: string[]
           game_id: string
           hours_count: number
