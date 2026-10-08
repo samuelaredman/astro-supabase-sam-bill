@@ -4110,12 +4110,15 @@ export type Database = {
           completed_hours_count: number
           full_count: number
           full_hours_count: number
+          completed_profile_ids: string[]
           full_profile_ids: string[]
           game_id: string
           hours_count: number
           member_count: number
           played_count: number
+          played_profile_ids: string[]
           review_count: number
+          score_counts: number[]
         }[]
       }
       group_feed: {

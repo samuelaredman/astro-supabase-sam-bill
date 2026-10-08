@@ -4,9 +4,10 @@
  * and how the group did on it.
  *
  * The members' numbers come from group_featured_game_stats() (migrations
- * 20261006000007 and 20261007000000): played, completed, 100% / platinum,
- * average rating, achievement % and hours — for everyone who played, those who
- * finished and those who 100%'d. Nothing here counts review or library rows — see
+ * 20261006000007, 20261007000000 and 20261007000001): played, completed,
+ * 100% / platinum, average rating and how it splits across 1–10, achievement %
+ * and hours — for everyone who played, those who finished and those who
+ * 100%'d — plus a few members at each stage for the avatars. Nothing here counts review or library rows — see
  * "Review stats" in CLAUDE.md. A featured game's question is an ordinary group
  * poll with featured_game_id set (migration 20261006000005), so voting, closing
  * and deleting go through /api/groups/polls/*. Its options are optional, and
@@ -23,8 +24,8 @@ import { getGroupAuthority, type SupabaseAdmin } from "./api";
 
 /** The most featured games one group can have, and the most the tab shows. */
 export const FEATURED_GAMES_MAX = 50;
-/** Avatars shown for the members who 100%'d / platinumed a game. */
-export const FEATURED_FULL_AVATARS = 8;
+/** Avatars shown for each stage (played / finished / 100%) of a game. */
+export const FEATURED_STAGE_AVATARS = 8;
 
 export const FEATURED_NOTE_MAX = 500;
 export const POLL_QUESTION_MAX = 300;
@@ -150,6 +151,10 @@ export interface FeaturedStatsRow {
   full_hours_count: number;
   avg_full_hours: number | null;
   full_profile_ids: string[] | null;
+  completed_profile_ids?: string[] | null;
+  played_profile_ids?: string[] | null;
+  /** Members who gave it each score, 1 to 10. */
+  score_counts?: number[] | null;
 }
 
 export interface FeaturedStats {
@@ -329,11 +334,21 @@ export interface FeaturedGame {
   youtubeVideoId: string | null;
   game: { id: string; title: string; slug: string | null; coverImgUrl: string | null; year: number | null };
   stats: FeaturedStats;
-  /** Some of the members who 100%'d or platinumed it (public libraries only). */
-  fullMembers: { id: string; username: string; avatarUrl: string | null }[];
+  /** A few members at each stage, people with a profile picture first. */
+  stageMembers: Record<FeaturedStage, StageMember[]>;
+  /** Members who gave it each score: index 0 is a 1, index 9 a 10. */
+  scoreCounts: number[];
   poll: FeaturedPoll | null;
   /** The viewer's published review of the game, if any. */
   myReview: { id: string; score: number } | null;
+}
+
+export type FeaturedStage = "played" | "completed" | "full";
+export interface StageMember { id: string; username: string; avatarUrl: string | null }
+
+/** score_counts as ten numbers, whatever came back (an older function returns none). */
+export function normalizeScoreCounts(counts: number[] | null | undefined): number[] {
+  return Array.from({ length: 10 }, (_, i) => Math.max(0, Number(counts?.[i]) || 0));
 }
 
 export interface GroupGamesData {
@@ -393,13 +408,22 @@ export async function loadGroupFeaturedGames(opts: {
       ])
     : [{ data: [] }, [], []];
 
-  const fullIds = [...new Set(
-    [...statsByGame.values()].flatMap((s) => (s.full_profile_ids ?? []).slice(0, FEATURED_FULL_AVATARS)),
+  const stageIds = (row: FeaturedStatsRow | undefined, stage: FeaturedStage): string[] =>
+    ((stage === "full" ? row?.full_profile_ids : stage === "completed" ? row?.completed_profile_ids : row?.played_profile_ids) ?? [])
+      .slice(0, FEATURED_STAGE_AVATARS);
+  const STAGES: FeaturedStage[] = ["played", "completed", "full"];
+  const avatarIds = [...new Set(
+    [...statsByGame.values()].flatMap((s) => STAGES.flatMap((stage) => stageIds(s, stage))),
   )];
-  const { data: fullProfiles } = fullIds.length
-    ? await db.from("profiles").select("id, username, avatar_url").in("id", fullIds)
+  const { data: avatarProfiles } = avatarIds.length
+    ? await db.from("profiles").select("id, username, avatar_url").in("id", avatarIds)
     : { data: [] };
-  const profileById = new Map<string, any>((fullProfiles ?? []).map((p: any) => [p.id, p]));
+  const profileById = new Map<string, any>((avatarProfiles ?? []).map((p: any) => [p.id, p]));
+  const membersOf = (row: FeaturedStatsRow | undefined, stage: FeaturedStage): StageMember[] =>
+    stageIds(row, stage)
+      .map((id) => profileById.get(id))
+      .filter(Boolean)
+      .map((p: any) => ({ id: p.id, username: p.username, avatarUrl: p.avatar_url }));
 
   const pollByFeatured = new Map<string, any>(pollRows.map((p) => [p.featured_game_id, p]));
   const myReviewByGame = new Map<string, any>((myReviewsRes.data ?? []).map((r: any) => [r.game_id, r]));
@@ -422,11 +446,12 @@ export async function loadGroupFeaturedGames(opts: {
         year: r.games.date_released ? new Date(r.games.date_released).getFullYear() : null,
       },
       stats: buildFeaturedStats(statsRow, memberCount),
-      fullMembers: (statsRow?.full_profile_ids ?? [])
-        .slice(0, FEATURED_FULL_AVATARS)
-        .map((id) => profileById.get(id))
-        .filter(Boolean)
-        .map((p: any) => ({ id: p.id, username: p.username, avatarUrl: p.avatar_url })),
+      stageMembers: {
+        played: membersOf(statsRow, "played"),
+        completed: membersOf(statsRow, "completed"),
+        full: membersOf(statsRow, "full"),
+      },
+      scoreCounts: normalizeScoreCounts(statsRow?.score_counts),
       poll: poll ? summarizePoll(poll, optionsRes.data ?? [], voteRows, viewerProfileId, answerRows) : null,
       myReview: review ? { id: review.id, score: review.score } : null,
     };

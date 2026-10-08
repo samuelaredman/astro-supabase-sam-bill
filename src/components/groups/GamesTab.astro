@@ -13,6 +13,7 @@
  */
 import { formatScore, scoreClass, timeAgo, igdbImage } from "../../utils/format";
 import { youTubeThumbUrl, youTubeWatchUrl } from "../../utils/youtube";
+import GameInsights from "./GameInsights.astro";
 import {
   formatHours,
   FEATURED_NOTE_MAX,
@@ -37,6 +38,27 @@ const { data, groupId, groupName, canFeature, isMember, viewerProfileId, isAdmin
 const ANSWERS_SHOWN = 3;
 const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+type Featured = GroupGamesData["games"][number];
+/** The three stages of the stats section: played, finished, 100% / platinum. */
+const stagesOf = (fg: Featured) => {
+  const s = fg.stats;
+  return [
+    { key: "played" as const, label: "Played", pct: s.playedPct, count: s.played, of: s.memberCount,
+      members: fg.stageMembers.played, verb: "played it", empty: "Nobody in the group has played it yet.",
+      timeLabel: "Played", avgH: s.avgHours, hoursN: s.hoursCount },
+    { key: "completed" as const, label: "Finished", pct: s.completedPct, count: s.completed, of: s.played,
+      members: fg.stageMembers.completed, verb: "finished it", empty: "Nobody's finished it yet.",
+      timeLabel: "To finish", avgH: s.avgCompletedHours, hoursN: s.completedHoursCount },
+    { key: "full" as const, label: "100% / Plat", pct: s.fullPct, count: s.full, of: s.played,
+      members: fg.stageMembers.full, verb: "went for 100%", empty: "Nobody's gone for 100% yet.",
+      timeLabel: "To 100%", avgH: s.avgFullHours, hoursN: s.fullHoursCount },
+  ];
+};
+/** Open on Finished once someone has, otherwise on Played. */
+const defaultStage = (fg: Featured) => (fg.stats.completed > 0 ? "completed" : "played");
+const maxHours = (fg: Featured) =>
+  Math.max(fg.stats.avgHours ?? 0, fg.stats.avgCompletedHours ?? 0, fg.stats.avgFullHours ?? 0);
 ---
 
 <div class="gg" data-group-id={groupId}>
@@ -187,68 +209,82 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
                         <span class="rc-video-desc" hidden></span>
                       </a>
                     </div>
+                    <GameInsights fg={fg} />
                   </div>
                 )}
 
-                <section class="gg-community" aria-label="How the community did">
-                  <div class="gg-community-top">
-                    <div class="gg-section-label">The community <span class="gg-section-sub">· {plural(s.memberCount, "member")}</span></div>
-                    <ul class="gg-rings">
-                      {[
-                        { label: "Played", pct: s.playedPct, sub: `${s.played} of ${s.memberCount}`, tone: "soft" },
-                        { label: "Finished", pct: s.completedPct, sub: s.played > 0 ? `${s.completed} of ${s.played} players` : "nobody yet", tone: "mid" },
-                        { label: "100% / Plat", pct: s.fullPct, sub: s.played > 0 ? plural(s.full, "player") : "nobody yet", tone: "full" },
-                      ].map((r) => (
-                        <li class={`gg-ring gg-ring-${r.tone}`}>
+                <section class="gg-community" data-gg-stages data-stage={defaultStage(fg)} aria-label="How the community did">
+                  <div class="gg-section-label">The community <span class="gg-section-sub">· {plural(s.memberCount, "member")}</span></div>
+
+                  {/* Stages: pick one to see who got there and how long it took */}
+                  <div class="gg-stages" role="tablist" aria-label="How far the community got">
+                    {stagesOf(fg).map((st) => (
+                      <button type="button" role="tab" class={`gg-stage gg-stage-${st.key}`} data-gg-stage={st.key}
+                        aria-selected={st.key === defaultStage(fg) ? "true" : "false"}>
+                        <span class="gg-stage-ring">
                           <svg viewBox="0 0 36 36" aria-hidden="true">
+                            {st.key === "full" && (
+                              <defs>
+                                <linearGradient id={`gg-plat-${fg.id}`} x1="0" y1="0" x2="1" y2="1">
+                                  <stop offset="0%" class="gg-plat-a" />
+                                  <stop offset="100%" class="gg-plat-b" />
+                                </linearGradient>
+                              </defs>
+                            )}
                             <circle class="gg-ring-track" cx="18" cy="18" r="15.5" pathLength="100" />
-                            {(r.pct ?? 0) > 0 && (
+                            {(st.pct ?? 0) > 0 && (
                               <circle class="gg-ring-fill" cx="18" cy="18" r="15.5" pathLength="100"
-                                stroke-dasharray={`${r.pct} 100`} />
+                                stroke-dasharray={`${st.pct} 100`}
+                                style={st.key === "full" ? `stroke:url(#gg-plat-${fg.id})` : undefined} />
                             )}
                           </svg>
-                          <span class="gg-ring-pct">{r.pct != null ? `${r.pct}%` : "—"}</span>
-                          <span class="gg-ring-label">{r.label}</span>
-                          <span class="gg-ring-sub">{r.sub}</span>
-                        </li>
-                      ))}
-                    </ul>
+                          <span class="gg-stage-pct">{st.pct != null ? `${st.pct}%` : "—"}</span>
+                        </span>
+                        <span class="gg-stage-label">{st.label}</span>
+                        <span class="gg-stage-sub">{st.count} of {st.of}</span>
+                      </button>
+                    ))}
                   </div>
 
-                  {fg.fullMembers.length > 0 && (
-                    <div class="gg-club">
-                      <div class="gg-club-avatars">
-                        {fg.fullMembers.map((m) => (
-                          <a class="member-avatar gg-club-avatar" href={`/reviewers/${m.username}`} title={`@${m.username}`}>
-                            {m.avatarUrl ? <img src={m.avatarUrl} alt={`@${m.username}`} loading="lazy" /> : initials(m.username)}
-                          </a>
-                        ))}
-                      </div>
-                      <span class="gg-club-label">
-                        {s.full > fg.fullMembers.length ? `+${s.full - fg.fullMembers.length} more ` : ""}went for 100%
-                      </span>
+                  {stagesOf(fg).map((st) => (
+                    <div class={`gg-stage-detail gg-stage-${st.key}`} data-gg-stage-detail={st.key} role="tabpanel">
+                      {st.members.length > 0 ? (
+                        <>
+                          <div class="gg-club-avatars">
+                            {st.members.slice(0, 5).map((m) => (
+                              <a class="member-avatar gg-club-avatar" href={`/reviewers/${m.username}`} title={`@${m.username}`}>
+                                {m.avatarUrl ? <img src={m.avatarUrl} alt={`@${m.username}`} loading="lazy" /> : initials(m.username)}
+                              </a>
+                            ))}
+                          </div>
+                          <span class="gg-stage-who">
+                            <a href={`/reviewers/${st.members[0].username}`}>@{st.members[0].username}</a>
+                            {st.count > 1 && ` and ${plural(st.count - 1, "other")}`} {st.verb}
+                          </span>
+                        </>
+                      ) : (
+                        <span class="gg-stage-who gg-stage-none">{st.empty}</span>
+                      )}
                     </div>
-                  )}
+                  ))}
 
-                  <dl class="gg-mini">
-                    <div>
-                      <dt>Achievements <span>{s.achievementCount > 0 ? `${s.achievementCount} synced` : "none synced"}</span></dt>
-                      <dd>{s.avgAchievementPct != null ? `${s.avgAchievementPct}%` : "—"}</dd>
-                    </div>
-                    {/* Average time, broken down by how far players got */}
-                    <div>
-                      <dt>Avg time <span>{s.hoursCount > 0 ? `all ${plural(s.hoursCount, "player")}` : "no hours yet"}</span></dt>
-                      <dd>{formatHours(s.avgHours)}</dd>
-                    </div>
-                    <div>
-                      <dt>To finish <span>{s.completedHoursCount > 0 ? plural(s.completedHoursCount, "player") : "no hours yet"}</span></dt>
-                      <dd>{formatHours(s.avgCompletedHours)}</dd>
-                    </div>
-                    <div>
-                      <dt>To 100% <span>{s.fullHoursCount > 0 ? plural(s.fullHoursCount, "player") : "no hours yet"}</span></dt>
-                      <dd>{formatHours(s.avgFullHours)}</dd>
-                    </div>
-                  </dl>
+                  {/* Time to each stage — the picked one lights up */}
+                  <div class="gg-ladder">
+                    <div class="gg-mini-head">Average time</div>
+                    {stagesOf(fg).map((st) => (
+                      <button type="button" class={`gg-ladder-row gg-stage-${st.key}`} data-gg-stage={st.key}
+                        title={st.hoursN > 0 ? `Averaged over ${plural(st.hoursN, "player")}` : "No hours logged yet"}>
+                        <span class="gg-ladder-label">{st.timeLabel}</span>
+                        <span class="gg-ladder-track">
+                          <span class="gg-ladder-bar" style={`width:${st.avgH != null && maxHours(fg) > 0 ? Math.max(4, (st.avgH / maxHours(fg)) * 100) : 0}%`}></span>
+                        </span>
+                        <span class="gg-ladder-val">{formatHours(st.avgH)}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Without a video, ratings and achievements live in the panel */}
+                  {!fg.youtubeVideoId && <GameInsights fg={fg} />}
                 </section>
               </div>
 

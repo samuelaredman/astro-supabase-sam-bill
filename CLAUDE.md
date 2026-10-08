@@ -317,7 +317,10 @@ supabase/
   100% run, a refund verdict, a first playthrough), each with an optional YouTube video, note and question,
   and how the group did on it: played, finished, 100% / platinum, average rating, achievement % and
   hours (overall, for those who finished and for those who 100%'d), from `group_featured_game_stats()`
-  (migration `20261006000007`, hours breakdown `20261007000000`). Library data counts only for
+  (migration `20261006000007`, hours breakdown `20261007000000`, avatars per stage and the 1–10 score
+  split `20261007000001`). The stats panel is interactive: picking played / finished / 100% shows who got
+  there and lights up that stage's time (`src/scripts/group-games.ts`); the score split and achievements
+  meter are `GameInsights.astro`, under the video or in the panel when there's none. Library data counts only for
   public libraries and never for hidden games; ratings come through `group_reviews()` without the
   group's focus. Rows live in `group_featured_games` (migration `20261006000005`); a game's question is
   an ordinary `group_polls` row with `featured_game_id` set, so it votes through `/api/groups/polls/*` and

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFeaturedStats,
   formatHours,
+  normalizeScoreCounts,
   readFeaturedNote,
   readFeaturedPoll,
   readPollAnswer,
@@ -67,6 +68,14 @@ describe("buildFeaturedStats", () => {
 
   it("has no member share for an empty group", () => {
     expect(buildFeaturedStats(row({ member_count: 0, played_count: 0 })).playedPct).toBeNull();
+  });
+});
+
+describe("normalizeScoreCounts", () => {
+  it("always gives ten counts, one per score", () => {
+    expect(normalizeScoreCounts([0, 0, 1, 0, 2, 0, 5, 9, 4, 1])).toEqual([0, 0, 1, 0, 2, 0, 5, 9, 4, 1]);
+    expect(normalizeScoreCounts(null)).toEqual(Array(10).fill(0));
+    expect(normalizeScoreCounts([3, 1])).toEqual([3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
   });
 });
 

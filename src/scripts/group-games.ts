@@ -221,9 +221,23 @@ async function removeFeatured(btn: HTMLElement) {
 
 // ── Wiring ─────────────────────────────────────────────────────────────────
 
+// ── Stats: picking a stage (played / finished / 100%) ──────────────────────
+// The panel's data-stage shows that stage's people and lights up its time bar
+// (CSS); the stage buttons carry aria-selected.
+
+function pickStage(panel: HTMLElement, stage: string) {
+  panel.dataset.stage = stage;
+  for (const btn of panel.querySelectorAll<HTMLElement>(".gg-stage[data-gg-stage]")) {
+    btn.setAttribute("aria-selected", btn.dataset.ggStage === stage ? "true" : "false");
+  }
+}
+
 document.addEventListener("click", (e) => {
   const target = e.target as HTMLElement | null;
   if (!target?.closest("#gg-feature-form .autocomplete-wrap")) closeResults();
+  const stageBtn = target?.closest<HTMLElement>("[data-gg-stage]");
+  const stagePanel = stageBtn?.closest<HTMLElement>("[data-gg-stages]");
+  if (stageBtn && stagePanel && stageBtn.dataset.ggStage) return pickStage(stagePanel, stageBtn.dataset.ggStage);
   const btn = target?.closest<HTMLElement>("[data-gg-action]");
   if (!btn) return;
   switch (btn.dataset.ggAction) {
