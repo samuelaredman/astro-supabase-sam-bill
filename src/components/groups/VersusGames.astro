@@ -1,0 +1,210 @@
+---
+/**
+ * The Stats tab's games list: every game either side reviewed, as face-offs —
+ * cover in the middle, each side's score, hours, achievement % and platform
+ * either side — under the tab's scope and genre (set above the cards), plus
+ * its own title search, "only you / only them" filter and sort, a page at a time.
+ *
+ * Rendered inside CompareTab, and on its own by /groups/[id]/compare?part=games
+ * when the filter, sort or "Show more" changes (src/scripts/group-compare.ts
+ * swaps it in place). The view rides in ?sc= / ?gg= / ?gq= / ?gf= / ?gs= / ?gn=, so it's
+ * shareable; "Show more" is a real link, so it works without the script.
+ */
+import { formatScore, igdbImage as igdbCover, scoreClass } from "../../utils/format";
+import {
+  signedScore,
+  VERSUS_GAMES_MAX,
+  VERSUS_GAMES_PAGE,
+  VERSUS_SEARCH_MAX,
+  type GroupVersusData,
+  type VersusGameFilter,
+  type VersusGameRow,
+  type VersusGameSort,
+  type VersusScope,
+} from "../../utils/groupCompare";
+
+interface Props {
+  data: GroupVersusData;
+}
+const { data } = Astro.props;
+const { subject, opponent, games } = data;
+
+const subjectName = subject ? (subject.isViewer ? "You" : `@${subject.username}`) : "";
+const otherShort = opponent ? `@${opponent.username}` : "Community";
+const subjectLower = subject?.isViewer ? "you" : subjectName;
+const otherLower = opponent ? `@${opponent.username}` : "the community";
+
+// Only under the "all" scope: every other scope is shared games already
+const filters: { key: VersusGameFilter; label: string }[] = [
+  { key: "all", label: "All games" },
+  { key: "yours", label: `Only ${subjectLower}` },
+  { key: "theirs", label: `Only ${otherLower}` },
+];
+const sorts: { key: VersusGameSort; label: string }[] = [
+  { key: "gap", label: "Biggest gap" },
+  { key: "top", label: "Top rated" },
+  { key: "low", label: "Lowest rated" },
+  // Against one member every game has one review, so this would order nothing
+  ...(opponent ? [] : [{ key: "most-reviewed" as const, label: "Most reviewed" }]),
+  { key: "title", label: "A–Z" },
+];
+const emptyText: Record<VersusScope | VersusGameFilter, string> = {
+  all: "No games reviewed yet.",
+  shared: `${subjectName} and ${otherLower} haven't reviewed any of the same games yet.`,
+  disagree: `No games ${subjectLower} and ${otherLower} are more than a point apart on.`,
+  agree: `No games ${subjectLower} and ${otherLower} are within a point on.`,
+  yours: `Every game ${subjectLower} reviewed, ${otherLower} reviewed too.`,
+  theirs: `${subjectName} reviewed every game ${otherLower} did.`,
+};
+const emptyKey = data.scope !== "all" ? data.scope : games.filter;
+
+/** A link to this view with some of the list's settings changed. */
+function viewHref(change: { gf?: string; gs?: string; gn?: number }) {
+  const q = new URLSearchParams({ tab: "compare" });
+  if (opponent) q.set("with", opponent.id);
+  const gf = change.gf ?? games.filter, gs = change.gs ?? games.sort;
+  if (gf !== "all") q.set("gf", gf);
+  if (gs !== "gap") q.set("gs", gs);
+  if (data.scope !== "all") q.set("sc", data.scope);
+  if (data.genre) q.set("gg", data.genre);
+  if (games.search) q.set("gq", games.search);
+  if (change.gn && change.gn > VERSUS_GAMES_PAGE) q.set("gn", String(change.gn));
+  return `?${q}`;
+}
+const genreName = data.genres.find((g) => g.id === data.genre)?.name ?? null;
+const moreLimit = Math.min(games.limit + VERSUS_GAMES_PAGE, VERSUS_GAMES_MAX);
+const hasMore = games.rows.length < games.total && games.limit < VERSUS_GAMES_MAX;
+
+const badge = (score: number | null) => (score != null ? scoreClass(score) : "");
+const plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+const cover = (g: VersusGameRow) => igdbCover(g.game.cover_img_url, "t_cover_big");
+
+/**
+ * One side of a face-off: the score, big, beside the cover, and the rest as a
+ * list further out. The labels are the same on both sides so the rows line
+ * up; the community's numbers are averages (hours, achieved) or its most
+ * common pick (platform), which the key says once.
+ */
+type FaceRow = { key: string; label: string; value: string; meter?: number };
+function faceSide(g: VersusGameRow, side: "subject" | "other") {
+  const isCommunity = side === "other" && !opponent;
+  const d = side === "subject" ? g.subjectDetail : g.otherDetail;
+  const score = side === "subject" ? g.subjectScore : g.otherScore;
+  const rows: FaceRow[] = !d ? [] : [
+    { key: "hours", label: "Hours", value: d.avgHours != null ? `${Math.round(d.avgHours).toLocaleString()}h` : "—" },
+    {
+      key: "ach", label: "Achieved",
+      value: d.achievementPct != null ? `${Math.round(d.achievementPct * 100)}%` : "—",
+      meter: d.achievementPct != null ? Math.round(d.achievementPct * 100) : undefined,
+    },
+    { key: "platform", label: "Platform", value: d.platform ?? "—" },
+  ];
+  return {
+    score: formatScore(score),
+    badge: badge(score) || "gv-score-none",
+    scoreSub: score == null ? "Not reviewed" : isCommunity ? `avg of ${plural(g.otherCount, "review")}` : null,
+    rows,
+  };
+}
+---
+
+<section class="gv-games" id="gv-games" data-gv-games>
+  <div class="gv-games-head">
+    <span class="gv-list-title">Games</span>
+    <span class="gv-key" aria-hidden="true">
+      <span class="gv-key-item"><i class="gv-dot gv-dot-l"></i>{subjectName}</span>
+      <span class="gv-key-item"><i class="gv-dot gv-dot-r"></i>{opponent ? otherShort : "Community averages"}</span>
+    </span>
+  </div>
+
+  <div class="gv-games-bar">
+    {/* A real form, so Enter searches without the script; with it, typing searches as you go */}
+    <form class="gv-search" method="get" role="search" data-gv-search-form>
+      <input type="hidden" name="tab" value="compare" />
+      {opponent && <input type="hidden" name="with" value={opponent.id} />}
+      {games.filter !== "all" && <input type="hidden" name="gf" value={games.filter} />}
+      {data.scope !== "all" && <input type="hidden" name="sc" value={data.scope} />}
+      {data.genre && <input type="hidden" name="gg" value={data.genre} />}
+      {games.sort !== "gap" && <input type="hidden" name="gs" value={games.sort} />}
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input
+        type="search"
+        name="gq"
+        value={games.search ?? ""}
+        placeholder="Search games"
+        aria-label="Search games"
+        maxlength={VERSUS_SEARCH_MAX}
+        autocomplete="off"
+        data-gv-search
+      />
+    </form>
+    {data.scope === "all" && (
+      <label class="gv-sort">
+        <span>Show</span>
+        <select class="gv-select" data-gv-filter aria-label="Filter games">
+          {filters.map((f) => <option value={f.key} selected={f.key === games.filter}>{f.label}</option>)}
+        </select>
+      </label>
+    )}
+    <label class="gv-sort">
+      <span>Sort</span>
+      <select class="gv-select" data-gv-sort aria-label="Sort games">
+        {sorts.map((o) => <option value={o.key} selected={o.key === games.sort}>{o.label}</option>)}
+      </select>
+    </label>
+  </div>
+
+  {games.failed ? (
+    <p class="gv-games-empty">Games couldn't be loaded right now. Try again in a moment.</p>
+  ) : games.rows.length === 0 ? (
+    <p class="gv-games-empty">
+      {games.search ? `No games matching “${games.search}”${genreName ? ` in ${genreName}` : ""}.`
+        : genreName ? `No ${genreName} games here.` : emptyText[emptyKey]}
+    </p>
+  ) : (
+    <>
+      <div class="gv-faceoffs">
+        {games.rows.map((g) => (
+          <a class="gv-face" href={`/games/${g.game.slug}`} style={cover(g) ? `--gv-art:url("${cover(g)}")` : undefined}>
+            {(["subject", "other"] as const).map((side) => {
+              const f = faceSide(g, side);
+              return (
+                <div class={`gv-face-side gv-face-${side === "subject" ? "l" : "r"}`} aria-label={side === "subject" ? subjectName : otherShort} role="group">
+                  <div class="gv-face-score">
+                    <span class="gv-face-lbl">Score</span>
+                    <span class={`score-badge ${f.badge}`}>{f.score}</span>
+                    {f.scoreSub && <small>{f.scoreSub}</small>}
+                  </div>
+                  {f.rows.length > 0 && (
+                    <dl class="gv-face-list">
+                      {f.rows.map((r) => (
+                        <div class={`gv-face-row gv-face-${r.key}`}>
+                          <dt class="gv-face-lbl">{r.label}</dt>
+                          <dd>{r.value}</dd>
+                          {r.meter != null && <span class="gv-face-meter" aria-hidden="true"><i style={`width:${r.meter}%`}></i></span>}
+                        </div>
+                      ))}
+                    </dl>
+                  )}
+                </div>
+              );
+            })}
+            <div class="gv-face-game">
+              {cover(g) ? <img class="gv-face-cover" src={cover(g)!} alt="" loading="lazy" /> : <span class="gv-face-cover"></span>}
+              <span class="gv-face-title">{g.game.title}</span>
+              {g.diff != null && (
+                <span class={`gv-face-gap ${g.diff > 0 ? "gv-diff-up" : g.diff < 0 ? "gv-diff-down" : ""}`} title={`${subjectName} minus ${otherShort}`}>
+                  {signedScore(g.diff)}
+                </span>
+              )}
+            </div>
+          </a>
+        ))}
+      </div>
+      <div class="gv-games-foot">
+        <span>Showing {games.rows.length.toLocaleString()} of {plural(games.total, "game")}</span>
+        {hasMore && <a class="gv-more" href={viewHref({ gn: moreLimit })} data-gv-games-link>Show more</a>}
+      </div>
+    </>
+  )}
+</section>

@@ -10,12 +10,12 @@ export const POST: APIRoute = async (context) => {
   const { group_id, message } = body;
   if (!group_id) return json({ error: "group_id is required" }, 400);
 
-  // Verify the group is private
+  // Verify the group actually requires a join request (private, or public with approval required)
   const { data: group } = await db.from("groups")
-    .select("id, name, visibility").eq("id", group_id).single();
+    .select("id, name, visibility, requires_approval").eq("id", group_id).single();
   if (!group) return json({ error: "Group not found" }, 404);
-  if (group.visibility !== "private") {
-    return json({ error: "Join requests are only for private groups" }, 400);
+  if (group.visibility !== "private" && !group.requires_approval) {
+    return json({ error: "This group doesn't require a join request — join directly." }, 400);
   }
 
   // Not already a member

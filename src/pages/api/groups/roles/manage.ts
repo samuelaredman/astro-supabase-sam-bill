@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { requireAuth, json } from "../../../../utils/api";
+import { requireAuth, json, getGroupAuthority } from "../../../../utils/api";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -10,7 +10,7 @@ export const POST: APIRoute = async (context) => {
   const {
     group_id, action, role_id, name, color, role_rank,
     can_invite, can_remove_members, can_edit_group,
-    can_manage_sessions, can_manage_watchlist, can_manage_roles,
+    can_manage_sessions, can_manage_watchlist, can_manage_roles, can_feature_games,
     is_view_only,
   } = body;
 
@@ -19,8 +19,7 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "action must be create, update, or delete" }, 400);
 
   // ── Resolve caller's authority ────────────────────────────────────────────
-  const { data: membership } = await db.from("group_members")
-    .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();
+  const membership = await getGroupAuthority(db, group_id, profile.id);
   if (!membership) return json({ error: "Not a member of this group" }, 403);
 
   const isOwner = membership.role === "owner";
@@ -72,8 +71,9 @@ export const POST: APIRoute = async (context) => {
       can_edit_group:       !!can_edit_group,
       can_manage_sessions:  can_manage_sessions !== undefined ? !!can_manage_sessions : true,
       can_manage_watchlist: can_manage_watchlist !== undefined ? !!can_manage_watchlist : true,
+      can_feature_games:    !!can_feature_games,
       is_view_only:         !!is_view_only,
-    }).select("id, name, color, role_rank, can_manage_roles, can_invite, can_remove_members, can_edit_group, can_manage_sessions, can_manage_watchlist, is_view_only").single();
+    }).select("id, name, color, role_rank, can_manage_roles, can_invite, can_remove_members, can_edit_group, can_manage_sessions, can_manage_watchlist, can_feature_games, is_view_only").single();
 
     if (error) {
       if (error.code === "23505") return json({ error: "A role with that name already exists" }, 409);
@@ -110,6 +110,7 @@ export const POST: APIRoute = async (context) => {
     if (can_manage_sessions !== undefined)  updates.can_manage_sessions = !!can_manage_sessions;
     if (can_manage_watchlist !== undefined) updates.can_manage_watchlist= !!can_manage_watchlist;
     if (can_manage_roles !== undefined)     updates.can_manage_roles    = !!can_manage_roles;
+    if (can_feature_games !== undefined)    updates.can_feature_games   = !!can_feature_games;
     if (is_view_only !== undefined)         updates.is_view_only        = !!is_view_only;
 
     // Validate new rank if provided

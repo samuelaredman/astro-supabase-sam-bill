@@ -1,0 +1,543 @@
+/**
+ * The group Games tab (?tab=games): games a creator features — the ones they
+ * 100%, review or play through — each with its video, a note, an optional question
+ * and how the group did on it.
+ *
+ * The members' numbers come from group_featured_game_stats() (migrations
+ * 20261006000007, 20261007000000 and 20261007000001): played, completed,
+ * 100% / platinum, average rating and how it splits across 1–10, achievement %
+ * and hours — for everyone who played, those who finished and those who
+ * 100%'d — plus a few members at each stage for the avatars. Nothing here counts review or library rows — see
+ * "Review stats" in CLAUDE.md. A featured game's question is an ordinary group
+ * poll with featured_game_id set (migration 20261006000005), so voting, closing
+ * and deleting go through /api/groups/polls/*. Its options are optional, and
+ * members can always answer in their own words too (group_poll_answers,
+ * migration 20261006000008, through /api/groups/polls/answer). Answers can be
+ * upvoted and replied to (migration 20261007000002,
+ * /api/groups/polls/answer-vote and /answer-reply); the card ranks them by
+ * upvotes.
+ *
+ * The page (src/pages/groups/[id]/index.astro) calls loadGroupFeaturedGames()
+ * only when it's the tab in the URL, and src/components/groups/GamesTab.astro
+ * renders it.
+ */
+
+import { fetchAll } from "./fetchAll";
+import { getGroupAuthority, type SupabaseAdmin } from "./api";
+
+/** The most featured games one group can have, and the most the tab shows. */
+export const FEATURED_GAMES_MAX = 50;
+/** Avatars shown for each stage (played / finished / 100%) of a game. */
+export const FEATURED_STAGE_AVATARS = 8;
+
+export const FEATURED_NOTE_MAX = 500;
+export const POLL_QUESTION_MAX = 300;
+export const POLL_OPTION_MAX = 80;
+export const POLL_OPTIONS_MIN = 2;
+export const POLL_OPTIONS_MAX = 6;
+export const POLL_ANSWER_MAX = 500;
+export const POLL_REPLY_MAX = 500;
+
+export interface FeaturedPollInput {
+  question: string;
+  options: string[];
+}
+
+/**
+ * Reads the optional `poll` field of a feature request: the creator's question.
+ * Absent or null → no question. Otherwise it needs a question, and either no
+ * options (members only write answers) or 2–6 distinct ones, within the same
+ * limits as the group's other polls.
+ */
+export function readFeaturedPoll(
+  value: unknown,
+): { poll: FeaturedPollInput | null } | { error: string } {
+  if (value == null) return { poll: null };
+  if (typeof value !== "object") return { error: "Invalid question." };
+  const { question, options } = value as { question?: unknown; options?: unknown };
+  const q = typeof question === "string" ? question.trim() : "";
+  if (!q) return { error: "Write a question." };
+  if (q.length > POLL_QUESTION_MAX) return { error: `The question is too long (max ${POLL_QUESTION_MAX} characters).` };
+  if (options != null && !Array.isArray(options)) return { error: "Invalid options." };
+  const clean = (options ?? [])
+    .map((o: unknown) => (typeof o === "string" ? o.trim() : ""))
+    .filter(Boolean);
+  if (clean.some((o: string) => o.length > POLL_OPTION_MAX)) return { error: `Options can be at most ${POLL_OPTION_MAX} characters.` };
+  const unique = [...new Set(clean.map((o: string) => o.toLowerCase()))];
+  if (unique.length !== clean.length) return { error: "Options must be different from each other." };
+  if (clean.length > 0 && (clean.length < POLL_OPTIONS_MIN || clean.length > POLL_OPTIONS_MAX))
+    return { error: `Add between ${POLL_OPTIONS_MIN} and ${POLL_OPTIONS_MAX} options, or none to only take written answers.` };
+  return { poll: { question: q, options: clean } };
+}
+
+/** A member's written answer to a question: trimmed, 1–500 characters; empty → delete it. */
+export function readPollAnswer(value: unknown): { body: string | null } | { error: string } {
+  if (value == null) return { body: null };
+  if (typeof value !== "string") return { error: "Invalid answer." };
+  const body = value.trim();
+  if (body.length > POLL_ANSWER_MAX) return { error: `Your answer is too long (max ${POLL_ANSWER_MAX} characters).` };
+  return { body: body || null };
+}
+
+/** Reads the optional note: absent → leave alone, empty → clear. */
+export function readFeaturedNote(
+  body: Record<string, unknown>,
+): { present: false } | { present: true; note: string | null } | { present: true; error: string } {
+  if (!("note" in body)) return { present: false };
+  const value = body.note;
+  if (value == null) return { present: true, note: null };
+  if (typeof value !== "string") return { present: true, error: "Invalid note." };
+  const note = value.trim();
+  if (note.length > FEATURED_NOTE_MAX) return { present: true, error: `The note is too long (max ${FEATURED_NOTE_MAX} characters).` };
+  return { present: true, note: note || null };
+}
+
+/**
+ * Whether someone may feature games in a group: owners and admins (site admins
+ * count, via getGroupAuthority), and custom roles with can_feature_games that
+ * aren't view-only.
+ */
+export async function canFeatureGames(db: SupabaseAdmin, groupId: string, profileId: string): Promise<boolean> {
+  const authority = await getGroupAuthority(db, groupId, profileId);
+  if (!authority) return false;
+  if (["owner", "admin"].includes(authority.role)) return true;
+  if (!authority.custom_role_id) return false;
+  const { data: role } = await db.from("group_roles")
+    .select("can_feature_games, is_view_only").eq("id", authority.custom_role_id).maybeSingle();
+  return !!role?.can_feature_games && !role.is_view_only;
+}
+
+/** Creates the featured game's question and any options; returns an error, or null on success. */
+export async function createFeaturedPoll(
+  db: SupabaseAdmin,
+  groupId: string,
+  featuredId: string,
+  profileId: string,
+  poll: FeaturedPollInput,
+): Promise<unknown> {
+  const { data: row, error } = await db.from("group_polls").insert({
+    group_id: groupId, profile_id: profileId, question: poll.question, featured_game_id: featuredId,
+  }).select("id").single();
+  if (error) {
+    console.error("[groups/featured-games] poll insert error:", JSON.stringify(error));
+    return error;
+  }
+  if (poll.options.length === 0) return null;
+  const { error: optError } = await db.from("group_poll_options").insert(
+    poll.options.map((label, i) => ({ poll_id: row.id, label, position: i })),
+  );
+  if (optError) {
+    console.error("[groups/featured-games] poll option insert error:", JSON.stringify(optError));
+    await db.from("group_polls").delete().eq("id", row.id);
+    return optError;
+  }
+  return null;
+}
+
+/**
+ * Whether someone can remove others' answers and replies on a question: its
+ * author, the group's owners and admins (site admins count), and roles that can
+ * edit the group — the same people who can close or delete it.
+ */
+export async function canModeratePoll(
+  db: SupabaseAdmin,
+  poll: { group_id: string; profile_id: string },
+  profileId: string,
+): Promise<boolean> {
+  if (poll.profile_id === profileId) return true;
+  const authority = await getGroupAuthority(db, poll.group_id, profileId);
+  if (!authority) return false;
+  if (["owner", "admin"].includes(authority.role)) return true;
+  if (!authority.custom_role_id) return false;
+  const { data: role } = await db.from("group_roles")
+    .select("can_edit_group").eq("id", authority.custom_role_id).maybeSingle();
+  return !!role?.can_edit_group;
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+
+/** One row of group_featured_game_stats(). */
+export interface FeaturedStatsRow {
+  game_id: string;
+  member_count: number;
+  played_count: number;
+  completed_count: number;
+  full_count: number;
+  review_count: number;
+  avg_score: number | null;
+  achievement_count: number;
+  avg_achievement_pct: number | null;
+  hours_count: number;
+  avg_hours: number | null;
+  /** Hours of those who finished it / 100%'d it. */
+  completed_hours_count: number;
+  avg_completed_hours: number | null;
+  full_hours_count: number;
+  avg_full_hours: number | null;
+  full_profile_ids: string[] | null;
+  completed_profile_ids?: string[] | null;
+  played_profile_ids?: string[] | null;
+  /** Members who gave it each score, 1 to 10. */
+  score_counts?: number[] | null;
+}
+
+export interface FeaturedStats {
+  memberCount: number;
+  played: number;
+  /** Share of the group's members who played it, 0–100. */
+  playedPct: number | null;
+  completed: number;
+  /** Share of those who played it who finished it, 0–100. */
+  completedPct: number | null;
+  full: number;
+  /** Share of those who played it who 100%'d or platinumed it, 0–100. */
+  fullPct: number | null;
+  reviewCount: number;
+  avgScore: number | null;
+  achievementCount: number;
+  /** Average achievement completion, 0–100. */
+  avgAchievementPct: number | null;
+  hoursCount: number;
+  /** Average hours of everyone who played it. */
+  avgHours: number | null;
+  completedHoursCount: number;
+  /** Average hours of those who finished it. */
+  avgCompletedHours: number | null;
+  fullHoursCount: number;
+  /** Average hours of those who 100%'d or platinumed it. */
+  avgFullHours: number | null;
+}
+
+/** An average of hours to one decimal, or null when nobody's hours are behind it. */
+function avgHoursOf(count: number, avg: number | null | undefined): number | null {
+  return count > 0 && avg != null ? Math.round(avg * 10) / 10 : null;
+}
+
+function pct(part: number, whole: number): number | null {
+  return whole > 0 ? Math.round((part / whole) * 100) : null;
+}
+
+/** A stats row as the card shows it; a game nobody has touched is all zeros. */
+export function buildFeaturedStats(row: FeaturedStatsRow | null | undefined, memberCount = 0): FeaturedStats {
+  const members = row?.member_count ?? memberCount;
+  const played = row?.played_count ?? 0;
+  const completed = row?.completed_count ?? 0;
+  const full = row?.full_count ?? 0;
+  const reviewCount = row?.review_count ?? 0;
+  const achievementCount = row?.achievement_count ?? 0;
+  const hoursCount = row?.hours_count ?? 0;
+  const completedHoursCount = row?.completed_hours_count ?? 0;
+  const fullHoursCount = row?.full_hours_count ?? 0;
+  return {
+    memberCount: members,
+    played,
+    playedPct: pct(played, members),
+    completed,
+    completedPct: pct(completed, played),
+    full,
+    fullPct: pct(full, played),
+    reviewCount,
+    avgScore: reviewCount > 0 && row?.avg_score != null ? row.avg_score : null,
+    achievementCount,
+    avgAchievementPct: achievementCount > 0 && row?.avg_achievement_pct != null
+      ? Math.round(row.avg_achievement_pct * 100)
+      : null,
+    hoursCount,
+    avgHours: avgHoursOf(hoursCount, row?.avg_hours),
+    completedHoursCount,
+    avgCompletedHours: avgHoursOf(completedHoursCount, row?.avg_completed_hours),
+    fullHoursCount,
+    avgFullHours: avgHoursOf(fullHoursCount, row?.avg_full_hours),
+  };
+}
+
+/** "37h", "4.5h", "45m" — hours as the card shows them. */
+export function formatHours(hours: number | null | undefined): string {
+  if (hours == null || !Number.isFinite(hours)) return "—";
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}m`;
+  return hours >= 10 ? `${Math.round(hours)}h` : `${Math.round(hours * 10) / 10}h`;
+}
+
+// ── Polls ────────────────────────────────────────────────────────────────────
+
+export interface FeaturedPollOption {
+  id: string;
+  label: string;
+  count: number;
+  /** Share of the votes, 0–100. */
+  pct: number;
+}
+
+export interface FeaturedReply {
+  id: string;
+  profileId: string;
+  username: string;
+  avatarUrl: string | null;
+  body: string;
+  createdAt: string;
+}
+
+export interface FeaturedAnswer {
+  id: string;
+  profileId: string;
+  username: string;
+  avatarUrl: string | null;
+  body: string;
+  createdAt: string;
+  edited: boolean;
+  upvotes: number;
+  /** Whether the viewer upvoted it. */
+  myUpvote: boolean;
+  /** Oldest first, like a conversation. */
+  replies: FeaturedReply[];
+}
+
+export interface FeaturedPoll {
+  id: string;
+  question: string;
+  closed: boolean;
+  profileId: string;
+  totalVotes: number;
+  myOptionId: string | null;
+  /** Empty when the question only takes written answers. */
+  options: FeaturedPollOption[];
+  /** Written answers, most upvoted first, then newest. */
+  answers: FeaturedAnswer[];
+  myAnswer: FeaturedAnswer | null;
+}
+
+export interface AnswerRow {
+  id: string;
+  poll_id: string;
+  profile_id: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+  profiles: { username: string; avatar_url: string | null } | null;
+}
+
+export interface AnswerVoteRow { answer_id: string; profile_id: string }
+export interface ReplyRow {
+  id: string;
+  answer_id: string;
+  profile_id: string;
+  body: string;
+  created_at: string;
+  profiles: { username: string; avatar_url: string | null } | null;
+}
+
+/**
+ * A question with its options in order, each option's share of the votes, and
+ * its written answers with their upvotes and replies — most upvoted first, then
+ * newest.
+ */
+export function summarizePoll(
+  poll: { id: string; question: string; closed: boolean; profile_id: string },
+  options: { id: string; poll_id: string; label: string; position: number }[],
+  votes: { poll_id: string; option_id: string; profile_id: string }[],
+  viewerProfileId: string | null,
+  answerRows: AnswerRow[] = [],
+  answerVotes: AnswerVoteRow[] = [],
+  replyRows: ReplyRow[] = [],
+): FeaturedPoll {
+  const mine = votes.filter((v) => v.poll_id === poll.id);
+  const total = mine.length;
+  const answers: FeaturedAnswer[] = answerRows
+    .filter((a) => a.poll_id === poll.id && a.profiles)
+    .map((a) => {
+      const ups = answerVotes.filter((v) => v.answer_id === a.id);
+      return {
+        id: a.id,
+        profileId: a.profile_id,
+        username: a.profiles!.username,
+        avatarUrl: a.profiles!.avatar_url,
+        body: a.body,
+        createdAt: a.created_at,
+        edited: a.updated_at !== a.created_at,
+        upvotes: ups.length,
+        myUpvote: !!viewerProfileId && ups.some((v) => v.profile_id === viewerProfileId),
+        replies: replyRows
+          .filter((r) => r.answer_id === a.id && r.profiles)
+          .sort((x, y) => x.created_at.localeCompare(y.created_at))
+          .map((r) => ({
+            id: r.id,
+            profileId: r.profile_id,
+            username: r.profiles!.username,
+            avatarUrl: r.profiles!.avatar_url,
+            body: r.body,
+            createdAt: r.created_at,
+          })),
+      };
+    })
+    .sort((a, b) => b.upvotes - a.upvotes || b.createdAt.localeCompare(a.createdAt));
+  return {
+    id: poll.id,
+    question: poll.question,
+    closed: poll.closed,
+    profileId: poll.profile_id,
+    totalVotes: total,
+    myOptionId: viewerProfileId ? mine.find((v) => v.profile_id === viewerProfileId)?.option_id ?? null : null,
+    options: options
+      .filter((o) => o.poll_id === poll.id)
+      .sort((a, b) => a.position - b.position)
+      .map((o) => {
+        const count = mine.filter((v) => v.option_id === o.id).length;
+        return { id: o.id, label: o.label, count, pct: total > 0 ? Math.round((count / total) * 100) : 0 };
+      }),
+    answers,
+    myAnswer: viewerProfileId ? answers.find((a) => a.profileId === viewerProfileId) ?? null : null,
+  };
+}
+
+// ── Loader ───────────────────────────────────────────────────────────────────
+
+export interface FeaturedGame {
+  id: string;
+  createdAt: string;
+  createdBy: string | null;
+  note: string | null;
+  youtubeVideoId: string | null;
+  game: { id: string; title: string; slug: string | null; coverImgUrl: string | null; year: number | null };
+  stats: FeaturedStats;
+  /** A few members at each stage, people with a profile picture first. */
+  stageMembers: Record<FeaturedStage, StageMember[]>;
+  /** Members who gave it each score: index 0 is a 1, index 9 a 10. */
+  scoreCounts: number[];
+  poll: FeaturedPoll | null;
+  /** The viewer's published review of the game, if any. */
+  myReview: { id: string; score: number } | null;
+}
+
+export type FeaturedStage = "played" | "completed" | "full";
+export interface StageMember { id: string; username: string; avatarUrl: string | null }
+
+/** score_counts as ten numbers, whatever came back (an older function returns none). */
+export function normalizeScoreCounts(counts: number[] | null | undefined): number[] {
+  return Array.from({ length: 10 }, (_, i) => Math.max(0, Number(counts?.[i]) || 0));
+}
+
+export interface GroupGamesData {
+  games: FeaturedGame[];
+  memberCount: number;
+}
+
+export async function loadGroupFeaturedGames(opts: {
+  db: any;
+  groupId: string;
+  memberCount: number;
+  viewerProfileId: string | null;
+}): Promise<GroupGamesData> {
+  const { db, groupId, memberCount, viewerProfileId } = opts;
+
+  const { data: rows, error } = await db
+    .from("group_featured_games")
+    .select("id, game_id, youtube_video_id, note, created_at, created_by, games ( id, title, slug, cover_img_url, date_released )")
+    .eq("group_id", groupId)
+    .order("created_at", { ascending: false })
+    .limit(FEATURED_GAMES_MAX);
+  if (error) console.error("[groupFeaturedGames] featured games:", JSON.stringify(error));
+  const featured = (rows ?? []).filter((r: any) => r.games);
+  if (featured.length === 0) return { games: [], memberCount };
+
+  const gameIds: string[] = featured.map((r: any) => r.game_id);
+  const featuredIds: string[] = featured.map((r: any) => r.id);
+
+  const [statsRes, pollsRes, myReviewsRes] = await Promise.all([
+    db.rpc("group_featured_game_stats", { p_group_id: groupId, p_game_ids: gameIds }),
+    db.from("group_polls")
+      .select("id, question, closed, profile_id, featured_game_id")
+      .in("featured_game_id", featuredIds),
+    viewerProfileId
+      ? db.from("reviews").select("id, game_id, score")
+          .eq("profile_id", viewerProfileId).eq("status", "published").in("game_id", gameIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+  if (statsRes.error) console.error("[groupFeaturedGames] stats:", JSON.stringify(statsRes.error));
+  if (pollsRes.error) console.error("[groupFeaturedGames] polls:", JSON.stringify(pollsRes.error));
+
+  const statsByGame = new Map<string, FeaturedStatsRow>(
+    ((statsRes.data ?? []) as FeaturedStatsRow[]).map((s) => [s.game_id, s]),
+  );
+  const pollRows: any[] = pollsRes.data ?? [];
+  const pollIds = pollRows.map((p) => p.id);
+
+  // Votes, answers, upvotes and replies are paged: fifty questions in a big group
+  // pass the 1000-row cap. Upvotes and replies are read through their answer's
+  // question, so the request doesn't carry every answer id.
+  //
+  // `profiles!profile_id` names the author: group_poll_answer_votes (answer +
+  // member as its key) is a second path from an answer to profiles, and a bare
+  // `profiles` embed is then ambiguous — PostgREST refuses the whole query.
+  // fetchAll() reads a failed page as "no rows", so failures are logged here.
+  const logged = (label: string) => (res: { data: any[] | null; error: unknown }) => {
+    if (res.error) console.error(`[groupFeaturedGames] ${label}:`, JSON.stringify(res.error));
+    return res;
+  };
+  const [optionsRes, voteRows, answerRows, answerVoteRows, replyRows] = pollIds.length
+    ? await Promise.all([
+        db.from("group_poll_options").select("id, poll_id, label, position").in("poll_id", pollIds),
+        fetchAll<any>((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
+          .in("poll_id", pollIds).order("id").range(from, to).then(logged("poll votes"))),
+        fetchAll<AnswerRow>((from, to) => db.from("group_poll_answers")
+          .select("id, poll_id, profile_id, body, created_at, updated_at, profiles!profile_id ( username, avatar_url )")
+          .in("poll_id", pollIds).order("id").range(from, to).then(logged("answers"))),
+        fetchAll<AnswerVoteRow>((from, to) => db.from("group_poll_answer_votes")
+          .select("answer_id, profile_id, group_poll_answers!inner ( poll_id )")
+          .in("group_poll_answers.poll_id", pollIds).order("answer_id").order("profile_id").range(from, to).then(logged("answer upvotes"))),
+        fetchAll<ReplyRow>((from, to) => db.from("group_poll_answer_replies")
+          .select("id, answer_id, profile_id, body, created_at, profiles!profile_id ( username, avatar_url ), group_poll_answers!inner ( poll_id )")
+          .in("group_poll_answers.poll_id", pollIds).order("id").range(from, to).then(logged("answer replies"))),
+      ])
+    : [{ data: [] }, [], [], [], []];
+
+  const stageIds = (row: FeaturedStatsRow | undefined, stage: FeaturedStage): string[] =>
+    ((stage === "full" ? row?.full_profile_ids : stage === "completed" ? row?.completed_profile_ids : row?.played_profile_ids) ?? [])
+      .slice(0, FEATURED_STAGE_AVATARS);
+  const STAGES: FeaturedStage[] = ["played", "completed", "full"];
+  const avatarIds = [...new Set(
+    [...statsByGame.values()].flatMap((s) => STAGES.flatMap((stage) => stageIds(s, stage))),
+  )];
+  const { data: avatarProfiles } = avatarIds.length
+    ? await db.from("profiles").select("id, username, avatar_url").in("id", avatarIds)
+    : { data: [] };
+  const profileById = new Map<string, any>((avatarProfiles ?? []).map((p: any) => [p.id, p]));
+  const membersOf = (row: FeaturedStatsRow | undefined, stage: FeaturedStage): StageMember[] =>
+    stageIds(row, stage)
+      .map((id) => profileById.get(id))
+      .filter(Boolean)
+      .map((p: any) => ({ id: p.id, username: p.username, avatarUrl: p.avatar_url }));
+
+  const pollByFeatured = new Map<string, any>(pollRows.map((p) => [p.featured_game_id, p]));
+  const myReviewByGame = new Map<string, any>((myReviewsRes.data ?? []).map((r: any) => [r.game_id, r]));
+
+  const games: FeaturedGame[] = featured.map((r: any) => {
+    const statsRow = statsByGame.get(r.game_id);
+    const poll = pollByFeatured.get(r.id);
+    const review = myReviewByGame.get(r.game_id);
+    return {
+      id: r.id,
+      createdAt: r.created_at,
+      createdBy: r.created_by,
+      note: r.note,
+      youtubeVideoId: r.youtube_video_id,
+      game: {
+        id: r.games.id,
+        title: r.games.title,
+        slug: r.games.slug,
+        coverImgUrl: r.games.cover_img_url,
+        year: r.games.date_released ? new Date(r.games.date_released).getFullYear() : null,
+      },
+      stats: buildFeaturedStats(statsRow, memberCount),
+      stageMembers: {
+        played: membersOf(statsRow, "played"),
+        completed: membersOf(statsRow, "completed"),
+        full: membersOf(statsRow, "full"),
+      },
+      scoreCounts: normalizeScoreCounts(statsRow?.score_counts),
+      poll: poll ? summarizePoll(poll, optionsRes.data ?? [], voteRows, viewerProfileId, answerRows, answerVoteRows, replyRows) : null,
+      myReview: review ? { id: review.id, score: review.score } : null,
+    };
+  });
+
+  return { games, memberCount: games[0]?.stats.memberCount ?? memberCount };
+}

@@ -8,6 +8,15 @@ export function scoreClass(score: number): string {
   return 'score-low';
 }
 
+/**
+ * A score as the site shows it: always one decimal ("9.0", "6.4"), "—" when
+ * there is none. Pair it with scoreClass(score) on the unrounded value, as the
+ * game page does.
+ */
+export function formatScore(score: number | null | undefined): string {
+  return score == null || !Number.isFinite(score) ? '—' : score.toFixed(1);
+}
+
 export function timeAgo(dateStr: string): string {
   // Clamp negatives to 0: a stored timestamp shouldn't be in the future,
   // but imports (Steam review dates rounded to noon UTC) can drift slightly

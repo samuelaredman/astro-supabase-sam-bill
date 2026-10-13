@@ -61,7 +61,7 @@ src/
     discover.astro, following.astro, notifications.astro
     profile.astro, settings.astro
     signin.astro, signup.astro, forgot-password.astro, reset-password-confirm.astro
-    welcome.astro, contact.astro, terms.astro, privacy.astro
+    contact.astro, terms.astro, privacy.astro
   components/
     Layout.astro        ← Wraps all non-standalone pages. OG, nav, theme CSS vars.
     ReviewCard.astro    ← Feed card used on index, game, reviewer, search pages.
@@ -239,6 +239,8 @@ supabase/
 | | `banner_url` | text | YES | — |
 | | `visibility` | text | NO | `'public'` |
 | | `invite_code` | text UNIQUE | YES | — |
+| | `slug` | text UNIQUE | YES | — |
+| | `is_site_group` | bool | NO | false — at most one row true (`groups_one_site_group`) |
 | | `created_by` | uuid FK→profiles | NO | — |
 | | `created_at` | timestamptz | NO | now() |
 | `group_members` | `id` | uuid PK | NO | uuid_generate_v4() |
@@ -268,6 +270,97 @@ supabase/
 | | `status` | text | NO | `'pending'` |
 | | `created_at` | timestamptz | NO | now() |
 | | `expires_at` | timestamptz | YES | — |
+
+### Groups: stats, admin checks, custom links
+
+- **Stats come from the `group_*` SQL functions** (migrations `20260911120000` and `20260912000000`):
+  `group_review_summary`, `group_member_review_stats`, `group_game_review_stats`,
+  `group_game_member_scores`, `group_split_decision`, `group_hot_take`, `group_score_distribution`,
+  plus the Stats tab's `group_versus_games`, `group_versus_summary`, `group_versus_profile` and
+  `group_versus_genres` — all reading through
+  `group_reviews(group, genre?, platform?)`, which applies "published, by a current member, inside the
+  group's focus". Site-wide numbers (Hot Take's community side) come from `game_review_stats`, per the
+  review-stats rule. Service role only. Never `.in('profile_id', memberIds)` over reviews: it truncates
+  at 1000 rows and fails on URL length.
+- **The Stats tab (`?tab=compare`) is "you vs someone".** The viewer (a visitor sees the owner, or on the
+  site group the most active reviewer) against the community — everyone else in the group — or one member
+  picked in the "compare with" menu, kept in `?with=` so a comparison is a shareable link. It shows a
+  stat card for each side (games played, average rating, average achievement %, hours per game and 10s,
+  from `group_versus_profile`, migration `20261006000001`, built into rows by `buildStatCard()`), with what
+  the two share in the middle (shared games, % within a point, average gap). Under them are the charts: the
+  score distribution and a top-genres radar (`group_versus_genres`, migration `20261005000004`), built by
+  `buildTape()`. The cards and charts need no shared games. Last comes every game either side reviewed
+  (`VersusGames.astro`), as face-offs — cover in the middle, each side's score, hours, achievement % and
+  platform either side, the extras read for just the listed games from `group_versus_game_details`
+  (migration `20261006000002`). Above the cards, two tab-wide filters narrow every number on the tab — cards, middle numbers,
+  histogram, radar and list: "Games" (`?sc=` all / shared / disagree / agree; `group_versus_scope()` and the
+  `p_scope` parameter, migration `20261006000004`) and "Genre" (`?gg=`, through `p_genre_id`; hidden under a
+  genre focus). The list adds a title search, an "only you / only them" menu (all-games scope only), a sort menu
+  and "Show more", in `?gq=` / `?gf=` / `?gs=` / `?gn=` (`filterVersusGames()` / `sortVersusGames()`) and
+  re-fetch just the list from `/groups/[id]/compare?part=games`. The list reads `group_versus_games_ranked`
+  (migration `20261006000003`), whose `rated` / `turn` / `rated_side` give one top/lowest-rated ranking for
+  both sides, taking turns at an equal rating.
+  `loadGroupVersus()` (`src/utils/groupCompare.ts`) builds it from `group_versus_games` /
+  `group_versus_summary` (migration `20261005000002`), which never count the subject on the other side;
+  the community needs `COMMUNITY_MIN_REVIEWS` other reviews before a game counts. `CompareTab.astro`
+  renders it, the page calls both for the first paint, and the menu re-fetches the partial route
+  `/groups/[id]/compare`. Behaviour is delegated once from `src/scripts/group-compare.ts`; the CSS lives in
+  the page's global block. The games list is a `.limit()`ed read (`VERSUS_GAMES_MAX`), which keeps it clear of the 1000-row cap.
+- **The Feed tab (`?tab=feed`) is the group's activity.** Everyone, members included, lands on
+  Overview; the Feed loads only when it's the tab in the URL. `loadGroupFeed()`
+  (`src/utils/groupFeed.ts`) builds a page and `FeedTab.astro` renders it; filter changes and further
+  pages re-fetch the partial route `/groups/[id]/feed`, which runs the same loader and components.
+  Each card carries the viewer's own score for that game — the point of the tab, and the one thing a
+  chat app can't show. The filters ("We disagree", "Haven't played") are applied inside `group_feed()`,
+  not after the rows arrive: filtering a page of 20 in JS shows a handful of rows and pages wrongly.
+- **The Games tab (`?tab=games`) is the creator's featured games** — the games from their videos (a
+  100% run, a refund verdict, a first playthrough), each with an optional YouTube video, note and question,
+  and how the group did on it: played, finished, 100% / platinum, average rating, achievement % and
+  hours (overall, for those who finished and for those who 100%'d), from `group_featured_game_stats()`
+  (migration `20261006000007`, hours breakdown `20261007000000`, avatars per stage and the 1–10 score
+  split `20261007000001`). The stats panel is interactive: picking played / finished / 100% shows who got
+  there and lights up that stage's time (`src/scripts/group-games.ts`); the score split and achievements
+  meter are `GameInsights.astro`, under the video or in the panel when there's none. Library data counts only for
+  public libraries and never for hidden games; ratings come through `group_reviews()` without the
+  group's focus. Rows live in `group_featured_games` (migration `20261006000005`); a game's question is
+  an ordinary `group_polls` row with `featured_game_id` set, so it votes through `/api/groups/polls/*` and
+  Overview's Polls card leaves it out. Its options are optional (none = written answers only), and
+  members can always write one answer each (`group_poll_answers`, migration `20261006000008`, via
+  `/api/groups/polls/answer`). Answers can be upvoted and replied to (`group_poll_answer_votes` /
+  `group_poll_answer_replies`, migration `20261007000002`, via `/api/groups/polls/answer-vote` and
+  `/answer-reply`); the card puts the question beside its top three answers by upvotes, with "View all". Owners, admins and roles with `can_feature_games` (migration
+  `20261006000006`) feature games via `/api/groups/featured-games/(create, update, delete)`. The tab
+  shows once a game is featured (before that, only to those who can feature one), and
+  `stats_config.show_games` turns it off. `loadGroupFeaturedGames()` (`src/utils/groupFeaturedGames.ts`)
+  builds it only when it's the open tab, `GamesTab.astro` renders it, and `src/scripts/group-games.ts`
+  runs the form. "Review it" links to `/games/[slug]?review=1`, which opens the review composer, and the
+  community rating / "Read reviews" open the Feed narrowed to that game (`?tab=feed&game=<id>`, a filter on
+  `group_feed()`'s rows that skips the group's focus, like the Games tab's numbers).
+- **The Overview is showcases, like a profile's.** Its sections (`GROUP_SHOWCASE_SECTIONS` in
+  `src/utils/groupShowcases.ts`) render in two stacks — main column and sidebar — wrapped in the profile's
+  `ShowcaseSection.astro`. Whoever can edit the group (owner, admins, `can_edit_group` roles) gets
+  "Customize", which reorders sections within their column and hides them, saved as `groups.overview_order` /
+  `overview_hidden` through `/api/groups/update` (migration `20261008000000`). `overview_hidden` NULL means
+  never customized: `DEFAULT_HIDDEN_SHOWCASES` plus whatever the old `stats_config.show_*` switches turned
+  off (settings no longer shows those switches, only the tab toggles). New sections: "Now featuring" (the
+  newest Games tab game and its numbers) and a video like a profile's (`showcase_video_mode` 'latest' = the
+  owner's newest upload via `/api/groups/latest-video`, or 'featured'). "At a glance" and Members stay fixed.
+- **Admin-gated group actions use `getGroupAuthority(db, groupId, profileId)`** (`src/utils/api.ts`),
+  not a raw `group_members` lookup. Site admins (`site_admins`) count as a group admin in every group,
+  so we can moderate the groups we run without joining them. Owner-only actions (delete, transfer,
+  promote to admin) still check for the real owner; member actions (leave, vote, log a session) still
+  need real membership.
+- **`groups.slug` is the custom link `chekpoint.gg/c/<slug>`** (`src/pages/c/[slug].astro`, a 302 to
+  the group that keeps the query string). Only site admins set it (`POST /api/groups/slug`). Build
+  share and invite links with `groupPath(group)` (`src/utils/groupSlug.ts`).
+- **The site group ("Chekpoint", `groups.is_site_group`) has every profile in it**, so group stats
+  work site-wide. Migration `20260912000003`: `on_profile_join_site_group` adds each new profile
+  (it swallows its own errors so it can never break signup), and triggers refuse deleting its
+  memberships or the group (account deletion still cascades). `leave`, `members/remove` and `delete`
+  refuse first via `src/utils/siteGroup.ts`, and the page hides those buttons. On it the Stats tab
+  starts from the viewer, not the owner. Never count its members by fetching `group_members` rows.
+- **Joining goes through `joinGroup()`** (`src/utils/groupJoin.ts`), the single copy of the join rules
+  (public without approval, or a private group's current invite code).
 
 ### Other tables
 
@@ -336,6 +429,8 @@ every route still enforces that the user is logged in.
 | Trigger | Table | Event | What it does |
 |---------|-------|-------|-------------|
 | `handle_new_user` | `auth.users` | AFTER INSERT | **Auto-creates a `profiles` row** on signup. Sets `auth_user_id = NEW.id`, `username = raw_user_meta_data->>'username'` or email prefix. Never manually insert profiles on signup — this trigger handles it. |
+| `on_profile_join_site_group` | `profiles` | AFTER INSERT | Adds the new profile to the site group (`groups.is_site_group`). Never raises. |
+| `keep_site_group_members` / `keep_site_group` | `group_members` / `groups` | BEFORE DELETE | Refuse removing site-group members or deleting the site group; cascades from a deleted profile still go through. |
 | `enforce_group_limit` | `groups` | BEFORE INSERT | Raises exception if `created_by` user already has 10 groups. INSERT will hard-fail with a DB exception — handle this in the API route. |
 | `contact_submissions` | `contact_submissions` | AFTER INSERT | Fires HTTP POST to `notify-contact` Edge Function to email the team. |
 | `on_report_insert` | `reports` | AFTER INSERT | Fires HTTP POST to `notify-report` Edge Function to email the team. |
@@ -456,8 +551,8 @@ before this was caught). It is the single most fragile part of the app. Treat an
 touching the files below as high-risk regardless of how small the diff looks.
 
 **Files in scope:** `src/pages/api/auth/signup.ts`, `signin.ts`, `reset-password.ts`,
-`update-password.ts`, `set-session.ts`, `src/pages/auth/confirm.astro`,
-`src/pages/reset-password-confirm.astro`, `src/pages/welcome.astro`, `src/pages/signup.astro`,
+`update-password.ts`, `set-session.ts`, `src/utils/groupJoin.ts`, `src/pages/auth/confirm.astro`,
+`src/pages/reset-password-confirm.astro`, `src/pages/signup.astro`,
 `src/pages/signin.astro`, `src/pages/forgot-password.astro`.
 
 ### Rule 1 — never use `context.url.origin` / `new URL(request.url).origin` for a redirect URL sent to Supabase
@@ -475,9 +570,10 @@ and was fixed 2026-07-03/04. If you ever see `context.url.origin` reappear in an
 ### Rule 2 — any redirect path passed to Supabase must correspond to an actual route, and must be in the Supabase Redirect URLs allowlist
 
 `signup.ts`'s `emailRedirectTo` pointed at `/welcome` directly for a long stretch — but
-`/welcome` only checks for an existing cookie session; it never exchanges a confirmation
+`/welcome` only checked for an existing cookie session; it never exchanged a confirmation
 token for one. Confirmation links must land on `/auth/confirm` (`src/pages/auth/confirm.astro`),
-which does the actual exchange and sets the session cookie, then forwards to `/welcome`.
+which does the actual exchange and sets the session cookie, then forwards to the homepage — or
+to the group they signed up from (Rule 5). `/welcome` no longer exists.
 Before changing any redirect path, confirm the target file actually exists at that route
 (check `src/pages/`, not just what "should" be there) and that the path is listed in
 Supabase → Authentication → URL Configuration → Redirect URLs.
@@ -531,6 +627,20 @@ have no link and are unaffected.
 
 **Never revert a template to `{{ .ConfirmationURL }}`** — it reintroduces the `supabase.co`
 link and silently breaks Gmail delivery again with zero error anywhere in our stack.
+
+### Rule 5 — signing up from a group page joins the group on confirmation
+
+A logged-out group page links to `/signup?group=<id>[&code=<invite>]`. `signup.ts` stores that as
+`pending_group` in the new user's metadata, the only place that survives the email round trip
+(even when the link is opened on another device). Once the session exists, `/auth/confirm` calls
+`landingAfterConfirm(user)` (`src/utils/groupJoin.ts`) and redirects to what it returns instead of
+`/`: in both the server-side `code`/`token_hash` branch, and the hash-fragment branch via
+`/api/auth/set-session`, which returns it as `redirect`. `landingAfterConfirm` clears the key
+(GoTrue merges `user_metadata`, so `username` is kept), joins through `joinGroup()`'s rules, and
+returns the group's path. For an approval-only group, they land on its page to request access.
+It never throws. Users can edit their own metadata, so never trust `pending_group` beyond
+`joinGroup()`. If you change where confirmation lands, keep this call on the way, or signups from
+creator links silently stop joining.
 
 ### Verification standard for any change in this area
 

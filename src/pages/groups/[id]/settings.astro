@@ -2,6 +2,8 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
+import { getGroupAuthority, isSiteAdmin } from "../../../utils/api";
+import { groupPath } from "../../../utils/groupSlug";
 import { getPageUser } from "../../../utils/pageAuth";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
@@ -12,16 +14,15 @@ const { id } = Astro.params;
 const db = getSupabaseAdmin() as any;
 
 const { data: profile } = await db
-  .from("profiles").select("id, is_group_admin").eq("auth_user_id", user.id).single();
+  .from("profiles").select("id").eq("auth_user_id", user.id).single();
 if (!profile) return Astro.redirect("/signin");
-const isAdmin = !!(profile as any).is_group_admin;
 
 const { data: group } = await (db as any)
   .from("groups").select("*").eq("id", id).single();
 if (!group) return Astro.redirect("/404");
 
-const { data: membership } = await db
-  .from("group_members").select("role, custom_role_id").eq("group_id", id).eq("profile_id", profile.id).maybeSingle();
+// Site admins count as a group admin here without joining (getGroupAuthority)
+const membership = await getGroupAuthority(db, group.id, profile.id);
 
 const isOwner = membership?.role === "owner";
 const isAdminBuiltin = membership?.role === "admin";
@@ -57,7 +58,7 @@ const minAllowedRank = rankConstraint === null ? 1 : rankConstraint + 1;
 let groupRoles: any[] = [];
 try {
   const { data: roles } = await db.from("group_roles")
-    .select("id, name, color, role_rank, can_manage_roles, can_invite, can_remove_members, can_edit_group, can_manage_sessions, can_manage_watchlist, is_view_only")
+    .select("id, name, color, role_rank, can_manage_roles, can_invite, can_remove_members, can_edit_group, can_manage_sessions, can_manage_watchlist, can_feature_games, is_view_only")
     .eq("group_id", id).order("role_rank", { ascending: true });
   groupRoles = roles ?? [];
 } catch { /* migration may not be applied yet */ }
@@ -90,13 +91,18 @@ const [{ data: genres }, { data: platforms }] = await Promise.all([
 const defaultStats = {
   show_top_games: true, show_top_rated: true, show_hot_take: true,
   show_critic_spectrum: true, show_recent_reviews: true,
-  show_score_compare: true, show_sessions: true, show_watchlist: true,
+  show_score_compare: true, show_sessions: true, show_watchlist: true, show_games: true,
+  show_announcements: true, show_polls: true,
+  show_consensus: true, show_divergent: true, show_hidden_gems: true, show_score_distribution: true,
   focus_genre_id: null, focus_platform_id: null,
 };
 const statsConfig = { ...defaultStats, ...(group.stats_config ?? {}) };
 
+// Custom /c/ links are set by site admins only (/api/groups/slug)
+const siteAdmin = await isSiteAdmin(db, profile.id);
+const sharePath = groupPath(group);
 const inviteUrl = group.invite_code
-  ? `${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`
+  ? `${Astro.url.origin}${sharePath}?code=${group.invite_code}`
   : null;
 
 // Role colors available to pick
@@ -222,18 +228,31 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
             <div class="vis-label">Private</div>
             <div class="vis-desc">Members join by request or invite</div>
           </label>
-          {isAdmin && (
-            <label class={`vis-option${group.visibility === "community" ? " selected" : ""}`} id="opt-community">
-              <input type="radio" name="visibility" value="community" checked={group.visibility === "community"} />
-              <div class="vis-label">🏠 Community</div>
-              <div class="vis-desc">All new users auto-join</div>
-            </label>
-          )}
         </div>
+      </div>
+      <div class="form-group" id="requires-approval-group" style={group.visibility === "private" ? "display:none" : ""}>
+        <label class="toggle-row">
+          <input type="checkbox" id="setting-requires-approval" checked={!!group.requires_approval} />
+          Require approval to join <span style="font-weight:400;color:var(--text-tertiary)">— people apply instead of joining instantly</span>
+        </label>
       </div>
       <button class="btn-primary" onclick="saveGeneral()">Save Changes</button>
       <p class="form-msg" id="general-msg"></p>
     </div>
+
+    <!-- ── Custom Link (site admins) ────────────────────────────── -->
+    {siteAdmin && (
+      <div class="settings-section">
+        <div class="settings-section-title">Custom Link <span style="font-weight:500;text-transform:none;letter-spacing:0">· site admins only</span></div>
+        <div class="form-group">
+          <label class="form-label" for="setting-slug">{Astro.url.host}/c/</label>
+          <input id="setting-slug" class="form-input" type="text" value={group.slug ?? ""} maxlength="32" placeholder="creator-name" autocomplete="off" spellcheck="false" />
+        </div>
+        <p style="font-size:12px;color:var(--text-tertiary);margin:-6px 0 12px">Lowercase letters, numbers and hyphens. Share and invite links switch to it. Leave empty to remove.</p>
+        <button class="btn-primary" onclick="saveSlug()">Save Link</button>
+        <p class="form-msg" id="slug-msg"></p>
+      </div>
+    )}
 
     <!-- ── Invite Link ──────────────────────────────────────────── -->
     {group.invite_code && (
@@ -241,7 +260,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
         <div class="settings-section-title">Invite Link</div>
         <div class="invite-row">
           <input class="invite-code-display" id="invite-code-display" type="text" readonly
-            value={`${Astro.url.origin}/groups/${group.id}?code=${group.invite_code}`} />
+            value={inviteUrl ?? ""} />
           <button class="btn-ghost" onclick="copyInviteLink()">Copy</button>
         </div>
         <div style="margin-top:10px">
@@ -312,6 +331,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
                   <span class={`perm-chip${r.can_edit_group ? " active" : ""}`}>Can edit group</span>
                   <span class={`perm-chip${r.can_manage_sessions ? " active" : ""}`}>Sessions</span>
                   <span class={`perm-chip${r.can_manage_watchlist ? " active" : ""}`}>Watchlist</span>
+                  <span class={`perm-chip${r.can_feature_games ? " active" : ""}`}>Feature games</span>
                 </div>
                 {isSelfRole && <div style="font-size:11px;color:var(--text-tertiary);margin-top:6px">← Your current role</div>}
                 {canEditRole && (
@@ -344,6 +364,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
                     <label class="perm-check-row"><input type="checkbox" id={`edit-editgrp-${r.id}`} checked={r.can_edit_group} /> Can edit group</label>
                     <label class="perm-check-row"><input type="checkbox" id={`edit-sessions-${r.id}`} checked={r.can_manage_sessions} /> Manage sessions</label>
                     <label class="perm-check-row"><input type="checkbox" id={`edit-watchlist-${r.id}`} checked={r.can_manage_watchlist} /> Manage watchlist</label>
+                    <label class="perm-check-row"><input type="checkbox" id={`edit-feature-${r.id}`} checked={r.can_feature_games} /> Feature games</label>
                     {isOwner && <label class="perm-check-row"><input type="checkbox" id={`edit-manageroles-${r.id}`} checked={r.can_manage_roles} /> Can manage roles</label>}
                   </div>
                   <div style="display:flex;gap:8px">
@@ -388,6 +409,7 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
             <label class="perm-check-row"><input type="checkbox" id="new-can-edit" /> Can edit group</label>
             <label class="perm-check-row"><input type="checkbox" id="new-manage-sessions" checked /> Manage sessions</label>
             <label class="perm-check-row"><input type="checkbox" id="new-manage-watchlist" checked /> Manage watchlist</label>
+            <label class="perm-check-row"><input type="checkbox" id="new-feature-games" /> Feature games</label>
             <label class="perm-check-row"><input type="checkbox" id="new-manage-roles" /> Can manage roles</label>
           </div>
           <div class="role-form-actions">
@@ -427,41 +449,23 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
     <div class="settings-section">
       <div class="settings-section-title">Stats &amp; Display</div>
       <p style="font-size:12px;color:var(--text-tertiary);margin-bottom:14px">
-        Choose which sections appear on your group's overview page.
+        Choose which tabs your group has. To reorder or hide the sections on the Overview, use
+        <a href={`/groups/${group.id}`} style="color:var(--accent)">Customize</a> on the Overview itself.
       </p>
 
       <div class="stats-grid">
-        <label class="toggle-row">
-          <input type="checkbox" id="sc-top-games" checked={statsConfig.show_top_games} />
-          Most Played
-        </label>
-        <label class="toggle-row">
-          <input type="checkbox" id="sc-top-rated" checked={statsConfig.show_top_rated} />
-          Top Rated
-        </label>
-        <label class="toggle-row">
-          <input type="checkbox" id="sc-hot-take" checked={statsConfig.show_hot_take} />
-          Hot Take
-        </label>
-        <label class="toggle-row">
-          <input type="checkbox" id="sc-spectrum" checked={statsConfig.show_critic_spectrum} />
-          Critic Spectrum
-        </label>
-        <label class="toggle-row">
-          <input type="checkbox" id="sc-reviews" checked={statsConfig.show_recent_reviews} />
-          Recent Reviews
-        </label>
         <label class="toggle-row">
           <input type="checkbox" id="sc-compare" checked={statsConfig.show_score_compare} />
           Score Compare tab
         </label>
         <label class="toggle-row">
+          <input type="checkbox" id="sc-games" checked={statsConfig.show_games} />
+          Games tab
+        </label>
+        {/* Sessions is switched off for now (SESSIONS_ENABLED in groups/[id]/index.astro) */}
+        <label class="toggle-row" style="display:none">
           <input type="checkbox" id="sc-sessions" checked={statsConfig.show_sessions} />
           Sessions tab
-        </label>
-        <label class="toggle-row">
-          <input type="checkbox" id="sc-watchlist" checked={statsConfig.show_watchlist} />
-          Want to Play
         </label>
       </div>
 
@@ -517,7 +521,8 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
     )}
 
     <!-- ── Danger Zone ───────────────────────────────────────────── -->
-    {isOwner && (
+    {/* The site group can't be deleted (src/utils/siteGroup.ts) */}
+    {isOwner && !group.is_site_group && (
       <div class="settings-section" style="border-color:#5a1a1a">
         <div class="settings-section-title" style="color:#f87171">Danger Zone</div>
         <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px">
@@ -531,12 +536,15 @@ const ROLE_COLORS = ["#6050c8","#2dd4bf","#4ade80","#f59e0b","#f87171","#a78bfa"
 </div>
 </Layout>
 
-<script define:vars={{ groupId: group.id, minAllowedRank, isOwner }}>
+<script define:vars={{ groupId: group.id, minAllowedRank, isOwner, initialSharePath: sharePath, statsConfig }}>
 // ── Visibility radios ────────────────────────────────────────────────────
 document.querySelectorAll('.vis-option').forEach(opt => {
   opt.addEventListener('click', () => {
     document.querySelectorAll('.vis-option').forEach(o => o.classList.remove('selected'));
     opt.classList.add('selected');
+    const isPrivate = opt.querySelector('input').value === 'private';
+    const raGroup = document.getElementById('requires-approval-group');
+    if (raGroup) raGroup.style.display = isPrivate ? 'none' : '';
   });
 });
 
@@ -554,18 +562,38 @@ async function saveGeneral() {
   const name = document.getElementById('setting-name').value;
   const description = document.getElementById('setting-desc').value;
   const visibility = document.querySelector('input[name="visibility"]:checked')?.value;
+  const requires_approval = document.getElementById('setting-requires-approval')?.checked ?? false;
   const res = await fetch('/api/groups/update', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupId, name, description, visibility }),
+    body: JSON.stringify({ group_id: groupId, name, description, visibility, requires_approval }),
   });
   const data = await res.json();
   showMsg('general-msg', res.ok ? 'Saved!' : (data.error ?? 'Error saving'), res.ok);
   if (res.ok && data.invite_code) {
     const d = document.getElementById('invite-code-display');
-    if (d) d.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
+    if (d) d.value = `${window.location.origin}${sharePath}?code=${data.invite_code}`;
   }
 }
 window.saveGeneral = saveGeneral;
+
+// ── Custom link ──────────────────────────────────────────────────────────
+let sharePath = initialSharePath;
+
+async function saveSlug() {
+  const slug = document.getElementById('setting-slug').value;
+  const res = await fetch('/api/groups/slug', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, slug }),
+  });
+  const data = await res.json();
+  if (!res.ok) return showMsg('slug-msg', data.error ?? 'Error saving', false);
+  document.getElementById('setting-slug').value = data.slug ?? '';
+  sharePath = data.slug ? `/c/${data.slug}` : `/groups/${groupId}`;
+  const field = document.getElementById('invite-code-display');
+  if (field) field.value = field.value.replace(/^(https?:\/\/[^/]+)[^?]*/, `$1${sharePath}`);
+  showMsg('slug-msg', data.slug ? `Saved — ${window.location.host}/c/${data.slug}` : 'Custom link removed', true);
+}
+window.saveSlug = saveSlug;
 
 // ── Invite link ──────────────────────────────────────────────────────────
 function copyInviteLink() {
@@ -586,7 +614,7 @@ async function regenerateInvite() {
   const data = await res.json();
   if (res.ok && data.invite_code) {
     const field = document.getElementById('invite-code-display');
-    if (field) field.value = `${window.location.origin}/groups/${groupId}?code=${data.invite_code}`;
+    if (field) field.value = `${window.location.origin}${sharePath}?code=${data.invite_code}`;
     showMsg('invite-msg', 'New link generated!', true);
   } else {
     showMsg('invite-msg', data.error ?? 'Error', false);
@@ -610,14 +638,12 @@ window.saveApplication = saveApplication;
 async function saveStatsConfig() {
   const get = id => document.getElementById(id);
   const stats_config = {
-    show_top_games:       get('sc-top-games')?.checked ?? true,
-    show_top_rated:       get('sc-top-rated')?.checked ?? true,
-    show_hot_take:        get('sc-hot-take')?.checked ?? true,
-    show_critic_spectrum: get('sc-spectrum')?.checked ?? true,
-    show_recent_reviews:  get('sc-reviews')?.checked ?? true,
+    // The Overview's sections are set in Customize on the Overview now; their old
+    // show_* values (which seed an Overview that was never customized) are kept
+    ...statsConfig,
     show_score_compare:   get('sc-compare')?.checked ?? true,
     show_sessions:        get('sc-sessions')?.checked ?? true,
-    show_watchlist:       get('sc-watchlist')?.checked ?? true,
+    show_games:           get('sc-games')?.checked ?? true,
     focus_genre_id:       get('sc-genre')?.value || null,
     focus_platform_id:    get('sc-platform')?.value || null,
   };
@@ -652,8 +678,8 @@ function getSelectedColor(containerId) {
 function toggleViewOnly(roleId, prefix) {
   const viewOnly = document.getElementById(prefix === 'new' ? 'new-view-only' : `edit-view-${roleId}`)?.checked;
   const writeIds = prefix === 'new'
-    ? ['new-can-invite','new-can-remove','new-can-edit','new-manage-sessions','new-manage-watchlist','new-manage-roles']
-    : [`edit-invite-${roleId}`,`edit-remove-${roleId}`,`edit-editgrp-${roleId}`,`edit-sessions-${roleId}`,`edit-watchlist-${roleId}`,`edit-manageroles-${roleId}`];
+    ? ['new-can-invite','new-can-remove','new-can-edit','new-manage-sessions','new-manage-watchlist','new-feature-games','new-manage-roles']
+    : [`edit-invite-${roleId}`,`edit-remove-${roleId}`,`edit-editgrp-${roleId}`,`edit-sessions-${roleId}`,`edit-watchlist-${roleId}`,`edit-feature-${roleId}`,`edit-manageroles-${roleId}`];
   writeIds.forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.disabled = viewOnly; if (viewOnly) el.checked = false; }
@@ -683,6 +709,7 @@ async function createRole() {
     can_edit_group:       document.getElementById('new-can-edit')?.checked,
     can_manage_sessions:  document.getElementById('new-manage-sessions')?.checked,
     can_manage_watchlist: document.getElementById('new-manage-watchlist')?.checked,
+    can_feature_games:    document.getElementById('new-feature-games')?.checked,
     is_view_only:         document.getElementById('new-view-only')?.checked,
   };
   const res = await fetch('/api/groups/roles/manage', {
@@ -715,6 +742,7 @@ async function saveRoleEdit(roleId) {
     can_edit_group:       document.getElementById(`edit-editgrp-${roleId}`)?.checked,
     can_manage_sessions:  document.getElementById(`edit-sessions-${roleId}`)?.checked,
     can_manage_watchlist: document.getElementById(`edit-watchlist-${roleId}`)?.checked,
+    can_feature_games:    document.getElementById(`edit-feature-${roleId}`)?.checked,
     is_view_only:         document.getElementById(`edit-view-${roleId}`)?.checked,
   };
   const res = await fetch('/api/groups/roles/manage', {

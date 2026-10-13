@@ -85,8 +85,13 @@ export const POST: APIRoute = async (context) => {
 
   console.log(`[steam/import] Steam returned ${steamGames.length} games for steamId=${steamId}`);
 
+  // Steam returns an empty list (not an error) when "Game details" is private,
+  // so treat it as a failure the client can explain.
   if (steamGames.length === 0) {
-    return json({ matched: 0, updated: 0, unmatched: 0, total: 0, removed: 0 });
+    return json({
+      error: 'No games found in your Steam library. Make sure your Steam "Game details" privacy setting is Public.',
+      code: 'steam_private',
+    }, 422);
   }
 
   // Build lowercase→playtime / →appid / →last-played maps from Steam library.

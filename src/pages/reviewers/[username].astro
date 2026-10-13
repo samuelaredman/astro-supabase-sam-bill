@@ -18,6 +18,10 @@ import ReviewsTab from '../../components/profile/ReviewsTab.astro';
 import RecommendationsTab from '../../components/profile/RecommendationsTab.astro';
 import ListsTab from '../../components/profile/ListsTab.astro';
 import LibraryTab from '../../components/profile/LibraryTab.astro';
+import GroupsTab from '../../components/profile/GroupsTab.astro';
+import ShowcaseSection from '../../components/profile/ShowcaseSection.astro';
+import { readShowcaseKeys, readShowcaseOrder } from '../../utils/profileShowcases';
+import { groupPath } from '../../utils/groupSlug';
 import {
   isLazyProfileTab, loadProfileTab, PROFILE_REVIEWS_SELECT, sortPublishedReviews,
   type ProfileTabContext,
@@ -34,7 +38,7 @@ const [user, { data: reviewer, error: reviewerError }] = await Promise.all([
   .from('profiles')
   .select(`
     id, username, avatar_url, bio, banner_url, banner_position, created_at, is_active,
-    favorite_game_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
+    favorite_game_id, featured_group_id, showcase_games, want_to_play_privacy, dropped_privacy, search_indexable,
     steam_id, steam_username, steam_synced_at,
     psn_account_id, psn_online_id, psn_synced_at,
     xbox_xuid, xbox_gamertag, xbox_synced_at,
@@ -75,6 +79,9 @@ const _newSocialCols = ['steam_url', 'psn_url', 'xbox_url', 'instagram_url', 'ti
 // sum of their latencies for data most visitors never scroll to.
 const [
   { data: _showcaseAchData },
+  { data: _showcaseVideoData },
+  { data: _hiddenShowcasesData },
+  { data: _showcaseOrderData },
   { data: _newSocialData },
   { data: _aliasRows },
   { data: voteTotalsRows },
@@ -86,10 +93,15 @@ const [
   { count: recsCount },
   communityStatsRows,
   { data: volumePercentileRaw },
+  { data: groupMembershipRows },
+  { data: featuredGroupRow },
 ] = await Promise.all([
   // Split out from the main select so a not-yet-applied migration degrades one
   // field instead of 404ing the whole profile (the select above uses .single()).
   db.from('profiles').select('showcase_achievements').eq('id', reviewer.id).maybeSingle(),
+  db.from('profiles').select('showcase_video_mode, showcase_video_id').eq('id', reviewer.id).maybeSingle(),
+  db.from('profiles').select('hidden_showcases').eq('id', reviewer.id).maybeSingle(),
+  db.from('profiles').select('showcase_order').eq('id', reviewer.id).maybeSingle(),
   db.from('profiles').select(_newSocialCols.join(', ')).eq('id', reviewer.id).maybeSingle(),
   db.from('username_history')
     .select('old_username, changed_at')
@@ -129,9 +141,36 @@ const [
   // "More reviews than N% of reviewers" — computed in Postgres. This used to
   // page through the author of every published review on the site.
   db.rpc('reviewer_volume_percentile', { p_profile_id: reviewer.id }),
+  // The reviewer's groups: the Groups tab count, and the owner's featured-group
+  // picker. The tab itself (member counts etc.) loads with the tab.
+  db.from('group_members')
+    .select('groups!inner ( id, name, avatar_url, visibility )')
+    .eq('profile_id', reviewer.id)
+    .order('joined_at', { ascending: true }),
+  // "Join my community" card — shown whatever its visibility, since the reviewer
+  // chose to feature it (same exposure as the private-group join wall).
+  (reviewer as any).featured_group_id
+    ? db.from('groups')
+        .select('id, name, description, avatar_url, visibility, slug, group_members ( count )')
+        .eq('id', (reviewer as any).featured_group_id)
+        .maybeSingle()
+    : Promise.resolve({ data: null }),
 ]);
 
 (reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
+// Video showcase: 'featured' renders a stored id; 'latest' is filled client-side
+// from /api/profile/latest-video (CDN-cached) so YouTube never slows the page.
+const showcaseVideoMode: 'latest' | 'featured' | null =
+  _showcaseVideoData?.showcase_video_mode === 'latest' && reviewer.youtube_url ? 'latest'
+  : _showcaseVideoData?.showcase_video_mode === 'featured' && _showcaseVideoData?.showcase_video_id ? 'featured'
+  : null;
+// Showcase sections the owner hid — skipped for visitors; the owner sees them in Edit profile.
+const hiddenShowcaseList = readShowcaseKeys(_hiddenShowcasesData?.hidden_showcases) ?? [];
+const hiddenShowcases = new Set<string>(hiddenShowcaseList);
+const hiddenShowcasesJson = JSON.stringify(hiddenShowcaseList);
+const showcaseOrder = readShowcaseOrder(_showcaseOrderData?.showcase_order);
+const showcaseOrderJson = JSON.stringify(showcaseOrder);
+const showcaseVideoId: string | null = showcaseVideoMode === 'featured' ? _showcaseVideoData!.showcase_video_id : null;
 for (const c of _newSocialCols) (reviewer as any)[c] = (_newSocialData as any)?.[c] ?? null;
 
 const previousUsernames: { name: string; changed_at: string }[] = [];
@@ -214,6 +253,17 @@ const tabSrc = (tab: string) => `/reviewers/${encodeURIComponent(reviewer.userna
 const savedListsCount = (savedListRows ?? []).filter((s: any) => isOwnProfile || !s.is_hidden).length;
 const listsTabCount = (ownListsCount ?? 0) + savedListsCount;
 const recsTabCount = Math.min(recsCount ?? 0, 100);
+// Groups: public ones for everyone, private ones only on your own profile
+const reviewerGroups: Array<{ id: string; name: string; avatar_url: string | null; visibility: string }> =
+  (groupMembershipRows ?? []).map((m: any) => m.groups).filter((g: any) => g && (isOwnProfile || g.visibility === 'public'));
+const groupsTabCount = reviewerGroups.length;
+const featuredGroup = featuredGroupRow
+  ? { ...(featuredGroupRow as any), memberCount: Number((featuredGroupRow as any).group_members?.[0]?.count ?? 0) }
+  : null;
+const featuredGroupJson = JSON.stringify(featuredGroup ? { id: featuredGroup.id } : null);
+const reviewerGroupsForPickerJson = JSON.stringify(
+  isOwnProfile ? reviewerGroups.map((g) => ({ id: g.id, name: g.name, avatar_url: g.avatar_url })) : []
+);
 
 // How far a previous (possibly interrupted) achievement sync got, per service,
 // so the owner's Sync button resumes instead of restarting. Each connected
@@ -774,6 +824,93 @@ const reviewerBreadcrumbJsonLd = {
     .fav-empty-icon{width:44px;height:44px;border-radius:12px;background:var(--tag-bg);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;transition:border-color .15s}
     .fav-empty:hover .fav-empty-icon{border-color:var(--accent)}
 
+    /* FEATURED COMMUNITY */
+    /* Showcase edit bar (owner only, edit mode only) — see ShowcaseSection.astro */
+    .sc-edit-bar{display:none;align-items:center;gap:10px;padding:6px 6px 6px 12px;margin-bottom:8px;border:1px dashed color-mix(in srgb,var(--accent) 45%,var(--border));border-radius:10px;background:var(--accent-subtle)}
+    body.editing-profile .sc-edit-bar{display:flex}
+    .sc-edit-label{flex:1;min-width:0;display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-secondary)}
+    .sc-hidden-badge{display:none;font-size:10px;letter-spacing:.04em;padding:2px 7px;border-radius:999px;background:var(--tag-bg);color:var(--text-tertiary)}
+    .sc-edit-actions{display:flex;align-items:center;gap:4px}
+    .sc-move-btn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-secondary);cursor:pointer;transition:color .15s,border-color .15s}
+    .sc-move-btn:hover:not(:disabled){color:var(--accent);border-color:var(--accent)}
+    .sc-move-btn:disabled{opacity:.35;cursor:default}
+    .sc-toggle-btn{height:28px;padding:0 12px;margin-left:4px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-primary);font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:border-color .15s,filter .15s}
+    .sc-toggle-btn:hover{border-color:var(--text-tertiary)}
+    .sc-move-btn:focus-visible,.sc-toggle-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .sc-toggle-show{display:none}
+    .sc-is-hidden .sc-toggle-hide{display:none}
+    .sc-is-hidden .sc-toggle-show{display:inline}
+    .sc-is-hidden .sc-toggle-btn{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+    .sc-is-hidden .sc-toggle-btn:hover{filter:brightness(1.1)}
+    .sc-is-hidden .sc-hidden-badge{display:inline-block}
+    .sc-section.sc-is-hidden{display:none}
+    body.editing-profile .sc-section{margin-bottom:14px}
+    body.editing-profile .sc-section > .card,body.editing-profile .sc-section > .fav-game-card{margin-bottom:0}
+    body.editing-profile .sc-section.sc-is-hidden{display:block}
+    body.editing-profile .sc-is-hidden > :not(.sc-edit-bar){opacity:.4;filter:grayscale(.7);pointer-events:none;user-select:none}
+    /* Video showcase */
+    .vs-label{display:inline-flex;align-items:center;gap:7px}
+    .vs-live-dot{width:7px;height:7px;border-radius:50%;background:#ff0033;box-shadow:0 0 0 3px color-mix(in srgb,#ff0033 25%,transparent)}
+    .vs-player{position:relative;display:block;width:100%;aspect-ratio:16/9;padding:0;border:0;border-radius:12px;overflow:hidden;background:var(--bg-hover);cursor:pointer}
+    .vs-player img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s ease,filter .2s}
+    .vs-player:hover img{transform:scale(1.02);filter:brightness(.85)}
+    .vs-player:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .vs-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:64px;height:44px;border-radius:12px;background:rgba(15,15,15,.8);color:#fff;display:flex;align-items:center;justify-content:center;transition:background .15s}
+    .vs-player:hover .vs-play{background:#ff0033}
+    .vs-duration{position:absolute;right:8px;bottom:8px;font-size:12px;font-weight:600;color:#fff;background:rgba(0,0,0,.8);padding:2px 6px;border-radius:4px}
+    .vs-duration[hidden]{display:none}
+    .vs-player--playing{cursor:default}
+    .vs-player--playing iframe{width:100%;height:100%;border:0;display:block}
+    .vs-body[data-state="loading"] .vs-player{animation:vs-pulse 1.4s ease-in-out infinite}
+    .vs-body[data-state="loading"] .vs-play{opacity:.4}
+    @keyframes vs-pulse{50%{opacity:.6}}
+    .vs-info{display:flex;flex-direction:column;gap:3px;margin-top:12px;text-decoration:none;color:inherit}
+    .vs-title{font-size:15px;font-weight:600;color:var(--text-primary);line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .vs-info:hover .vs-title{color:var(--accent)}
+    .vs-meta{font-size:12px;color:var(--text-tertiary)}
+    .vs-meta:empty{display:none}
+    .vs-unavailable{font-size:13px;color:var(--text-secondary);padding:14px;background:var(--bg-hover);border:1px dashed var(--border);border-radius:12px;line-height:1.5}
+    .vs-unavailable[hidden],.vs-body[hidden]{display:none}
+    .vs-inline-link{background:none;border:none;padding:0;font:inherit;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+    .vsm-body{padding:8px 20px 4px;display:flex;flex-direction:column;gap:10px}
+    .vsm-option{display:flex;gap:12px;align-items:flex-start;padding:14px;border:1px solid var(--border);border-radius:12px;cursor:pointer;transition:border-color .15s,background .15s}
+    .vsm-option:hover{border-color:color-mix(in srgb,var(--accent) 50%,var(--border))}
+    .vsm-option:has(input[type=radio]:checked){border-color:var(--accent);background:var(--accent-subtle)}
+    .vsm-option input[type=radio]{accent-color:var(--accent);margin-top:3px;flex-shrink:0}
+    .vsm-option--disabled{cursor:default;opacity:.75}
+    .vsm-option--disabled:hover{border-color:var(--border)}
+    .vsm-option-text{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+    .vsm-option-title{font-size:14px;font-weight:600;color:var(--text-primary)}
+    .vsm-option-desc{font-size:12px;color:var(--text-secondary);line-height:1.45}
+    .vsm-url{margin-top:8px;font-size:13px;padding:9px 12px}
+    .vsm-error{font-size:13px;color:#f87171}
+    .vsm-error[hidden]{display:none}
+    .vsm-footer{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px 18px}
+    .vsm-btn{font-family:inherit;font-size:13px;font-weight:600;padding:8px 16px;border-radius:10px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);cursor:pointer}
+    .vsm-btn:hover{border-color:var(--accent)}
+    .vsm-btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+    .vsm-btn--primary:hover{filter:brightness(1.1)}
+    .vsm-btn:disabled{opacity:.6;cursor:default}
+    .fg-change-btn{background:none;border:none;cursor:pointer;font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.1em;font-family:inherit}
+    .fg-card{display:flex;align-items:center;gap:14px;padding:14px;background:var(--bg-hover);border:1px solid var(--border);border-radius:12px;text-decoration:none;color:inherit;transition:border-color .15s}
+    .fg-card:hover{border-color:var(--accent)}
+    .fg-avatar{width:48px;height:48px;border-radius:12px;object-fit:cover;flex-shrink:0}
+    .fg-avatar-placeholder{display:flex;align-items:center;justify-content:center;background:var(--accent);color:#fff;font-size:15px;font-weight:700}
+    .fg-info{flex:1;min-width:0}
+    .fg-name{font-size:14px;font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .fg-desc{font-size:12px;color:var(--text-secondary);margin-top:2px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+    .fg-meta{font-size:11px;color:var(--text-tertiary);margin-top:4px}
+    .fg-cta{font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap;flex-shrink:0}
+
+    /* GROUPS TAB */
+    .rgroup-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
+    .rgroup-card{display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;text-decoration:none;transition:border-color .15s,background .15s}
+    .rgroup-card:hover{border-color:var(--accent);background:var(--bg-hover)}
+    .rgroup-avatar{width:52px;height:52px;border-radius:14px;object-fit:cover}
+    .rgroup-avatar-placeholder{width:52px;height:52px;border-radius:14px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:white}
+    .rgroup-name{font-size:13px;font-weight:600;color:var(--text-primary);text-align:center;word-break:break-word}
+    .rgroup-meta{font-size:11px;color:var(--text-tertiary)}
+
     /* SHOWCASE */
     .showcase-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
     .showcase-item{aspect-ratio:3/4;border-radius:10px;overflow:hidden;border:1px solid var(--border);position:relative;transition:transform .2s,border-color .2s;cursor:pointer}
@@ -1142,6 +1279,26 @@ const reviewerBreadcrumbJsonLd = {
     /* Post-sync status message under the sync dropdown — populated by
        profileSteamSync() with a "Synced — N new, N updated" line. */
     .steam-sync-status{font-size:12px;color:var(--text-tertiary);text-align:right;min-height:18px;margin-bottom:12px}
+    .steam-sync-alert{--ssa-red:#ef4444;text-align:left;font-size:13px;line-height:1.5;color:var(--text-secondary);background:color-mix(in srgb,var(--ssa-red) 7%,var(--bg-card));border:1px solid color-mix(in srgb,var(--ssa-red) 35%,var(--border));border-left:3px solid var(--ssa-red);border-radius:10px;padding:14px 16px;margin-bottom:4px}
+    .ssa-head{display:flex;align-items:flex-start;gap:10px}
+    .ssa-icon{color:var(--ssa-red);flex-shrink:0;margin-top:2px;display:flex}
+    .ssa-head-text{flex:1;min-width:0}
+    .ssa-title{font-size:14px;font-weight:700;color:var(--text-primary);line-height:1.3}
+    .ssa-msg{margin-top:2px}
+    .ssa-close{flex-shrink:0;background:none;border:none;color:var(--text-tertiary);font-size:20px;line-height:1;padding:0 2px;cursor:pointer;border-radius:4px}
+    .ssa-close:hover{color:var(--text-primary)}
+    .ssa-body{margin:12px 0 0 26px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--ssa-red) 20%,var(--border))}
+    .ssa-sub{font-weight:600;color:var(--text-primary);margin-bottom:6px}
+    .ssa-steps{margin:0 0 12px;padding-left:20px}
+    .ssa-steps li{margin-bottom:4px}
+    .ssa-steps li::marker{color:var(--text-tertiary);font-weight:600}
+    .ssa-steps strong{color:var(--text-primary)}
+    .ssa-actions{display:flex;flex-wrap:wrap;gap:8px}
+    .ssa-btn{display:inline-flex;align-items:center;font-size:12px;font-weight:600;padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-primary);cursor:pointer;text-decoration:none;font-family:inherit}
+    .ssa-btn:hover{border-color:var(--accent);color:var(--accent)}
+    .ssa-btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+    .ssa-btn--primary:hover{filter:brightness(1.1);color:var(--accent-text)}
+    @media (max-width:520px){.ssa-body{margin-left:0}.ssa-btn{flex:1;justify-content:center}}
     /* Library: Overview/Detailed pills share this row with the sync dropdown */
     .lib-view-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
     .lib-view-row .sort-tabs{margin-bottom:0}
@@ -1437,7 +1594,8 @@ const reviewerBreadcrumbJsonLd = {
     <a href={`/reviewers/${reviewer.username}?tab=library`} class={`tab-link ${activeTab === 'library' ? 'active' : ''}`}>Library</a>
     <a href={`/reviewers/${reviewer.username}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`}>Reviews {publishedReviews.length > 0 && <span class="tab-count">{publishedReviews.length}</span>}</a>
     <a href={`/reviewers/${reviewer.username}?tab=lists`} class={`tab-link ${activeTab === 'lists' ? 'active' : ''}`}>Lists {listsTabCount > 0 && <span class="tab-count">{listsTabCount}</span>}</a>
-    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Recommendations {recsTabCount > 0 && <span class="tab-count">{recsTabCount}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`}>Recs {recsTabCount > 0 && <span class="tab-count">{recsTabCount}</span>}</a>
+    <a href={`/reviewers/${reviewer.username}?tab=groups`} class={`tab-link ${activeTab === 'groups' ? 'active' : ''}`}>Groups {groupsTabCount > 0 && <span class="tab-count">{groupsTabCount}</span>}</a>
     {(showAchievementsTab) && <a href={`/reviewers/${reviewer.username}?tab=achievements`} class={`tab-link ${activeTab === 'achievements' ? 'active' : ''}`}>Achievements</a>}
   </nav>
 
@@ -1446,80 +1604,163 @@ const reviewerBreadcrumbJsonLd = {
     <div class="two-col">
       <div>
 
-        <!-- FAVORITE GAME -->
-        {favGame ? (
-          <div class="fav-game-card" id="favGameCard">
-            <img class="fav-game-bg" src={igdbCover(favGame.cover_img_url, 't_screenshot_big') ?? ''} alt="" />
-            <div class="fav-game-overlay"></div>
-            <div class="fav-game-content">
-              <a href={`/games/${favGame.slug}`}>
-                <img class="fav-cover" src={igdbCover(favGame.cover_img_url) ?? ''} alt={favGame.title} />
-              </a>
-              <div class="fav-info">
-                <div class="fav-label">⭐ Favorite game</div>
-                <a href={`/games/${favGame.slug}`} class="fav-title">{favGame.title}</a>
-                {favReview?.body && <div class="fav-review-blurb">"{favReview.body}"</div>}
+        {/* SHOWCASES — rendered in the owner's saved order; reordered/hidden in Edit profile (see ShowcaseSection.astro) */}
+        <div class="sc-stack" id="showcaseStack">
+        {showcaseOrder.map((key) => (
+          /* FAVORITE GAME */ key === 'favorite_game' ? (
+            <ShowcaseSection section="favorite_game" label="Favorite game" hidden={hiddenShowcases.has('favorite_game')} isOwner={isOwnProfile}>
+            {favGame ? (
+              <div class="fav-game-card" id="favGameCard">
+                <img class="fav-game-bg" src={igdbCover(favGame.cover_img_url, 't_screenshot_big') ?? ''} alt="" />
+                <div class="fav-game-overlay"></div>
+                <div class="fav-game-content">
+                  <a href={`/games/${favGame.slug}`}>
+                    <img class="fav-cover" src={igdbCover(favGame.cover_img_url) ?? ''} alt={favGame.title} />
+                  </a>
+                  <div class="fav-info">
+                    <div class="fav-label">⭐ Favorite game</div>
+                    <a href={`/games/${favGame.slug}`} class="fav-title">{favGame.title}</a>
+                    {favReview?.body && <div class="fav-review-blurb">"{favReview.body}"</div>}
+                  </div>
+                  {favReview && (
+                    <div class={`fav-score ${scoreClass(favReview.score)}`}>{favReview.score}</div>
+                  )}
+                </div>
+                {isOwnProfile && (
+                  <button
+                    onclick="openGamePicker('favorite')"
+                    style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,.6);border:none;color:white;font-size:11px;font-family:inherit;padding:4px 10px;border-radius:8px;cursor:pointer;backdrop-filter:blur(4px)"
+                  >
+                    Change
+                  </button>
+                )}
               </div>
-              {favReview && (
-                <div class={`fav-score ${scoreClass(favReview.score)}`}>{favReview.score}</div>
-              )}
-            </div>
-            {isOwnProfile && (
-              <button
-                onclick="openGamePicker('favorite')"
-                style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,.6);border:none;color:white;font-size:11px;font-family:inherit;padding:4px 10px;border-radius:8px;cursor:pointer;backdrop-filter:blur(4px)"
-              >
-                Change
-              </button>
-            )}
-          </div>
-        ) : isOwnProfile ? (
-          <div class="fav-game-card">
-            <div class="fav-empty" onclick="openGamePicker('favorite')">
-              <div class="fav-empty-icon">⭐</div>
-              <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Set a favorite game</div>
-              <div style="font-size:12px;color:var(--text-tertiary)">The one game that defines you</div>
-            </div>
-          </div>
-        ) : null}
-
-        <!-- SHOWCASE -->
-        <div class="card">
-          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span>Showcase</span>
-            {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
-          </div>
-          <div class="showcase-grid" id="showcaseGrid">
-            <!-- Filled by JS from localStorage/server -->
-            <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',0)" : ''}>
-              <span style="font-size:24px">+</span>
-              <span>Add game</span>
-            </div>
-            <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',1)" : ''}>
-              <span style="font-size:24px">+</span>
-              <span>Add game</span>
-            </div>
-            <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',2)" : ''}>
-              <span style="font-size:24px">+</span>
-              <span>Add game</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- ACHIEVEMENT SHOWCASE -->
-        <div class="card" id="achShowcaseCard">
-          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span>Achievement Showcase</span>
-            {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
-          </div>
-          <div class="ach-showcase-grid" id="achShowcaseGrid">
-            {[0,1,2,3,4].map(i => (
-              <div class="ach-showcase-empty" onclick={isOwnProfile ? `openAchPicker(${i})` : ''}>
-                <span style="font-size:20px;color:var(--text-tertiary)">+</span>
-                <span>Add</span>
+            ) : isOwnProfile ? (
+              <div class="fav-game-card">
+                <div class="fav-empty" onclick="openGamePicker('favorite')">
+                  <div class="fav-empty-icon">⭐</div>
+                  <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Set a favorite game</div>
+                  <div style="font-size:12px;color:var(--text-tertiary)">The one game that defines you</div>
+                </div>
               </div>
-            ))}
-          </div>
+            ) : null}
+            </ShowcaseSection>
+          ) : /* FEATURED COMMUNITY */ key === 'featured_group' ? (
+            <ShowcaseSection section="featured_group" label="Join my community" hidden={hiddenShowcases.has('featured_group')} isOwner={isOwnProfile}>
+            {featuredGroup ? (
+              <div class="card" id="featuredGroupCard">
+                <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+                  <span>Join my community</span>
+                  {isOwnProfile && <button class="fg-change-btn" onclick="openFeaturedGroupPicker()">Change</button>}
+                </div>
+                <a href={groupPath(featuredGroup)} class="fg-card">
+                  {featuredGroup.avatar_url
+                    ? <img src={featuredGroup.avatar_url} alt={featuredGroup.name} class="fg-avatar" />
+                    : <div class="fg-avatar fg-avatar-placeholder">{featuredGroup.name.slice(0,2).toUpperCase()}</div>
+                  }
+                  <div class="fg-info">
+                    <div class="fg-name">{featuredGroup.name}</div>
+                    {featuredGroup.description && <div class="fg-desc">{featuredGroup.description}</div>}
+                    <div class="fg-meta">{featuredGroup.memberCount} member{featuredGroup.memberCount === 1 ? '' : 's'} · <span style="text-transform:capitalize">{featuredGroup.visibility}</span></div>
+                  </div>
+                  <span class="fg-cta">View Group →</span>
+                </a>
+              </div>
+            ) : isOwnProfile ? (
+              <div class="card">
+                <div class="card-title">Join my community</div>
+                <div class="fav-empty" onclick="openFeaturedGroupPicker()">
+                  <div class="fav-empty-icon">👥</div>
+                  <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Feature a group on your profile</div>
+                  <div style="font-size:12px;color:var(--text-tertiary)">Invite visitors to join one of your communities</div>
+                </div>
+              </div>
+            ) : null}
+            </ShowcaseSection>
+          ) : /* VIDEO SHOWCASE — featured: id rendered here; latest: filled by JS from /api/profile/latest-video */ key === 'video' ? (
+            <ShowcaseSection section="video" label="Video" hidden={hiddenShowcases.has('video')} isOwner={isOwnProfile}>
+            {showcaseVideoMode ? (
+              <div class="card" id="videoShowcaseCard" data-mode={showcaseVideoMode} data-video-id={showcaseVideoId ?? ''} data-username={reviewer.username}>
+                <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+                  <span class="vs-label">
+                    {showcaseVideoMode === 'latest' && <span class="vs-live-dot" aria-hidden="true"></span>}
+                    {showcaseVideoMode === 'latest' ? 'Latest video' : 'Featured video'}
+                  </span>
+                  {isOwnProfile && <button class="fg-change-btn" onclick="openVideoShowcasePicker()">Change</button>}
+                </div>
+                <div class="vs-body" data-state={showcaseVideoMode === 'featured' ? 'ready' : 'loading'}>
+                  <button type="button" class="vs-player" aria-label="Play video" onclick="playShowcaseVideo()">
+                    {showcaseVideoId && <img src={`https://i.ytimg.com/vi/${showcaseVideoId}/hqdefault.jpg`} alt="" loading="lazy" />}
+                    <span class="vs-play" aria-hidden="true">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    </span>
+                    <span class="vs-duration" hidden></span>
+                  </button>
+                  <a class="vs-info" href={showcaseVideoId ? `https://www.youtube.com/watch?v=${showcaseVideoId}` : (reviewer.youtube_url ?? '#')} target="_blank" rel="noopener noreferrer">
+                    <span class="vs-title">{showcaseVideoMode === 'latest' ? 'Loading latest upload…' : 'YouTube video'}</span>
+                    <span class="vs-meta"></span>
+                  </a>
+                </div>
+                <div class="vs-unavailable" hidden>
+                  {isOwnProfile
+                    ? <>We couldn’t find any uploads on your YouTube channel. <button type="button" class="vs-inline-link" onclick="openVideoShowcasePicker()">Feature a specific video</button> instead?</>
+                    : 'No videos yet.'}
+                </div>
+              </div>
+            ) : isOwnProfile ? (
+              <div class="card">
+                <div class="card-title">Video</div>
+                <div class="fav-empty" onclick="openVideoShowcasePicker()">
+                  <div class="fav-empty-icon">🎬</div>
+                  <div style="font-size:14px;font-weight:500;color:var(--text-secondary)">Showcase a video</div>
+                  <div style="font-size:12px;color:var(--text-tertiary)">Feature a favorite or always show your latest upload</div>
+                </div>
+              </div>
+            ) : null}
+            </ShowcaseSection>
+          ) : /* SHOWCASE */ key === 'games' ? (
+            <ShowcaseSection section="games" label="Game showcase" hidden={hiddenShowcases.has('games')} isOwner={isOwnProfile}>
+                    <div class="card">
+              <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Showcase</span>
+                {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
+              </div>
+              <div class="showcase-grid" id="showcaseGrid">
+                <!-- Filled by JS from localStorage/server -->
+                <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',0)" : ''}>
+                  <span style="font-size:24px">+</span>
+                  <span>Add game</span>
+                </div>
+                <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',1)" : ''}>
+                  <span style="font-size:24px">+</span>
+                  <span>Add game</span>
+                </div>
+                <div class="showcase-empty" onclick={isOwnProfile ? "openGamePicker('showcase',2)" : ''}>
+                  <span style="font-size:24px">+</span>
+                  <span>Add game</span>
+                </div>
+              </div>
+            </div>
+            </ShowcaseSection>
+          ) : /* ACHIEVEMENT SHOWCASE */ key === 'achievements' ? (
+            <ShowcaseSection section="achievements" label="Achievement showcase" hidden={hiddenShowcases.has('achievements')} isOwner={isOwnProfile}>
+                    <div class="card" id="achShowcaseCard">
+              <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+                <span>Achievement Showcase</span>
+                {isOwnProfile && <span style="font-size:10px;color:var(--text-tertiary);font-weight:400;text-transform:none;letter-spacing:0">Click to edit</span>}
+              </div>
+              <div class="ach-showcase-grid" id="achShowcaseGrid">
+                {[0,1,2,3,4].map(i => (
+                  <div class="ach-showcase-empty" onclick={isOwnProfile ? `openAchPicker(${i})` : ''}>
+                    <span style="font-size:20px;color:var(--text-tertiary)">+</span>
+                    <span>Add</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            </ShowcaseSection>
+          ) : null
+        ))}
         </div>
 
         <!-- SCORE DISTRIBUTION -->
@@ -1618,6 +1859,13 @@ const reviewerBreadcrumbJsonLd = {
   <div class={`tab-panel ${activeTab === 'library' ? 'active' : ''}`} data-tab="library" data-src={activeTab === 'library' ? undefined : tabSrc('library')}>
     {activeTab === 'library'
       ? <LibraryTab data={activeTabData} reviewer={reviewer} isOwnProfile={isOwnProfile} />
+      : <div class="tab-lazy-loading">Loading…</div>}
+  </div>
+
+  <!-- ── GROUPS TAB ── -->
+  <div class={`tab-panel ${activeTab === 'groups' ? 'active' : ''}`} data-tab="groups" data-src={activeTab === 'groups' ? undefined : tabSrc('groups')}>
+    {activeTab === 'groups'
+      ? <GroupsTab data={activeTabData} reviewer={reviewer} />
       : <div class="tab-lazy-loading">Loading…</div>}
   </div>
 
@@ -1830,6 +2078,64 @@ const reviewerBreadcrumbJsonLd = {
   </div>
 </div>
 
+{isOwnProfile && (
+  <>
+  <div class="modal-backdrop" id="videoShowcaseModal" onclick="closeVideoShowcasePickerOnBackdrop(event)">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <div class="modal-title">Showcase a video</div>
+        <button class="modal-close" onclick="closeVideoShowcasePicker()">×</button>
+      </div>
+      <div class="vsm-body">
+        <label class={`vsm-option${!reviewer.youtube_url ? ' vsm-option--disabled' : ''}`}>
+          <input type="radio" name="vsmMode" value="latest" checked={showcaseVideoMode === 'latest'} disabled={!reviewer.youtube_url} />
+          <span class="vsm-option-text">
+            <span class="vsm-option-title">Latest upload</span>
+            <span class="vsm-option-desc">
+              {reviewer.youtube_url
+                ? 'Always shows the newest video from your YouTube channel.'
+                : <>Add your YouTube channel to your profile links first. <button type="button" class="vs-inline-link" onclick="vsmAddChannel()">Add channel</button></>}
+            </span>
+          </span>
+        </label>
+        <label class="vsm-option">
+          <input type="radio" name="vsmMode" value="featured" checked={showcaseVideoMode === 'featured' || (!showcaseVideoMode && !reviewer.youtube_url)} />
+          <span class="vsm-option-text">
+            <span class="vsm-option-title">Featured video</span>
+            <span class="vsm-option-desc">Pin one video you’re proud of.</span>
+            <input type="url" class="modal-search-input vsm-url" id="vsmUrl" placeholder="Paste a YouTube link" autocomplete="off"
+              value={showcaseVideoId ? `https://www.youtube.com/watch?v=${showcaseVideoId}` : ''} />
+          </span>
+        </label>
+        {showcaseVideoMode && (
+          <label class="vsm-option">
+            <input type="radio" name="vsmMode" value="" />
+            <span class="vsm-option-text">
+              <span class="vsm-option-title">Don’t show a video</span>
+              <span class="vsm-option-desc">Remove the video from your profile.</span>
+            </span>
+          </label>
+        )}
+        <div class="vsm-error" id="vsmError" hidden></div>
+      </div>
+      <div class="vsm-footer">
+        <button type="button" class="vsm-btn" onclick="closeVideoShowcasePicker()">Cancel</button>
+        <button type="button" class="vsm-btn vsm-btn--primary" id="vsmSave" onclick="saveVideoShowcase()">Save</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-backdrop" id="featuredGroupPickerModal" onclick="closeFeaturedGroupPickerOnBackdrop(event)">
+    <div class="modal" style="max-height:60vh">
+      <div class="modal-header">
+        <div class="modal-title">Feature a group</div>
+        <button class="modal-close" onclick="closeFeaturedGroupPicker()">×</button>
+      </div>
+      <div class="modal-results" id="featuredGroupPickerResults"></div>
+    </div>
+  </div>
+  </>
+)}
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
@@ -1850,7 +2156,7 @@ const reviewerBreadcrumbJsonLd = {
   </defs>
 </svg>
 
-<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor }}>
+<script define:vars={{ distJson, statsJson, activeTab, isOwnProfile: isOwnProfileJson, reviewerUsername: reviewer.username, showcaseJson, reviewScoresJson, reviewHoursJson, showcaseAchievementsJson, achProfileId, libraryIsOwn, socialIconsJson, socialLabelsJson, socialColorsJson, socialKeysJson, hasAccentColor, featuredGroupJson, reviewerGroupsForPickerJson, hiddenShowcasesJson, showcaseOrderJson }}>
 
   var s = JSON.parse(statsJson)
   var ownProfile = JSON.parse(isOwnProfile)
@@ -1921,6 +2227,7 @@ const reviewerBreadcrumbJsonLd = {
   }
 
   function cancelEditMode() {
+    restoreShowcases()
     document.body.classList.remove('editing-profile')
     document.getElementById('editModeBar').classList.remove('visible')
     document.getElementById('editProfileBtn').style.display = ''
@@ -2030,6 +2337,12 @@ const reviewerBreadcrumbJsonLd = {
       if (input) payload[key] = input.value.trim()
     })
     if (accentInput) payload.accent_color = accentCleared ? '' : accentInput.value
+    var hiddenNow = currentHiddenShowcases()
+    var hiddenChanged = !sameKeys(hiddenNow, savedHiddenShowcases, false)
+    if (hiddenChanged) payload.hidden_showcases = hiddenNow
+    var orderNow = currentShowcaseOrder()
+    var orderChanged = !sameKeys(orderNow, savedShowcaseOrder, true)
+    if (orderChanged) payload.showcase_order = orderNow
 
     if (Object.keys(payload).length > 0) {
       try {
@@ -2040,6 +2353,8 @@ const reviewerBreadcrumbJsonLd = {
         })
         var respData = await bres2.json().catch(function() { return {} })
         if (!bres2.ok) throw new Error(respData.error || 'Profile save failed')
+        if (hiddenChanged) savedHiddenShowcases = hiddenNow
+        if (orderChanged) savedShowcaseOrder = orderNow
 
         // update bio display
         if (bioTextarea) {
@@ -2201,6 +2516,249 @@ const reviewerBreadcrumbJsonLd = {
   window.openGamePicker = openGamePicker
   window.closePicker = closePicker
   window.closePickerOnBackdrop = closePickerOnBackdrop
+
+  // ── FEATURED GROUP PICKER ──
+  var _myGroupsForPicker = JSON.parse(reviewerGroupsForPickerJson || '[]')
+  var _currentFeaturedGroup = JSON.parse(featuredGroupJson || 'null')
+
+  function groupInitials(name) { return String(name).slice(0, 2).toUpperCase() }
+
+  function openFeaturedGroupPicker() {
+    var results = document.getElementById('featuredGroupPickerResults')
+    var html = ''
+    if (_myGroupsForPicker.length === 0) {
+      html = '<div class="modal-empty">You\'re not in any groups yet. <a href="/groups" style="color:var(--accent)">Browse groups</a></div>'
+    } else {
+      if (_currentFeaturedGroup) {
+        html += '<div class="modal-result" onclick="selectFeaturedGroup(null)"><div class="modal-result-cover">✕</div><div><div class="modal-result-title">Remove featured group</div></div></div>'
+      }
+      _myGroupsForPicker.forEach(function(g) {
+        var cover = g.avatar_url
+          ? '<img src="' + escAttr(g.avatar_url) + '" alt="" />'
+          : groupInitials(g.name)
+        html += '<div class="modal-result" onclick="selectFeaturedGroup(&quot;' + g.id + '&quot;)"><div class="modal-result-cover">' + cover + '</div><div><div class="modal-result-title">' + escAttr(g.name) + '</div></div></div>'
+      })
+    }
+    results.innerHTML = html
+    document.getElementById('featuredGroupPickerModal').classList.add('open')
+  }
+  function closeFeaturedGroupPicker() { document.getElementById('featuredGroupPickerModal').classList.remove('open') }
+  function closeFeaturedGroupPickerOnBackdrop(e) { if (e.target === document.getElementById('featuredGroupPickerModal')) closeFeaturedGroupPicker() }
+  async function selectFeaturedGroup(groupId) {
+    try {
+      var res = await fetch('/api/profile/featured-group', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_id: groupId })
+      })
+      var data = await res.json().catch(function() { return {} })
+      if (!res.ok) throw new Error(data.error || 'Failed to update')
+      closeFeaturedGroupPicker()
+      location.reload()
+    } catch (e) {
+      showToast(e && e.message ? e.message : 'Failed to update', 'error')
+    }
+  }
+  window.openFeaturedGroupPicker = openFeaturedGroupPicker
+  window.closeFeaturedGroupPicker = closeFeaturedGroupPicker
+  window.closeFeaturedGroupPickerOnBackdrop = closeFeaturedGroupPickerOnBackdrop
+  window.selectFeaturedGroup = selectFeaturedGroup
+
+  // ── SHOWCASE ORDER + HIDING ──
+  // Owner-only, edit mode only (see ShowcaseSection.astro). Moving reorders
+  // the sections inside #showcaseStack; hiding flips .sc-is-hidden. Both are
+  // staged in the DOM: saveProfile() sends whichever changed and
+  // cancelEditMode() puts back what was last saved.
+  var savedHiddenShowcases = JSON.parse(hiddenShowcasesJson || '[]')
+  var savedShowcaseOrder = JSON.parse(showcaseOrderJson || '[]')
+  function showcaseSections() {
+    var stack = document.getElementById('showcaseStack')
+    return stack ? Array.from(stack.querySelectorAll(':scope > .sc-section')) : []
+  }
+  function currentHiddenShowcases() {
+    return showcaseSections().filter(function(el) { return el.classList.contains('sc-is-hidden') }).map(function(el) { return el.dataset.showcase })
+  }
+  function currentShowcaseOrder() {
+    return showcaseSections().map(function(el) { return el.dataset.showcase })
+  }
+  function sameKeys(a, b, ordered) {
+    a = a.slice(); b = b.slice()
+    if (!ordered) { a.sort(); b.sort() }
+    return a.join(',') === b.join(',')
+  }
+  function refreshShowcaseMoveButtons() {
+    var els = showcaseSections()
+    els.forEach(function(el, i) {
+      var up = el.querySelector('.sc-move-btn[data-dir="-1"]')
+      var down = el.querySelector('.sc-move-btn[data-dir="1"]')
+      if (up) up.disabled = i === 0
+      if (down) down.disabled = i === els.length - 1
+    })
+  }
+  function restoreShowcases() {
+    var stack = document.getElementById('showcaseStack')
+    if (!stack) return
+    var byKey = {}
+    showcaseSections().forEach(function(el) { byKey[el.dataset.showcase] = el })
+    savedShowcaseOrder.forEach(function(key) { if (byKey[key]) stack.appendChild(byKey[key]) })
+    showcaseSections().forEach(function(el) {
+      el.classList.toggle('sc-is-hidden', savedHiddenShowcases.indexOf(el.dataset.showcase) !== -1)
+    })
+    refreshShowcaseMoveButtons()
+  }
+  function moveShowcase(key, dir) {
+    var els = showcaseSections()
+    var idx = els.findIndex(function(el) { return el.dataset.showcase === key })
+    var target = els[idx + dir]
+    if (idx === -1 || !target) return
+    var el = els[idx]
+    if (dir < 0) target.before(el); else target.after(el)
+    refreshShowcaseMoveButtons()
+    // Keep focus on the arrow that was pressed, or its twin once it hits an end.
+    var btn = el.querySelector('.sc-move-btn[data-dir="' + dir + '"]')
+    if (btn && btn.disabled) btn = el.querySelector('.sc-move-btn[data-dir="' + (-dir) + '"]')
+    if (btn) btn.focus()
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+  function toggleShowcaseHidden(key) {
+    var el = showcaseSections().find(function(s) { return s.dataset.showcase === key })
+    if (el) el.classList.toggle('sc-is-hidden')
+  }
+  refreshShowcaseMoveButtons()
+  window.moveShowcase = moveShowcase
+  window.toggleShowcaseHidden = toggleShowcaseHidden
+
+  // ── VIDEO SHOWCASE ──
+  // Featured: the id is server-rendered. Latest: ask /api/profile/latest-video
+  // (CDN-cached per profile) for the channel's newest upload. Either way the
+  // title/channel/views come from /api/youtube/meta, as on review cards.
+  function vsAgo(iso) {
+    var t = Date.parse(iso)
+    if (!t) return ''
+    var d = Math.floor((Date.now() - t) / 86400000)
+    if (d < 1) return 'today'
+    if (d < 2) return 'yesterday'
+    if (d < 30) return d + ' days ago'
+    if (d < 365) { var m = Math.floor(d / 30); return m + (m === 1 ? ' month ago' : ' months ago') }
+    var y = Math.floor(d / 365); return y + (y === 1 ? ' year ago' : ' years ago')
+  }
+  function vsShow(card, id, fallbackTitle) {
+    var body = card.querySelector('.vs-body')
+    var player = card.querySelector('.vs-player')
+    var link = card.querySelector('.vs-info')
+    var title = card.querySelector('.vs-title')
+    var meta = card.querySelector('.vs-meta')
+    card.dataset.videoId = id
+    if (!player.querySelector('img')) {
+      var img = document.createElement('img')
+      img.alt = ''
+      player.insertBefore(img, player.firstChild)
+    }
+    player.querySelector('img').src = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg'
+    link.href = 'https://www.youtube.com/watch?v=' + id
+    if (fallbackTitle) title.textContent = fallbackTitle
+    body.dataset.state = 'ready'
+    fetch('/api/youtube/meta?id=' + id)
+      .then(function(r) { return r.ok ? r.json() : null })
+      .then(function(m) {
+        if (!m || !m.title) return
+        title.textContent = m.title
+        player.setAttribute('aria-label', 'Play video: ' + m.title)
+        meta.textContent = [m.channel, m.views, m.published ? vsAgo(m.published) : null].filter(Boolean).join(' · ')
+        var dur = card.querySelector('.vs-duration')
+        if (m.duration && dur) { dur.textContent = m.duration; dur.hidden = false }
+      })
+      .catch(function() {})
+  }
+  function vsUnavailable(card) {
+    if (!ownProfile) { card.style.display = 'none'; return }
+    card.querySelector('.vs-body').hidden = true
+    card.querySelector('.vs-unavailable').hidden = false
+  }
+  ;(function initVideoShowcase() {
+    var card = document.getElementById('videoShowcaseCard')
+    if (!card) return
+    if (card.dataset.mode === 'featured') { if (card.dataset.videoId) vsShow(card, card.dataset.videoId); return }
+    fetch('/api/profile/latest-video?u=' + encodeURIComponent(card.dataset.username))
+      .then(function(r) { return r.ok ? r.json() : null })
+      .then(function(d) {
+        if (d && d.video && /^[A-Za-z0-9_-]{11}$/.test(d.video.id)) vsShow(card, d.video.id, d.video.title)
+        else vsUnavailable(card)
+      })
+      .catch(function() { vsUnavailable(card) })
+  })()
+  function playShowcaseVideo() {
+    var card = document.getElementById('videoShowcaseCard')
+    var id = card && card.dataset.videoId
+    if (!id || !/^[A-Za-z0-9_-]{11}$/.test(id)) return
+    var player = card.querySelector('.vs-player')
+    var frame = document.createElement('div')
+    frame.className = 'vs-player vs-player--playing'
+    var iframe = document.createElement('iframe')
+    iframe.src = 'https://www.youtube-nocookie.com/embed/' + id + '?autoplay=1&rel=0'
+    iframe.title = 'YouTube video'
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture'
+    iframe.allowFullscreen = true
+    frame.appendChild(iframe)
+    player.replaceWith(frame)
+  }
+  window.playShowcaseVideo = playShowcaseVideo
+
+  function openVideoShowcasePicker() {
+    var err = document.getElementById('vsmError')
+    if (err) err.hidden = true
+    document.getElementById('videoShowcaseModal').classList.add('open')
+  }
+  function closeVideoShowcasePicker() { document.getElementById('videoShowcaseModal').classList.remove('open') }
+  function closeVideoShowcasePickerOnBackdrop(e) { if (e.target === document.getElementById('videoShowcaseModal')) closeVideoShowcasePicker() }
+  function vsmAddChannel() {
+    closeVideoShowcasePicker()
+    enterEditMode()
+    var input = document.getElementById('social-youtube_url')
+    if (input) { input.scrollIntoView({ behavior: 'smooth', block: 'center' }); input.focus() }
+  }
+  ;(function wireVideoShowcaseModal() {
+    var url = document.getElementById('vsmUrl')
+    if (!url) return
+    // Typing a link means "featured" — select it so Save does what they expect.
+    url.addEventListener('focus', function() {
+      var r = document.querySelector('input[name="vsmMode"][value="featured"]')
+      if (r) r.checked = true
+    })
+    url.addEventListener('keydown', function(e) { if (e.key === 'Enter') saveVideoShowcase() })
+  })()
+  async function saveVideoShowcase() {
+    var picked = document.querySelector('input[name="vsmMode"]:checked')
+    var err = document.getElementById('vsmError')
+    var btn = document.getElementById('vsmSave')
+    err.hidden = true
+    if (!picked) { err.textContent = 'Choose an option.'; err.hidden = false; return }
+    var mode = picked.value || null
+    var videoUrl = (document.getElementById('vsmUrl').value || '').trim()
+    if (mode === 'featured' && !videoUrl) { err.textContent = 'Paste a YouTube link to feature.'; err.hidden = false; return }
+    btn.disabled = true
+    btn.textContent = 'Saving…'
+    try {
+      var res = await fetch('/api/profile/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ showcase_video_mode: mode, showcase_video_url: videoUrl })
+      })
+      var data = await res.json().catch(function() { return {} })
+      if (!res.ok) throw new Error(data.error || 'Failed to save')
+      location.reload()
+    } catch (e) {
+      err.textContent = e && e.message ? e.message : 'Failed to save'
+      err.hidden = false
+      btn.disabled = false
+      btn.textContent = 'Save'
+    }
+  }
+  window.openVideoShowcasePicker = openVideoShowcasePicker
+  window.closeVideoShowcasePicker = closeVideoShowcasePicker
+  window.closeVideoShowcasePickerOnBackdrop = closeVideoShowcasePickerOnBackdrop
+  window.vsmAddChannel = vsmAddChannel
+  window.saveVideoShowcase = saveVideoShowcase
 
   function debouncedSearch(q) {
     clearTimeout(_searchTimer)
@@ -2424,10 +2982,57 @@ const reviewerBreadcrumbJsonLd = {
     renderShowcase(currentShowcase)
   }
 
+  // Shared by the Achievements feed (tier badge under platinum unlocks), the
+  // Library (badge on 100%-trophy PSN covers) and the Achievement showcase
+  // (badge on a featured platinum). Defined before the showcase, which renders
+  // as soon as the script runs.
+  // Platinum gets its own small vector trophy under the achievement art,
+  // modeled on Sony's physical platinum: a deep-blue orb with the face-button
+  // glyphs, cradled by silver blade "hands" rising from a round base. Smooth
+  // vector (not pixel-art) so the gradients read as polished metal.
+  var _PLAT_SVG =
+    '<svg class="ach-plat-svg" viewBox="0 0 24 30" aria-hidden="true">' +
+      '<circle cx="12" cy="9.5" r="7.5" fill="url(#achPlatOrb)"/>' +
+      '<g fill="none" stroke="#fff" stroke-width=".7" stroke-linecap="round" stroke-linejoin="round" opacity=".92">' +
+        '<rect x="7.6" y="5.6" width="2.6" height="2.6"/>' +
+        '<path d="M13.9 5.5l1.5 2.7h-3z"/>' +
+        '<path d="M7.7 10.4l2.4 2.4M10.1 10.4l-2.4 2.4"/>' +
+        '<circle cx="14.4" cy="11.6" r="1.3"/>' +
+      '</g>' +
+      '<g fill="url(#achPlatSilver)">' +
+        '<path d="M11.6 23.2C5.6 20.8 2.6 14.2 3.4 6.4 4.9 11.4 7.6 15.6 12 18.6z"/>' +
+        '<path d="M12.4 23.2c6-2.4 9-9 8.2-16.8-1.5 5-4.2 9.2-8.6 12.2z"/>' +
+        '<path d="M11.7 23.4C8.2 21.8 6.1 18.4 5.8 13.8 7.6 16.8 9.6 18.8 12 19.9z"/>' +
+        '<path d="M12.3 23.4c3.5-1.6 5.6-5 5.9-9.6-1.8 3-3.8 5-6.2 6.1z"/>' +
+        '<path d="M8.6 23.6h6.8l1.2 1.9H7.4z"/>' +
+        '<rect x="6.2" y="25.3" width="11.6" height="3.4" rx="1.2"/>' +
+      '</g>' +
+      '<rect x="6.8" y="25.9" width="10.4" height=".5" rx=".25" fill="#fff" opacity=".55"/>' +
+    '</svg>'
+
   // ── ACHIEVEMENT SHOWCASE ──
   var currentAchShowcase = JSON.parse(showcaseAchievementsJson)
   var _allAchievements = null
   var _achPickerSlot = 0
+
+  // Steam, PSN and Xbox unlocks can all be featured. When the user has a game
+  // on more than one platform, its unlocks carry a platform tag in front of
+  // the game name (src/utils/achievementShowcase.ts sets multi_platform).
+  // Showcases saved before PSN/Xbox have no source and are Steam.
+  var _ACH_SOURCE_TAG = { steam: 'Steam', psn: 'PSN', xbox: 'Xbox' }
+  function _achSourceTag(ach) {
+    var source = ach.source || 'steam'
+    if (!ach.multi_platform || !_ACH_SOURCE_TAG[source]) return null
+    var tag = document.createElement('span')
+    tag.className = 'ach-src-tag ach-src-tag--' + source
+    tag.textContent = _ACH_SOURCE_TAG[source]
+    return tag
+  }
+  function _achGameLabel(ach) {
+    var title = ach.game_title || ('App ' + (ach.external_id || ach.steam_appid))
+    var source = ach.source || 'steam'
+    return ach.multi_platform && _ACH_SOURCE_TAG[source] ? _ACH_SOURCE_TAG[source] + ' · ' + title : title
+  }
 
   ;(function initAchShowcase() {
     var padded = currentAchShowcase.slice()
@@ -2465,6 +3070,14 @@ const reviewerBreadcrumbJsonLd = {
           ph.textContent = '🏆'
           imgWrap.appendChild(ph)
         }
+        // A featured PSN platinum gets the same trophy badge as a 100% PSN game in the Library
+        if (ach.source === 'psn' && ach.trophy_type === 'platinum') {
+          var plat = document.createElement('span')
+          plat.className = 'ach-showcase-plat'
+          plat.title = 'Platinum trophy'
+          plat.innerHTML = _PLAT_SVG
+          imgWrap.appendChild(plat)
+        }
         if (ownProfile) {
           var removeBtn = document.createElement('button')
           removeBtn.className = 'ach-showcase-remove'
@@ -2488,7 +3101,11 @@ const reviewerBreadcrumbJsonLd = {
         var name = document.createElement('div'); name.className = 'ach-showcase-name'
         name.textContent = ach.display_name || ach.api_name || ''; wrap.appendChild(name)
         var game = document.createElement('div'); game.className = 'ach-showcase-game'
-        game.textContent = ach.game_title || ''; wrap.appendChild(game)
+        var gameTag = _achSourceTag(ach)
+        if (gameTag) game.appendChild(gameTag)
+        game.appendChild(document.createTextNode(ach.game_title || ''))
+        game.title = _achGameLabel(ach)
+        wrap.appendChild(game)
         grid.appendChild(wrap)
       } else {
         var empty = document.createElement('div'); empty.className = 'ach-showcase-empty'
@@ -2512,7 +3129,7 @@ const reviewerBreadcrumbJsonLd = {
     if (searchEl) searchEl.value = ''
     if (_allAchievements) { _populateGameFilter(_allAchievements); filterAchPicker(); return }
     document.getElementById('achPickerList').innerHTML = '<div class="modal-empty">Loading…</div>'
-    fetch('/api/steam/my-achievements').then(function(r) { return r.ok ? r.json() : Promise.reject() })
+    fetch('/api/profile/showcase-achievements').then(function(r) { return r.ok ? r.json() : Promise.reject() })
       .then(function(data) {
         _allAchievements = data.achievements || []
         _populateGameFilter(_allAchievements)
@@ -2528,10 +3145,12 @@ const reviewerBreadcrumbJsonLd = {
     if (!gameEl || gameEl.options.length > 1) return
     var seen = {}, games = []
     achievements.forEach(function(a) {
-      var t = a.game_title || ('App ' + a.steam_appid)
+      var t = _achGameLabel(a)
       if (!seen[t]) { seen[t] = true; games.push(t) }
     })
-    games.sort().forEach(function(g) {
+    // Sort by game, so a game's platforms sit next to each other
+    function _bare(label) { return label.replace(/^(Steam|PSN|Xbox) · /, '').toLowerCase() }
+    games.sort(function(x, y) { return _bare(x) < _bare(y) ? -1 : _bare(x) > _bare(y) ? 1 : x < y ? -1 : x > y ? 1 : 0 }).forEach(function(g) {
       var opt = document.createElement('option'); opt.value = g; opt.textContent = g
       gameEl.appendChild(opt)
     })
@@ -2547,8 +3166,7 @@ const reviewerBreadcrumbJsonLd = {
     var q    = searchEl ? searchEl.value.toLowerCase().trim() : ''
     var game = gameEl  ? gameEl.value : ''
     var filtered = _allAchievements.filter(function(a) {
-      var aGame = a.game_title || ('App ' + a.steam_appid)
-      if (game && aGame !== game) return false
+      if (game && _achGameLabel(a) !== game) return false
       if (q && !(a.display_name || a.api_name || '').toLowerCase().includes(q)) return false
       return true
     })
@@ -2580,6 +3198,8 @@ const reviewerBreadcrumbJsonLd = {
         ph.textContent = '🏆'; iw.appendChild(ph)
       }
       card.appendChild(iw)
+      var pickTag = _achSourceTag(ach)
+      if (pickTag) card.appendChild(pickTag)
       var nm = document.createElement('div'); nm.className = 'ach-picker-card-name'
       nm.textContent = ach.display_name || ach.api_name || ''; card.appendChild(nm)
       if (ach.global_percent != null) {
@@ -2589,7 +3209,7 @@ const reviewerBreadcrumbJsonLd = {
       }
       card.onclick = async function() {
         var sc = currentAchShowcase.slice()
-        sc[_achPickerSlot] = { api_name: ach.api_name, steam_appid: ach.steam_appid, display_name: ach.display_name, description: ach.description, icon_url: ach.icon_url, global_percent: ach.global_percent, game_title: ach.game_title }
+        sc[_achPickerSlot] = { source: ach.source, external_id: ach.external_id, api_name: ach.api_name, steam_appid: ach.steam_appid, display_name: ach.display_name, description: ach.description, icon_url: ach.icon_url, global_percent: ach.global_percent, game_title: ach.game_title, trophy_type: ach.trophy_type, multi_platform: ach.multi_platform }
         closeAchPicker()
         try {
           var r = await fetch('/api/profile/update', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ showcase_achievements: sc.filter(Boolean) }) })
@@ -2615,31 +3235,6 @@ const reviewerBreadcrumbJsonLd = {
     if (gameEl)   gameEl.addEventListener('change', filterAchPicker)
   })()
 
-  // Shared by the Achievements feed (tier badge under platinum unlocks) and the
-  // Library (badge on 100%-trophy PSN covers).
-  // Platinum gets its own small vector trophy under the achievement art,
-  // modeled on Sony's physical platinum: a deep-blue orb with the face-button
-  // glyphs, cradled by silver blade "hands" rising from a round base. Smooth
-  // vector (not pixel-art) so the gradients read as polished metal.
-  var _PLAT_SVG =
-    '<svg class="ach-plat-svg" viewBox="0 0 24 30" aria-hidden="true">' +
-      '<circle cx="12" cy="9.5" r="7.5" fill="url(#achPlatOrb)"/>' +
-      '<g fill="none" stroke="#fff" stroke-width=".7" stroke-linecap="round" stroke-linejoin="round" opacity=".92">' +
-        '<rect x="7.6" y="5.6" width="2.6" height="2.6"/>' +
-        '<path d="M13.9 5.5l1.5 2.7h-3z"/>' +
-        '<path d="M7.7 10.4l2.4 2.4M10.1 10.4l-2.4 2.4"/>' +
-        '<circle cx="14.4" cy="11.6" r="1.3"/>' +
-      '</g>' +
-      '<g fill="url(#achPlatSilver)">' +
-        '<path d="M11.6 23.2C5.6 20.8 2.6 14.2 3.4 6.4 4.9 11.4 7.6 15.6 12 18.6z"/>' +
-        '<path d="M12.4 23.2c6-2.4 9-9 8.2-16.8-1.5 5-4.2 9.2-8.6 12.2z"/>' +
-        '<path d="M11.7 23.4C8.2 21.8 6.1 18.4 5.8 13.8 7.6 16.8 9.6 18.8 12 19.9z"/>' +
-        '<path d="M12.3 23.4c3.5-1.6 5.6-5 5.9-9.6-1.8 3-3.8 5-6.2 6.1z"/>' +
-        '<path d="M8.6 23.6h6.8l1.2 1.9H7.4z"/>' +
-        '<rect x="6.2" y="25.3" width="11.6" height="3.4" rx="1.2"/>' +
-      '</g>' +
-      '<rect x="6.8" y="25.9" width="10.4" height=".5" rx=".25" fill="#fff" opacity=".55"/>' +
-    '</svg>'
 
   // ── ACHIEVEMENTS FEED — fetched from /api/user-achievements/feed on tab open,
   //    so switching to this tab is instant instead of a full page navigation. ──
@@ -5323,7 +5918,12 @@ const reviewerBreadcrumbJsonLd = {
       });
       var data = await res.json();
       if (!res.ok) {
-        if (statusEl) { statusEl.textContent = data.error || 'Sync failed.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block'; }
+        // Rate-limit errors are self-explanatory; anything else is most often
+        // a private Steam profile, so point at the privacy settings.
+        var message = data.code === 'steam_private'
+          ? 'Steam didn’t return any games — this usually means your library is hidden.'
+          : (data.error || 'Something went wrong.');
+        showSteamSyncError(statusEl, message, res.status !== 429);
       } else {
         var parts = [data.matched + ' new', data.updated + ' updated'];
         if (data.removed > 0) parts.push(data.removed + ' removed');
@@ -5336,12 +5936,59 @@ const reviewerBreadcrumbJsonLd = {
         }, 1500);
       }
     } catch (e) {
-      if (statusEl) { statusEl.textContent = 'Network error.'; statusEl.style.color = '#f87171'; statusEl.style.display = 'block'; }
+      showSteamSyncError(statusEl, 'Sync failed — could not reach the server.', true);
     } finally {
       btn.disabled = false;
       btn.textContent = 'Sync now';
     }
   };
+
+  // Failure card under the sync row. Mirrors the "Steam privacy requirements"
+  // note on /settings, since a private profile is the usual cause. The sync
+  // menu is closed first — it drops down over this exact spot.
+  function showSteamSyncError(statusEl: HTMLElement | null, message: string, withPrivacyHint: boolean) {
+    if (!statusEl) return;
+    var wrap = document.querySelector('.lib-sync') as HTMLElement | null;
+    if (wrap && wrap.getAttribute('data-open') === 'true') (window as any).toggleLibSyncMenu();
+
+    var card = document.createElement('div');
+    card.className = 'steam-sync-alert';
+    card.setAttribute('role', 'alert');
+    card.innerHTML =
+      '<div class="ssa-head">' +
+        '<span class="ssa-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>' +
+        '<div class="ssa-head-text"><div class="ssa-title">Steam sync failed</div><div class="ssa-msg"></div></div>' +
+        '<button type="button" class="ssa-close" aria-label="Dismiss">&times;</button>' +
+      '</div>' +
+      (withPrivacyHint
+        ? '<div class="ssa-body">' +
+            '<div class="ssa-sub">Make sure your Steam profile is public</div>' +
+            '<ol class="ssa-steps">' +
+              '<li>In Steam, go to <strong>Edit Profile → Privacy Settings</strong>.</li>' +
+              '<li>Set <strong>Game details</strong> to <strong>Public</strong>.</li>' +
+              '<li>Uncheck <strong>“Always keep my total playtime private”</strong> so your hours sync — otherwise every game shows 0 hours.</li>' +
+            '</ol>' +
+            '<div class="ssa-actions">' +
+              '<a class="ssa-btn ssa-btn--primary" href="https://steamcommunity.com/my/edit/settings" target="_blank" rel="noopener noreferrer">Open Steam privacy settings ↗</a>' +
+              '<button type="button" class="ssa-btn ssa-retry">Try again</button>' +
+            '</div>' +
+          '</div>'
+        : '');
+    (card.querySelector('.ssa-msg') as HTMLElement).textContent = message;
+    card.querySelector('.ssa-close')?.addEventListener('click', function() {
+      statusEl.textContent = '';
+      statusEl.style.display = 'none';
+    });
+    card.querySelector('.ssa-retry')?.addEventListener('click', function() {
+      (window as any).profileSteamSync();
+    });
+
+    statusEl.textContent = '';
+    statusEl.style.color = '';
+    statusEl.style.display = 'block';
+    statusEl.appendChild(card);
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
 </script>
 
 <script is:inline>
@@ -5927,6 +6574,10 @@ async function createNewList(btn) {
     color: #fff; font-size: 12px; border: none; font-family: inherit; padding: 0; line-height: 1;
   }
   .ach-showcase-slot:hover .ach-showcase-remove { display: flex; }
+  /* Platinum badge on a featured PSN platinum, hanging off the bottom-right
+     corner; same trophy as the Library's .lib-plat-badge */
+  .ach-showcase-plat { position: absolute; right: -9px; bottom: -6px; width: 22px; height: 28px; z-index: 2; pointer-events: none; }
+  .ach-showcase-plat .ach-plat-svg { width: 100%; height: 100%; }
   .ach-showcase-empty {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     width: min(100%, 64px); aspect-ratio: 1; border-radius: 8px; gap: 3px;
@@ -5995,6 +6646,16 @@ async function createNewList(btn) {
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
   .ach-picker-card-pct { font-size: 9px; color: var(--text-tertiary); }
+  /* Platform tag for games the user has on more than one platform; colours
+     match the Achievements feed's .ach-feed-src badges */
+  .ach-src-tag {
+    display: inline-block; vertical-align: 1px; margin-right: 4px; padding: 1px 4px; border-radius: 4px;
+    font-size: 8px; font-weight: 700; line-height: 1.3; letter-spacing: .04em; text-transform: uppercase; color: #fff;
+  }
+  .ach-src-tag--steam { background: #1b2838; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); }
+  .ach-src-tag--psn   { background: #003791; }
+  .ach-src-tag--xbox  { background: #107C10; }
+  .ach-picker-card .ach-src-tag { margin-right: 0; }
   .ach-picker-card-pct--rare { color: #ca8a04; font-weight: 700; }
 
   /* ── Achievement filters ── */

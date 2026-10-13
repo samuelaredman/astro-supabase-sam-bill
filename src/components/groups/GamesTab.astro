@@ -1,0 +1,372 @@
+---
+/**
+ * The group Games tab (?tab=games): the games the group's creator features,
+ * each with its video, note, question and how the group did on it. Built by
+ * loadGroupFeaturedGames() (src/utils/groupFeaturedGames.ts).
+ *
+ * The video reuses the review card's player markup (.rc-video), so
+ * src/scripts/review-card.ts fills in its title and swaps in the player on
+ * click. A question's options reuse the Overview poll classes and the page's
+ * votePoll / togglePollClosed / deletePoll. The feature form, edit and remove,
+ * and written answers are src/scripts/group-games.ts; the CSS lives in the
+ * page's global block.
+ */
+import { formatScore, scoreClass, timeAgo, igdbImage } from "../../utils/format";
+import { youTubeThumbUrl, youTubeWatchUrl } from "../../utils/youtube";
+import GameInsights from "./GameInsights.astro";
+import PollAnswer from "./PollAnswer.astro";
+import {
+  formatHours,
+  FEATURED_NOTE_MAX,
+  POLL_ANSWER_MAX,
+  POLL_OPTION_MAX,
+  POLL_QUESTION_MAX,
+  type GroupGamesData,
+} from "../../utils/groupFeaturedGames";
+
+interface Props {
+  data: GroupGamesData;
+  groupId: string;
+  groupName: string;
+  canFeature: boolean;
+  isMember: boolean;
+  viewerProfileId: string | null;
+  isAdminOrOwner: boolean;
+}
+const { data, groupId, groupName, canFeature, isMember, viewerProfileId, isAdminOrOwner } = Astro.props;
+
+/** Answers shown before "Show all". */
+const ANSWERS_SHOWN = 3;
+const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+type Featured = GroupGamesData["games"][number];
+/** The three stages of the stats section: played, finished, 100% / platinum. */
+const stagesOf = (fg: Featured) => {
+  const s = fg.stats;
+  return [
+    { key: "played" as const, label: "Played", pct: s.playedPct, count: s.played, of: s.memberCount,
+      members: fg.stageMembers.played, verb: "played it", empty: "Nobody in the group has played it yet.",
+      timeLabel: "Played", avgH: s.avgHours, hoursN: s.hoursCount },
+    { key: "completed" as const, label: "Finished", pct: s.completedPct, count: s.completed, of: s.played,
+      members: fg.stageMembers.completed, verb: "finished it", empty: "Nobody's finished it yet.",
+      timeLabel: "To finish", avgH: s.avgCompletedHours, hoursN: s.completedHoursCount },
+    { key: "full" as const, label: "100% / Plat", pct: s.fullPct, count: s.full, of: s.played,
+      members: fg.stageMembers.full, verb: "went for 100%", empty: "Nobody's gone for 100% yet.",
+      timeLabel: "To 100%", avgH: s.avgFullHours, hoursN: s.fullHoursCount },
+  ];
+};
+/** Open on Finished once someone has, otherwise on Played. */
+const defaultStage = (fg: Featured) => (fg.stats.completed > 0 ? "completed" : "played");
+const maxHours = (fg: Featured) =>
+  Math.max(fg.stats.avgHours ?? 0, fg.stats.avgCompletedHours ?? 0, fg.stats.avgFullHours ?? 0);
+---
+
+<div class="gg" data-group-id={groupId}>
+  <div class="gg-head">
+    <div>
+      <h2 class="gg-title">Featured games</h2>
+      <p class="gg-sub">
+        Games from {groupName}'s videos — and how the community did on them.
+      </p>
+    </div>
+    {canFeature && (
+      <button type="button" class="btn-primary gg-add-btn" data-gg-action="toggle-form">+ Feature a game</button>
+    )}
+  </div>
+
+  {canFeature && (
+    <form class="gg-form compose-form" id="gg-feature-form" hidden>
+      <label class="gg-label" for="gg-game-input">Game</label>
+      {/* Same search as the Write a review composer (src/pages/index.astro) */}
+      <div class="autocomplete-wrap">
+        <input id="gg-game-input" class="compose-input gg-input" type="text" placeholder="Search for a game..." autocomplete="off" />
+        <div class="autocomplete-results" id="gg-search-results"></div>
+      </div>
+
+      <label class="gg-label" for="gg-video-input">YouTube video <span class="gg-optional">optional</span></label>
+      <input id="gg-video-input" class="compose-input gg-input" type="url" placeholder="https://www.youtube.com/watch?v=…" />
+
+      <label class="gg-label" for="gg-note-input">Note <span class="gg-optional">optional</span></label>
+      <textarea id="gg-note-input" class="compose-input" maxlength={FEATURED_NOTE_MAX} placeholder="What was it like? The verdict, the hardest part, what to watch for…"></textarea>
+
+      <label class="gg-label" for="gg-poll-question">Question for the community <span class="gg-optional">optional</span></label>
+      <input id="gg-poll-question" class="compose-input gg-input" type="text" maxlength={POLL_QUESTION_MAX} placeholder="Question for the community" />
+      <div class="gg-poll-fields">
+        <div class="gg-poll-options" id="gg-poll-options" data-max-length={POLL_OPTION_MAX}></div>
+        <button type="button" class="gg-link-btn gg-add-option" data-gg-action="add-option">+ Add options to vote on</button>
+      </div>
+
+      <div class="gg-form-actions">
+        <button type="submit" class="btn-primary">Feature it</button>
+        <button type="button" class="gg-link-btn" data-gg-action="toggle-form">Cancel</button>
+      </div>
+      <p class="gg-error" id="gg-form-error" hidden></p>
+    </form>
+  )}
+
+  {data.games.length === 0 ? (
+    <div class="empty-tab gg-empty">
+      {canFeature
+        ? "Feature the games from your videos — a 100% run, a refund verdict, a first playthrough — and see how many of your community played them, finished them and what they thought."
+        : "No featured games yet."}
+    </div>
+  ) : (
+    <div class="gg-list">
+      {data.games.map((fg) => {
+        const s = fg.stats;
+        const cover = igdbImage(fg.game.coverImgUrl, "t_cover_big");
+        const gameHref = fg.game.slug ? `/games/${fg.game.slug}` : null;
+        // The game page opens its review composer (or sign-in prompt) for ?review=1
+        const reviewHref = fg.game.slug ? `/games/${fg.game.slug}?review=1` : null;
+        // The group's reviews of just this game, on the Feed tab
+        const readReviewsHref = `/groups/${groupId}?tab=feed&game=${fg.game.id}`;
+        const poll = fg.poll;
+        const showResults = poll && (poll.closed || !!poll.myOptionId || !isMember);
+        const canManagePoll = poll && (isAdminOrOwner || poll.profileId === viewerProfileId);
+        return (
+          <article class="gg-card card" data-featured-id={fg.id}>
+            {/* The game's cover art, blurred, behind the header */}
+            <header class="gg-hero">
+              {cover && <div class="gg-hero-art" style={`background-image:url("${encodeURI(cover)}")`} aria-hidden="true"></div>}
+              <div class="gg-hero-inner">
+                {cover
+                  ? <img class="gg-cover" src={cover} alt="" loading="lazy" width="88" height="118" />
+                  : <div class="gg-cover gg-cover-empty" aria-hidden="true">🎮</div>}
+                <div class="gg-hero-text">
+                  <div class="gg-kicker">
+                    <span class="gg-kicker-pill">Featured</span>
+                    <span>{timeAgo(fg.createdAt)} ago</span>
+                    {fg.game.year && <span>· {fg.game.year}</span>}
+                    {canFeature && (
+                      <div class="gg-manage">
+                        <button type="button" class="announcement-action" data-gg-action="edit" data-id={fg.id}>Edit</button>
+                        <button type="button" class="announcement-action" data-gg-action="remove" data-id={fg.id} data-title={fg.game.title}>Remove</button>
+                      </div>
+                    )}
+                  </div>
+                  {gameHref
+                    ? <a class="gg-game-title" href={gameHref}>{fg.game.title}</a>
+                    : <span class="gg-game-title">{fg.game.title}</span>}
+                  {fg.note && <blockquote class="gg-note">{fg.note}</blockquote>}
+                  <div class="gg-hero-actions">
+                    {fg.myReview
+                      ? (
+                        <a class="gg-my-review" href={`/reviews/${fg.myReview.id}`}>
+                          <span class={`score-badge ${scoreClass(fg.myReview.score)}`}>{fg.myReview.score}</span>
+                          Your review
+                        </a>
+                      )
+                      : reviewHref && <a class="btn-primary gg-review-btn" href={reviewHref}>Review it</a>}
+                    {s.reviewCount > 0 && (
+                      <a class="gg-ghost-btn" href={readReviewsHref}>Read reviews <span class="gg-btn-count">{s.reviewCount}</span></a>
+                    )}
+                    {gameHref && <a class="gg-ghost-btn gg-game-btn" href={gameHref}>Game page</a>}
+                  </div>
+                </div>
+                {/* The group's rating, front and centre */}
+                <a class={`gg-score${s.avgScore == null ? " gg-score-none" : ""}`}
+                  href={s.reviewCount > 0 ? readReviewsHref : (reviewHref ?? undefined)}>
+                  <span class={`gg-score-num${s.avgScore != null ? ` ${scoreClass(s.avgScore)}` : ""}`}>{formatScore(s.avgScore)}</span>
+                  <span class="gg-score-text">
+                    <span class="gg-score-label">Community rating</span>
+                    <span class="gg-score-sub">{s.reviewCount > 0 ? `from ${plural(s.reviewCount, "review")}` : "No reviews yet — be the first"}</span>
+                  </span>
+                </a>
+              </div>
+            </header>
+
+            <div class="gg-body">
+              {canFeature && (
+                <form class="gg-edit compose-form" data-gg-edit={fg.id} hidden>
+                  <label class="gg-label">YouTube video</label>
+                  <input class="compose-input gg-input" name="youtube_url" type="url"
+                    value={fg.youtubeVideoId ? youTubeWatchUrl(fg.youtubeVideoId) : ""} placeholder="https://www.youtube.com/watch?v=…" />
+                  <label class="gg-label">Note</label>
+                  <textarea class="compose-input" name="note" maxlength={FEATURED_NOTE_MAX}>{fg.note ?? ""}</textarea>
+                  <div class="gg-form-actions">
+                    <button type="submit" class="btn-primary">Save</button>
+                    <button type="button" class="gg-link-btn" data-gg-action="edit" data-id={fg.id}>Cancel</button>
+                  </div>
+                  <p class="gg-error" hidden></p>
+                </form>
+              )}
+
+              <div class={`gg-split${fg.youtubeVideoId ? "" : " gg-split-solo"}`}>
+                {fg.youtubeVideoId && (
+                  <div class="gg-media">
+                    <div class="rc-video gg-video" data-video-id={fg.youtubeVideoId}>
+                      <button type="button" class="rc-video-thumb" aria-label="Play video">
+                        <img src={youTubeThumbUrl(fg.youtubeVideoId)} alt="" loading="lazy" width="320" height="180" />
+                        <span class="rc-video-play" aria-hidden="true">
+                          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                        </span>
+                        <span class="rc-video-duration" hidden></span>
+                      </button>
+                    </div>
+                    <GameInsights fg={fg} />
+                  </div>
+                )}
+
+                <section class="gg-community" data-gg-stages data-stage={defaultStage(fg)} aria-label="How the community did">
+                  <div class="gg-section-label">The community <span class="gg-section-sub">· {plural(s.memberCount, "member")}</span></div>
+
+                  {/* Stages: pick one to see who got there and how long it took */}
+                  <div class="gg-stages" role="tablist" aria-label="How far the community got">
+                    {stagesOf(fg).map((st) => (
+                      <button type="button" role="tab" class={`gg-stage gg-stage-${st.key}`} data-gg-stage={st.key}
+                        aria-selected={st.key === defaultStage(fg) ? "true" : "false"}>
+                        <span class="gg-stage-ring">
+                          <svg viewBox="0 0 36 36" aria-hidden="true">
+                            {st.key === "full" && (
+                              <defs>
+                                <linearGradient id={`gg-plat-${fg.id}`} x1="0" y1="0" x2="1" y2="1">
+                                  <stop offset="0%" class="gg-plat-a" />
+                                  <stop offset="100%" class="gg-plat-b" />
+                                </linearGradient>
+                              </defs>
+                            )}
+                            <circle class="gg-ring-track" cx="18" cy="18" r="15.5" pathLength="100" />
+                            {(st.pct ?? 0) > 0 && (
+                              <circle class="gg-ring-fill" cx="18" cy="18" r="15.5" pathLength="100"
+                                stroke-dasharray={`${st.pct} 100`}
+                                style={st.key === "full" ? `stroke:url(#gg-plat-${fg.id})` : undefined} />
+                            )}
+                          </svg>
+                          <span class="gg-stage-pct">{st.pct != null ? `${st.pct}%` : "—"}</span>
+                        </span>
+                        <span class="gg-stage-label">{st.label}</span>
+                        <span class="gg-stage-sub">{st.count} of {st.of}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {stagesOf(fg).map((st) => (
+                    <div class={`gg-stage-detail gg-stage-${st.key}`} data-gg-stage-detail={st.key} role="tabpanel">
+                      {st.members.length > 0 ? (
+                        <>
+                          <div class="gg-club-avatars">
+                            {st.members.slice(0, 5).map((m) => (
+                              <a class="member-avatar gg-club-avatar" href={`/reviewers/${m.username}`} title={`@${m.username}`}>
+                                {m.avatarUrl ? <img src={m.avatarUrl} alt={`@${m.username}`} loading="lazy" /> : initials(m.username)}
+                              </a>
+                            ))}
+                          </div>
+                          <span class="gg-stage-who">
+                            <a href={`/reviewers/${st.members[0].username}`}>@{st.members[0].username}</a>
+                            {st.count > 1 && ` and ${plural(st.count - 1, "other")}`} {st.verb}
+                          </span>
+                        </>
+                      ) : (
+                        <span class="gg-stage-who gg-stage-none">{st.empty}</span>
+                      )}
+                    </div>
+                  ))}
+
+                  {/* Time to each stage — the picked one lights up */}
+                  <div class="gg-ladder">
+                    <div class="gg-mini-head">Average time</div>
+                    {stagesOf(fg).map((st) => (
+                      <button type="button" class={`gg-ladder-row gg-stage-${st.key}`} data-gg-stage={st.key}
+                        title={st.hoursN > 0 ? `Averaged over ${plural(st.hoursN, "player")}` : "No hours logged yet"}>
+                        <span class="gg-ladder-label">{st.timeLabel}</span>
+                        <span class="gg-ladder-track">
+                          <span class="gg-ladder-bar" style={`width:${st.avgH != null && maxHours(fg) > 0 ? Math.max(4, (st.avgH / maxHours(fg)) * 100) : 0}%`}></span>
+                        </span>
+                        <span class="gg-ladder-val">{formatHours(st.avgH)}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Without a video, ratings and achievements live in the panel */}
+                  {!fg.youtubeVideoId && <GameInsights fg={fg} />}
+                </section>
+              </div>
+
+              {poll && (
+                <div class="gg-poll" data-poll-id={poll.id}>
+                  {/* The question, and voting / answering it */}
+                  <div class="gg-poll-ask poll-item">
+                    <div class="gg-poll-kicker">Question for the community</div>
+                    <div class="poll-question">{poll.question}</div>
+                    {showResults
+                      ? poll.options.map((o) => (
+                          <div class={`poll-result${o.id === poll.myOptionId ? " voted" : ""}`}>
+                            <div class="poll-result-bar" style={`width:${o.pct}%`}></div>
+                            <div class="poll-result-label"><span>{o.label}</span><span>{o.pct}%</span></div>
+                          </div>
+                        ))
+                      : poll.options.map((o) => (
+                          <button type="button" class="poll-option" onclick={`votePoll('${poll.id}', '${o.id}')`}>{o.label}</button>
+                        ))}
+
+                    {isMember && !poll.closed && (
+                      <form class="gg-answer-form" data-gg-answer={poll.id}>
+                        <textarea class="compose-input gg-answer-input" name="body" maxlength={POLL_ANSWER_MAX} rows={poll.myAnswer ? 2 : 1}
+                          placeholder={poll.myAnswer ? "Edit your answer…" : "Your answer…"}>{poll.myAnswer?.body ?? ""}</textarea>
+                        <div class="gg-answer-actions">
+                          <button type="submit" class="btn-copy gg-small-btn">{poll.myAnswer ? "Update answer" : "Answer"}</button>
+                          {poll.myAnswer && (
+                            <button type="button" class="announcement-action" data-gg-action="delete-answer" data-id={poll.myAnswer.id}>Delete my answer</button>
+                          )}
+                        </div>
+                        <p class="gg-error" hidden></p>
+                      </form>
+                    )}
+
+                    <div class="poll-meta">
+                      <span>
+                        {[
+                          poll.options.length > 0 ? plural(poll.totalVotes, "vote") : null,
+                          plural(poll.answers.length, "answer"),
+                          poll.closed ? "Closed" : null,
+                        ].filter(Boolean).join(" · ")}
+                        {!isMember && !poll.closed && " · join the group to answer"}
+                      </span>
+                      {canManagePoll && (
+                        <span class="poll-meta-actions">
+                          <button class="announcement-action" onclick={`togglePollClosed('${poll.id}', ${!poll.closed})`}>{poll.closed ? "Reopen" : "Close"}</button>
+                          <button class="announcement-action" onclick={`deletePoll('${poll.id}')`}>Delete</button>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* The top answers, most upvoted first, with the rest a click away */}
+                  <div class="gg-poll-answers">
+                    <div class="gg-mini-head">Top answers <span>{plural(poll.answers.length, "answer")}</span></div>
+                    {poll.answers.length === 0 ? (
+                      <p class="gg-answers-empty">No answers yet{isMember && !poll.closed ? " — be the first." : "."}</p>
+                    ) : (
+                      <>
+                        <ul class="gg-answer-list">
+                          {poll.answers.slice(0, ANSWERS_SHOWN).map((a) => (
+                            <PollAnswer answer={a} viewerProfileId={viewerProfileId} isMember={isMember} closed={poll.closed} canModerate={!!canManagePoll} />
+                          ))}
+                        </ul>
+                        {poll.answers.length > ANSWERS_SHOWN && (
+                          <>
+                            <ul class="gg-answer-list" data-gg-more-answers={poll.id} hidden>
+                              {poll.answers.slice(ANSWERS_SHOWN).map((a) => (
+                                <PollAnswer answer={a} viewerProfileId={viewerProfileId} isMember={isMember} closed={poll.closed} canModerate={!!canManagePoll} />
+                              ))}
+                            </ul>
+                            <button type="button" class="gg-more-answers" data-gg-action="more-answers" data-id={poll.id}
+                              data-label-more={`View all ${poll.answers.length} answers`} data-label-less="Show top answers">
+                              View all {poll.answers.length} answers
+                            </button>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  )}
+</div>

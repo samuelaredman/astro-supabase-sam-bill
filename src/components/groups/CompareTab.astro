@@ -1,0 +1,379 @@
+---
+/**
+ * The group Stats tab: you vs the community, or you vs one member you pick
+ * (the creator, say). A stat card for each side with what they share between
+ * them, the score and genre charts, and every game either side reviewed as
+ * face-offs, with filters and sorts (VersusGames.astro).
+ *
+ * Rendered both by the group page (first paint) and by the partial route
+ * /groups/[id]/compare that the "compare with" menu re-fetches, from the same
+ * loadGroupVersus() data — see src/utils/groupCompare.ts. Styles live in the
+ * page's global block, like the other group tab components, so markup swapped
+ * in later is styled. Behaviour is delegated from src/scripts/group-compare.ts.
+ */
+import { formatScore, scoreClass } from "../../utils/format";
+import StatRows from "./StatRows.astro";
+import MemberOptions from "./MemberOptions.astro";
+import { DEFAULT_VERSUS_COLORS, VERSUS_COLOR_PRESETS } from "../../utils/versusColors";
+import VersusGames from "./VersusGames.astro";
+import {
+  agreementLabel,
+  VERSUS_SCOPES,
+  type VersusScope,
+  shortGenre,
+  type GroupVersusData,
+  type TapeTile,
+  type VersusMember,
+} from "../../utils/groupCompare";
+
+interface Props {
+  data: GroupVersusData;
+  /** The group being compared — the menu re-fetches /groups/<id>/compare. */
+  groupId: string;
+  /** Shown between the stat cards when the group has a genre/platform focus. */
+  focusLabel?: string | null;
+}
+const { data, groupId, focusLabel } = Astro.props;
+const {
+  subject, opponent, options, viewerIsGuest, minReviews, failed, sharedGames,
+  meanAbsDiff, agreementPct, card, tape,
+} = data;
+
+const profilePath = (username: string) => `/reviewers/${encodeURIComponent(username)}`;
+const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
+
+const subjectName = subject ? (subject.isViewer ? "You" : `@${subject.username}`) : "";
+const otherName = opponent ? `@${opponent.username}` : "the community";
+const otherShort = opponent ? `@${opponent.username}` : "Community";
+const optionLabel = (m: VersusMember) => `@${m.username}${m.isOwner ? " (owner)" : ""}`;
+
+
+// ── Score histogram ──
+// Each pair of bars takes its score's grade colour (gv-sc-*, from scoreClass);
+// the sides differ by fill instead: the subject solid, the other side striped.
+const reviewsLabel = (n: number) => `${n.toLocaleString()} review${n === 1 ? "" : "s"}`;
+const shareLabel = (share: number) => `${Math.round(share)}%`;
+/** Readouts near the edges open inwards so they stay inside the card. */
+const tipSide = (score: number) => (score <= 2 ? " gv-hist-tip-start" : score >= 9 ? " gv-hist-tip-end" : "");
+
+// ── Genre radar geometry (SVG units) ──
+const RADAR = { w: 300, h: 230, cx: 150, cy: 117, r: 78 };
+const radarAngle = (i: number, n: number) => -Math.PI / 2 + (2 * Math.PI * i) / n;
+const radarPoint = (i: number, n: number, value: number, scale: number) => {
+  const a = radarAngle(i, n);
+  const d = (Math.min(value, scale) / scale) * RADAR.r;
+  return { x: RADAR.cx + Math.cos(a) * d, y: RADAR.cy + Math.sin(a) * d };
+};
+const pts = (list: { x: number; y: number }[]) => list.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+function radar(t: Extract<TapeTile, { kind: "radar" }>) {
+  const n = t.axes.length;
+  const rings = [1 / 3, 2 / 3, 1].map((f) => pts(t.axes.map((_, i) => radarPoint(i, n, f * t.scale, t.scale))));
+  const spokes = t.axes.map((_, i) => radarPoint(i, n, t.scale, t.scale));
+  const left = t.axes.map((a, i) => radarPoint(i, n, a.left, t.scale));
+  const right = t.axes.map((a, i) => radarPoint(i, n, a.right, t.scale));
+  const labels = t.axes.map((a, i) => {
+    const ang = radarAngle(i, n);
+    const cos = Math.cos(ang), sin = Math.sin(ang);
+    return {
+      text: shortGenre(a.genre),
+      full: a.genre,
+      x: RADAR.cx + cos * (RADAR.r + 12),
+      y: RADAR.cy + sin * (RADAR.r + 12) + (sin > 0.5 ? 9 : sin < -0.5 ? -3 : 4),
+      anchor: cos > 0.3 ? "start" : cos < -0.3 ? "end" : "middle",
+    };
+  });
+  return { rings, spokes, left, right, labels };
+}
+
+/**
+ * A link to this tab under another scope — what the shared-games and
+ * within-a-point numbers open: the whole tab narrows to those games, and the
+ * page jumps to their list. The genre and sort stay; a title search goes, so
+ * the list matches the number.
+ */
+function scopeHref(next: VersusScope) {
+  const q = new URLSearchParams({ tab: "compare" });
+  if (opponent) q.set("with", opponent.id);
+  q.set("sc", next);
+  if (data.genre) q.set("gg", data.genre);
+  if (data.games.sort !== "gap") q.set("gs", data.games.sort);
+  return `?${q}#gv-games`;
+}
+
+const scopeLabels: Record<VersusScope, string> = {
+  all: "All games",
+  shared: "Shared games",
+  disagree: "Disagree",
+  agree: "Agree",
+};
+const filtered = data.scope !== "all" || !!data.genre;
+
+// Possessives built here rather than in the markup, where nested
+// template strings with apostrophes trip the Astro parser
+const subjectGames = subject?.isViewer ? "your" : `${subjectName}'s`;
+const others = minReviews === 1 ? "another member" : `${minReviews}+ other members`;
+const emptyMessage = !subject
+  ? ""
+  : failed
+    ? "Stats couldn't be loaded right now. Try again in a moment."
+    : subject.reviewCount === 0
+    ? `${subject.isViewer ? "You haven't" : `${subjectName} hasn't`} reviewed any games in this group yet.`
+    : filtered
+      ? "No shared games match these filters."
+    : opponent
+      ? `${subjectName} and ${otherName} haven't reviewed any of the same games yet.`
+      : `None of ${subjectGames} games has been reviewed by ${others} yet. Try comparing with a member instead.`;
+---
+
+<div class="gv-root" data-gv-group={groupId}>
+  {/* Apply the viewer's side colours before paint (see src/utils/versusColors.ts; the key is VERSUS_COLORS_KEY) */}
+  <script is:inline>
+    try {
+      var c = JSON.parse(localStorage.getItem("gv-colors") || "null");
+      if (c && /^#[0-9a-f]{6}$/i.test(c.l) && /^#[0-9a-f]{6}$/i.test(c.r)) {
+        var st = document.documentElement.style;
+        st.setProperty("--gv-pick-l", c.l); st.setProperty("--gv-pick-r", c.r);
+        st.setProperty("--gv-pick-l-dark", c.ld || c.l); st.setProperty("--gv-pick-r-dark", c.rd || c.r);
+      }
+    } catch (e) {}
+  </script>
+  {!subject ? (
+    <div class="empty-tab">Nobody in this group has reviewed a game yet.</div>
+  ) : (
+    <>
+      {/* ── Tab-wide filters: they narrow every number below, not just the games list ── */}
+      <div class="gv-filters">
+        <label class="gv-sort">
+          <span>Games</span>
+          <select class="gv-select" data-gv-scope aria-label="Which games the stats cover">
+            {VERSUS_SCOPES.map((sc) => <option value={sc} selected={sc === data.scope}>{scopeLabels[sc]}</option>)}
+          </select>
+        </label>
+        {data.genres.length > 0 && (
+          <label class="gv-sort">
+            <span>Genre</span>
+            <select class="gv-select" data-gv-genre aria-label="Genre">
+              <option value="" selected={!data.genre}>All genres</option>
+              {data.genres.map((g) => <option value={g.id} selected={g.id === data.genre}>{g.name}</option>)}
+            </select>
+          </label>
+        )}
+        {filtered && <a class="gv-filters-clear" href={opponent ? `?tab=compare&with=${opponent.id}` : "?tab=compare"} data-gv-tab-link>Clear filters</a>}
+      </div>
+
+      {/* ── Stat cards: each side's own numbers, with what they share in the middle ── */}
+      <div class="gv-head">
+        <section class="gv-card gv-card-l" aria-label={`${subjectName}'s stats`}>
+          <div class="gv-card-top">
+            <a class="gv-profile" href={profilePath(subject.username)} title={`@${subject.username}'s profile`}>
+              <span class="gv-av">
+                {subject.avatar_url ? <img src={subject.avatar_url} alt="" loading="lazy" /> : initials(subject.username)}
+              </span>
+              <span class="gv-name">{subjectName}</span>
+            </a>
+          </div>
+          {card && <StatRows rows={card} side="left" />}
+        </section>
+
+        <div class="gv-mid">
+          <span class="gv-vs">vs</span>
+          {sharedGames === 0 ? (
+            <p class="gv-mid-empty">{emptyMessage}</p>
+          ) : (
+            <>
+              {meanAbsDiff != null && <div class="gv-verdict-title">{agreementLabel(meanAbsDiff)}</div>}
+              <div class="gv-mid-facts">
+                <a class="gv-fact gv-fact-link" href={scopeHref("shared")} data-gv-tab-link data-gv-jump title="Show the shared games">
+                  <span class="gv-fact-lbl">Shared games</span>
+                  <span class="gv-fact-val">{sharedGames.toLocaleString()}</span>
+                </a>
+                <a class="gv-fact gv-fact-link" href={scopeHref("agree")} data-gv-tab-link data-gv-jump title="Show the games within a point">
+                  <span class="gv-fact-lbl">Within a point</span>
+                  <span class="gv-fact-val">{agreementPct}%</span>
+                </a>
+                <div class="gv-fact">
+                  <span class="gv-fact-lbl">Avg gap</span>
+                  <span class="gv-fact-val">{meanAbsDiff != null ? meanAbsDiff.toFixed(1) : "—"}</span>
+                </div>
+              </div>
+            </>
+          )}
+          {focusLabel && <span class="gv-mid-focus">{focusLabel}</span>}
+          <details class="gv-colors" data-gv-colors>
+            <summary>
+              <span class="gv-colors-pair" aria-hidden="true"><i class="gv-dot gv-dot-l"></i><i class="gv-dot gv-dot-r"></i></span>
+              Colours
+            </summary>
+            <div class="gv-colors-pop">
+              <div class="gv-colors-title">Side colours</div>
+              <div class="gv-colors-presets">
+                {VERSUS_COLOR_PRESETS.map((p) => (
+                  <button
+                    type="button"
+                    class="gv-preset"
+                    data-gv-preset={p.id}
+                    aria-pressed={p.id === DEFAULT_VERSUS_COLORS.id ? "true" : "false"}
+                    style={`--pl:${p.light.l};--pr:${p.light.r};--pld:${p.dark.l};--prd:${p.dark.r}`}
+                  >
+                    <span class="gv-preset-swatch" aria-hidden="true"></span>
+                    <span class="gv-preset-name">{p.label}</span>
+                  </button>
+                ))}
+              </div>
+              <div class="gv-colors-custom">
+                <label><input type="color" data-gv-color="l" value={DEFAULT_VERSUS_COLORS.light.l} />{subjectName}</label>
+                <label><input type="color" data-gv-color="r" value={DEFAULT_VERSUS_COLORS.light.r} />{otherShort}</label>
+              </div>
+              <button type="button" class="gv-colors-reset" data-gv-colors-reset>Reset to default</button>
+            </div>
+          </details>
+        </div>
+
+        <section class="gv-card gv-card-r" aria-label={`${otherShort} stats`}>
+          <div class="gv-card-top">
+            {opponent ? (
+              <a class="gv-profile gv-av" href={profilePath(opponent.username)} title={`@${opponent.username}'s profile`} aria-label={`@${opponent.username}'s profile`}>
+                {opponent.avatar_url ? <img src={opponent.avatar_url} alt="" loading="lazy" /> : initials(opponent.username)}
+              </a>
+            ) : (
+              <span class="gv-av">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              </span>
+            )}
+            {/* A searchable picker rather than a <select>, so any member can be found by name */}
+            <div class="gv-pick" data-gv-picker>
+              <span class="gv-pick-lbl" id="gv-pick-lbl">Compare with</span>
+              <button type="button" class="gv-select gv-pick-btn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="gv-pick-lbl gv-pick-current" data-gv-pick-toggle>
+                <span id="gv-pick-current">{opponent ? optionLabel(opponent) : "The community"}</span>
+              </button>
+              <div class="gv-pick-pop" hidden data-gv-pick-pop>
+                <div class="gv-pick-search">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                  <input type="search" placeholder="Search members" aria-label="Search members" aria-controls="gv-pick-list" autocomplete="off" maxlength="50" data-gv-pick-search />
+                </div>
+                <div class="gv-pick-list" id="gv-pick-list" role="listbox" aria-label="Compare with" data-gv-pick-list>
+                  <MemberOptions members={options} selectedId={opponent?.id ?? null} />
+                </div>
+              </div>
+            </div>
+          </div>
+          {card && <StatRows rows={card} side="right" />}
+        </section>
+      </div>
+
+      {viewerIsGuest && (
+        <div class="gv-note">Showing {subjectName}. Join the group and review a few games to compare yourself.</div>
+      )}
+
+      {/* ── Charts: the score histogram and genres, side by side; no shared games needed ── */}
+      {tape.length > 0 && (
+        <section class="gv-tape">
+          <div class="gv-tiles">
+            {tape.map((t) => (
+              <div class={`gv-tile gv-tile-${t.kind}`}>
+                {t.kind !== "dist" && <div class="gv-tile-label">{t.label}</div>}
+
+                {t.kind === "dist" && (
+                  <>
+                    <div class="gv-hist-key">
+                      <span><i class="gv-swatch gv-swatch-l"></i><strong>{subjectName}</strong> avg {formatScore(t.leftAvg)} · {reviewsLabel(t.leftTotal)}</span>
+                      <span><i class="gv-swatch gv-swatch-r"></i><strong>{otherShort}</strong> avg {formatScore(t.rightAvg)} · {reviewsLabel(t.rightTotal)}</span>
+                      <span class="gv-hist-headline">{t.headline}</span>
+                    </div>
+                    <div class="gv-hist">
+                      <div class="gv-hist-axis" aria-hidden="true">
+                        <span style="bottom:100%">{t.scale}%</span>
+                        <span style="bottom:50%">{t.scale / 2}%</span>
+                        <span style="bottom:0">0%</span>
+                      </div>
+                      <div class="gv-hist-plot">
+                        <i class="gv-hist-grid" style="bottom:100%" aria-hidden="true"></i>
+                        <i class="gv-hist-grid" style="bottom:50%" aria-hidden="true"></i>
+                        {t.left.map((l, i) => {
+                          const r = t.right[i];
+                          return (
+                            <div
+                              class={`gv-hist-col ${scoreClass(i + 1).replace("score-", "gv-sc-")}`}
+                              tabindex="0"
+                              aria-label={`Score ${i + 1}: ${subjectName} ${shareLabel(l)} (${reviewsLabel(t.leftCounts[i])}), ${otherShort} ${shareLabel(r)} (${reviewsLabel(t.rightCounts[i])})`}
+                            >
+                              <div class={`gv-hist-tip${tipSide(i + 1)}`} aria-hidden="true">
+                                <strong>Score {i + 1}</strong>
+                                <span><i class="gv-swatch gv-swatch-l"></i>{subjectName} {shareLabel(l)} · {reviewsLabel(t.leftCounts[i])}</span>
+                                <span><i class="gv-swatch gv-swatch-r"></i>{otherShort} {shareLabel(r)} · {reviewsLabel(t.rightCounts[i])}</span>
+                              </div>
+                              <span class="gv-hist-bar gv-hist-l" style={`height:${(l / t.scale) * 100}%`} aria-hidden="true">
+                                {l >= 1 && <b>{shareLabel(l)}</b>}
+                              </span>
+                              <span class="gv-hist-bar gv-hist-r" style={`height:${(r / t.scale) * 100}%`} aria-hidden="true">
+                                {r >= 1 && <b>{shareLabel(r)}</b>}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div class="gv-hist-xs" aria-hidden="true">
+                        {t.left.map((_, i) => <span><em class={scoreClass(i + 1)}>{i + 1}</em></span>)}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {t.kind === "radar" && (() => {
+                  const g = radar(t);
+                  return (
+                    <>
+                      <svg class="gv-radar" viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} role="img" aria-label={`Top genres: ${t.axes.map((a) => `${a.genre} ${subjectName} ${a.left}%, ${otherShort} ${a.right}%`).join("; ")}`}>
+                        {g.rings.map((ring) => <polygon class="gv-radar-ring" points={ring} />)}
+                        {g.spokes.map((p) => <line class="gv-radar-spoke" x1={RADAR.cx} y1={RADAR.cy} x2={p.x} y2={p.y} />)}
+                        <polygon class="gv-radar-area gv-radar-r" points={pts(g.right)} />
+                        <polygon class="gv-radar-area gv-radar-l" points={pts(g.left)} />
+                        {t.axes.map((a, i) => (
+                          <g class="gv-radar-axis">
+                            <title>{`${a.genre}: ${subjectName} ${a.left}% · ${otherShort} ${a.right}%`}</title>
+                            <circle class="gv-radar-dot gv-radar-r" cx={g.right[i].x} cy={g.right[i].y} r="3.5" />
+                            <circle class="gv-radar-dot gv-radar-l" cx={g.left[i].x} cy={g.left[i].y} r="3.5" />
+                            <text class="gv-radar-label" x={g.labels[i].x} y={g.labels[i].y} text-anchor={g.labels[i].anchor}>{g.labels[i].text}</text>
+                          </g>
+                        ))}
+                      </svg>
+                      <table class="gv-sr">
+                        <caption>Share of each side's reviews by genre</caption>
+                        <thead><tr><th>Genre</th><th>{subjectName}</th><th>{otherShort}</th></tr></thead>
+                        <tbody>{t.axes.map((a) => <tr><td>{a.genre}</td><td>{a.left}%</td><td>{a.right}%</td></tr>)}</tbody>
+                      </table>
+                    </>
+                  );
+                })()}
+
+                {t.kind === "pick" && (t.same ? (
+                  <div class="gv-fav-same">
+                    <span class="gv-fav-val">{t.left!.value}</span>
+                    <span class="gv-same">Same pick</span>
+                  </div>
+                ) : (
+                  <div class="gv-favs">
+                    {[{ side: t.left, cls: "gv-dot-l" }, { side: t.right, cls: "gv-dot-r" }].map(({ side, cls }) => (
+                      <div class="gv-fav">
+                        <i class={`gv-dot ${cls}`}></i>
+                        <span class="gv-fav-name">{side ? side.value : "—"}</span>
+                        {side?.sub && <span class="gv-fav-sub">{side.sub}</span>}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ── The lists ── */}
+      {/* ── Every game either side reviewed, filtered and sorted ── */}
+      <VersusGames data={data} />
+
+      <div class="gv-error" data-gv-error hidden>Couldn't load that comparison. Try again.</div>
+    </>
+  )}
+</div>

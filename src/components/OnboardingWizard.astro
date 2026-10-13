@@ -228,7 +228,12 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
     hasSteamConnected,
   }}
 >
-  window.__lockScroll && window.__lockScroll();
+  // Layout defines __lockScroll in a script that comes AFTER this component, so
+  // it doesn't exist yet when this runs — lock once the document has parsed.
+  if (window.__lockScroll) window.__lockScroll();
+  else document.addEventListener('DOMContentLoaded', function () {
+    if (window.__lockScroll && document.getElementById('ck-onboarding')) window.__lockScroll();
+  });
 
   var flow = pending;
   var flowIndex = -1;
@@ -253,14 +258,31 @@ const initial = username?.charAt(0)?.toUpperCase() || '?';
   }
 
   function finish() {
-    // keepalive: the redirect below can fire immediately, and a plain fetch is
-    // cancelled on navigation — leaving onboarding unmarked, so the wizard came back.
-    fetch('/api/profile/complete-onboarding', { method: 'POST', keepalive: true }).catch(function () {});
-    window.__unlockScroll && window.__unlockScroll();
-    var root = document.getElementById('ck-onboarding');
-    if (root) root.remove();
-    if (window.startTour) window.startTour('profile', 'review');
-    else window.location.href = '/';
+    // Wait for onboarding to be marked complete BEFORE starting the tour. The
+    // tour usually navigates to the profile page, and if that page renders
+    // before the write lands, the server still sees onboarding as incomplete
+    // and mounts the wizard again — on top of the tour that just auto-started
+    // (user report: "the tutorial got stuck behind the onboarding popup").
+    var btn = document.getElementById('obTourStart');
+    var label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+    fetch('/api/profile/complete-onboarding', { method: 'POST', keepalive: true })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); })
+      .then(function () {
+        window.__unlockScroll && window.__unlockScroll();
+        var root = document.getElementById('ck-onboarding');
+        if (root) root.remove();
+        if (window.startTour) window.startTour('profile', 'review');
+        else window.location.href = '/';
+      })
+      .catch(function (e) {
+        console.error('[onboarding] complete failed', e);
+        // Stay on the final step so they can retry — moving on would just bring
+        // the wizard back on the next page.
+        flowIndex = flow.length - 1;
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+        alert('Couldn’t save your progress — please try again.');
+      });
   }
 
   // ---- shared helpers ----

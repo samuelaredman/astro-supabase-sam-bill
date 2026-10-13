@@ -971,6 +971,58 @@ export type Database = {
           },
         ]
       }
+      group_featured_games: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          game_id: string
+          group_id: string
+          id: string
+          note: string | null
+          youtube_video_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          game_id: string
+          group_id: string
+          id?: string
+          note?: string | null
+          youtube_video_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          game_id?: string
+          group_id?: string
+          id?: string
+          note?: string | null
+          youtube_video_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_featured_games_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_featured_games_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_featured_games_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_invites: {
         Row: {
           created_at: string
@@ -1127,6 +1179,120 @@ export type Database = {
           },
         ]
       }
+      group_poll_answer_replies: {
+        Row: {
+          answer_id: string
+          body: string
+          created_at: string
+          id: string
+          profile_id: string
+        }
+        Insert: {
+          answer_id: string
+          body: string
+          created_at?: string
+          id?: string
+          profile_id: string
+        }
+        Update: {
+          answer_id?: string
+          body?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_answer_replies_answer_id_fkey"
+            columns: ["answer_id"]
+            isOneToOne: false
+            referencedRelation: "group_poll_answers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answer_replies_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_poll_answer_votes: {
+        Row: {
+          answer_id: string
+          created_at: string
+          profile_id: string
+        }
+        Insert: {
+          answer_id: string
+          created_at?: string
+          profile_id: string
+        }
+        Update: {
+          answer_id?: string
+          created_at?: string
+          profile_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_answer_votes_answer_id_fkey"
+            columns: ["answer_id"]
+            isOneToOne: false
+            referencedRelation: "group_poll_answers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answer_votes_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_poll_answers: {
+        Row: {
+          body: string
+          created_at: string
+          id: string
+          poll_id: string
+          profile_id: string
+          updated_at: string
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          id?: string
+          poll_id: string
+          profile_id: string
+          updated_at?: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          id?: string
+          poll_id?: string
+          profile_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_answers_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "group_polls"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answers_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       group_poll_options: {
         Row: {
           id: string
@@ -1206,6 +1372,7 @@ export type Database = {
         Row: {
           closed: boolean
           created_at: string
+          featured_game_id: string | null
           group_id: string
           id: string
           profile_id: string
@@ -1214,6 +1381,7 @@ export type Database = {
         Insert: {
           closed?: boolean
           created_at?: string
+          featured_game_id?: string | null
           group_id: string
           id?: string
           profile_id: string
@@ -1222,12 +1390,20 @@ export type Database = {
         Update: {
           closed?: boolean
           created_at?: string
+          featured_game_id?: string | null
           group_id?: string
           id?: string
           profile_id?: string
           question?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "group_polls_featured_game_id_fkey"
+            columns: ["featured_game_id"]
+            isOneToOne: true
+            referencedRelation: "group_featured_games"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "group_polls_group_id_fkey"
             columns: ["group_id"]
@@ -1247,6 +1423,7 @@ export type Database = {
       group_roles: {
         Row: {
           can_edit_group: boolean
+          can_feature_games: boolean
           can_invite: boolean
           can_manage_roles: boolean
           can_manage_sessions: boolean
@@ -1262,6 +1439,7 @@ export type Database = {
         }
         Insert: {
           can_edit_group?: boolean
+          can_feature_games?: boolean
           can_invite?: boolean
           can_manage_roles?: boolean
           can_manage_sessions?: boolean
@@ -1277,6 +1455,7 @@ export type Database = {
         }
         Update: {
           can_edit_group?: boolean
+          can_feature_games?: boolean
           can_invite?: boolean
           can_manage_roles?: boolean
           can_manage_sessions?: boolean
@@ -1444,7 +1623,11 @@ export type Database = {
           is_site_group: boolean
           join_prompt: string | null
           name: string
+          overview_hidden: string[] | null
+          overview_order: string[]
           requires_approval: boolean
+          showcase_video_id: string | null
+          showcase_video_mode: string | null
           slug: string | null
           stats_config: Json | null
           visibility: string
@@ -1461,7 +1644,11 @@ export type Database = {
           is_site_group?: boolean
           join_prompt?: string | null
           name: string
+          overview_hidden?: string[] | null
+          overview_order?: string[]
           requires_approval?: boolean
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           slug?: string | null
           stats_config?: Json | null
           visibility?: string
@@ -1478,7 +1665,11 @@ export type Database = {
           is_site_group?: boolean
           join_prompt?: string | null
           name?: string
+          overview_hidden?: string[] | null
+          overview_order?: string[]
           requires_approval?: boolean
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           slug?: string | null
           stats_config?: Json | null
           visibility?: string
@@ -2208,6 +2399,7 @@ export type Database = {
           dropped_privacy: string
           favorite_game_id: string | null
           featured_group_id: string | null
+          hidden_showcases: string[]
           id: string
           instagram_url: string | null
           is_active: boolean
@@ -2231,6 +2423,9 @@ export type Database = {
           search_indexable_at: string | null
           showcase_achievements: Json | null
           showcase_games: Json | null
+          showcase_order: string[]
+          showcase_video_id: string | null
+          showcase_video_mode: string | null
           steam_id: string | null
           steam_reviews_import_done_at: string | null
           steam_synced_at: string | null
@@ -2277,6 +2472,7 @@ export type Database = {
           dropped_privacy?: string
           favorite_game_id?: string | null
           featured_group_id?: string | null
+          hidden_showcases?: string[]
           id?: string
           instagram_url?: string | null
           is_active?: boolean
@@ -2300,6 +2496,9 @@ export type Database = {
           search_indexable_at?: string | null
           showcase_achievements?: Json | null
           showcase_games?: Json | null
+          showcase_order?: string[]
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
@@ -2346,6 +2545,7 @@ export type Database = {
           dropped_privacy?: string
           favorite_game_id?: string | null
           featured_group_id?: string | null
+          hidden_showcases?: string[]
           id?: string
           instagram_url?: string | null
           is_active?: boolean
@@ -2369,6 +2569,9 @@ export type Database = {
           search_indexable_at?: string | null
           showcase_achievements?: Json | null
           showcase_games?: Json | null
+          showcase_order?: string[]
+          showcase_video_id?: string | null
+          showcase_video_mode?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
@@ -3976,6 +4179,30 @@ export type Database = {
           score_variance: number
           slug: string
           title: string
+        }[]
+      }
+      group_featured_game_stats: {
+        Args: { p_game_ids: string[]; p_group_id: string }
+        Returns: {
+          achievement_count: number
+          avg_achievement_pct: number
+          avg_completed_hours: number
+          avg_full_hours: number
+          avg_hours: number
+          avg_score: number
+          completed_count: number
+          completed_hours_count: number
+          full_count: number
+          full_hours_count: number
+          completed_profile_ids: string[]
+          full_profile_ids: string[]
+          game_id: string
+          hours_count: number
+          member_count: number
+          played_count: number
+          played_profile_ids: string[]
+          review_count: number
+          score_counts: number[]
         }[]
       }
       group_feed: {

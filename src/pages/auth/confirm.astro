@@ -2,6 +2,7 @@
 export const prerender = false;
 import Layout from "../../components/Layout.astro";
 import { createSupabaseServerClientFromContext } from "../../utils/database";
+import { landingAfterConfirm } from "../../utils/groupJoin";
 import type { EmailOtpType } from "@supabase/supabase-js";
 
 // Supabase's default hosted /auth/v1/verify endpoint (what {{ .ConfirmationURL }}
@@ -19,14 +20,16 @@ const token_hash = url.searchParams.get("token_hash");
 const type = url.searchParams.get("type") as EmailOtpType | null;
 const code = url.searchParams.get("code");
 
+// Signed up from a group page: landingAfterConfirm joins that group and
+// returns its path, so they land in it instead of the feed (utils/groupJoin).
 if (code) {
-  const { error } = await supabase.auth.exchangeCodeForSession(code);
-  if (!error) return Astro.redirect("/");
+  const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+  if (!error) return Astro.redirect((await landingAfterConfirm(data.user)) ?? "/");
 }
 
 if (token_hash && type) {
-  const { error } = await supabase.auth.verifyOtp({ type, token_hash });
-  if (!error) return Astro.redirect("/");
+  const { data, error } = await supabase.auth.verifyOtp({ type, token_hash });
+  if (!error) return Astro.redirect((await landingAfterConfirm(data.user)) ?? "/");
 }
 ---
 
@@ -63,7 +66,11 @@ if (token_hash && type) {
         return;
       }
 
-      window.location.href = '/';
+      // The group they signed up from, if any (set-session → landingAfterConfirm)
+      const data = await res.json().catch(() => ({}));
+      const next = typeof data.redirect === 'string' && data.redirect.startsWith('/') && !data.redirect.startsWith('//')
+        ? data.redirect : '/';
+      window.location.href = next;
     } catch {
       window.location.href = '/signin?error=confirmation_failed';
     }
