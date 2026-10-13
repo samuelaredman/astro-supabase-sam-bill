@@ -1188,6 +1188,28 @@ const reviewerBreadcrumbJsonLd = {
     .lib-dt-bar-fill{height:100%;border-radius:3px;background:var(--accent);transition:width .2s}
     .lib-dt-bar-fill.full{background:var(--score-great,#4ade80)}
     .lib-dt-pct{font-size:11px;font-weight:600;color:var(--text-secondary);flex-shrink:0;min-width:34px;text-align:right}
+    /* Clickable completion bar opens the per-game achievement list modal. The
+       whole wrap is still a <button>, but the chip at the end gives the row an
+       explicit affordance so people know the bar is interactive. */
+    button.lib-dt-bar-wrap{background:none;border:none;padding:0;margin:0;color:inherit;font:inherit;cursor:pointer;text-align:left;border-radius:4px;transition:opacity .15s}
+    button.lib-dt-bar-wrap:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+    button.lib-dt-bar-wrap:hover .lib-dt-pct{color:var(--text-primary)}
+    .lib-dt-bar-cta{
+      display:inline-flex;align-items:center;gap:4px;
+      flex-shrink:0;
+      font-size:11px;font-weight:600;letter-spacing:.01em;
+      color:var(--text-tertiary);
+      background:var(--tag-bg);border:1px solid var(--border);
+      padding:3px 8px 3px 10px;border-radius:999px;
+      transition:color .15s,border-color .15s,background .15s,transform .15s;
+    }
+    .lib-dt-bar-cta svg{transition:transform .15s}
+    button.lib-dt-bar-wrap:hover .lib-dt-bar-cta{
+      color:var(--accent);
+      border-color:color-mix(in srgb,var(--accent) 55%,var(--border));
+      background:color-mix(in srgb,var(--accent) 10%,var(--bg-card));
+    }
+    button.lib-dt-bar-wrap:hover .lib-dt-bar-cta svg{transform:translateX(2px)}
     /* gear panel tabs */
     .lib-gear-tabs{display:flex;gap:4px;margin:-16px -16px 16px;padding:10px 12px;border-bottom:1px solid var(--border);background:var(--bg-hover);border-radius:11px 11px 0 0}
     .lib-gear-tab{background:none;border:none;border-radius:6px;padding:5px 12px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;color:var(--text-tertiary);transition:all .15s}
@@ -4002,10 +4024,27 @@ const reviewerBreadcrumbJsonLd = {
     var bar = ''
     if (it.achTotal != null && it.achTotal > 0) {
       var pct = Math.round((it.achUnlocked / it.achTotal) * 100)
-      bar = '<div class="lib-dt-bar-wrap">' +
+      // Source + external id so the modal can fetch the full per-game list.
+      // Steam/PSN/Xbox each key differently (appid / npCommId / titleId).
+      var achSid = it.sourcePlatform === 'steam' ? it.steamAppid
+        : it.sourcePlatform === 'psn' ? it.psnNpCommId
+        : it.sourcePlatform === 'xbox' ? it.xboxTitleId
+        : null
+      var achClickable = achSid != null && !!it.sourcePlatform
+      var barOpen = achClickable
+        ? '<button type="button" class="lib-dt-bar-wrap" data-ach-src="' + it.sourcePlatform + '" data-ach-sid="' + String(achSid).replace(/"/g, '&quot;') + '" aria-label="See all achievements">'
+        : '<div class="lib-dt-bar-wrap">'
+      var barClose = achClickable ? '</button>' : '</div>'
+      // Trailing chip gives the row an explicit "I'm clickable" cue. The whole
+      // wrap is still the hit target; this just signals it visually.
+      var cta = achClickable
+        ? '<span class="lib-dt-bar-cta">View all<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg></span>'
+        : ''
+      bar = barOpen +
         '<div class="lib-dt-bar"><div class="lib-dt-bar-fill' + (pct >= 100 ? ' full' : '') + '" style="width:' + pct + '%"></div></div>' +
         '<span class="lib-dt-pct">' + pct + '%</span>' +
-      '</div>'
+        cta +
+      barClose
     }
     return '<div class="lib-dt-row" data-game-id="' + it.gameId + '">' +
       '<a class="lib-dt-cover' + _libPerfectCls(it) + '" href="/games/' + it.slug + '"' +
@@ -4022,6 +4061,166 @@ const reviewerBreadcrumbJsonLd = {
       '</div>' +
     '</div>'
   }
+
+  // ── Per-game achievement list modal (opens from the detailed view's
+  //    completion bar). Fetches /api/user-achievements/game, keeps the raw
+  //    list in _achDetailData, and re-renders on search input. ──
+  var _achDetailData = null
+  var _achDetailLoadSeq = 0
+
+  function _achDetailFmtDate(s) {
+    if (!s) return ''
+    var d = new Date(s)
+    if (isNaN(d.getTime())) return ''
+    try {
+      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) +
+        ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    } catch(e) { return d.toISOString().slice(0, 10) }
+  }
+  function _achEscape(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+  // Globe-ish SVG for the "global %" row (same shape used in the Steam feed).
+  var _ACH_GLOBE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></svg>'
+  var _ACH_CHECK = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+
+  function _achRowHtml(a) {
+    var pct = (a.global_percent != null) ? Number(a.global_percent).toFixed(1) + '%' : '—'
+    // Same < 10% threshold the achievement feed, showcase and picker use
+    // (`ach-feed-icon-wrap--rare`, `ach-showcase-img-wrap--rare`,
+    // `ach-picker-card--rare`) so the sunbeam treatment is consistent
+    // everywhere the user sees it.
+    var isRare = a.global_percent != null && a.global_percent < 10
+    var icon = a.unlocked
+      ? (a.icon_url || '')
+      : (a.icon_gray_url || a.icon_url || '')
+    var iconEl = icon
+      ? '<img src="' + _achEscape(icon) + '" alt="" loading="lazy" />'
+      : '<span>🏆</span>'
+    var dateLine = a.unlocked && a.unlock_time
+      ? '<div class="ach-row-date">' + _achEscape(_achDetailFmtDate(a.unlock_time)) + '</div>'
+      : ''
+    var metaParts = []
+    if (a.trophy_type) {
+      metaParts.push('<span class="ach-row-tier ach-row-tier--' + _achEscape(a.trophy_type) + '">' + _achEscape(a.trophy_type) + '</span>')
+    }
+    if (a.gamerscore != null) {
+      metaParts.push('<span class="ach-row-gs">' + _achEscape(a.gamerscore) + ' G</span>')
+    }
+    metaParts.push('<span class="ach-row-global' + (isRare ? ' ach-row-pct-rare' : '') + '">' + _ACH_GLOBE + _achEscape(pct) + '</span>')
+    if (a.unlocked) {
+      metaParts.push('<span class="ach-row-earned">' + _ACH_CHECK + 'Earned</span>')
+    }
+    return '<div class="ach-row ' + (a.unlocked ? 'unlocked' : 'locked') + (isRare ? ' rare' : '') + '">' +
+      '<div class="ach-row-icon' + (isRare ? ' ach-row-icon--rare' : '') + '">' + iconEl + '</div>' +
+      '<div class="ach-row-body">' +
+        '<div class="ach-row-name">' + _achEscape(a.name || 'Hidden achievement') + '</div>' +
+        (a.description ? '<div class="ach-row-desc">' + _achEscape(a.description) + '</div>' : '') +
+        dateLine +
+      '</div>' +
+      '<div class="ach-row-meta">' + metaParts.join('') + '</div>' +
+    '</div>'
+  }
+
+  // Public — called by the search field's oninput handler.
+  function renderAchDetailList() {
+    var body = document.getElementById('achDetailBody')
+    if (!body || !_achDetailData) return
+    var q = (document.getElementById('achDetailSearch')?.value || '').trim().toLowerCase()
+    var items = _achDetailData.achievements || []
+    if (q) {
+      items = items.filter(function(a) {
+        return (a.name && a.name.toLowerCase().indexOf(q) !== -1) ||
+               (a.description && a.description.toLowerCase().indexOf(q) !== -1)
+      })
+    }
+    if (items.length === 0) {
+      body.innerHTML = '<div class="modal-empty">No achievements match.</div>'
+      return
+    }
+    body.innerHTML = items.map(_achRowHtml).join('')
+  }
+  window.renderAchDetailList = renderAchDetailList
+
+  function _renderAchDetailRarity(data) {
+    var rarityEl = document.getElementById('achDetailRarity')
+    if (!rarityEl) return
+    if (data.source !== 'psn') { rarityEl.innerHTML = ''; return }
+    var counts = { platinum: 0, gold: 0, silver: 0, bronze: 0 }
+    for (var i = 0; i < data.achievements.length; i++) {
+      var t = data.achievements[i].trophy_type
+      if (t && counts.hasOwnProperty(t)) counts[t]++
+    }
+    var tiers = ['platinum', 'gold', 'silver', 'bronze']
+    var html = ''
+    for (var j = 0; j < tiers.length; j++) {
+      var tier = tiers[j]
+      if (!counts[tier]) continue
+      html += '<span class="ach-detail-rarity-chip">' +
+        '<span class="ach-detail-rarity-dot ach-detail-rarity-dot--' + tier + '"></span>' +
+        counts[tier] + '</span>'
+    }
+    rarityEl.innerHTML = html
+  }
+
+  function openAchDetail(source, sid) {
+    var modal = document.getElementById('achDetailModal')
+    if (!modal) return
+    modal.classList.add('open')
+    document.getElementById('achDetailBody').innerHTML = '<div class="modal-empty">Loading…</div>'
+    document.getElementById('achDetailTitle').textContent = 'Achievements'
+    document.getElementById('achDetailSub').textContent = ''
+    document.getElementById('achDetailCount').textContent = ''
+    document.getElementById('achDetailPct').textContent = ''
+    document.getElementById('achDetailBarFill').style.width = '0%'
+    document.getElementById('achDetailRarity').innerHTML = ''
+    var searchEl = document.getElementById('achDetailSearch')
+    if (searchEl) searchEl.value = ''
+    if (window.__lockScroll) window.__lockScroll()
+    var seq = ++_achDetailLoadSeq
+    var qs = 'username=' + encodeURIComponent(reviewerUsername) +
+             '&source=' + encodeURIComponent(source) +
+             '&id=' + encodeURIComponent(sid)
+    fetch('/api/user-achievements/game?' + qs)
+      .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, j: j } }) })
+      .then(function(res) {
+        if (seq !== _achDetailLoadSeq) return
+        if (!res.ok) {
+          document.getElementById('achDetailBody').innerHTML =
+            '<div class="modal-empty">' + _achEscape(res.j && res.j.error || 'Failed to load.') + '</div>'
+          return
+        }
+        _achDetailData = res.j
+        document.getElementById('achDetailTitle').textContent = res.j.game_title || 'Achievements'
+        document.getElementById('achDetailSub').textContent = res.j.platform_label || ''
+        var total = res.j.total || 0
+        var unlocked = res.j.unlocked || 0
+        var pct = total ? Math.round(unlocked / total * 100) : 0
+        document.getElementById('achDetailCount').textContent = unlocked + ' / ' + total
+        document.getElementById('achDetailPct').textContent = pct + '%'
+        document.getElementById('achDetailBarFill').style.width = pct + '%'
+        _renderAchDetailRarity(res.j)
+        renderAchDetailList()
+      })
+      .catch(function() {
+        if (seq !== _achDetailLoadSeq) return
+        document.getElementById('achDetailBody').innerHTML =
+          '<div class="modal-empty">Failed to load achievements.</div>'
+      })
+  }
+  function closeAchDetail() {
+    var m = document.getElementById('achDetailModal')
+    if (m) m.classList.remove('open')
+    if (window.__unlockScroll) window.__unlockScroll()
+  }
+  function closeAchDetailOnBackdrop(e) {
+    if (e.target === document.getElementById('achDetailModal')) closeAchDetail()
+  }
+  window.openAchDetail = openAchDetail
+  window.closeAchDetail = closeAchDetail
+  window.closeAchDetailOnBackdrop = closeAchDetailOnBackdrop
 
   // Latest request wins. Each call gets a sequence number and responses that a
   // newer call has superseded are dropped. (This used to return early while a
@@ -4794,6 +4993,31 @@ const reviewerBreadcrumbJsonLd = {
       _renderHiddenList()
       _renderHideResults(hideSearch ? hideSearch.value : '')
       await fetchLibrary(_libPage)
+    }
+
+    // Open the achievement list modal when the completion bar in the detailed
+    // view is clicked. Delegated on the grid so it survives re-renders.
+    var detailedGrid = document.getElementById('libGridDetailed')
+    if (detailedGrid && !detailedGrid._achBound) {
+      detailedGrid._achBound = true
+      detailedGrid.addEventListener('click', function(e) {
+        var btn = e.target.closest && e.target.closest('button.lib-dt-bar-wrap')
+        if (!btn) return
+        e.preventDefault()
+        var src = btn.getAttribute('data-ach-src')
+        var sid = btn.getAttribute('data-ach-sid')
+        if (!src || !sid) return
+        openAchDetail(src, sid)
+      })
+    }
+    // Escape closes the achievement modal.
+    if (!window.__achDetailKeyBound) {
+      window.__achDetailKeyBound = true
+      document.addEventListener('keydown', function(e) {
+        if (e.key !== 'Escape') return
+        var m = document.getElementById('achDetailModal')
+        if (m && m.classList.contains('open')) closeAchDetail()
+      })
     }
   }
   window.__profileTabInit = window.__profileTabInit || {}
