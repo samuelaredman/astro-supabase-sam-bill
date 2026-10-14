@@ -47,18 +47,22 @@ const hasReviewedGame = (reviewedInGenre?.length ?? 0) > 0
 // fetch all games in this genre and, in parallel, the review count + score sum
 // of its reviewed games — aggregated in Postgres (hub_game_review_stats), so no
 // list of game ids has to travel in the request URL
-const [{ data: gameGenres }, hubStatRows] = await Promise.all([
-  supabase
+const [gameGenres, hubStatRows] = await Promise.all([
+  // Paged: a broad genre (Adventure, RPG) can hold several thousand games, and
+  // PostgREST truncates a single response at 1000 rows regardless of `.limit()`.
+  // Truncation here used to make recent-year counts look near-empty.
+  fetchAll<{ games: any }>((from, to) => supabase
     .from('game_genres')
     .select(`games(id, title, slug, cover_img_url, date_released, igdb_category)`)
     .eq('genre_id', genre.id)
-    .limit(500),
+    .order('game_id')
+    .range(from, to)),
   // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
   fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
     .rpc('hub_game_review_stats', { p_genre_id: genre.id }).order('game_id').range(from, to)),
 ])
 
-const allGames = (gameGenres ?? [])
+const allGames = gameGenres
   .map((gg: any) => gg.games)
   .filter(Boolean)
   .filter((g: any) => isAllowedGameCategory(g.igdb_category, g.title))
