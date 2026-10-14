@@ -955,6 +955,7 @@ SUPABASE_SERVICE_ROLE_KEY    Service role — server only, bypasses all RLS
 IGDB_CLIENT_ID               IGDB API credentials
 IGDB_CLIENT_SECRET           IGDB API credentials
 YOUTUBE_API_KEY              Optional. YouTube Data API v3 — review-video description/duration/views
+OPENXBL_APP_KEY              OpenXBL app Public Key — Xbox connect/sync. App at xbl.io/dashboard/apps, Redirect URL = <SITE_URL>/api/auth/xbox-callback
 ```
 
 Local: `.env` file. Production: Netlify environment settings.

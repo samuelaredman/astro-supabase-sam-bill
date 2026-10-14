@@ -47,18 +47,22 @@ const hasReviewedGame = (reviewedOnPlatform?.length ?? 0) > 0
 // its reviewed games — aggregated in Postgres (hub_game_review_stats). This used
 // to send every game id back in one `.in()` URL: ~37 KB at 1000 ids, which
 // failed and left this page showing "0 reviews".
-const [{ data: gamePlatforms }, hubStatRows] = await Promise.all([
-  supabase
+const [gamePlatforms, hubStatRows] = await Promise.all([
+  // Paged: a popular platform (Switch, PS4) can hold several thousand games, and
+  // PostgREST truncates a single response at 1000 rows regardless of `.limit()`.
+  // Truncation here used to make recent-year counts look near-empty.
+  fetchAll<{ games: any }>((from, to) => supabase
     .from('game_platforms')
     .select(`games(id, title, slug, cover_img_url, date_released, igdb_category)`)
     .eq('platform_id', platform.id)
-    .limit(3000),
+    .order('game_id')
+    .range(from, to)),
   // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
   fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
     .rpc('hub_game_review_stats', { p_platform_id: platform.id }).order('game_id').range(from, to)),
 ])
 
-const allGames = (gamePlatforms ?? [])
+const allGames = gamePlatforms
   .map((gp: any) => gp.games)
   .filter(Boolean)
   .filter((g: any) => isAllowedGameCategory(g.igdb_category, g.title))

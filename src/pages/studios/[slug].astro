@@ -49,20 +49,25 @@ const hasReviewedGame = (reviewedInStudio?.length ?? 0) > 0
 // This studio's games (any role) and, in parallel, the review count + score sum
 // of the reviewed ones — aggregated in Postgres (hub_game_review_stats) rather
 // than an `.in()` of every game id followed by every review row.
-const [{ data: developedRaw }, hubStatRows] = await Promise.all([
-  supabase
+const [developedRaw, hubStatRows] = await Promise.all([
+  // Paged: a prolific studio (EA, Konami, Nintendo) can hold several thousand
+  // games, and PostgREST truncates a single response at 1000 rows regardless of
+  // `.limit()`. Truncation here used to make recent-year counts look near-empty.
+  fetchAll<{ role: string; games: any }>((from, to) => supabase
     .from('game_companies')
     .select(`
       role,
       games(id, title, slug, cover_img_url, date_released, igdb_id, igdb_category)
     `)
-    .eq('company_id', studio.id),
+    .eq('company_id', studio.id)
+    .order('game_id')
+    .range(from, to)),
   // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
   fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
     .rpc('hub_game_review_stats', { p_company_id: studio.id }).order('game_id').range(from, to)),
 ])
 
-const allEntries = developedRaw ?? []
+const allEntries = developedRaw
 
 const developedGames = allEntries
   .filter((e: any) => e.role === 'developer')
