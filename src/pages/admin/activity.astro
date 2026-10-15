@@ -1,0 +1,258 @@
+---
+export const prerender = false;
+import Layout from "../../components/Layout.astro";
+import { resolveSiteAdminProfile } from "../../utils/api";
+import { getSupabaseAdmin } from "../../utils/database";
+
+const profile = await resolveSiteAdminProfile(Astro);
+if (!profile) return Astro.redirect('/404');
+
+const db = getSupabaseAdmin() as any;
+
+// Pull 60 days so we can compare the last 30 vs the prior 30.
+const { data: raw, error } = await db.rpc('admin_daily_activity', { days: 60 });
+if (error) {
+  console.error('[admin/activity] rpc error:', JSON.stringify(error));
+}
+
+type DayRow = {
+  day: string;
+  signups: number;
+  reviews: number;
+  comments: number;
+  recommendations: number;
+  reports: number;
+};
+
+const rows: DayRow[] = ((raw as any[]) ?? []).map((r) => ({
+  day: r.day,
+  signups: Number(r.signups ?? 0),
+  reviews: Number(r.reviews ?? 0),
+  comments: Number(r.comments ?? 0),
+  recommendations: Number(r.recommendations ?? 0),
+  reports: Number(r.reports ?? 0),
+}));
+
+type Metric = 'signups' | 'reviews' | 'comments' | 'recommendations' | 'reports';
+const METRICS: { key: Metric; label: string }[] = [
+  { key: 'signups', label: 'Signups' },
+  { key: 'reviews', label: 'Reviews' },
+  { key: 'comments', label: 'Comments' },
+  { key: 'recommendations', label: 'Recs' },
+  { key: 'reports', label: 'Reports' },
+];
+
+function windowSum(rows: DayRow[], metric: Metric, startIdx: number, endIdx: number): number {
+  let s = 0;
+  for (let i = startIdx; i < endIdx; i++) s += rows[i]?.[metric] ?? 0;
+  return s;
+}
+
+// Last 30 = indices [rows.length - 30, rows.length)
+// Prior 30 = indices [rows.length - 60, rows.length - 30)
+// Last 7 = indices [rows.length - 7, rows.length)
+const n = rows.length;
+const last30Start = Math.max(0, n - 30);
+const prior30Start = Math.max(0, n - 60);
+const prior30End = last30Start;
+const last7Start = Math.max(0, n - 7);
+
+type Summary = { label: string; metric: Metric; last7: number; last30: number; delta30: number };
+const summary: Summary[] = METRICS.map(({ key, label }) => {
+  const last30 = windowSum(rows, key, last30Start, n);
+  const prior30 = windowSum(rows, key, prior30Start, prior30End);
+  return {
+    label,
+    metric: key,
+    last7: windowSum(rows, key, last7Start, n),
+    last30,
+    delta30: last30 - prior30,
+  };
+});
+
+// Last 30 days of day rows for the chart + table.
+const last30Rows = rows.slice(last30Start);
+
+const signupMax = Math.max(1, ...last30Rows.map((r) => r.signups));
+
+function fmtDay(s: string): string {
+  const d = new Date(s + 'T00:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+function fmtWeekday(s: string): string {
+  return new Date(s + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short' });
+}
+---
+
+<Layout title="Activity — Admin" isLoggedIn={true} currentProfile={profile} activeNav="admin" variant="two-col">
+  <main class="feed admin-main">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Activity</div>
+        <div class="feed-subtitle">Daily signups + content, last 30 days. Trend vs the prior 30.</div>
+      </div>
+    </div>
+
+    <div class="admin-content">
+      <a href="/admin" class="admin-back-link">&larr; Admin</a>
+
+      {rows.length === 0 && <p class="admin-empty">No data yet — did the admin_daily_activity migration apply?</p>}
+
+      {rows.length > 0 && (
+        <>
+          <section class="summary-row">
+            {summary.map((s) => {
+              const sign = s.delta30 === 0 ? '' : s.delta30 > 0 ? '+' : '';
+              const trend = s.delta30 === 0 ? 'flat' : s.delta30 > 0 ? 'up' : 'down';
+              return (
+                <div class="metric-card">
+                  <div class="metric-label">{s.label}</div>
+                  <div class="metric-value">{s.last30}</div>
+                  <div class="metric-sub">
+                    <span class="metric-sub-main">{s.last7} last 7d</span>
+                    <span class={`metric-delta metric-delta-${trend}`}>{sign}{s.delta30} vs prior 30</span>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+
+          <section class="chart-section">
+            <h3 class="admin-section-title">Signups per day — last 30</h3>
+            <div class="chart-wrap">
+              <div class="chart-bars" role="list">
+                {last30Rows.map((r) => {
+                  const pct = (r.signups / signupMax) * 100;
+                  return (
+                    <div class="chart-col" role="listitem" title={`${fmtDay(r.day)}: ${r.signups} signups`}>
+                      <div class="chart-bar-track">
+                        <div class="chart-bar" style={`height: ${pct}%`} data-zero={r.signups === 0 ? 'true' : 'false'}>
+                          <span class="chart-bar-label">{r.signups > 0 ? r.signups : ''}</span>
+                        </div>
+                      </div>
+                      <div class="chart-x">{fmtDay(r.day).replace(/^\w+ /, '')}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          <section class="admin-section">
+            <h3 class="admin-section-title">Daily breakdown</h3>
+            <div class="table-wrap">
+              <table class="activity-table">
+                <thead>
+                  <tr>
+                    <th>Day</th>
+                    <th class="num">Signups</th>
+                    <th class="num">Reviews</th>
+                    <th class="num">Comments</th>
+                    <th class="num">Recs</th>
+                    <th class="num">Reports</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {last30Rows.slice().reverse().map((r) => (
+                    <tr>
+                      <td>{fmtWeekday(r.day)} {fmtDay(r.day)}</td>
+                      <td class={`num${r.signups === 0 ? ' zero' : ''}`}>{r.signups}</td>
+                      <td class={`num${r.reviews === 0 ? ' zero' : ''}`}>{r.reviews}</td>
+                      <td class={`num${r.comments === 0 ? ' zero' : ''}`}>{r.comments}</td>
+                      <td class={`num${r.recommendations === 0 ? ' zero' : ''}`}>{r.recommendations}</td>
+                      <td class={`num${r.reports === 0 ? ' zero' : ''}`}>{r.reports}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
+      )}
+    </div>
+  </main>
+</Layout>
+
+<style>
+  .admin-main { min-width: 0; }
+  .admin-content { padding: 20px; max-width: 960px; }
+  .admin-back-link { font-size: 13px; color: var(--text-secondary); text-decoration: none; margin-bottom: 12px; display: inline-block; }
+  .admin-back-link:hover { color: var(--accent); }
+  .admin-empty { color: var(--text-secondary); font-size: 14px; margin-top: 16px; }
+  .admin-section { margin-top: 24px; }
+  .admin-section-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); margin: 0 0 10px; }
+
+  .summary-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin-top: 16px;
+  }
+  .metric-card {
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-card);
+  }
+  .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); }
+  .metric-value { font-size: 28px; font-weight: 700; line-height: 1.1; margin-top: 4px; }
+  .metric-sub { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 8px; font-size: 11px; flex-wrap: wrap; }
+  .metric-sub-main { color: var(--text-tertiary); }
+  .metric-delta { font-weight: 600; }
+  .metric-delta-up { color: #27ae60; }
+  .metric-delta-down { color: #c0392b; }
+  .metric-delta-flat { color: var(--text-tertiary); }
+
+  .chart-section { margin-top: 24px; }
+  .chart-wrap {
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-card);
+    overflow-x: auto;
+  }
+  .chart-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    min-width: 480px;
+    height: 180px;
+  }
+  .chart-col { flex: 1; display: flex; flex-direction: column; align-items: stretch; min-width: 14px; }
+  .chart-bar-track { flex: 1; display: flex; align-items: flex-end; }
+  .chart-bar {
+    width: 100%;
+    background: var(--accent);
+    border-radius: 3px 3px 0 0;
+    min-height: 2px;
+    position: relative;
+    transition: opacity 0.15s ease;
+  }
+  .chart-bar[data-zero="true"] { background: var(--border); opacity: 0.5; min-height: 2px; }
+  .chart-bar:hover { opacity: 0.85; }
+  .chart-bar-label {
+    position: absolute;
+    left: 50%;
+    top: -14px;
+    transform: translateX(-50%);
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .chart-x {
+    font-size: 9px;
+    text-align: center;
+    color: var(--text-tertiary);
+    margin-top: 4px;
+    white-space: nowrap;
+  }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .activity-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--bg-card); }
+  .activity-table th, .activity-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border-subtle); }
+  .activity-table tr:last-child td { border-bottom: none; }
+  .activity-table th { background: var(--bg-hover); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); }
+  .activity-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .activity-table .num.zero { color: var(--text-tertiary); }
+</style>
