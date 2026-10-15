@@ -16,6 +16,16 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
+  // Backstop for the client's minlength=8. Supabase's global minimum defaults
+  // to 6 and the client can be bypassed (curl, modified page), so enforce 8
+  // here too to match what the signup form promises the user.
+  if (typeof password !== "string" || password.length < 8) {
+    return new Response(JSON.stringify({ error: "Password must be at least 8 characters." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   const nameCheck = validateName(username);
   if (!nameCheck.ok) {
     return new Response(JSON.stringify({ error: nameCheck.error }), {
@@ -24,10 +34,39 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
+  const db = getSupabaseAdmin();
+
+  // Pre-check: does this email already have an account? Supabase's signUp
+  // on an existing-but-unconfirmed email re-sends the confirmation without
+  // inserting a new auth.users row, which means `handle_new_user` never
+  // fires again and the profile keeps its first-attempt username. A user
+  // who meant to change their name lands as the original one with no error
+  // anywhere. Short-circuit here so the user gets a clear next step
+  // (confirm the existing link, or request a new one) instead of a
+  // mysterious re-send with silent state drift.
+  const { data: emailStatus } = await (db as any).rpc("email_signup_status", { p_email: email });
+  if (emailStatus === "confirmed") {
+    return new Response(
+      JSON.stringify({
+        error: "An account with this email already exists. Sign in instead, or reset your password if you've forgotten it.",
+        code: "email_exists",
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  if (emailStatus === "unconfirmed") {
+    return new Response(
+      JSON.stringify({
+        error: "You've already started signing up with this email. Check your inbox for the confirmation link, or request a new one from the sign-in page.",
+        code: "pending_confirmation",
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
   // Check username availability before attempting signup so a duplicate
   // doesn't surface as the cryptic "database error saving new user" from
   // the handle_new_user trigger.
-  const db = getSupabaseAdmin();
   const { data: existing } = await db
     .from("profiles")
     .select("id")
