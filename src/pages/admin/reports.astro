@@ -14,149 +14,234 @@ const { data: reports } = await db
   .select('id, reporter_id, target_type, target_id, reason, notes, status, created_at')
   .eq('status', 'pending')
   .order('created_at', { ascending: true })
-  .limit(200);
+  .limit(500);
 
-const reportRows = reports ?? [];
+const reportRows: any[] = reports ?? [];
 
-const reporterIds = [...new Set(reportRows.map((r: any) => r.reporter_id))];
-const reviewIds = reportRows.filter((r: any) => r.target_type === 'review').map((r: any) => r.target_id);
-const commentIds = reportRows.filter((r: any) => r.target_type === 'comment').map((r: any) => r.target_id);
-const profileTargetIds = reportRows.filter((r: any) => r.target_type === 'profile').map((r: any) => r.target_id);
+const reporterIds = [...new Set(reportRows.map((r) => r.reporter_id))];
+const reviewIds = [...new Set(reportRows.filter((r) => r.target_type === 'review').map((r) => r.target_id))];
+const commentIds = [...new Set(reportRows.filter((r) => r.target_type === 'comment').map((r) => r.target_id))];
+const profileTargetIds = [...new Set(reportRows.filter((r) => r.target_type === 'profile').map((r) => r.target_id))];
+const recommendationIds = [...new Set(reportRows.filter((r) => r.target_type === 'recommendation').map((r) => r.target_id))];
 
-const [reportersRes, reviewsRes, commentsRes, profilesRes] = await Promise.all([
+const [reportersRes, reviewsRes, commentsRes, profilesRes, recommendationsRes] = await Promise.all([
   reporterIds.length
     ? db.from('profiles').select('id, username').in('id', reporterIds)
-    : { data: [] as any[] },
+    : Promise.resolve({ data: [] as any[] }),
   reviewIds.length
-    ? db.from('reviews').select('id, title, body, profile_id, game_id, games(title), profiles(username)').in('id', reviewIds)
-    : { data: [] as any[] },
+    ? db.from('reviews').select('id, title, body, profile_id, game_id, games(title, slug), profiles(username)').in('id', reviewIds)
+    : Promise.resolve({ data: [] as any[] }),
   commentIds.length
     ? db.from('review_comments').select('id, body, review_id, profile_id, profiles(username)').in('id', commentIds)
-    : { data: [] as any[] },
+    : Promise.resolve({ data: [] as any[] }),
   profileTargetIds.length
     ? db.from('profiles').select('id, username').in('id', profileTargetIds)
-    : { data: [] as any[] },
+    : Promise.resolve({ data: [] as any[] }),
+  recommendationIds.length
+    ? db.from('recommendations').select('id, body, profile_id, source_game:games!source_game_id(title, slug), target_game:games!target_game_id(title, slug), profiles(username)').in('id', recommendationIds)
+    : Promise.resolve({ data: [] as any[] }),
 ]);
 
-const reporterMap = new Map((reportersRes.data as any[] ?? []).map((p: any) => [p.id, p.username]));
-const reviewMap = new Map((reviewsRes.data as any[] ?? []).map((r: any) => [r.id, r]));
-const commentMap = new Map((commentsRes.data as any[] ?? []).map((c: any) => [c.id, c]));
-const profileMap = new Map((profilesRes.data as any[] ?? []).map((p: any) => [p.id, p]));
+const reporterMap = new Map<string, string>(((reportersRes.data as any[]) ?? []).map((p) => [p.id, p.username]));
+const reviewMap = new Map<string, any>(((reviewsRes.data as any[]) ?? []).map((r) => [r.id, r]));
+const commentMap = new Map<string, any>(((commentsRes.data as any[]) ?? []).map((c) => [c.id, c]));
+const profileMap = new Map<string, any>(((profilesRes.data as any[]) ?? []).map((p) => [p.id, p]));
+const recommendationMap = new Map<string, any>(((recommendationsRes.data as any[]) ?? []).map((r) => [r.id, r]));
 
 function truncate(s: string | null | undefined, n: number): string {
   if (!s) return '';
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-const rows = reportRows.map((r: any) => {
-  let preview = '(content not found — may have been deleted)';
-  let link: string | null = null;
+interface GroupedReport {
+  key: string;
+  target_type: 'review' | 'comment' | 'profile' | 'recommendation';
+  target_id: string;
+  preview: string;
+  link: string | null;
+  deletable: boolean;
+  found: boolean;
+  reports: {
+    id: string;
+    reporter: string;
+    reason: string;
+    notes: string | null;
+    created_at: string;
+  }[];
+}
 
-  if (r.target_type === 'review') {
-    const rev = reviewMap.get(r.target_id);
-    if (rev) {
-      preview = `"${truncate(rev.title || rev.body, 140)}" on ${rev.games?.title ?? 'unknown game'} by ${rev.profiles?.username ?? 'unknown'}`;
-      link = `/reviews/${r.target_id}`;
+const grouped = new Map<string, GroupedReport>();
+
+for (const r of reportRows) {
+  const key = `${r.target_type}:${r.target_id}`;
+  let group = grouped.get(key);
+  if (!group) {
+    let preview = '(content not found — may have been deleted)';
+    let link: string | null = null;
+    let found = false;
+    let deletable = r.target_type !== 'profile';
+
+    if (r.target_type === 'review') {
+      const rev = reviewMap.get(r.target_id);
+      if (rev) {
+        preview = `"${truncate(rev.title || rev.body, 140)}" on ${rev.games?.title ?? 'unknown game'} by ${rev.profiles?.username ?? 'unknown'}`;
+        link = `/reviews/${r.target_id}`;
+        found = true;
+      }
+    } else if (r.target_type === 'comment') {
+      const c = commentMap.get(r.target_id);
+      if (c) {
+        preview = `"${truncate(c.body, 140)}" by ${c.profiles?.username ?? 'unknown'}`;
+        link = `/reviews/${c.review_id}`;
+        found = true;
+      }
+    } else if (r.target_type === 'profile') {
+      const p = profileMap.get(r.target_id);
+      if (p) {
+        preview = `Profile: ${p.username}`;
+        link = `/reviewers/${p.username}`;
+        found = true;
+      }
+    } else if (r.target_type === 'recommendation') {
+      const rec = recommendationMap.get(r.target_id);
+      if (rec) {
+        const srcTitle = rec.source_game?.title ?? 'a game';
+        const tgtTitle = rec.target_game?.title ?? 'another game';
+        preview = `"${truncate(rec.body, 140)}" (${srcTitle} → ${tgtTitle}) by ${rec.profiles?.username ?? 'unknown'}`;
+        link = rec.source_game?.slug ? `/games/${rec.source_game.slug}#recommendations` : null;
+        found = true;
+      }
     }
-  } else if (r.target_type === 'comment') {
-    const c = commentMap.get(r.target_id);
-    if (c) {
-      preview = `"${truncate(c.body, 140)}" by ${c.profiles?.username ?? 'unknown'}`;
-      link = `/reviews/${c.review_id}`;
-    }
-  } else if (r.target_type === 'profile') {
-    const p = profileMap.get(r.target_id);
-    if (p) {
-      preview = `Profile: ${p.username}`;
-      link = `/reviewers/${p.username}`;
-    }
+
+    group = {
+      key,
+      target_type: r.target_type,
+      target_id: r.target_id,
+      preview,
+      link,
+      deletable,
+      found,
+      reports: [],
+    };
+    grouped.set(key, group);
   }
 
-  return {
+  group.reports.push({
     id: r.id,
     reporter: reporterMap.get(r.reporter_id) ?? 'unknown',
-    target_type: r.target_type,
     reason: r.reason,
     notes: r.notes,
     created_at: r.created_at,
-    preview,
-    link,
-  };
-});
+  });
+}
+
+const groups = Array.from(grouped.values());
 ---
 
-<Layout title="Reports — Admin" isLoggedIn={true} currentProfile={profile} variant="two-col">
+<Layout title="Reports — Admin" isLoggedIn={true} currentProfile={profile} activeNav="admin" variant="two-col">
   <main class="feed admin-main">
     <div class="feed-header">
       <div>
         <div class="feed-title">Reports</div>
-        <div class="feed-subtitle">Pending user reports on reviews, comments, and profiles.</div>
+        <div class="feed-subtitle">Pending user reports on reviews, comments, profiles, and recommendations.</div>
       </div>
     </div>
 
     <div class="admin-content">
       <a href="/admin" class="admin-back-link">&larr; Admin</a>
 
-      {rows.length === 0 && <p class="admin-empty">No pending reports.</p>}
+      {groups.length === 0 && <p class="admin-empty">No pending reports.</p>}
 
       <div class="unmatched-list" id="reportsList">
-        {rows.map((row: any) => (
-        <div class="unmatched-row" data-report-id={row.id}>
-          <div class="unmatched-info">
-            <div class="unmatched-title">
-              <span class="report-type-badge">{row.target_type}</span>
-              <span class="report-reason-badge">{row.reason}</span>
+        {groups.map((g) => (
+          <div class="unmatched-row" data-target-type={g.target_type} data-target-id={g.target_id}>
+            <div class="unmatched-info">
+              <div class="unmatched-title">
+                <span class="report-type-badge">{g.target_type}</span>
+                {g.reports.length > 1 && <span class="report-count-badge">{g.reports.length} reports</span>}
+              </div>
+              <div class="unmatched-meta">
+                oldest {new Date(g.reports[0].created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              </div>
             </div>
-            <div class="unmatched-meta">
-              reported by {row.reporter} · {new Date(row.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+
+            <div class="report-preview">
+              {g.link ? <a href={g.link} target="_blank" rel="noopener">{g.preview}</a> : g.preview}
+            </div>
+
+            <ul class="report-reasons-list">
+              {g.reports.map((rep) => (
+                <li>
+                  <span class="report-reason-badge">{rep.reason}</span>
+                  <span class="report-reporter">by {rep.reporter}</span>
+                  {rep.notes && <span class="report-note-inline">— {rep.notes}</span>}
+                </li>
+              ))}
+            </ul>
+
+            <div class="unmatched-actions">
+              {g.deletable && g.found && (
+                <button class="admin-btn admin-btn-danger" data-action="delete" type="button">Delete content</button>
+              )}
+              <button class="admin-btn admin-btn-primary" data-action="resolve" type="button">Resolve</button>
+              <button class="admin-btn admin-btn-ghost" data-action="dismiss" type="button">Dismiss</button>
             </div>
           </div>
-          <div class="report-preview">
-            {row.link ? <a href={row.link} target="_blank" rel="noopener">{row.preview}</a> : row.preview}
-          </div>
-          {row.notes && <div class="report-notes">Note: {row.notes}</div>}
-          <div class="unmatched-actions">
-            <button class="admin-btn admin-btn-primary" onclick={`resolveReport('${row.id}')`}>Resolve</button>
-            <button class="admin-btn admin-btn-ghost" onclick={`dismissReport('${row.id}')`}>Dismiss</button>
-          </div>
-        </div>
-      ))}
+        ))}
       </div>
     </div>
   </main>
 </Layout>
 
 <script>
-declare global {
-  interface Window {
-    resolveReport: (reportId: string) => Promise<void>;
-    dismissReport: (reportId: string) => Promise<void>;
-  }
+function getRow(targetType: string, targetId: string): HTMLElement | null {
+  return document.querySelector(`.unmatched-row[data-target-type="${targetType}"][data-target-id="${targetId}"]`);
 }
 
-function getRow(reportId: string): HTMLElement | null {
-  return document.querySelector(`.unmatched-row[data-report-id="${reportId}"]`);
-}
-
-async function updateReport(reportId: string, endpoint: string) {
-  const row = getRow(reportId);
+async function act(endpoint: string, targetType: string, targetId: string, confirmMessage?: string) {
+  if (confirmMessage && !window.confirm(confirmMessage)) return;
+  const row = getRow(targetType, targetId);
   if (!row) return;
+  const buttons = row.querySelectorAll<HTMLButtonElement>('button[data-action]');
+  buttons.forEach((b) => (b.disabled = true));
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ report_id: reportId }),
+      body: JSON.stringify({ target_type: targetType, target_id: targetId }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Failed');
     row.remove();
+    if (!document.querySelectorAll('.unmatched-row').length) {
+      const empty = document.createElement('p');
+      empty.className = 'admin-empty';
+      empty.textContent = 'No pending reports.';
+      document.querySelector('.admin-content')?.appendChild(empty);
+    }
   } catch (e: any) {
+    buttons.forEach((b) => (b.disabled = false));
     alert(e.message ?? 'Something went wrong.');
   }
 }
 
-window.resolveReport = (reportId: string) => updateReport(reportId, '/api/admin/reports/resolve');
-window.dismissReport = (reportId: string) => updateReport(reportId, '/api/admin/reports/dismiss');
+document.getElementById('reportsList')?.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
+  if (!btn) return;
+  const row = btn.closest<HTMLElement>('.unmatched-row');
+  if (!row) return;
+  const targetType = row.dataset.targetType!;
+  const targetId = row.dataset.targetId!;
+  const action = btn.dataset.action;
+
+  if (action === 'delete') {
+    act('/api/admin/reports/delete-target', targetType, targetId, 'Delete this content? This cannot be undone (reviews are hidden; comments and recommendations are permanently removed).');
+  } else if (action === 'resolve') {
+    act('/api/admin/reports/resolve', targetType, targetId);
+  } else if (action === 'dismiss') {
+    act('/api/admin/reports/dismiss', targetType, targetId);
+  }
+});
 </script>
 
 <style>
@@ -176,9 +261,9 @@ window.dismissReport = (reportId: string) => updateReport(reportId, '/api/admin/
   .unmatched-info { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .unmatched-title { display: flex; gap: 8px; align-items: center; }
   .unmatched-meta { font-size: 12px; color: var(--text-tertiary); white-space: nowrap; }
-  .unmatched-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .unmatched-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 
-  .report-type-badge, .report-reason-badge {
+  .report-type-badge, .report-reason-badge, .report-count-badge {
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
@@ -187,10 +272,15 @@ window.dismissReport = (reportId: string) => updateReport(reportId, '/api/admin/
     background: var(--bg-hover);
     color: var(--text-secondary);
   }
+  .report-count-badge { background: var(--accent); color: #fff; }
   .report-preview { font-size: 13px; margin-top: 8px; color: var(--text-primary); line-height: 1.4; }
   .report-preview a { color: var(--accent); text-decoration: none; }
   .report-preview a:hover { text-decoration: underline; }
-  .report-notes { font-size: 12px; color: var(--text-secondary); margin-top: 6px; font-style: italic; }
+
+  .report-reasons-list { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .report-reasons-list li { font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .report-reporter { color: var(--text-secondary); }
+  .report-note-inline { color: var(--text-tertiary); font-style: italic; }
 
   .admin-btn {
     border: 1px solid var(--border);
@@ -202,7 +292,10 @@ window.dismissReport = (reportId: string) => updateReport(reportId, '/api/admin/
     font-weight: 500;
     cursor: pointer;
   }
+  .admin-btn:disabled { opacity: 0.5; cursor: wait; }
   .admin-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .admin-btn-primary:hover { opacity: 0.9; }
-  .admin-btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .admin-btn-primary:hover:not(:disabled) { opacity: 0.9; }
+  .admin-btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .admin-btn-danger { border-color: #c0392b; color: #c0392b; }
+  .admin-btn-danger:hover:not(:disabled) { background: #c0392b; color: #fff; }
 </style>
