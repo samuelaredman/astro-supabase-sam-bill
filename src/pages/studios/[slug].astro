@@ -115,6 +115,33 @@ const totalGames = new Set([
   ...publishedOnly.map((g: any) => g.id)
 ]).size
 
+// Per-game avg distribution for the score-hero card — one entry per bucket 1..10
+const gameAvgScoresList: number[] = (allGameIds as string[])
+  .filter((id: string) => reviewStats[id] && reviewStats[id].count > 0)
+  .map((id: string) => reviewStats[id].sum / reviewStats[id].count)
+const gameScoreDist: number[] = Array.from({ length: 10 }, (_, i) => {
+  if (i === 9) return gameAvgScoresList.filter(avg => avg >= 9.5).length
+  return gameAvgScoresList.filter(avg => avg >= i + 0.5 && avg < i + 1.5).length
+})
+
+// Avg score per release year for the trend sparkline
+const yearAvgScoresMap: Record<number, number | null> = {}
+{
+  const yearTotals: Record<number, { sum: number; count: number }> = {}
+  for (const g of [...developedGames, ...publishedOnly] as any[]) {
+    if (!g.date_released) continue
+    const year = new Date(g.date_released).getFullYear()
+    const stat = reviewStats[g.id]
+    if (!stat || stat.count === 0) continue
+    yearTotals[year] = yearTotals[year] ?? { sum: 0, count: 0 }
+    yearTotals[year].sum += stat.sum
+    yearTotals[year].count += stat.count
+  }
+  for (const [y, { sum, count }] of Object.entries(yearTotals)) {
+    yearAvgScoresMap[Number(y)] = count > 0 ? Math.round((sum / count) * 10) / 10 : null
+  }
+}
+
 // fetch IGDB company details
 let igdbData: any = null
 if (studio.igdb_id) {
@@ -171,6 +198,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       if (m) m.content = t === 'dark' ? '#0f0f0e' : '#f9f8f6';
     })();
   </script>
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png?v=2" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2" />
+  <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png?v=2" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
+  <link rel="manifest" href="/manifest.json" />
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" id="meta-theme-color" content="#f9f8f6" />
@@ -194,7 +226,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       --score-mid: #6b5a1a;   --score-mid-bg: #f5f0ea;
       --score-low: #6b1a1a;   --score-low-bg: #f5eaea;
       --game-accent: #4a3a8a; --game-accent-subtle: rgba(74,58,138,0.06);
-      --hero-overlay: linear-gradient(to bottom, rgba(245,244,242,0.0) 0%, rgba(245,244,242,0.5) 60%, rgba(245,244,242,1) 100%);
+      --hero-overlay: linear-gradient(to bottom, rgba(245,244,242,0.05) 0%, rgba(245,244,242,0.2) 40%, rgba(245,244,242,0.85) 75%, rgba(245,244,242,1) 100%);
+      --hero-side: linear-gradient(to right, rgba(245,244,242,0.4) 0%, transparent 40%);
     }
     :root[data-theme="dark"] {
       --bg: #09090a; --bg-card: #131314; --bg-hover: #1c1c1e;
@@ -210,7 +243,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       --score-low: #f87171;   --score-low-bg: #300e0e;
       --score-perfect: #ffffff; --score-perfect-bg: #22223a;
       --game-accent: #6050c8; --game-accent-subtle: rgba(96,80,200,0.09);
-      --hero-overlay: linear-gradient(to bottom, rgba(9,9,10,0.0) 0%, rgba(9,9,10,0.55) 60%, rgba(9,9,10,1) 100%);
+      --hero-overlay: linear-gradient(to bottom, rgba(9,9,10,0.05) 0%, rgba(9,9,10,0.2) 40%, rgba(9,9,10,0.8) 75%, rgba(9,9,10,1) 100%);
+      --hero-side: linear-gradient(to right, rgba(9,9,10,0.5) 0%, transparent 40%);
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -226,14 +260,15 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .jump-link:hover { color: var(--text-primary); }
     .jump-link.active { color: var(--text-primary); border-color: var(--game-accent); }
 
-    .hero { position: relative; width: 100%; height: 320px; overflow: hidden; background: #04040a; }
-    .hero-mosaic { position: absolute; inset: -20px; display: flex; flex-wrap: wrap; filter: blur(18px) saturate(1.5) brightness(0.38); transform: scale(1.08); }
+    .hero { position: relative; width: 100%; height: 400px; overflow: hidden; background: #04040a; }
+    .hero-mosaic { position: absolute; inset: -40px; display: flex; flex-wrap: wrap; filter: blur(28px) saturate(1.6) brightness(0.5); transform: scale(1.15); }
     .hero-mosaic-tile { flex: 1 1 90px; min-width: 90px; min-height: 160px; background-size: cover; background-position: center; }
+    .hero-side-fade { position: absolute; inset: 0; background: var(--hero-side); }
     .hero-overlay { position: absolute; inset: 0; background: var(--hero-overlay); }
 
-    .page { max-width: 900px; margin: 0 auto; padding: 0 28px 100px; }
+    .page { max-width: 980px; margin: 0 auto; padding: 0 28px 100px; }
 
-    .studio-header { display: flex; gap: 28px; align-items: flex-end; margin-top: -80px; margin-bottom: 32px; position: relative; z-index: 2; }
+    .studio-header { display: flex; gap: 24px; align-items: flex-end; margin-top: -100px; margin-bottom: 28px; position: relative; z-index: 2; }
     .studio-logo-wrap { flex-shrink: 0; width: 120px; height: 120px; border-radius: 20px; background: var(--bg-card); border: 1px solid rgba(96,80,200,0.3); box-shadow: 0 12px 40px rgba(0,0,0,0.7), 0 0 30px rgba(96,80,200,0.15); display: flex; align-items: center; justify-content: center; overflow: hidden; }
     .studio-logo { width: 100%; height: 100%; object-fit: contain; padding: 12px; }
     .studio-logo-placeholder { font-size: 52px; }
@@ -244,6 +279,54 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .studio-meta-sep { color: var(--text-tertiary); font-size: 10px; }
     .studio-website { font-size: 13px; color: var(--game-accent); transition: opacity 0.15s; display: flex; align-items: center; gap: 4px; }
     .studio-website:hover { opacity: 0.7; }
+
+    /* ── SCORE HERO ── */
+    .score-hero { display: flex; align-items: flex-start; gap: 24px; padding: 20px 24px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; margin-bottom: 16px; position: relative; overflow: hidden; }
+    .score-hero::before { content: ''; position: absolute; inset: 0; background: var(--game-accent-subtle); pointer-events: none; }
+    .score-hero::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(to right, transparent, var(--game-accent), transparent); opacity: 0.6; }
+    [data-theme="light"] .score-hero { background: #14121e; border-color: rgba(96,80,200,0.3); --score-perfect: #ffffff; --score-great: #4ade80; --score-teal: #2dd4bf; --score-good: #60a5fa; --score-mid: #fbbf24; --score-orange: #fb923c; --score-low: #f87171; }
+    [data-theme="light"] .score-hero .score-label { color: rgba(255,255,255,0.42); }
+    [data-theme="light"] .score-hero .review-count-label { color: rgba(255,255,255,0.55); }
+    [data-theme="light"] .score-hero .score-divider { background: rgba(255,255,255,0.1); }
+    [data-theme="light"] .score-hero .dist-label { color: rgba(255,255,255,0.32); }
+    .avg-score-num { font-family: 'Century Schoolbook', 'New Century Schoolbook', Georgia, serif; font-size: 72px; line-height: 1; font-weight: 700; position: relative; z-index: 1; letter-spacing: -3px; padding-top: 8px; }
+    .avg-score-num.score-perfect-color { color: #fff; text-shadow: 0 0 20px rgba(255,255,255,0.7), 0 0 40px rgba(255,255,255,0.3); }
+    .avg-score-num.score-great-color { color: var(--score-great); }
+    .avg-score-num.score-teal-color { color: var(--score-teal); }
+    .avg-score-num.score-good-color { color: var(--score-good); }
+    .avg-score-num.score-mid-color { color: var(--score-mid); }
+    .avg-score-num.score-orange-color { color: var(--score-orange); }
+    .avg-score-num.score-low-color { color: var(--score-low); }
+    .avg-score-num.score-none-color { color: rgba(255,255,255,0.3); font-size: 48px; padding-top: 16px; }
+    .score-divider { width: 1px; height: 56px; background: var(--border); flex-shrink: 0; margin-top: 8px; }
+    .score-meta { flex: 1; position: relative; z-index: 1; min-width: 0; }
+    .score-label { font-size: 11px; font-weight: 500; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 3px; }
+    .review-count-label { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+    .score-dist { display: flex; gap: 4px; align-items: flex-end; height: 56px; margin-top: 8px; }
+    .dist-bar-wrap { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: 1; }
+    .dist-bar { width: 100%; border-radius: 4px 4px 0 0; min-height: 4px; transition: opacity 0.15s, transform 0.15s; }
+    .dist-bar-wrap:hover .dist-bar { opacity: 1 !important; transform: scaleY(1.06); transform-origin: bottom; }
+    .dist-label { font-size: 9px; color: var(--text-tertiary); font-weight: 500; margin-top: 2px; }
+
+    /* SCORE TREND — line chart of avg per release year */
+    .trend-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 18px 22px 14px; margin-bottom: 16px; }
+    .trend-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+    .trend-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-tertiary); }
+    .trend-sub { font-size: 11px; color: var(--text-tertiary); }
+    .trend-svg { display: block; width: 100%; height: 100px; overflow: visible; }
+    .trend-grid { stroke: var(--border-subtle); stroke-width: 1; stroke-dasharray: 2 4; }
+    .trend-area { fill: var(--game-accent); opacity: 0.08; }
+    .trend-line { fill: none; stroke: var(--game-accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0.75; }
+    .trend-dot { stroke: var(--bg-card); stroke-width: 1.5; cursor: pointer; }
+    .trend-dot-perfect { fill: #fff; }
+    .trend-dot-great { fill: var(--score-great); }
+    .trend-dot-teal { fill: var(--score-teal); }
+    .trend-dot-good { fill: var(--score-good); }
+    .trend-dot-mid { fill: var(--score-mid); }
+    .trend-dot-orange { fill: var(--score-orange); }
+    .trend-dot-low { fill: var(--score-low); }
+    .trend-xaxis { position: relative; height: 14px; margin-top: 4px; }
+    .trend-xlabel { position: absolute; top: 0; transform: translateX(-50%); font-size: 10px; color: var(--text-tertiary); white-space: nowrap; }
 
     .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 28px; }
     .stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 22px 20px 18px; }
@@ -278,13 +361,14 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-tertiary); }
     .section-count { font-size: 12px; color: var(--text-tertiary); }
 
-    .games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
-    .game-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s; display: block; position: relative; }
-    .game-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-md); border-color: rgba(96,80,200,0.3); }
-    .game-cover { aspect-ratio: 3/4; background: var(--tag-bg); overflow: hidden; position: relative; }
+    .games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+    @media (max-width: 460px) { .games-grid { grid-template-columns: repeat(4, 1fr); gap: 6px; } }
+    .game-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; transition: transform 0.15s, border-color 0.15s; display: block; position: relative; }
+    .game-card:hover { transform: translateY(-3px); border-color: rgba(96,80,200,0.35); }
+    .game-cover { aspect-ratio: 3/4; background: var(--tag-bg); overflow: hidden; position: relative; display: flex; align-items: center; justify-content: center; font-size: 24px; }
     .game-cover img { width: 100%; height: 100%; object-fit: cover; }
-    .game-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 36px; }
-    .game-score-badge { position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; font-family: 'Century Schoolbook', Georgia, serif; }
+    .game-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+    .game-score-badge { position: absolute; bottom: 5px; right: 5px; min-width: 26px; height: 20px; padding: 0 5px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; font-family: 'DM Serif Display', serif; backdrop-filter: blur(6px); }
     .badge-perfect { color: #09090a; background: #ffffff; border: 1px solid rgba(255,255,255,0.8); box-shadow: 0 0 10px rgba(255,255,255,0.9), 0 0 24px rgba(255,255,255,0.6), 0 0 48px rgba(255,255,255,0.3); }
     [data-theme="light"] .badge-perfect { color: #ffffff; background: #1a1a2e; border: 1px solid rgba(30,26,60,0.3); box-shadow: 0 0 8px rgba(30,26,60,0.4); }
     .badge-great   { color: var(--score-great);   background: var(--score-great-bg);   border: 1px solid rgba(74,222,128,0.3); }
@@ -293,16 +377,20 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .badge-mid     { color: var(--score-mid);     background: var(--score-mid-bg);     border: 1px solid rgba(251,191,36,0.3); }
     .badge-orange  { color: var(--score-orange);  background: var(--score-orange-bg);  border: 1px solid rgba(251,146,60,0.3); }
     .badge-low     { color: var(--score-low);     background: var(--score-low-bg);     border: 1px solid rgba(248,113,113,0.3); }
-    .game-info { padding: 10px 12px 12px; }
-    .game-title-text { font-size: 12px; font-weight: 500; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 3px; }
-    .game-year { font-size: 11px; color: var(--text-tertiary); }
-    .game-review-count { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
+    .game-info { padding: 6px 8px 8px; }
+    .game-title-text { font-size: 10px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
+    .game-year { display: none; }
+    .game-review-count { display: none; }
 
     .empty-state { padding: 40px 0; text-align: center; color: var(--text-tertiary); }
     .empty-title { font-family: 'DM Serif Display', serif; font-size: 18px; color: var(--text-secondary); margin-bottom: 6px; }
 
     @media (max-width: 600px) {
-      .studio-header { flex-direction: column; align-items: flex-start; margin-top: -50px; }
+      .hero { height: 260px; }
+      .score-hero { flex-direction: column; gap: 12px; padding: 16px 18px; }
+      .score-divider { display: none; }
+      .avg-score-num { font-size: 56px; padding-top: 0; }
+      .studio-header { flex-direction: column; align-items: flex-start; margin-top: -60px; }
       .studio-name { font-size: 26px; }
       .hero { height: 220px; }
       .stats-row { gap: 8px; }
@@ -328,6 +416,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 
   <div class="hero">
     <div class="hero-mosaic" id="heroMosaic"></div>
+    <div class="hero-side-fade"></div>
     <div class="hero-overlay"></div>
   </div>
 
@@ -359,24 +448,78 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
     </div>
 
-    <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-num">{totalGames}</div>
-        <div class="stat-label">Games</div>
+    <div class="score-hero">
+      <div class={`avg-score-num ${overallScoreClass ? `score-${overallScoreClass}-color` : 'score-none-color'}`}>
+        {overallAvg ?? '—'}
       </div>
-      <div class="stat-card">
-        <div class="stat-num">{totalReviews.toLocaleString()}</div>
-        <div class="stat-label">Reviews</div>
-        <div class="stat-sub">across all games</div>
-      </div>
-      <div class={`stat-card ${overallScoreClass ? `score-card-${overallScoreClass}` : ''}`}>
-        {overallAvg
-          ? <div class={`stat-num ${overallScoreClass}`}>{overallAvg}</div>
-          : <div class="stat-num" style="color:var(--text-tertiary)">—</div>
-        }
-        <div class="stat-label">Avg score</div>
+      <div class="score-divider"></div>
+      <div class="score-meta">
+        <div class="score-label">Average game score</div>
+        <div class="review-count-label">
+          {totalReviews > 0
+            ? `${totalReviews.toLocaleString()} ${totalReviews === 1 ? 'review' : 'reviews'} across ${totalGames.toLocaleString()} games`
+            : `${totalGames.toLocaleString()} games · no reviews yet`}
+        </div>
+        {gameScoreDist.some((v: number) => v > 0) && (
+          <div class="score-dist">
+            {gameScoreDist.map((count: number, i: number) => {
+              const score = i + 1
+              const max = Math.max(...gameScoreDist, 1)
+              // sqrt scaling so small buckets stay visible when one bucket dominates
+              const h = count > 0 ? Math.max(25, Math.sqrt(count / max) * 100) : 6
+              const tier = score === 10 ? 'perfect' : score >= 9 ? 'great' : score >= 8 ? 'teal' : score >= 7 ? 'good' : score >= 5 ? 'mid' : score >= 3 ? 'orange' : 'low'
+              return (
+                <div class="dist-bar-wrap" title={`${count} game${count === 1 ? '' : 's'} averaging ${score}`}>
+                  <div class="dist-bar" style={`height:${h}%;background:var(--score-${tier});opacity:${count > 0 ? 0.85 : 0.15}`}></div>
+                  <div class="dist-label">{score}</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
+
+    {(() => {
+      const points = Object.entries(yearAvgScoresMap)
+        .map(([y, s]) => ({ year: Number(y), score: s as number | null }))
+        .filter(p => p.score !== null)
+        .sort((a, b) => a.year - b.year)
+      if (points.length < 2) return null
+      const minY = points[0].year, maxY = points[points.length - 1].year
+      const w = 1000, h = 100, padX = 10, padT = 10, padB = 20
+      const xAt = (y: number) => padX + ((y - minY) / Math.max(1, maxY - minY)) * (w - 2*padX)
+      const yAt = (s: number) => padT + (1 - (s - 1) / 9) * (h - padT - padB)
+      const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${xAt(p.year).toFixed(1)},${yAt(p.score!).toFixed(1)}`).join(' ')
+      const areaPath = `${linePath} L${xAt(maxY).toFixed(1)},${h - padB} L${xAt(minY).toFixed(1)},${h - padB} Z`
+      const tier = (s: number) => s === 10 ? 'perfect' : s >= 9 ? 'great' : s >= 8 ? 'teal' : s >= 7 ? 'good' : s >= 5 ? 'mid' : s >= 3 ? 'orange' : 'low'
+      const labelStep = Math.max(1, Math.floor(points.length / 6))
+      const labelPoints = points.filter((_, i) => i % labelStep === 0 || i === points.length - 1)
+      return (
+        <div class="trend-card">
+          <div class="trend-header">
+            <span class="trend-title">Score trend</span>
+            <span class="trend-sub">{minY} – {maxY}</span>
+          </div>
+          <svg class="trend-svg" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+            {[2, 5, 8].map(s => <line x1={padX} y1={yAt(s)} x2={w - padX} y2={yAt(s)} class="trend-grid" />)}
+            <path d={areaPath} class="trend-area" />
+            <path d={linePath} class="trend-line" />
+            {points.map(p => (
+              <circle cx={xAt(p.year)} cy={yAt(p.score!)} r="3.5" class={`trend-dot trend-dot-${tier(p.score!)}`}>
+                <title>{p.year}: {p.score!.toFixed(1)}</title>
+              </circle>
+            ))}
+          </svg>
+          <div class="trend-xaxis">
+            {labelPoints.map(p => (
+              <span class="trend-xlabel" style={`left:${((p.year - minY) / Math.max(1, maxY - minY)) * 100}%`}>{p.year}</span>
+            ))}
+          </div>
+        </div>
+      )
+    })()}
+
 
     {(studio.description || studio.founded_year || studio.country || studio.website_url) && (
       <div class="about-grid">
