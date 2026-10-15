@@ -1,3 +1,4 @@
+npm warn exec The following package was not found and will be installed: supabase@2.121.0
 export type Json =
   | string
   | number
@@ -10,7 +11,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.5"
+    PostgrestVersion: "14.4"
   }
   public: {
     Tables: {
@@ -1400,7 +1401,7 @@ export type Database = {
           {
             foreignKeyName: "group_polls_featured_game_id_fkey"
             columns: ["featured_game_id"]
-            isOneToOne: true
+            isOneToOne: false
             referencedRelation: "group_featured_games"
             referencedColumns: ["id"]
           },
@@ -3974,10 +3975,31 @@ export type Database = {
           steam_appid: number
         }[]
       }
+      admin_daily_activity: {
+        Args: { days?: number }
+        Returns: {
+          comments: number
+          day: string
+          recommendations: number
+          reports: number
+          reviews: number
+          signups: number
+        }[]
+      }
+      admin_user_retention: {
+        Args: { window_days?: number }
+        Returns: {
+          cohort_size: number
+          cohort_week: string
+          retained_14d: number
+          retained_pct: number
+        }[]
+      }
       bulk_update_steam_playtime: {
         Args: { p_profile_id: string; p_updates: Json }
         Returns: undefined
       }
+      email_signup_status: { Args: { p_email: string }; Returns: string }
       game_rank_stats: {
         Args: { p_game_id: string; p_genre_id: string; p_release_year: number }
         Returns: {
@@ -4006,6 +4028,16 @@ export type Database = {
         }[]
       }
       get_my_profile_id: { Args: never; Returns: string }
+      group_card_summaries: {
+        Args: { p_group_ids: string[] }
+        Returns: {
+          covers: string[]
+          group_id: string
+          last_review_at: string
+          member_avatars: Json
+          reviews_week: number
+        }[]
+      }
       group_compare_community_games: {
         Args: {
           p_genre_id?: string
@@ -4192,9 +4224,9 @@ export type Database = {
           avg_score: number
           completed_count: number
           completed_hours_count: number
+          completed_profile_ids: string[]
           full_count: number
           full_hours_count: number
-          completed_profile_ids: string[]
           full_profile_ids: string[]
           game_id: string
           hours_count: number
@@ -4233,6 +4265,7 @@ export type Database = {
           status: string | null
           title: string | null
           updated_at: string | null
+          youtube_video_id: string | null
         }[]
         SetofOptions: {
           from: "*"
@@ -4351,6 +4384,7 @@ export type Database = {
           status: string | null
           title: string | null
           updated_at: string | null
+          youtube_video_id: string | null
         }[]
         SetofOptions: {
           from: "*"
@@ -4385,6 +4419,166 @@ export type Database = {
           low_profile_id: string
           low_score: number
           spread: number
+        }[]
+      }
+      group_versus_game_details: {
+        Args: {
+          p_game_ids: string[]
+          p_genre_id?: string
+          p_group_id: string
+          p_other_id?: string
+          p_platform_id?: string
+          p_profile_id: string
+        }
+        Returns: {
+          achievement_count: number
+          avg_achievement_pct: number
+          avg_hours: number
+          game_id: string
+          hours_count: number
+          review_count: number
+          side: string
+          top_platform: string
+        }[]
+      }
+      group_versus_games: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_other_id?: string
+          p_platform_id?: string
+          p_prior_weight?: number
+          p_profile_id: string
+        }
+        Returns: {
+          cover_img_url: string
+          diff: number
+          diff_abs: number
+          game_id: string
+          other_avg: number
+          other_count: number
+          other_weighted: number
+          pair_avg: number
+          slug: string
+          subject_score: number
+          title: string
+        }[]
+      }
+      group_versus_games_ranked: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_other_id?: string
+          p_platform_id?: string
+          p_prior_weight?: number
+          p_profile_id: string
+        }
+        Returns: {
+          cover_img_url: string
+          diff: number
+          diff_abs: number
+          game_id: string
+          other_avg: number
+          other_count: number
+          other_weighted: number
+          pair_avg: number
+          rated: number
+          rated_side: number
+          slug: string
+          subject_score: number
+          title: string
+          turn: number
+        }[]
+      }
+      group_versus_genres: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_limit?: number
+          p_min_reviews?: number
+          p_other_id?: string
+          p_platform_id?: string
+          p_profile_id: string
+          p_scope?: string
+        }
+        Returns: {
+          genre: string
+          review_count: number
+          side: string
+        }[]
+      }
+      group_versus_profile: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_min_reviews?: number
+          p_other_id?: string
+          p_platform_id?: string
+          p_profile_id: string
+          p_scope?: string
+        }
+        Returns: {
+          achievement_games: number
+          avg_achievement_pct: number
+          avg_hours: number
+          avg_score: number
+          games_played: number
+          review_count: number
+          side: string
+          tens: number
+          top_genre: string
+          top_genre_count: number
+        }[]
+      }
+      group_versus_scope: {
+        Args: {
+          p_genre_id: string
+          p_group_id: string
+          p_min_reviews: number
+          p_other_id: string
+          p_platform_id: string
+          p_profile_id: string
+          p_scope: string
+        }
+        Returns: {
+          game_id: string
+        }[]
+      }
+      group_versus_score_distribution: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_min_reviews?: number
+          p_other_id?: string
+          p_platform_id?: string
+          p_profile_id: string
+          p_scope?: string
+        }
+        Returns: {
+          review_count: number
+          score: number
+          side: string
+        }[]
+      }
+      group_versus_summary: {
+        Args: {
+          p_genre_id?: string
+          p_group_id: string
+          p_min_reviews?: number
+          p_other_id?: string
+          p_platform_id?: string
+          p_profile_id: string
+          p_scope?: string
+        }
+        Returns: {
+          above: number
+          below: number
+          level: number
+          mean_abs_diff: number
+          other_avg: number
+          shared_games: number
+          subject_avg: number
+          within_one: number
         }[]
       }
       hub_game_review_stats: {
@@ -4544,6 +4738,13 @@ export type Database = {
         Args: { p_profile_id: string }
         Returns: {
           steam_appid: number
+        }[]
+      }
+      user_unlock_platforms: {
+        Args: { p_profile_id: string }
+        Returns: {
+          platform_label: string
+          source: string
         }[]
       }
       xbox_achievement_completion_by_titleid: {

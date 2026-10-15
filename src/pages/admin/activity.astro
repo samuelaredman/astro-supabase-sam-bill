@@ -15,6 +15,24 @@ if (error) {
   console.error('[admin/activity] rpc error:', JSON.stringify(error));
 }
 
+// 14-day retention cohorts over the trailing 90 days.
+const { data: retentionRaw, error: retError } = await db.rpc('admin_user_retention', { window_days: 90 });
+if (retError) {
+  console.error('[admin/activity] retention rpc error:', JSON.stringify(retError));
+}
+
+type RetentionRow = { cohort_week: string; cohort_size: number; retained_14d: number; retained_pct: number };
+const retentionRows: RetentionRow[] = ((retentionRaw as any[]) ?? []).map((r) => ({
+  cohort_week: r.cohort_week,
+  cohort_size: Number(r.cohort_size ?? 0),
+  retained_14d: Number(r.retained_14d ?? 0),
+  retained_pct: Number(r.retained_pct ?? 0),
+}));
+
+const retentionTotal = retentionRows.reduce((a, r) => a + r.cohort_size, 0);
+const retentionReturned = retentionRows.reduce((a, r) => a + r.retained_14d, 0);
+const retentionPct = retentionTotal === 0 ? 0 : Math.round((1000 * retentionReturned) / retentionTotal) / 10;
+
 type DayRow = {
   day: string;
   signups: number;
@@ -139,6 +157,49 @@ function fmtWeekday(s: string): string {
           </section>
 
           <section class="admin-section">
+            <h3 class="admin-section-title">14-day retention — last 90 days</h3>
+            <p class="retention-note">Share of new users who posted a review, comment, or rec at least 14 days after signing up. Only cohorts that have fully aged (signup ≥ 14 days ago) are counted.</p>
+            {retentionRows.length === 0 ? (
+              <p class="admin-empty">No matured cohorts yet.</p>
+            ) : (
+              <>
+                <div class="retention-headline">
+                  <div class="retention-headline-pct">{retentionPct}%</div>
+                  <div class="retention-headline-sub">{retentionReturned} of {retentionTotal} new users came back after 2 weeks</div>
+                </div>
+                <div class="table-wrap">
+                  <table class="activity-table">
+                    <thead>
+                      <tr>
+                        <th>Signup week</th>
+                        <th class="num">Cohort</th>
+                        <th class="num">Retained</th>
+                        <th class="num">%</th>
+                        <th>&nbsp;</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {retentionRows.map((r) => (
+                        <tr>
+                          <td>{fmtDay(r.cohort_week)}</td>
+                          <td class={`num${r.cohort_size === 0 ? ' zero' : ''}`}>{r.cohort_size}</td>
+                          <td class={`num${r.retained_14d === 0 ? ' zero' : ''}`}>{r.retained_14d}</td>
+                          <td class="num">{r.retained_pct}%</td>
+                          <td>
+                            <div class="retention-bar">
+                              <div class="retention-bar-fill" style={`width:${Math.min(100, r.retained_pct)}%`}></div>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </section>
+
+          <section class="admin-section">
             <h3 class="admin-section-title">Daily breakdown</h3>
             <div class="table-wrap">
               <table class="activity-table">
@@ -247,6 +308,19 @@ function fmtWeekday(s: string): string {
     margin-top: 4px;
     white-space: nowrap;
   }
+
+  .retention-note { font-size: 12px; color: var(--text-tertiary); margin: 0 0 12px; line-height: 1.5; }
+  .retention-headline {
+    display: flex; align-items: baseline; gap: 12px;
+    padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px;
+    background: var(--bg-card); margin-bottom: 12px;
+  }
+  .retention-headline-pct { font-size: 32px; font-weight: 700; line-height: 1; color: var(--accent); }
+  .retention-headline-sub { font-size: 13px; color: var(--text-secondary); }
+  .retention-bar {
+    width: 120px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .retention-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; }
 
   .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
   .activity-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--bg-card); }
