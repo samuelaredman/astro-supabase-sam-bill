@@ -1,0 +1,176 @@
+---
+export const prerender = false;
+import Layout from "../../../components/Layout.astro";
+import { resolveSiteAdminProfile } from "../../../utils/api";
+import { getSupabaseAdmin } from "../../../utils/database";
+
+const profile = await resolveSiteAdminProfile(Astro);
+if (!profile) return Astro.redirect('/404');
+
+const url = new URL(Astro.request.url);
+const q = (url.searchParams.get('q') ?? '').trim();
+
+const db = getSupabaseAdmin() as any;
+
+interface Result {
+  id: string;
+  username: string;
+  avatar_url: string | null;
+  review_count: number;
+  reports_against: number;
+}
+
+let results: Result[] = [];
+let searched = false;
+
+if (q.length >= 2) {
+  searched = true;
+  const { data: profiles } = await db
+    .from('profiles')
+    .select('id, username, avatar_url')
+    .ilike('username', `%${q}%`)
+    .order('username', { ascending: true })
+    .limit(50);
+
+  const profileRows = (profiles ?? []) as any[];
+  const ids = profileRows.map((p) => p.id);
+
+  if (ids.length) {
+    const [reviewStatsRes, reportsRes] = await Promise.all([
+      db.from('profile_review_stats').select('profile_id, review_count').in('profile_id', ids),
+      db.from('reports').select('target_id', { count: 'exact', head: false }).eq('target_type', 'profile').eq('status', 'pending').in('target_id', ids),
+    ]);
+    const reviewMap = new Map<string, number>(((reviewStatsRes.data as any[]) ?? []).map((r) => [r.profile_id, r.review_count ?? 0]));
+    const reportCounts = new Map<string, number>();
+    for (const row of ((reportsRes.data as any[]) ?? [])) {
+      reportCounts.set(row.target_id, (reportCounts.get(row.target_id) ?? 0) + 1);
+    }
+
+    results = profileRows.map((p) => ({
+      id: p.id,
+      username: p.username,
+      avatar_url: p.avatar_url,
+      review_count: reviewMap.get(p.id) ?? 0,
+      reports_against: reportCounts.get(p.id) ?? 0,
+    }));
+  }
+}
+
+function getInitials(username: string): string {
+  return username.slice(0, 2).toUpperCase();
+}
+---
+
+<Layout title="Users — Admin" isLoggedIn={true} currentProfile={profile} activeNav="admin" variant="two-col">
+  <main class="feed admin-main">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Users</div>
+        <div class="feed-subtitle">Search profiles by username. Click to view activity + moderate.</div>
+      </div>
+    </div>
+
+    <div class="admin-content">
+      <a href="/admin" class="admin-back-link">&larr; Admin</a>
+
+      <form method="get" action="/admin/users" class="user-search-form">
+        <input type="text" name="q" value={q} placeholder="Search usernames…" class="user-search-input" autofocus required minlength="2" />
+        <button type="submit" class="admin-btn admin-btn-primary">Search</button>
+      </form>
+
+      {searched && results.length === 0 && <p class="admin-empty">No users matching "{q}".</p>}
+      {!searched && <p class="admin-empty">Type at least 2 characters to search.</p>}
+
+      {results.length > 0 && (
+        <ul class="user-result-list">
+          {results.map((u) => (
+            <li class="user-result">
+              <a href={`/admin/users/${encodeURIComponent(u.username)}`} class="user-result-link">
+                <div class="user-result-avatar">
+                  {u.avatar_url
+                    ? <img src={u.avatar_url} alt={u.username} />
+                    : <span>{getInitials(u.username)}</span>
+                  }
+                </div>
+                <div class="user-result-info">
+                  <div class="user-result-name">{u.username}</div>
+                  <div class="user-result-meta">
+                    {u.review_count} {u.review_count === 1 ? 'review' : 'reviews'}
+                    {u.reports_against > 0 && (
+                      <>
+                        {' · '}
+                        <span class="report-flag">{u.reports_against} pending {u.reports_against === 1 ? 'report' : 'reports'}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  </main>
+</Layout>
+
+<style>
+  .admin-main { min-width: 0; }
+  .admin-content { padding: 20px; max-width: 720px; }
+  .admin-back-link { font-size: 13px; color: var(--text-secondary); text-decoration: none; margin-bottom: 12px; display: inline-block; }
+  .admin-back-link:hover { color: var(--accent); }
+  .admin-empty { color: var(--text-secondary); font-size: 14px; margin-top: 16px; }
+
+  .user-search-form { display: flex; gap: 8px; margin: 16px 0 8px; }
+  .user-search-input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 14px;
+  }
+  .user-search-input:focus { outline: none; border-color: var(--accent); }
+
+  .admin-btn {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .admin-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .admin-btn-primary:hover { opacity: 0.9; }
+
+  .user-result-list { list-style: none; padding: 0; margin: 16px 0 0; display: flex; flex-direction: column; gap: 6px; }
+  .user-result { margin: 0; }
+  .user-result-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+    text-decoration: none;
+    color: inherit;
+  }
+  .user-result-link:hover { border-color: var(--accent); background: var(--bg-hover); }
+  .user-result-avatar {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: var(--bg-hover);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .user-result-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .user-result-info { min-width: 0; }
+  .user-result-name { font-weight: 600; font-size: 14px; }
+  .user-result-meta { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+  .report-flag { color: #c0392b; font-weight: 600; }
+</style>
