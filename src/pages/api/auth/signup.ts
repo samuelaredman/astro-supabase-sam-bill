@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
+import { authRedirectUrl } from "../../../utils/api";
 import { validateName } from "../../../utils/moderation/nameRules";
 import { likeEscape } from "../../../utils/usernameHistory";
 import { toPendingGroup } from "../../../utils/groupJoin";
@@ -40,17 +41,13 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  // Use the configured `site` (astro.config.ts), not context.url.origin — the
-  // request-derived origin doesn't reliably match Supabase's Redirect URLs
-  // allowlist behind Netlify (same root cause as the reset-password bug).
-  //
   // Must point to /auth/confirm, not directly to /welcome: Supabase's
   // confirmation link only hands back a code/token in the URL — /auth/confirm
   // is what actually exchanges it for a session (via exchangeCodeForSession /
   // verifyOtp) and sets the auth cookie. /welcome only checks for an existing
   // cookie session, so landing there directly leaves the user logged out and
   // bounces them to /signin even though their email was confirmed.
-  const emailRedirectTo = new URL("/auth/confirm", context.site ?? context.url.origin).toString();
+  const emailRedirectTo = authRedirectUrl(context, "/auth/confirm");
 
   // Signed up from a group page: remember the group in the user's metadata so
   // /auth/confirm can join it after the email round trip (utils/groupJoin).
