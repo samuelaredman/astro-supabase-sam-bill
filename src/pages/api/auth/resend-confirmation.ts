@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext } from "../../../utils/database";
+import { authRedirectUrl } from "../../../utils/api";
 
 // Re-sends the signup confirmation email, for users who lost it, had it go to
 // spam, or whose link was already used/expired. Same client and redirect as
@@ -18,9 +19,8 @@ export const POST: APIRoute = async (context) => {
 
   const supabase = createSupabaseServerClientFromContext(context);
 
-  // Same rule as signup.ts: the configured `site`, never context.url.origin, and it
-  // must be /auth/confirm (the page that exchanges the token for a session).
-  const emailRedirectTo = new URL("/auth/confirm", context.site ?? context.url.origin).toString();
+  // Must be /auth/confirm (the page that exchanges the token for a session).
+  const emailRedirectTo = authRedirectUrl(context, "/auth/confirm");
 
   const { error } = await supabase.auth.resend({
     type: "signup",

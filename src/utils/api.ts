@@ -16,6 +16,32 @@ export const json = (body: unknown, status = 200) =>
   });
 
 /**
+ * Build an absolute URL for a Supabase emailRedirectTo / redirectTo value, from
+ * the Astro `site` config (astro.config.ts: 'https://chekpoint.gg') — NEVER
+ * from the request-derived origin. The configured site is the only URL that
+ * reliably matches Supabase's Redirect URLs allowlist behind Netlify, and the
+ * cost of a mismatch is severe: Supabase silently bounces the email link to
+ * the fallback Site URL with #error=access_denied&error_code=otp_expired, so
+ * the user sees "this link is invalid or expired" with no server-side signal
+ * anywhere in our logs. This exact bug ate signups/resets twice (2026-07 and
+ * 2026-08). See CLAUDE.md Rule 1.
+ *
+ * Throws if `site` is unset so a misconfiguration surfaces as a loud 500 at
+ * the first auth-email send, rather than a silent regression to the broken
+ * `context.url.origin` fallback pattern.
+ */
+export function authRedirectUrl(context: APIContext, path: string): string {
+  if (!context.site) {
+    throw new Error(
+      "astro.config.ts `site` is not set. Supabase auth email flows require a " +
+      "stable redirect URL (CLAUDE.md Rule 1). Set `site: 'https://chekpoint.gg'` " +
+      "or the equivalent for this environment."
+    );
+  }
+  return new URL(path, context.site).toString();
+}
+
+/**
  * Validates the session JWT and resolves the profiles row.
  * Returns either { auth, response: null } on success or { auth: null, response } on failure.
  *
