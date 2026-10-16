@@ -8,7 +8,7 @@ export const REC_SELECT = `
   id, body, contains_spoilers, created_at, profile_id,
   source_game:games!source_game_id ( id, title, slug, cover_img_url ),
   target_game:games!target_game_id ( id, title, slug, cover_img_url ),
-  profiles ( id, username, avatar_url, profile_badges ( badge_slug ) ),
+  profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   recommendation_votes ( vote, profile_id ),
   recommendation_reactions ( reaction_type, profile_id ),
   recommendation_comments ( id )
