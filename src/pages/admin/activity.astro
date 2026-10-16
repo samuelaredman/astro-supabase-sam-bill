@@ -91,7 +91,54 @@ const summary: Summary[] = METRICS.map(({ key, label }) => {
 // Last 30 days of day rows for the chart + table.
 const last30Rows = rows.slice(last30Start);
 
-const signupMax = Math.max(1, ...last30Rows.map((r) => r.signups));
+// ── Multi-line chart setup ────────────────────────────────────────────────
+// Shared Y axis across all metrics so volumes are directly comparable.
+const chartMax = Math.max(
+  1,
+  ...last30Rows.flatMap((r) => [r.signups, r.reviews, r.comments, r.recommendations, r.reports])
+);
+
+// SVG viewBox: 800 x 240, with padding for axis labels.
+const CHART_W = 800;
+const CHART_H = 240;
+const PAD_L = 32;
+const PAD_R = 12;
+const PAD_T = 12;
+const PAD_B = 32;
+const PLOT_W = CHART_W - PAD_L - PAD_R;
+const PLOT_H = CHART_H - PAD_T - PAD_B;
+const nPoints = last30Rows.length;
+const xStep = nPoints > 1 ? PLOT_W / (nPoints - 1) : 0;
+
+function xAt(i: number): number { return PAD_L + i * xStep; }
+function yAt(v: number): number { return PAD_T + PLOT_H - (v / chartMax) * PLOT_H; }
+
+const SERIES: { key: Metric; label: string; color: string }[] = [
+  { key: 'signups',         label: 'Signups',  color: '#6050c8' }, // --accent
+  { key: 'reviews',         label: 'Reviews',  color: '#27ae60' },
+  { key: 'comments',        label: 'Comments', color: '#3498db' },
+  { key: 'recommendations', label: 'Recs',     color: '#e67e22' },
+  { key: 'reports',         label: 'Reports',  color: '#c0392b' },
+];
+
+const seriesPaths = SERIES.map((s) => {
+  const d = last30Rows
+    .map((r, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(r[s.key]).toFixed(1)}`)
+    .join(' ');
+  return { ...s, d };
+});
+
+// Y-axis gridlines (0, 25%, 50%, 75%, 100% of max).
+const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => ({
+  y: PAD_T + PLOT_H - f * PLOT_H,
+  label: Math.round(chartMax * f).toString(),
+}));
+
+// X-axis labels: every ~5th day to avoid crowding.
+const xTickStep = Math.max(1, Math.ceil(nPoints / 6));
+const xTicks = last30Rows
+  .map((r, i) => ({ i, label: fmtDay(r.day).replace(/^\w+ /, '') }))
+  .filter(({ i }) => i % xTickStep === 0 || i === nPoints - 1);
 
 function fmtDay(s: string): string {
   const d = new Date(s + 'T00:00:00');
@@ -136,23 +183,48 @@ function fmtWeekday(s: string): string {
           </section>
 
           <section class="chart-section">
-            <h3 class="admin-section-title">Signups per day — last 30</h3>
+            <h3 class="admin-section-title">Daily activity — last 30</h3>
             <div class="chart-wrap">
-              <div class="chart-bars" role="list">
-                {last30Rows.map((r) => {
-                  const pct = (r.signups / signupMax) * 100;
-                  return (
-                    <div class="chart-col" role="listitem" title={`${fmtDay(r.day)}: ${r.signups} signups`}>
-                      <div class="chart-bar-track">
-                        <div class="chart-bar" style={`height: ${pct}%`} data-zero={r.signups === 0 ? 'true' : 'false'}>
-                          <span class="chart-bar-label">{r.signups > 0 ? r.signups : ''}</span>
-                        </div>
-                      </div>
-                      <div class="chart-x">{fmtDay(r.day).replace(/^\w+ /, '')}</div>
-                    </div>
-                  );
-                })}
+              <div class="chart-legend">
+                {SERIES.map((s) => (
+                  <span class="legend-item">
+                    <span class="legend-swatch" style={`background:${s.color}`}></span>
+                    {s.label}
+                  </span>
+                ))}
               </div>
+              <svg class="line-chart" viewBox={`0 0 ${CHART_W} ${CHART_H}`} role="img" aria-label="Daily activity trend chart">
+                {/* Gridlines + y labels */}
+                {yTicks.map((t) => (
+                  <g>
+                    <line x1={PAD_L} x2={CHART_W - PAD_R} y1={t.y} y2={t.y} class="grid-line" />
+                    <text x={PAD_L - 6} y={t.y + 3} class="axis-label axis-label-y">{t.label}</text>
+                  </g>
+                ))}
+                {/* X labels */}
+                {xTicks.map((t) => (
+                  <text x={xAt(t.i)} y={CHART_H - PAD_B + 16} class="axis-label axis-label-x">{t.label}</text>
+                ))}
+                {/* Series lines (drawn after grid so they sit on top) */}
+                {seriesPaths.map((s) => (
+                  <path d={s.d} fill="none" stroke={s.color} stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+                ))}
+                {/* Point markers with tooltips */}
+                {seriesPaths.map((s) => (
+                  <g>
+                    {last30Rows.map((r, i) => (
+                      <circle
+                        cx={xAt(i)}
+                        cy={yAt(r[s.key])}
+                        r="2.2"
+                        fill={s.color}
+                      >
+                        <title>{fmtDay(r.day)} — {s.label}: {r[s.key]}</title>
+                      </circle>
+                    ))}
+                  </g>
+                ))}
+              </svg>
             </div>
           </section>
 
@@ -270,44 +342,33 @@ function fmtWeekday(s: string): string {
     border: 1px solid var(--border);
     border-radius: 12px;
     background: var(--bg-card);
-    overflow-x: auto;
   }
-  .chart-bars {
+  .chart-legend {
     display: flex;
-    align-items: flex-end;
-    gap: 4px;
-    min-width: 480px;
-    height: 180px;
-  }
-  .chart-col { flex: 1; display: flex; flex-direction: column; align-items: stretch; min-width: 14px; }
-  .chart-bar-track { flex: 1; display: flex; align-items: flex-end; }
-  .chart-bar {
-    width: 100%;
-    background: var(--accent);
-    border-radius: 3px 3px 0 0;
-    min-height: 2px;
-    position: relative;
-    transition: opacity 0.15s ease;
-  }
-  .chart-bar[data-zero="true"] { background: var(--border); opacity: 0.5; min-height: 2px; }
-  .chart-bar:hover { opacity: 0.85; }
-  .chart-bar-label {
-    position: absolute;
-    left: 50%;
-    top: -14px;
-    transform: translateX(-50%);
-    font-size: 9px;
-    font-weight: 600;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    font-size: 12px;
     color: var(--text-secondary);
-    white-space: nowrap;
+    margin-bottom: 10px;
   }
-  .chart-x {
-    font-size: 9px;
-    text-align: center;
-    color: var(--text-tertiary);
-    margin-top: 4px;
-    white-space: nowrap;
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
   }
+  .line-chart {
+    width: 100%;
+    height: auto;
+    display: block;
+    overflow: visible;
+  }
+  .line-chart .grid-line { stroke: var(--border-subtle, var(--border)); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.6; }
+  .line-chart .axis-label { font-size: 10px; fill: var(--text-tertiary); font-family: inherit; }
+  .line-chart .axis-label-y { text-anchor: end; }
+  .line-chart .axis-label-x { text-anchor: middle; }
+  .line-chart circle { transition: r 0.1s ease; cursor: pointer; }
+  .line-chart circle:hover { r: 4; }
 
   .retention-note { font-size: 12px; color: var(--text-tertiary); margin: 0 0 12px; line-height: 1.5; }
   .retention-headline {
