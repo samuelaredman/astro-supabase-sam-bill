@@ -1,8 +1,10 @@
 ---
 export const prerender = false;
 import Layout from "../../../components/Layout.astro";
+import ProfileBadge from "../../../components/ProfileBadge.astro";
 import { resolveSiteAdminProfile } from "../../../utils/api";
 import { getSupabaseAdmin } from "../../../utils/database";
+import { listBadges } from "../../../utils/badges";
 
 const adminProfile = await resolveSiteAdminProfile(Astro);
 if (!adminProfile) return Astro.redirect('/404');
@@ -49,6 +51,15 @@ try {
 const isBanned = authUser.banned_until ? new Date(authUser.banned_until) > new Date() : false;
 
 const pid = profile.id;
+
+// Current badges on this user. profile_badges is service-role-write only;
+// toggle via POST /api/admin/users/badges and reload.
+const { data: userBadgeRows } = await db
+  .from('profile_badges')
+  .select('badge_slug')
+  .eq('profile_id', pid);
+const currentBadgeSlugs = new Set<string>(((userBadgeRows as any[]) ?? []).map((r) => r.badge_slug));
+const allBadges = listBadges();
 
 // Fetch content + follows + reports in parallel. Content lists use a cap of 500
 // so we can filter them JS-side to flagged items only without silently truncating.
@@ -174,6 +185,7 @@ function getInitials(u: string): string { return u.slice(0, 2).toUpperCase(); }
         <div class="user-header-info">
           <h2 class="user-header-name">
             {profile.username}
+            {Array.from(currentBadgeSlugs).map((slug) => <ProfileBadge slug={slug} size="md" />)}
             <a href={`/reviewers/${profile.username}`} class="user-public-link" target="_blank" rel="noopener">view public profile ↗</a>
           </h2>
           <div class="user-admin-actions">
@@ -186,6 +198,30 @@ function getInitials(u: string): string { return u.slice(0, 2).toUpperCase(); }
             >
               {isBanned ? 'Unban user' : 'Ban user'}
             </button>
+          </div>
+          <div class="badge-assign">
+            <div class="badge-assign-label">Badges</div>
+            <div class="badge-assign-list">
+              {allBadges.map((b) => {
+                const on = currentBadgeSlugs.has(b.slug);
+                return (
+                  <label class={`badge-toggle${on ? ' badge-toggle--on' : ''}`}>
+                    <input
+                      type="checkbox"
+                      class="badge-toggle-input"
+                      data-profile-id={pid}
+                      data-badge-slug={b.slug}
+                      checked={on}
+                    />
+                    <span class="badge-toggle-icon" aria-hidden="true" style={`color:${b.color}`}>{b.icon}</span>
+                    <span class="badge-toggle-text">
+                      <span class="badge-toggle-name">{b.label}</span>
+                      <span class="badge-toggle-desc">{b.description}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
           </div>
           <dl class="user-meta-grid">
             <div><dt>Email</dt><dd>{authUser.email ?? '—'} {authUser.email && !authUser.email_confirmed_at && <span class="warn">(unconfirmed)</span>}</dd></div>
@@ -407,6 +443,32 @@ document.querySelector('.admin-content')?.addEventListener('click', (e) => {
   }
 });
 
+// Badge toggles — fire-and-forget, reload on success so the header chip
+// stays in sync without us having to render it client-side.
+document.querySelectorAll<HTMLInputElement>('.badge-toggle-input').forEach((input) => {
+  input.addEventListener('change', async () => {
+    const profileId = input.dataset.profileId;
+    const badgeSlug = input.dataset.badgeSlug;
+    if (!profileId || !badgeSlug) return;
+    const assigned = input.checked;
+    input.disabled = true;
+    try {
+      const res = await fetch('/api/admin/users/badges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile_id: profileId, badge_slug: badgeSlug, assigned }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed');
+      window.location.reload();
+    } catch (e: any) {
+      input.checked = !assigned;
+      input.disabled = false;
+      alert(e.message ?? 'Something went wrong.');
+    }
+  });
+});
+
 // Ban / unban toggle
 const banBtn = document.getElementById('banToggleBtn') as HTMLButtonElement | null;
 if (banBtn) {
@@ -528,6 +590,26 @@ if (banBtn) {
   .ban-banner-sub { color: var(--text-secondary); font-size: 12px; }
 
   .user-admin-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+  .badge-assign { margin-top: 12px; }
+  .badge-assign-label { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+  .badge-assign-list { display: flex; flex-direction: column; gap: 6px; }
+  .badge-toggle {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-card);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .badge-toggle:hover { border-color: var(--accent); background: var(--bg-hover); }
+  .badge-toggle--on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg-card)); }
+  .badge-toggle-input { margin: 0; cursor: pointer; }
+  .badge-toggle-icon { font-size: 15px; width: 20px; text-align: center; line-height: 1; }
+  .badge-toggle-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .badge-toggle-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .badge-toggle-desc { font-size: 12px; color: var(--text-tertiary); }
 
   .section-sub {
     font-weight: 400;

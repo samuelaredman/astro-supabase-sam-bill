@@ -2380,6 +2380,42 @@ export type Database = {
         }
         Relationships: []
       }
+      profile_badges: {
+        Row: {
+          assigned_at: string
+          assigned_by: string | null
+          badge_slug: string
+          profile_id: string
+        }
+        Insert: {
+          assigned_at?: string
+          assigned_by?: string | null
+          badge_slug: string
+          profile_id: string
+        }
+        Update: {
+          assigned_at?: string
+          assigned_by?: string | null
+          badge_slug?: string
+          profile_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "profile_badges_assigned_by_fkey"
+            columns: ["assigned_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "profile_badges_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           accent_color: string | null
