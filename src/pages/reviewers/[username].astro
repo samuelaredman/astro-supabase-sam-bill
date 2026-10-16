@@ -4093,6 +4093,10 @@ const reviewerBreadcrumbJsonLd = {
     // `ach-picker-card--rare`) so the sunbeam treatment is consistent
     // everywhere the user sees it.
     var isRare = a.global_percent != null && a.global_percent < 10
+    // A hidden achievement that the viewer hasn't unlocked yet is masked by
+    // default. The real name/description still ride along as data attrs so
+    // clicking the row reveals them (users can spoil themselves on demand).
+    var isMasked = a.hidden && !a.unlocked
     var icon = a.unlocked
       ? (a.icon_url || '')
       : (a.icon_gray_url || a.icon_url || '')
@@ -4112,16 +4116,73 @@ const reviewerBreadcrumbJsonLd = {
     metaParts.push('<span class="ach-row-global' + (isRare ? ' ach-row-pct-rare' : '') + '">' + _ACH_GLOBE + _achEscape(pct) + '</span>')
     if (a.unlocked) {
       metaParts.push('<span class="ach-row-earned">' + _ACH_CHECK + 'Earned</span>')
+    } else if (isMasked) {
+      metaParts.push('<span class="ach-row-reveal">Reveal</span>')
     }
-    return '<div class="ach-row ' + (a.unlocked ? 'unlocked' : 'locked') + (isRare ? ' rare' : '') + '">' +
+    var displayName = isMasked ? 'Hidden achievement' : (a.name || 'Hidden achievement')
+    var displayDesc = isMasked ? '' : (a.description || '')
+    var realName = a.name || ''
+    var realDesc = a.description || ''
+    var dataAttrs = isMasked
+      ? ' data-ach-hidden="1" data-ach-name="' + _achEscape(realName) + '" data-ach-desc="' + _achEscape(realDesc) + '" role="button" tabindex="0"'
+      : ''
+    return '<div class="ach-row ' + (a.unlocked ? 'unlocked' : 'locked') + (isRare ? ' rare' : '') + (isMasked ? ' ach-row--hidden' : '') + '"' + dataAttrs + '>' +
       '<div class="ach-row-icon' + (isRare ? ' ach-row-icon--rare' : '') + '">' + iconEl + '</div>' +
       '<div class="ach-row-body">' +
-        '<div class="ach-row-name">' + _achEscape(a.name || 'Hidden achievement') + '</div>' +
-        (a.description ? '<div class="ach-row-desc">' + _achEscape(a.description) + '</div>' : '') +
+        '<div class="ach-row-name">' + _achEscape(displayName) + '</div>' +
+        (displayDesc ? '<div class="ach-row-desc">' + _achEscape(displayDesc) + '</div>' : '') +
         dateLine +
       '</div>' +
       '<div class="ach-row-meta">' + metaParts.join('') + '</div>' +
     '</div>'
+  }
+
+  // Reveal a single hidden achievement row in place when the user taps it.
+  // Reads the real name/desc off the row's data attrs (populated in _achRowHtml)
+  // and swaps the "Hidden achievement" placeholder for the real text.
+  function _revealHiddenAchRow(row) {
+    if (!row || row.dataset.achHidden !== '1') return
+    var realName = row.dataset.achName || ''
+    var realDesc = row.dataset.achDesc || ''
+    var nameEl = row.querySelector('.ach-row-name')
+    if (nameEl) nameEl.textContent = realName || 'Hidden achievement'
+    if (realDesc) {
+      var descEl = row.querySelector('.ach-row-desc')
+      if (!descEl) {
+        descEl = document.createElement('div')
+        descEl.className = 'ach-row-desc'
+        var bodyEl = row.querySelector('.ach-row-body')
+        var dateEl = bodyEl ? bodyEl.querySelector('.ach-row-date') : null
+        if (bodyEl) {
+          if (dateEl) bodyEl.insertBefore(descEl, dateEl)
+          else bodyEl.appendChild(descEl)
+        }
+      }
+      descEl.textContent = realDesc
+    }
+    var revealChip = row.querySelector('.ach-row-reveal')
+    if (revealChip) revealChip.remove()
+    row.classList.remove('ach-row--hidden')
+    row.dataset.achHidden = ''
+    row.removeAttribute('role')
+    row.removeAttribute('tabindex')
+  }
+
+  // One-time delegated handler for the achievement modal body.
+  if (!window.__achDetailRevealWired) {
+    window.__achDetailRevealWired = true
+    var body = document.getElementById('achDetailBody')
+    if (body) {
+      body.addEventListener('click', function(e) {
+        var row = e.target.closest('.ach-row--hidden')
+        if (row) _revealHiddenAchRow(row)
+      })
+      body.addEventListener('keydown', function(e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return
+        var row = e.target.closest('.ach-row--hidden')
+        if (row) { e.preventDefault(); _revealHiddenAchRow(row) }
+      })
+    }
   }
 
   // Public — called by the search field's oninput handler.
