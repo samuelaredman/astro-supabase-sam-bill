@@ -27,16 +27,6 @@ const isLoggedIn = !!user;
 
 setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 
-const PST_OFFSET_MS = 8 * 60 * 60 * 1000
-function getPstDayStart(daysAgo = 0): Date {
-  const pstNow = new Date(Date.now() - PST_OFFSET_MS)
-  return new Date(Date.UTC(
-    pstNow.getUTCFullYear(), pstNow.getUTCMonth(), pstNow.getUTCDate() - daysAgo,
-    8, 0, 0, 0
-  ))
-}
-const todayPstStart = getPstDayStart(0)
-const yesterdayPstStart = getPstDayStart(1)
 const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
 const REVIEW_FIELDS = `
@@ -54,7 +44,6 @@ const [
   profileRes,
   platformsRes,
   rawReviewsRes,
-  todayRawRes,
   weekReviewsRes,
   siteStats,
   genresRes,
@@ -64,8 +53,7 @@ const [
     : Promise.resolve({ data: null }),
   db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
   db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(30),
-  db.from('reviews').select('game_id, published_at, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', yesterdayPstStart.toISOString()).limit(200),
-  db.from('reviews').select('game_id, score, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
+  db.from('reviews').select('game_id, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
   getSiteStats(),
   db.from('genres').select('id, name, slug').order('name'),
 ])
@@ -221,43 +209,14 @@ const feedItems: any[] = [
   ...recentRecs,
 ].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
-type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>
-const todayMap: DayMap = {}
-const yesterdayMap: DayMap = {}
-for (const r of todayRawRes.data ?? []) {
-  const g = (r as any).games
-  if (!g) continue
-  const publishedAt = new Date((r as any).published_at)
-  const map = publishedAt >= todayPstStart ? todayMap : yesterdayMap
-  if (!map[g.id]) map[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
-  map[g.id].count++
-}
-const mostReviewedToday = Object.values(todayMap).sort((a, b) => b.count - a.count)[0] ?? null
-const mostReviewedYesterday = Object.values(yesterdayMap).sort((a, b) => b.count - a.count)[0] ?? null
-const featuredGame = mostReviewedToday ?? mostReviewedYesterday
-const featuredLabel = mostReviewedToday ? 'Most Reviewed Today' : 'Most Reviewed Yesterday'
-const featuredPeriod = mostReviewedToday ? 'today' : 'yesterday'
-
 const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
-const weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {}
 for (const r of weekReviewsRes.data ?? []) {
   const g = (r as any).games
   if (!g) continue
   if (!trendingMap[g.id]) trendingMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
   trendingMap[g.id].count++
-  if (!weekGameMap[g.id]) weekGameMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, scores: [] }
-  if (r.score != null) weekGameMap[g.id].scores.push(r.score)
 }
 const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
-const topRated = Object.entries(weekGameMap)
-  .map(([id, g]) => {
-    if (g.scores.length < 2) return null
-    const avg = g.scores.reduce((a, b) => a + b, 0) / g.scores.length
-    return { id, ...g, avg_score: avg, review_count: g.scores.length }
-  })
-  .filter(Boolean)
-  .sort((a: any, b: any) => b.avg_score - a.avg_score)
-  .slice(0, 12)
 
 // Chekpoint Creators strip — the newest upload from each badged creator's
 // linked YouTube channel. Fetched in parallel; the strip only renders for
@@ -449,57 +408,6 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         </div>
       </div>
     </div>
-
-    {featuredGame && (
-      <div class="hero">
-        {igdbImage((featuredGame as any).cover, 't_1080p') && (
-          <div class="hero-bg" style={`background-image: url('${igdbImage((featuredGame as any).cover, 't_1080p')}')`}></div>
-        )}
-        <div class="hero-overlay"></div>
-        <div class="hero-content">
-          {igdbImage((featuredGame as any).cover)
-            ? <img class="hero-cover" src={igdbImage((featuredGame as any).cover) ?? ''} alt={(featuredGame as any).title} />
-            : <div class="hero-cover-placeholder">🎮</div>
-          }
-          <div class="hero-info">
-            <div class="hero-label">{featuredLabel}</div>
-            <div class="hero-title">{(featuredGame as any).title}</div>
-            <div class="hero-score">
-              <span class="hero-score-num">{(featuredGame as any).count}</span>
-              <span class="hero-score-label">{(featuredGame as any).count === 1 ? 'review' : 'reviews'} {featuredPeriod}</span>
-            </div>
-            <a href={`/games/${(featuredGame as any).slug}`} class="hero-cta">Read reviews →</a>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {topRated.length > 0 && (
-      <div class="section-block">
-        <div class="section-block-header">
-          <span class="section-block-title">Top Rated This Week</span>
-          <a href="/search?sort=highest" class="section-block-link">See all →</a>
-        </div>
-        <div class="top-rated-scroll">
-          {topRated.map((game: any) => (
-            <a href={`/games/${game.slug}`} class="top-rated-card">
-              <div class="top-rated-cover-wrap">
-                {igdbImage(game.cover)
-                  ? <img class="top-rated-cover" src={igdbImage(game.cover) ?? ''} alt={game.title} loading="lazy" />
-                  : <div class="top-rated-cover-placeholder">🎮</div>
-                }
-                <div class={`top-rated-badge ${scoreClass(game.avg_score)}`}>
-                  {game.avg_score.toFixed(1)}
-                </div>
-              </div>
-              <div class="top-rated-info">
-                <div class="top-rated-title">{game.title}</div>
-              </div>
-            </a>
-          ))}
-        </div>
-      </div>
-    )}
 
     {creatorVideos.length > 0 && (
       <div class="section-block creators-section">
@@ -1989,43 +1897,12 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   .rec-panel-by { font-size: 11px; color: var(--text-tertiary); }
   .rec-panel-seeall { display: block; text-align: center; font-size: 12px; color: var(--accent); margin-top: 10px; text-decoration: none; }
   .rec-panel-seeall:hover { text-decoration: underline; }
-  .hero { position: relative; overflow: hidden; background: #0a0a0a; min-height: 220px; display: flex; align-items: flex-end; }
-  .hero-bg { position: absolute; inset: 0; background-size: cover; background-position: center 30%; opacity: 0.4; filter: blur(2px) saturate(1.4); transform: scale(1.05); }
-  .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to right, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.6) 50%, rgba(10,10,10,0.2) 100%); }
-  .hero-content { position: relative; z-index: 2; padding: 28px 24px; display: flex; align-items: flex-end; gap: 20px; width: 100%; }
-  .hero-cover { width: 90px; height: 120px; border-radius: 10px; object-fit: cover; box-shadow: 0 8px 32px rgba(0,0,0,0.6); flex-shrink: 0; border: 1px solid rgba(255,255,255,0.1); }
-  .hero-cover-placeholder { width: 90px; height: 120px; border-radius: 10px; background: #222; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 36px; }
-  .hero-info { flex: 1; min-width: 0; }
-  .hero-label { font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
-  .hero-title { font-family: 'DM Serif Display', serif; font-size: 26px; color: #fff; line-height: 1.2; margin-bottom: 8px; letter-spacing: -0.3px; }
-  .hero-score { display: inline-flex; align-items: center; gap: 6px; }
-  .hero-score-num { font-family: 'DM Serif Display', serif; font-size: 22px; color: #4ade80; }
-  .hero-score-label { font-size: 12px; color: rgba(255,255,255,0.5); }
-  .hero-cta { display: inline-block; margin-top: 10px; background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.2); border-radius: 20px; padding: 6px 14px; font-size: 13px; backdrop-filter: blur(8px); transition: background 0.15s; }
-  .hero-cta:hover { background: rgba(255,255,255,0.25); }
   .section-block { padding: 20px 20px 0; border-bottom: 1px solid var(--border-subtle); background: var(--accent-subtle); position: relative; }
   .section-block::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(to right, transparent, var(--accent), transparent); opacity: 0.3; }
   .section-block-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
   .section-block-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); opacity: 0.7; }
   .section-block-link { font-size: 12px; color: var(--text-tertiary); transition: color 0.15s; }
   .section-block-link:hover { color: var(--text-primary); }
-  .top-rated-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 20px; scrollbar-width: none; }
-  .top-rated-scroll::-webkit-scrollbar { display: none; }
-  .top-rated-card { flex-shrink: 0; width: 100px; display: block; }
-  .top-rated-cover-wrap { position: relative; width: 100px; height: 133px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); transition: transform 0.15s, box-shadow 0.15s; background: var(--tag-bg); }
-  .top-rated-card:hover .top-rated-cover-wrap { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(0,0,0,.45); }
-  .top-rated-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .top-rated-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; }
-  .top-rated-badge { position: absolute; bottom: 6px; right: 6px; min-width: 28px; height: 22px; padding: 0 6px; border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'DM Serif Display', serif; backdrop-filter: blur(6px); }
-  .top-rated-badge.score-perfect { background: rgba(255,255,255,.95); color: #09090a; box-shadow: 0 0 10px rgba(255,255,255,.7), 0 0 20px rgba(255,255,255,.3); border: 1px solid rgba(255,255,255,.9); }
-  .top-rated-badge.score-great  { background: rgba(17,46,28,.9);  color: #4ade80; border: 1px solid rgba(74,222,128,.5); }
-  .top-rated-badge.score-teal   { background: rgba(8,45,42,.9);   color: #2dd4bf; border: 1px solid rgba(45,212,191,.5); }
-  .top-rated-badge.score-good   { background: rgba(14,34,64,.88); color: #60a5fa; border: 1px solid rgba(96,165,250,.4); }
-  .top-rated-badge.score-mid    { background: rgba(39,30,0,.88);  color: #fbbf24; border: 1px solid rgba(251,191,36,.4); }
-  .top-rated-badge.score-orange { background: rgba(44,22,10,.88); color: #fb923c; border: 1px solid rgba(251,146,60,.4); }
-  .top-rated-badge.score-low    { background: rgba(48,14,14,.88); color: #f87171; border: 1px solid rgba(248,113,113,.4); }
-  .top-rated-info { margin-top: 6px; }
-  .top-rated-title { font-size: 11px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
 
   /* Compact single-video strip that slides horizontally between creators,
      styled like the profile video showcase (vs-player) — one 16:9 thumbnail
