@@ -140,6 +140,25 @@ const xTicks = last30Rows
   .map((r, i) => ({ i, label: fmtDay(r.day).replace(/^\w+ /, '') }))
   .filter(({ i }) => i % xTickStep === 0 || i === nPoints - 1);
 
+// Column hover zones — each covers half the gap on either side of its data point,
+// so hovering anywhere above that column pops the day's full stats tooltip.
+const hoverZones = last30Rows.map((_r, i) => {
+  const left  = i === 0            ? PAD_L : (xAt(i - 1) + xAt(i)) / 2;
+  const right = i === nPoints - 1  ? CHART_W - PAD_R : (xAt(i) + xAt(i + 1)) / 2;
+  return { i, x: left, width: right - left, cx: xAt(i) };
+});
+
+// Data for the client-side hover script — one record per day.
+const chartData = last30Rows.map((r) => ({
+  day: r.day,
+  signups: r.signups,
+  reviews: r.reviews,
+  comments: r.comments,
+  recommendations: r.recommendations,
+  reports: r.reports,
+}));
+const chartSeries = SERIES;
+
 function fmtDay(s: string): string {
   const d = new Date(s + 'T00:00:00');
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -193,38 +212,129 @@ function fmtWeekday(s: string): string {
                   </span>
                 ))}
               </div>
-              <svg class="line-chart" viewBox={`0 0 ${CHART_W} ${CHART_H}`} role="img" aria-label="Daily activity trend chart">
-                {/* Gridlines + y labels */}
-                {yTicks.map((t) => (
-                  <g>
-                    <line x1={PAD_L} x2={CHART_W - PAD_R} y1={t.y} y2={t.y} class="grid-line" />
-                    <text x={PAD_L - 6} y={t.y + 3} class="axis-label axis-label-y">{t.label}</text>
-                  </g>
-                ))}
-                {/* X labels */}
-                {xTicks.map((t) => (
-                  <text x={xAt(t.i)} y={CHART_H - PAD_B + 16} class="axis-label axis-label-x">{t.label}</text>
-                ))}
-                {/* Series lines (drawn after grid so they sit on top) */}
-                {seriesPaths.map((s) => (
-                  <path d={s.d} fill="none" stroke={s.color} stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
-                ))}
-                {/* Point markers with tooltips */}
-                {seriesPaths.map((s) => (
-                  <g>
-                    {last30Rows.map((r, i) => (
-                      <circle
-                        cx={xAt(i)}
-                        cy={yAt(r[s.key])}
-                        r="2.2"
-                        fill={s.color}
-                      >
-                        <title>{fmtDay(r.day)} — {s.label}: {r[s.key]}</title>
-                      </circle>
-                    ))}
-                  </g>
-                ))}
-              </svg>
+              <div class="chart-plot">
+                <svg class="line-chart" viewBox={`0 0 ${CHART_W} ${CHART_H}`} role="img" aria-label="Daily activity trend chart">
+                  {/* Gridlines + y labels */}
+                  {yTicks.map((t) => (
+                    <g>
+                      <line x1={PAD_L} x2={CHART_W - PAD_R} y1={t.y} y2={t.y} class="grid-line" />
+                      <text x={PAD_L - 6} y={t.y + 3} class="axis-label axis-label-y">{t.label}</text>
+                    </g>
+                  ))}
+                  {/* X labels */}
+                  {xTicks.map((t) => (
+                    <text x={xAt(t.i)} y={CHART_H - PAD_B + 16} class="axis-label axis-label-x">{t.label}</text>
+                  ))}
+                  {/* Vertical crosshair guide (shown on hover) */}
+                  <line class="hover-guide" x1="0" x2="0" y1={PAD_T} y2={PAD_T + PLOT_H} />
+                  {/* Series lines (drawn after grid so they sit on top) */}
+                  {seriesPaths.map((s) => (
+                    <path d={s.d} fill="none" stroke={s.color} stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+                  ))}
+                  {/* Point markers */}
+                  {seriesPaths.map((s) => (
+                    <g data-series={s.key}>
+                      {last30Rows.map((r, i) => (
+                        <circle
+                          cx={xAt(i)}
+                          cy={yAt(r[s.key])}
+                          r="2.2"
+                          fill={s.color}
+                          data-day-idx={i}
+                        />
+                      ))}
+                    </g>
+                  ))}
+                  {/* Column hover zones (invisible, pointer target) */}
+                  {hoverZones.map((z) => (
+                    <rect
+                      class="hover-zone"
+                      x={z.x}
+                      y={PAD_T}
+                      width={z.width}
+                      height={PLOT_H}
+                      data-idx={z.i}
+                      data-cx={z.cx}
+                    />
+                  ))}
+                </svg>
+                <div class="chart-tooltip" role="tooltip"></div>
+              </div>
+              <script is:inline define:vars={{ chartData, chartSeries }}>
+                (function () {
+                  var wrap = document.querySelector('.chart-plot');
+                  if (!wrap) return;
+                  var svg = wrap.querySelector('.line-chart');
+                  var tooltip = wrap.querySelector('.chart-tooltip');
+                  var guide = svg.querySelector('.hover-guide');
+                  var zones = svg.querySelectorAll('.hover-zone');
+
+                  function fmtDay(day) {
+                    var d = new Date(day + 'T00:00:00');
+                    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                  }
+
+                  function highlight(idx) {
+                    svg.querySelectorAll('circle[data-day-idx]').forEach(function (c) {
+                      if (parseInt(c.getAttribute('data-day-idx'), 10) === idx) {
+                        c.setAttribute('r', '4');
+                      } else {
+                        c.setAttribute('r', '2.2');
+                      }
+                    });
+                  }
+                  function clearHighlight() {
+                    svg.querySelectorAll('circle[data-day-idx]').forEach(function (c) { c.setAttribute('r', '2.2'); });
+                  }
+
+                  function showAt(idx, rect) {
+                    var row = chartData[idx];
+                    if (!row) return;
+                    var rows = chartSeries.map(function (s) {
+                      return '<div class="tt-row">'
+                        + '<span class="tt-dot" style="background:' + s.color + '"></span>'
+                        + '<span class="tt-label">' + s.label + '</span>'
+                        + '<span class="tt-val">' + row[s.key] + '</span>'
+                        + '</div>';
+                    }).join('');
+                    tooltip.innerHTML = '<div class="tt-day">' + fmtDay(row.day) + '</div>' + rows;
+                    tooltip.style.display = 'block';
+
+                    var wrapRect = wrap.getBoundingClientRect();
+                    var zoneRect = rect.getBoundingClientRect();
+                    var columnCenter = zoneRect.left - wrapRect.left + zoneRect.width / 2;
+                    var ttW = tooltip.offsetWidth;
+                    var ttH = tooltip.offsetHeight;
+                    // Prefer right side; flip to left if it'd overflow.
+                    var left = columnCenter + 12;
+                    if (left + ttW + 8 > wrap.clientWidth) left = columnCenter - ttW - 12;
+                    if (left < 4) left = 4;
+                    tooltip.style.left = left + 'px';
+                    tooltip.style.top = Math.max(4, Math.min(wrap.clientHeight - ttH - 4, 16)) + 'px';
+
+                    // Move the SVG guide line to the data point's x.
+                    var cx = rect.getAttribute('data-cx');
+                    guide.setAttribute('x1', cx);
+                    guide.setAttribute('x2', cx);
+                    guide.classList.add('on');
+
+                    highlight(idx);
+                  }
+
+                  function hide() {
+                    tooltip.style.display = 'none';
+                    guide.classList.remove('on');
+                    clearHighlight();
+                  }
+
+                  zones.forEach(function (rect) {
+                    var idx = parseInt(rect.getAttribute('data-idx'), 10);
+                    rect.addEventListener('mouseenter', function () { showAt(idx, rect); });
+                    rect.addEventListener('mousemove', function () { showAt(idx, rect); });
+                  });
+                  svg.addEventListener('mouseleave', hide);
+                })();
+              </script>
             </div>
           </section>
 
@@ -367,8 +477,52 @@ function fmtWeekday(s: string): string {
   .line-chart .axis-label { font-size: 10px; fill: var(--text-tertiary); font-family: inherit; }
   .line-chart .axis-label-y { text-anchor: end; }
   .line-chart .axis-label-x { text-anchor: middle; }
-  .line-chart circle { transition: r 0.1s ease; cursor: pointer; }
-  .line-chart circle:hover { r: 4; }
+  .line-chart circle { transition: r 0.08s ease; pointer-events: none; }
+  .line-chart .hover-guide {
+    stroke: var(--text-secondary);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.1s ease;
+  }
+  .line-chart .hover-guide.on { opacity: 0.5; }
+  .line-chart .hover-zone { fill: transparent; cursor: crosshair; }
+
+  .chart-plot { position: relative; }
+  .chart-tooltip {
+    display: none;
+    position: absolute;
+    pointer-events: none;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 12px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+    min-width: 160px;
+    z-index: 10;
+  }
+  .chart-tooltip .tt-day {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-subtle, var(--border));
+  }
+  .chart-tooltip .tt-row {
+    display: grid;
+    grid-template-columns: 10px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+  .chart-tooltip .tt-dot { width: 10px; height: 10px; border-radius: 2px; }
+  .chart-tooltip .tt-label { color: var(--text-secondary); }
+  .chart-tooltip .tt-val { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
 
   .retention-note { font-size: 12px; color: var(--text-tertiary); margin: 0 0 12px; line-height: 1.5; }
   .retention-headline {
