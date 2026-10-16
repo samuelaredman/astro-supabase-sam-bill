@@ -2,6 +2,16 @@ export const prerender = false;
 import type { APIRoute } from "astro";
 import { requireAdmin, json } from "../../../../utils/api";
 
+// Founder accounts that may never be banned via this endpoint. Checked
+// before any DB lookup so a compromised site_admins row or a future admin
+// gone rogue still can't get past this. Mirrored by the DB trigger
+// prevent_superadmin_ban (migration 20261015000001) which blocks the same
+// profiles at the auth.users level even if someone bypasses this route.
+const UNBANNABLE_PROFILE_IDS = new Set<string>([
+  "a19ccc20-ff7b-4426-9357-e9729d11edb7", // bill
+  "08f00603-3a1e-42e2-81ed-d3dfd3ae33ad", // sam
+]);
+
 // Ban / unban a user via Supabase Auth's `banned_until`. A banned user can't
 // sign in, and their existing session fails at the next JWT refresh (<=1h).
 // Call with { profile_id, banned }.
@@ -31,6 +41,12 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "You can't ban yourself." }, 400);
   }
 
+  // Hard-coded founder protection — must be checked before any DB-sourced
+  // membership so an attacker can't bypass by first removing site_admins rows.
+  if (UNBANNABLE_PROFILE_IDS.has(profileId) && banned) {
+    return json({ error: "This account is protected and can't be banned." }, 403);
+  }
+
   const { data: target } = await (db as any)
     .from("profiles")
     .select("id, auth_user_id, username")
@@ -44,7 +60,7 @@ export const POST: APIRoute = async (context) => {
     .select("profile_id")
     .eq("profile_id", profileId)
     .maybeSingle();
-  if (targetAdmin) return json({ error: "Can't ban another admin." }, 400);
+  if (targetAdmin && banned) return json({ error: "Can't ban another admin." }, 400);
 
   // ban_duration: 'none' lifts; a long duration bans. 100y covers forever in practice.
   const banDuration = banned ? "876000h" : "none";
