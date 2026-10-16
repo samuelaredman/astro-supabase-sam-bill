@@ -11,6 +11,7 @@ const TIMEOUT_MS = 5000;
 export interface LatestUpload {
   id: string;
   title: string | null;
+  description: string | null;
 }
 
 /** The channel part of a validated profile YouTube link: { kind, value }. */
@@ -37,7 +38,9 @@ export function parseLatestFromVideosPage(html: string): LatestUpload | null {
   if (raw) {
     try { title = JSON.parse(`"${raw}"`); } catch { title = null; }
   }
-  return { id, title };
+  // The videos tab doesn't carry full descriptions — the Data API path fills
+  // this in. Scrape path leaves it null.
+  return { id, title, description: null };
 }
 
 async function fromDataApi(channel: NonNullable<ReturnType<typeof parseChannelUrl>>, key: string): Promise<LatestUpload | null> {
@@ -64,7 +67,12 @@ async function fromDataApi(channel: NonNullable<ReturnType<typeof parseChannelUr
   }
   const snippet = (await plRes.json())?.items?.[0]?.snippet;
   const id = snippet?.resourceId?.videoId;
-  return id && VIDEO_ID.test(id) ? { id, title: snippet?.title ?? null } : null;
+  if (!id || !VIDEO_ID.test(id)) return null;
+  return {
+    id,
+    title: snippet?.title ?? null,
+    description: typeof snippet?.description === 'string' ? snippet.description : null,
+  };
 }
 
 async function fromVideosPage(channelUrl: string): Promise<LatestUpload | null> {
