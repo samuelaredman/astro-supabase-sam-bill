@@ -15,6 +15,9 @@ import { REC_SELECT, shapeRec } from '../utils/recommendationsFeed';
 import { setPageCacheHeaders } from '../utils/cache';
 import { getPageUser } from '../utils/pageAuth';
 import { BADGES } from '../utils/badges';
+import { fetchLatestUpload } from '../utils/youtubeChannel';
+
+const YOUTUBE_API_KEY = import.meta.env.YOUTUBE_API_KEY || (globalThis as any).process?.env?.YOUTUBE_API_KEY;
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
@@ -256,16 +259,31 @@ const topRated = Object.entries(weekGameMap)
   .sort((a: any, b: any) => b.avg_score - a.avg_score)
   .slice(0, 12)
 
-// Chekpoint Creators strip — profiles with the chekpoint-creator badge.
-// Rendered right above the feed tabs so visitors see them without scrolling.
+// Chekpoint Creators strip — the newest upload from each badged creator's
+// linked YouTube channel. Fetched in parallel; the strip only renders for
+// creators who both have a youtube_url and whose channel returned a video.
+// Home page is CDN-cached so these YouTube hits are one-per-cache-TTL, not
+// one-per-request.
 const { data: creatorRows } = await supabase
   .from('profile_badges')
-  .select('profiles!profile_badges_profile_id_fkey ( id, username, avatar_url, bio )')
+  .select('profiles!profile_badges_profile_id_fkey ( id, username, avatar_url, youtube_url )')
   .eq('badge_slug', 'chekpoint-creator')
   .order('assigned_at', { ascending: true });
-const chekpointCreators = ((creatorRows as any[]) ?? [])
+const creatorProfiles = ((creatorRows as any[]) ?? [])
   .map((r) => r.profiles)
-  .filter(Boolean) as Array<{ id: string; username: string; avatar_url: string | null; bio: string | null }>;
+  .filter((p: any) => p && p.youtube_url) as Array<{ id: string; username: string; avatar_url: string | null; youtube_url: string }>;
+
+const creatorVideoResults = await Promise.all(
+  creatorProfiles.map((p) =>
+    fetchLatestUpload(p.youtube_url, YOUTUBE_API_KEY).catch(() => null)
+  )
+);
+const creatorVideos = creatorProfiles
+  .map((p, i) => ({ creator: p, video: creatorVideoResults[i] }))
+  .filter((cv) => cv.video) as Array<{
+    creator: typeof creatorProfiles[number];
+    video: { id: string; title: string | null };
+  }>;
 
 const totalReviews = siteStats.totalReviews
 const totalRecommendations = siteStats.totalRecommendations
@@ -483,24 +501,54 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       </div>
     )}
 
-    {chekpointCreators.length > 0 && (
+    {creatorVideos.length > 0 && (
       <div class="section-block">
         <div class="section-block-header">
           <span class="section-block-title">Chekpoint Creators</span>
+          <span class="section-block-sub">Latest from our partnered creators</span>
         </div>
-        <div class="creators-strip">
-          {chekpointCreators.map((c) => (
-            <a href={`/reviewers/${c.username}`} class="creator-card" title={c.bio ?? ''}>
-              <div class="creator-avatar">
-                {c.avatar_url
-                  ? <img src={c.avatar_url} alt={c.username} loading="lazy" />
-                  : <span>{c.username.slice(0, 2).toUpperCase()}</span>
-                }
-              </div>
-              <div class="creator-name">@{c.username}</div>
-              <span class="creator-badge" aria-hidden="true">✦ Creator</span>
-            </a>
-          ))}
+        <div class="creators-carousel" id="creatorsCarousel" data-auto-rotate={creatorVideos.length > 1 ? 'true' : 'false'}>
+          <button class="creators-arrow creators-arrow-prev" type="button" aria-label="Previous video">‹</button>
+          <div class="creators-track" id="creatorsTrack">
+            {creatorVideos.map(({ creator, video }) => (
+              <a
+                href={`https://www.youtube.com/watch?v=${video.id}`}
+                target="_blank"
+                rel="noopener"
+                class="creator-video"
+                data-video-id={video.id}
+              >
+                <div class="creator-video-thumb">
+                  <img
+                    src={`https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`}
+                    alt={video.title ?? `Latest video from @${creator.username}`}
+                    loading="lazy"
+                  />
+                  <span class="creator-video-play" aria-hidden="true">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                  </span>
+                </div>
+                <div class="creator-video-meta">
+                  <a
+                    href={`/reviewers/${creator.username}`}
+                    class="creator-video-author"
+                    onclick="event.stopPropagation()"
+                  >
+                    <span class="creator-video-avatar">
+                      {creator.avatar_url
+                        ? <img src={creator.avatar_url} alt="" loading="lazy" />
+                        : <span>{creator.username.slice(0, 2).toUpperCase()}</span>
+                      }
+                    </span>
+                    <span class="creator-video-username">@{creator.username}</span>
+                    <span class="creator-video-badge" aria-hidden="true">✦</span>
+                  </a>
+                  <div class="creator-video-title">{video.title ?? 'Latest upload'}</div>
+                </div>
+              </a>
+            ))}
+          </div>
+          <button class="creators-arrow creators-arrow-next" type="button" aria-label="Next video">›</button>
         </div>
       </div>
     )}
@@ -799,6 +847,65 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   </div>
 
   <script is:inline>
+    // Creators carousel: side-scroll with arrow buttons, auto-rotate every ~6s
+    // while idle. Pauses on hover/focus and after any manual scroll until the
+    // user leaves it. Disabled when the user prefers reduced motion.
+    (function () {
+      var carousel = document.getElementById('creatorsCarousel');
+      if (!carousel) return;
+      var track = document.getElementById('creatorsTrack');
+      if (!track) return;
+      var prev = carousel.querySelector('.creators-arrow-prev');
+      var next = carousel.querySelector('.creators-arrow-next');
+
+      function cardStep() {
+        var first = track.querySelector('.creator-video');
+        if (!first) return track.clientWidth;
+        var style = getComputedStyle(track);
+        var gap = parseFloat(style.columnGap || style.gap || '0') || 0;
+        return first.getBoundingClientRect().width + gap;
+      }
+      function updateArrows() {
+        var atStart = track.scrollLeft <= 2;
+        var atEnd = track.scrollLeft + track.clientWidth >= track.scrollWidth - 2;
+        if (prev) prev.toggleAttribute('disabled', atStart);
+        if (next) next.toggleAttribute('disabled', atEnd);
+      }
+      function scrollBy(dir) {
+        track.scrollBy({ left: dir * cardStep(), behavior: 'smooth' });
+      }
+      if (prev) prev.addEventListener('click', function () { stopAutoRotate(); scrollBy(-1); });
+      if (next) next.addEventListener('click', function () { stopAutoRotate(); scrollBy(1); });
+      track.addEventListener('scroll', updateArrows, { passive: true });
+      window.addEventListener('resize', updateArrows);
+      updateArrows();
+
+      // Auto-rotate (only when there's more than one card and user hasn't
+      // disabled motion). Loops to the start when we hit the end.
+      var autoRotateTimer = null;
+      function stopAutoRotate() {
+        if (autoRotateTimer) { clearInterval(autoRotateTimer); autoRotateTimer = null; }
+      }
+      function startAutoRotate() {
+        if (autoRotateTimer) return;
+        if (carousel.dataset.autoRotate !== 'true') return;
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        autoRotateTimer = setInterval(function () {
+          var atEnd = track.scrollLeft + track.clientWidth >= track.scrollWidth - 2;
+          if (atEnd) {
+            track.scrollTo({ left: 0, behavior: 'smooth' });
+          } else {
+            scrollBy(1);
+          }
+        }, 6000);
+      }
+      carousel.addEventListener('mouseenter', stopAutoRotate);
+      carousel.addEventListener('mouseleave', startAutoRotate);
+      carousel.addEventListener('focusin', stopAutoRotate);
+      carousel.addEventListener('focusout', startAutoRotate);
+      startAutoRotate();
+    })();
+
     (function () {
       var banner = document.getElementById('welcomeBanner');
       if (!banner) return;
@@ -1916,60 +2023,172 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   .top-rated-info { margin-top: 6px; }
   .top-rated-title { font-size: 11px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
 
-  .creators-strip {
-    display: flex;
-    gap: 12px;
-    overflow-x: auto;
-    padding-bottom: 20px;
-    scrollbar-width: none;
+  .section-block-sub {
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    font-style: italic;
   }
-  .creators-strip::-webkit-scrollbar { display: none; }
-  .creator-card {
-    flex-shrink: 0;
-    width: 128px;
+
+  .creators-carousel {
+    position: relative;
+    padding-bottom: 20px;
+  }
+  .creators-track {
+    display: flex;
+    gap: 14px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+    scroll-padding-left: 4px;
+  }
+  .creators-track::-webkit-scrollbar { display: none; }
+  .creator-video {
+    flex: 0 0 320px;
+    scroll-snap-align: start;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 14px 10px;
-    border: 1px solid var(--border);
     border-radius: 14px;
     background: var(--bg-card);
+    border: 1px solid var(--border);
+    overflow: hidden;
     text-decoration: none;
     color: inherit;
-    transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+    transition: transform 0.2s ease, border-color 0.15s, box-shadow 0.2s;
   }
-  .creator-card:hover {
+  .creator-video:hover {
     transform: translateY(-3px);
     border-color: var(--accent);
-    box-shadow: 0 10px 24px rgba(0,0,0,.35);
+    box-shadow: 0 14px 32px rgba(0, 0, 0, 0.4);
   }
-  .creator-avatar {
-    width: 60px; height: 60px;
+  .creator-video-thumb {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: var(--bg-hover);
+    overflow: hidden;
+  }
+  .creator-video-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transition: transform 0.3s ease;
+  }
+  .creator-video:hover .creator-video-thumb img { transform: scale(1.04); }
+  .creator-video-play {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+  .creator-video-play svg {
+    width: 44px; height: 44px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 50%;
+    padding: 10px;
+    transition: background 0.15s, transform 0.15s;
+  }
+  .creator-video:hover .creator-video-play svg {
+    background: var(--accent);
+    transform: scale(1.08);
+  }
+  .creator-video-meta {
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .creator-video-author {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    width: fit-content;
+    padding: 2px 2px 2px 0;
+    border-radius: 999px;
+    transition: color 0.15s;
+  }
+  .creator-video-author:hover { color: var(--accent); }
+  .creator-video-avatar {
+    width: 22px; height: 22px;
     border-radius: 50%;
     background: var(--bg-hover);
     overflow: hidden;
     display: flex; align-items: center; justify-content: center;
-    font-size: 20px; font-weight: 600;
+    font-size: 10px; font-weight: 700;
     color: var(--text-secondary);
-    border: 2px solid var(--accent);
+    border: 1px solid var(--accent);
+    flex-shrink: 0;
   }
-  .creator-avatar img { width: 100%; height: 100%; object-fit: cover; }
-  .creator-name {
-    font-size: 12px; font-weight: 600;
+  .creator-video-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .creator-video-username {
+    font-weight: 600;
     color: var(--text-primary);
-    text-align: center;
-    max-width: 108px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
   }
-  .creator-badge {
-    font-size: 9.5px; font-weight: 700;
-    letter-spacing: 0.04em;
+  .creator-video-badge {
     color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 2px 7px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .creator-video-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: 36px;
+  }
+
+  .creators-arrow {
+    position: absolute;
+    top: 50%;
+    transform: translateY(calc(-50% - 10px));
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-size: 22px;
+    font-family: inherit;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    padding-bottom: 2px;
+    z-index: 2;
+    opacity: 0.9;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  }
+  .creators-arrow:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    opacity: 1;
+  }
+  .creators-arrow-prev { left: -4px; }
+  .creators-arrow-next { right: -4px; }
+  .creators-arrow[disabled] {
+    opacity: 0;
+    pointer-events: none;
+  }
+  @media (max-width: 640px) {
+    .creator-video { flex-basis: 280px; }
+    .creators-arrow { display: none; }
   }
 
   .feed-tabs { display: flex; align-items: center; gap: 6px; padding: 12px 20px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-card); position: sticky; top: 73px; z-index: 9; flex-wrap: wrap; }
