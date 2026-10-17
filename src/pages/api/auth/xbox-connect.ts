@@ -18,25 +18,9 @@ export const GET: APIRoute = async (context) => {
   const { data: { user } } = await userClient.auth.getUser();
   if (!user) return context.redirect('/signin');
 
-  const appKey = import.meta.env.OPENXBL_APP_KEY;
-  if (!appKey) {
-    console.error('[xbox-connect] OPENXBL_APP_KEY is not set');
-    return context.redirect('/settings?xbox=error#xbox');
-  }
-
-  const stateBytes = new Uint8Array(24);
-  crypto.getRandomValues(stateBytes);
-  const state = Array.from(stateBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-
-  // 10-min TTL covers any realistic time on the Microsoft login screen.
-  // SameSite=Lax so it survives the top-level cross-site redirect back.
-  context.cookies.set('xbox_oauth_state', state, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    path: '/',
-    maxAge: 60 * 10,
-  });
-
-  return context.redirect(`https://xbl.io/app/auth/${encodeURIComponent(appKey)}`);
+  // OpenXBL rebuilt their site and removed the `/app/auth/<key>` OAuth
+  // endpoint we used to redirect to — it now returns a 404 page. Until
+  // they publish a replacement URL, send users to the Xbox section of
+  // Settings where the manual paste-your-API-key flow lives.
+  return context.redirect('/settings?xbox=oauth-removed#xbox');
 };
