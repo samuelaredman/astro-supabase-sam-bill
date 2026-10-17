@@ -1,11 +1,11 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 
-// OpenXBL callback. After the user signs in with Microsoft on xbl.io,
-// they land here with `?code=<one-time>`. The code is NOT the API key —
-// it must be exchanged via POST https://xbl.io/app/claim, which returns
-// the persistent per-user API key plus XUID + gamertag. That response
-// shape is documented in the OpenXBL PHP SDK's ClaimsResponse
+// OpenXBL callback. After the user signs in with Microsoft (consent screen
+// shows our Azure app), they land here with `?code=<one-time>`. The code is
+// NOT the API key — it must be exchanged via POST https://api.xbl.io/app/claim,
+// which returns the persistent per-user API key plus XUID + gamertag. That
+// response shape is documented in the OpenXBL PHP SDK's ClaimsResponse
 // (appKey, xuid, gamertag, email, avatar).
 //
 // OpenXBL doesn't preserve a `?state=` param across the flow, so we
@@ -39,7 +39,7 @@ export const GET: APIRoute = async (context) => {
 
   let claim: { appKey?: string; xuid?: string; gamertag?: string } | null = null;
   try {
-    const res = await fetch('https://xbl.io/app/claim', {
+    const res = await fetch('https://api.xbl.io/app/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ code, app_key: appKey }),
