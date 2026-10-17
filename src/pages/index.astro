@@ -16,6 +16,7 @@ import { setPageCacheHeaders } from '../utils/cache';
 import { getPageUser } from '../utils/pageAuth';
 import { BADGES } from '../utils/badges';
 import { fetchCreatorContent } from '../utils/youtubeChannel';
+import { groupPath } from '../utils/groupSlug';
 
 const YOUTUBE_API_KEY = import.meta.env.YOUTUBE_API_KEY || (globalThis as any).process?.env?.YOUTUBE_API_KEY;
 
@@ -225,12 +226,29 @@ const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).sl
 // one-per-request.
 const { data: creatorRows } = await supabase
   .from('profile_badges')
-  .select('profiles!profile_badges_profile_id_fkey ( id, username, avatar_url, youtube_url )')
+  .select('profiles!profile_badges_profile_id_fkey ( id, username, avatar_url, youtube_url, featured_group_id )')
   .eq('badge_slug', 'chekpoint-creator')
   .order('assigned_at', { ascending: true });
 const creatorProfiles = ((creatorRows as any[]) ?? [])
   .map((r) => r.profiles)
-  .filter((p: any) => p && p.youtube_url) as Array<{ id: string; username: string; avatar_url: string | null; youtube_url: string }>;
+  .filter((p: any) => p && p.youtube_url) as Array<{ id: string; username: string; avatar_url: string | null; youtube_url: string; featured_group_id: string | null }>;
+
+// Pull featured group (name + path) for each creator who's set one on their
+// profile so we can show a "Join their community" CTA next to the Chekpoint
+// profile pill. One batched query, service role to read private groups too
+// (public-only filter applied).
+const featuredGroupIds = Array.from(new Set(
+  creatorProfiles.map((p) => p.featured_group_id).filter((x): x is string => !!x)
+));
+const featuredGroupById = new Map<string, { id: string; name: string; slug: string | null; visibility: string }>();
+if (featuredGroupIds.length) {
+  const { data: groupRows } = await (adminDb as any)
+    .from('groups')
+    .select('id, name, slug, visibility')
+    .in('id', featuredGroupIds)
+    .eq('visibility', 'public');
+  for (const g of (groupRows ?? []) as any[]) featuredGroupById.set(g.id, g);
+}
 
 // Helpers for the creator strip's display chrome.
 function truncateText(text: string | null | undefined, maxChars: number): string | null {
@@ -280,17 +298,21 @@ const creatorBundleResults = await Promise.all(
 const creatorVideos = creatorProfiles
   .map((p, i) => ({ creator: p, ...creatorBundleResults[i] }))
   .filter((cv) => cv.video)
-  .map((cv) => ({
-    creator: cv.creator,
-    channel: cv.channel,
-    video: cv.video!,
-    descriptionShort: truncateText(cv.video!.description, 320),
-    channelBioShort: truncateText(cv.channel?.bio, 160),
-    subsLabel: formatCompactNumber(cv.channel?.subscriberCount ?? null),
-    viewsLabel: formatCompactNumber(cv.video!.viewCount),
-    durationLabel: formatDuration(cv.video!.durationSeconds),
-    ageLabel: formatRelativeAge(cv.video!.publishedAt),
-  }));
+  .map((cv) => {
+    const featured = cv.creator.featured_group_id ? featuredGroupById.get(cv.creator.featured_group_id) ?? null : null;
+    return {
+      creator: cv.creator,
+      channel: cv.channel,
+      video: cv.video!,
+      descriptionShort: truncateText(cv.video!.description, 320),
+      channelBioShort: truncateText(cv.channel?.bio, 160),
+      subsLabel: formatCompactNumber(cv.channel?.subscriberCount ?? null),
+      viewsLabel: formatCompactNumber(cv.video!.viewCount),
+      durationLabel: formatDuration(cv.video!.durationSeconds),
+      ageLabel: formatRelativeAge(cv.video!.publishedAt),
+      communityGroup: featured ? { name: featured.name, path: groupPath(featured) } : null,
+    };
+  });
 
 const totalReviews = siteStats.totalReviews
 const totalRecommendations = siteStats.totalRecommendations
@@ -485,7 +507,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
           data-count={creatorVideos.length}
         >
           <div class="creators-track" id="creatorsTrack">
-            {creatorVideos.map(({ creator, channel, video, descriptionShort, channelBioShort, subsLabel, viewsLabel, durationLabel, ageLabel }) => {
+            {creatorVideos.map(({ creator, channel, video, descriptionShort, channelBioShort, subsLabel, viewsLabel, durationLabel, ageLabel, communityGroup }) => {
               const channelAvatar = channel?.avatarUrl ?? creator.avatar_url;
               const channelName = channel?.name ?? creator.username;
               const channelHandle = channel?.handle ?? null;
@@ -551,14 +573,27 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
                     {channelBioShort && (
                       <p class="creator-slide-channel-bio">{channelBioShort}</p>
                     )}
-                    <a
-                      href={`/reviewers/${creator.username}`}
-                      class="creator-slide-chekpoint-btn"
-                    >
-                      <span class="creator-slide-chekpoint-btn-icon" aria-hidden="true">✦</span>
-                      <span class="creator-slide-chekpoint-btn-text">See on Chekpoint</span>
-                      <svg class="creator-slide-chekpoint-btn-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-                    </a>
+                    <div class="creator-slide-actions">
+                      <a
+                        href={`/reviewers/${creator.username}`}
+                        class="creator-slide-chekpoint-btn"
+                      >
+                        <span class="creator-slide-chekpoint-btn-icon" aria-hidden="true">✦</span>
+                        <span class="creator-slide-chekpoint-btn-text">See profile</span>
+                        <svg class="creator-slide-chekpoint-btn-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+                      </a>
+                      {communityGroup && (
+                        <a
+                          href={communityGroup.path}
+                          class="creator-slide-community-btn"
+                          title={`Join ${communityGroup.name}`}
+                        >
+                          <svg class="creator-slide-community-btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                          <span class="creator-slide-community-btn-text">Join community</span>
+                          <svg class="creator-slide-chekpoint-btn-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+                        </a>
+                      )}
+                    </div>
                   </aside>
                 </div>
               );
@@ -2212,6 +2247,18 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     overflow: hidden;
   }
 
+  /* Row of CTAs under the channel info — "See profile" (accent) + optional
+     "Join community" (neutral outline) when the creator has a featured
+     group. Both are compact pills; wrap to a column on narrow slots. */
+  .creator-slide-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+  }
+
   /* CTA to the creator's Chekpoint profile. Pill with a sparkle on the
      left, label in the middle, arrow on the right. Hover triggers a
      left-to-right accent sweep + the arrow slides. */
@@ -2262,6 +2309,52 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     transition: transform 0.25s ease;
   }
   .creator-slide-chekpoint-btn:hover .creator-slide-chekpoint-btn-arrow {
+    transform: translateX(3px);
+  }
+
+  /* Community CTA — same shape, neutral palette so it doesn't compete
+     with the primary accent-tinted "See profile" button. */
+  .creator-slide-community-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px 8px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-decoration: none;
+    overflow: hidden;
+    isolation: isolate;
+    transition: color 0.25s ease, border-color 0.25s ease, transform 0.15s ease, box-shadow 0.2s;
+  }
+  .creator-slide-community-btn::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: var(--text-primary);
+    transform: translateX(-101%);
+    transition: transform 0.35s cubic-bezier(0.65, 0, 0.35, 1);
+    z-index: -1;
+  }
+  .creator-slide-community-btn:hover {
+    color: var(--bg);
+    border-color: var(--text-primary);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  }
+  .creator-slide-community-btn:hover::before { transform: translateX(0); }
+  .creator-slide-community-btn-icon {
+    transition: transform 0.3s ease;
+  }
+  .creator-slide-community-btn:hover .creator-slide-community-btn-icon {
+    transform: scale(1.1);
+  }
+  .creator-slide-community-btn:hover .creator-slide-chekpoint-btn-arrow {
     transform: translateX(3px);
   }
 
@@ -2318,7 +2411,13 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       font-size: 15px;
       box-shadow: none;
     }
-    .creator-slide-chekpoint-btn { margin-top: 0; margin-left: auto; }
+    .creator-slide-actions {
+      margin-top: 0;
+      margin-left: auto;
+      justify-content: flex-end;
+      width: auto;
+    }
+    .creator-slide-chekpoint-btn { margin-top: 0; }
   }
   /* Phones: everything stacks. */
   @media (max-width: 640px) {
