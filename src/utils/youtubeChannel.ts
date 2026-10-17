@@ -108,12 +108,23 @@ async function fromDataApi(channel: NonNullable<ReturnType<typeof parseChannelUr
 
   if (!uploads) return { video: null, channel: channelInfo };
 
-  const plRes = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=1&playlistId=${encodeURIComponent(uploads)}&key=${k}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-  if (!plRes.ok) {
-    console.error('[youtubeChannel] playlistItems.list error:', plRes.status, await plRes.text().catch(() => ''));
-    return { video: null, channel: channelInfo };
+  // YouTube maintains parallel "all uploads" and "long-form only" playlists
+  // for every channel. Normal uploads = UU<...>, long-form only = UULF<...>,
+  // Shorts only = UUSH<...>. Swap the prefix so Shorts don't surface as the
+  // "latest video" in our strip — a creator who posts a Short every day
+  // between full videos would otherwise show the Short.
+  const longFormPlaylist = uploads.replace(/^UU/, 'UULF');
+
+  async function fetchFirstVideo(playlistId: string) {
+    const r = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=1&playlistId=${encodeURIComponent(playlistId)}&key=${k}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (!r.ok) return null;
+    return (await r.json())?.items?.[0]?.snippet ?? null;
   }
-  const snippet = (await plRes.json())?.items?.[0]?.snippet;
+
+  // Try long-form first; fall back to any upload if the creator has none
+  // (new channels, Shorts-only channels, etc.).
+  let snippet = longFormPlaylist !== uploads ? await fetchFirstVideo(longFormPlaylist).catch(() => null) : null;
+  if (!snippet) snippet = await fetchFirstVideo(uploads).catch(() => null);
   const vid = snippet?.resourceId?.videoId;
   if (!vid || !VIDEO_ID.test(vid)) return { video: null, channel: channelInfo };
 
