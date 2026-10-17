@@ -1,4 +1,4 @@
-// Chekpoint service worker — v2
+// Chekpoint service worker — v3
 // Strategy: cache-first ONLY for known-immutable static assets. Every other
 // request (including SSR HTML — pages AND on-demand tab fragments fetched by
 // the profile page's tab loader) passes through to the network, so counts,
@@ -10,8 +10,12 @@
 // not 'navigate'), so the "bypass for navigations" clause didn't cover it,
 // and users saw stale library counts until they hard-refreshed. Bumping the
 // cache name also purges those stale entries on the next visit.
+//
+// v3 — forced bump to purge old entries after rapid CSS iteration on the
+// Chekpoint Creators strip. Astro's content-hashed filenames should be
+// enough cache-busting on their own, but SW caches survive hard-refresh.
 
-const CACHE = 'chekpoint-v2';
+const CACHE = 'chekpoint-v3';
 const PRECACHE = ['/favicon.svg', '/manifest.json'];
 
 // Only cache what's genuinely immutable:
