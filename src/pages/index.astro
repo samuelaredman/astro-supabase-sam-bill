@@ -15,7 +15,7 @@ import { REC_SELECT, shapeRec } from '../utils/recommendationsFeed';
 import { setPageCacheHeaders } from '../utils/cache';
 import { getPageUser } from '../utils/pageAuth';
 import { BADGES } from '../utils/badges';
-import { fetchLatestUpload } from '../utils/youtubeChannel';
+import { fetchCreatorContent } from '../utils/youtubeChannel';
 
 const YOUTUBE_API_KEY = import.meta.env.YOUTUBE_API_KEY || (globalThis as any).process?.env?.YOUTUBE_API_KEY;
 
@@ -232,33 +232,64 @@ const creatorProfiles = ((creatorRows as any[]) ?? [])
   .map((r) => r.profiles)
   .filter((p: any) => p && p.youtube_url) as Array<{ id: string; username: string; avatar_url: string | null; youtube_url: string }>;
 
-const creatorVideoResults = await Promise.all(
-  creatorProfiles.map((p) =>
-    fetchLatestUpload(p.youtube_url, YOUTUBE_API_KEY).catch(() => null)
-  )
-);
-// Trim YouTube descriptions to a readable preview — strip trailing link blobs
-// (timestamps + socials usually live at the bottom) and clip to ~220 chars.
-function truncateDescription(desc: string | null | undefined): string | null {
-  if (!desc) return null;
-  // Keep first few lines, drop blank-only tails
-  const cleaned = desc.split(/\n{2,}/)[0]?.trim();
+// Helpers for the creator strip's display chrome.
+function truncateText(text: string | null | undefined, maxChars: number): string | null {
+  if (!text) return null;
+  const cleaned = text.split(/\n{2,}/)[0]?.trim();
   if (!cleaned) return null;
-  if (cleaned.length <= 220) return cleaned;
-  const slice = cleaned.slice(0, 220);
+  if (cleaned.length <= maxChars) return cleaned;
+  const slice = cleaned.slice(0, maxChars);
   const lastSpace = slice.lastIndexOf(' ');
-  return (lastSpace > 160 ? slice.slice(0, lastSpace) : slice) + '…';
+  return (lastSpace > maxChars * 0.75 ? slice.slice(0, lastSpace) : slice) + '…';
+}
+function formatCompactNumber(n: number | null | undefined): string | null {
+  if (n == null || isNaN(n)) return null;
+  if (n < 1_000) return String(n);
+  if (n < 10_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+  if (n < 1_000_000) return Math.round(n / 1_000) + 'K';
+  if (n < 10_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  return Math.round(n / 1_000_000) + 'M';
+}
+function formatDuration(seconds: number | null | undefined): string | null {
+  if (seconds == null || seconds < 0) return null;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+function formatRelativeAge(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return null;
+  const diff = Date.now() - then;
+  const minute = 60_000, hour = 3600_000, day = 86400_000, week = 7 * day, month = 30 * day, year = 365 * day;
+  if (diff < hour) return `${Math.max(1, Math.floor(diff / minute))} min ago`;
+  if (diff < day) return `${Math.floor(diff / hour)} hr ago`;
+  if (diff < week) return `${Math.floor(diff / day)} days ago`;
+  if (diff < month) return `${Math.floor(diff / week)} wk ago`;
+  if (diff < year) return `${Math.floor(diff / month)} mo ago`;
+  return `${Math.floor(diff / year)} yr ago`;
 }
 
+const creatorBundleResults = await Promise.all(
+  creatorProfiles.map((p) =>
+    fetchCreatorContent(p.youtube_url, YOUTUBE_API_KEY).catch(() => ({ video: null, channel: null }))
+  )
+);
 const creatorVideos = creatorProfiles
-  .map((p, i) => ({ creator: p, video: creatorVideoResults[i] }))
+  .map((p, i) => ({ creator: p, ...creatorBundleResults[i] }))
   .filter((cv) => cv.video)
   .map((cv) => ({
     creator: cv.creator,
-    video: {
-      ...(cv.video as { id: string; title: string | null; description: string | null }),
-      description: truncateDescription(cv.video!.description),
-    },
+    channel: cv.channel,
+    video: cv.video!,
+    descriptionShort: truncateText(cv.video!.description, 320),
+    channelBioShort: truncateText(cv.channel?.bio, 160),
+    subsLabel: formatCompactNumber(cv.channel?.subscriberCount ?? null),
+    viewsLabel: formatCompactNumber(cv.video!.viewCount),
+    durationLabel: formatDuration(cv.video!.durationSeconds),
+    ageLabel: formatRelativeAge(cv.video!.publishedAt),
   }));
 
 const totalReviews = siteStats.totalReviews
@@ -442,71 +473,88 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
           data-count={creatorVideos.length}
         >
           <div class="creators-track" id="creatorsTrack">
-            {creatorVideos.map(({ creator, video }) => (
-              <div class="creator-slide" data-video-id={video.id}>
-                <a
-                  href={`https://www.youtube.com/watch?v=${video.id}`}
-                  target="_blank"
-                  rel="noopener"
-                  class="creator-slide-thumb"
-                  aria-label={video.title ?? `Latest video from @${creator.username}`}
-                >
-                  <img
-                    class="creator-slide-img"
-                    src={`https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`}
-                    alt=""
-                    loading="lazy"
-                  />
-                  <span class="creator-slide-play" aria-hidden="true">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                  </span>
-                </a>
-                <div class="creator-slide-info">
-                  <div class="creator-slide-meta">
-                    <span class="creator-slide-tag">✦ Chekpoint Creator</span>
-                    <span class="creator-slide-dot" aria-hidden="true">·</span>
-                    <a href={`/reviewers/${creator.username}`} class="creator-slide-handle">@{creator.username}</a>
+            {creatorVideos.map(({ creator, channel, video, descriptionShort, channelBioShort, subsLabel, viewsLabel, durationLabel, ageLabel }) => {
+              const channelAvatar = channel?.avatarUrl ?? creator.avatar_url;
+              const channelName = channel?.name ?? creator.username;
+              const channelHandle = channel?.handle ?? null;
+              return (
+                <div class="creator-slide" data-video-id={video.id}>
+                  <a
+                    href={`https://www.youtube.com/watch?v=${video.id}`}
+                    target="_blank"
+                    rel="noopener"
+                    class="creator-slide-thumb"
+                    aria-label={video.title ?? `Latest video from @${creator.username}`}
+                  >
+                    <img
+                      class="creator-slide-img"
+                      src={`https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`}
+                      alt=""
+                      loading="lazy"
+                    />
+                    <span class="creator-slide-play" aria-hidden="true">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    </span>
+                    {durationLabel && <span class="creator-slide-duration">{durationLabel}</span>}
+                  </a>
+                  <div class="creator-slide-info">
+                    <a
+                      href={`https://www.youtube.com/watch?v=${video.id}`}
+                      target="_blank"
+                      rel="noopener"
+                      class="creator-slide-title"
+                    >
+                      {video.title ?? 'Latest upload'}
+                    </a>
+                    <div class="creator-slide-videostats">
+                      {ageLabel && <span>{ageLabel}</span>}
+                      {ageLabel && viewsLabel && <span aria-hidden="true">·</span>}
+                      {viewsLabel && <span>{viewsLabel} views</span>}
+                    </div>
+                    {descriptionShort && (
+                      <p class="creator-slide-desc">{descriptionShort}</p>
+                    )}
                   </div>
-                  <a
-                    href={`https://www.youtube.com/watch?v=${video.id}`}
-                    target="_blank"
-                    rel="noopener"
-                    class="creator-slide-title"
-                  >
-                    {video.title ?? 'Latest upload'}
-                  </a>
-                  {video.description && (
-                    <p class="creator-slide-desc">{video.description}</p>
-                  )}
+                  <aside class="creator-slide-channel">
+                    <span class="creator-slide-chip">
+                      <span class="creator-slide-chip-icon" aria-hidden="true">✦</span>
+                      Chekpoint Creator
+                    </span>
+                    <a
+                      href={creator.youtube_url}
+                      target="_blank"
+                      rel="noopener"
+                      class="creator-slide-channel-link"
+                    >
+                      <span class="creator-slide-channel-avatar">
+                        {channelAvatar
+                          ? <img src={channelAvatar} alt="" loading="lazy" />
+                          : <span>{creator.username.slice(0, 2).toUpperCase()}</span>
+                        }
+                      </span>
+                      <span class="creator-slide-channel-text">
+                        <span class="creator-slide-channel-name">{channelName}</span>
+                        <span class="creator-slide-channel-sub">
+                          {channelHandle && <span>{channelHandle}</span>}
+                          {channelHandle && subsLabel && <span aria-hidden="true">·</span>}
+                          {subsLabel && <span>{subsLabel} subscribers</span>}
+                        </span>
+                      </span>
+                    </a>
+                    {channelBioShort && (
+                      <p class="creator-slide-channel-bio">{channelBioShort}</p>
+                    )}
+                    <a
+                      href={`/reviewers/${creator.username}`}
+                      class="creator-slide-chekpoint-link"
+                    >
+                      View on Chekpoint
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg>
+                    </a>
+                  </aside>
                 </div>
-                <div class="creator-slide-actions">
-                  <a
-                    href={`https://www.youtube.com/watch?v=${video.id}`}
-                    target="_blank"
-                    rel="noopener"
-                    class="creator-slide-btn creator-slide-btn-primary"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-                    Watch on YouTube
-                  </a>
-                  <a
-                    href={creator.youtube_url}
-                    target="_blank"
-                    rel="noopener"
-                    class="creator-slide-btn"
-                  >
-                    View channel
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg>
-                  </a>
-                  <a
-                    href={`/reviewers/${creator.username}`}
-                    class="creator-slide-btn creator-slide-btn-subtle"
-                  >
-                    Chekpoint profile
-                  </a>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           {creatorVideos.length > 1 && (
             <div class="creators-dots" id="creatorsDots" role="tablist" aria-label="Jump to creator">
@@ -1956,9 +2004,11 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   .section-block-link { font-size: 12px; color: var(--text-tertiary); transition: color 0.15s; }
   .section-block-link:hover { color: var(--text-primary); }
 
-  /* Promo-sized creator card: 3 columns — thumbnail on the left, title +
-     description in the middle (fills), action buttons on the right. The
-     whole strip slides between creators every few seconds. */
+  /* Promo creator card. Three top-aligned columns:
+       [thumbnail] [title + stats + description] [channel card]
+     The whole strip slides between creators every few seconds.
+     Title aligns with the top of the video thumbnail — no cropping needed
+     because we don't clamp the title line count. */
   .creators-section {
     padding-bottom: 18px;
     background: linear-gradient(
@@ -2006,10 +2056,10 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   .creator-slide {
     flex: 0 0 100%;
     display: grid;
-    grid-template-columns: 320px 1fr 180px;
+    grid-template-columns: 300px 1fr 280px;
     gap: 20px;
-    align-items: center;
-    padding: 6px 2px;
+    align-items: start;
+    padding: 4px 2px;
   }
 
   .creator-slide-thumb {
@@ -2054,55 +2104,138 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     background: #ff0033;
     transform: translate(-50%, -50%) scale(1.08);
   }
+  .creator-slide-duration {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.85);
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-variant-numeric: tabular-nums;
+  }
 
   .creator-slide-info {
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
+    /* Nudge the first baseline a touch to align with the top of the thumb */
+    padding-top: 0;
   }
-  .creator-slide-meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 11.5px;
-    color: var(--text-secondary);
-    flex-wrap: wrap;
-  }
-  .creator-slide-tag {
-    color: var(--accent);
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    font-size: 10.5px;
-  }
-  .creator-slide-dot { color: var(--text-tertiary); }
-  .creator-slide-handle {
-    color: var(--text-primary);
-    font-weight: 600;
-    text-decoration: none;
-    transition: color 0.15s;
-  }
-  .creator-slide-handle:hover { color: var(--accent); }
-
   .creator-slide-title {
     font-family: 'DM Serif Display', serif;
     font-size: 24px;
     font-weight: 400;
     color: var(--text-primary);
-    line-height: 1.2;
+    line-height: 1.15;
     letter-spacing: -0.3px;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
     text-decoration: none;
     transition: color 0.15s;
+    /* No line-clamp — show the whole title. Falls back gracefully if long. */
+    margin: 0;
   }
   .creator-slide-title:hover { color: var(--accent); }
-
+  .creator-slide-videostats {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-tertiary);
+    flex-wrap: wrap;
+  }
   .creator-slide-desc {
-    font-size: 13px;
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    line-height: 1.55;
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* Channel card — YouTube-style channel display: avatar + name + handle +
+     subs + bio, framed in a card. */
+  .creator-slide-channel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-card);
+    min-width: 0;
+  }
+  .creator-slide-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    width: fit-content;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    padding: 3px 9px;
+    border-radius: 999px;
+  }
+  .creator-slide-chip-icon { font-size: 10px; line-height: 1; }
+  .creator-slide-channel-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    text-decoration: none;
+    color: inherit;
+    min-width: 0;
+    transition: opacity 0.15s;
+  }
+  .creator-slide-channel-link:hover { opacity: 0.85; }
+  .creator-slide-channel-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--bg-hover);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+  }
+  .creator-slide-channel-avatar img { width: 100%; height: 100%; object-fit: cover; }
+  .creator-slide-channel-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .creator-slide-channel-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .creator-slide-channel-sub {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    display: inline-flex;
+    gap: 5px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .creator-slide-channel-bio {
+    font-size: 12.5px;
     color: var(--text-secondary);
     line-height: 1.5;
     margin: 0;
@@ -2111,50 +2244,25 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-
-  .creator-slide-actions {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    align-items: stretch;
-  }
-  .creator-slide-btn {
+  .creator-slide-chekpoint-link {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 7px;
-    padding: 10px 14px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: var(--bg-card);
-    color: var(--text-primary);
-    font-size: 12.5px;
+    gap: 5px;
+    font-size: 12px;
     font-weight: 600;
-    text-decoration: none;
-    text-align: center;
-    transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.08s;
-    white-space: nowrap;
-  }
-  .creator-slide-btn:hover {
-    border-color: var(--accent);
     color: var(--accent);
-    transform: translateY(-1px);
+    text-decoration: none;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    transition: background 0.15s, color 0.15s;
+    margin-top: 2px;
   }
-  .creator-slide-btn-primary {
-    background: #ff0033;
-    border-color: #ff0033;
+  .creator-slide-chekpoint-link:hover {
+    background: var(--accent);
     color: #fff;
-  }
-  .creator-slide-btn-primary:hover {
-    background: #e60029;
-    border-color: #e60029;
-    color: #fff;
-    transform: translateY(-1px);
-  }
-  .creator-slide-btn-subtle {
-    background: transparent;
-    color: var(--text-secondary);
-    font-weight: 500;
   }
 
   .creators-dots {
@@ -2179,33 +2287,24 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     width: 36px;
   }
 
-  /* Collapse to 2 columns when the right rail is tight — buttons stack
-     under the content, still side-by-side with the thumbnail. */
-  @media (max-width: 900px) {
+  /* Mid widths — channel card drops below the content, thumb + content stay
+     side-by-side. */
+  @media (max-width: 1000px) {
     .creator-slide {
-      grid-template-columns: 240px 1fr;
-      grid-template-rows: auto auto;
-      row-gap: 12px;
+      grid-template-columns: 260px 1fr;
+      row-gap: 14px;
     }
-    .creator-slide-thumb { grid-row: 1 / span 2; align-self: start; }
-    .creator-slide-actions {
-      grid-column: 2;
-      flex-direction: row;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-    .creator-slide-btn { padding: 8px 12px; font-size: 12px; flex: 0 0 auto; }
+    .creator-slide-channel { grid-column: 1 / -1; }
+    .creator-slide-channel-link { max-width: 420px; }
   }
-  /* Phones: thumbnail stacks on top of everything else. */
+  /* Phones: everything stacks. */
   @media (max-width: 640px) {
     .creator-slide {
       grid-template-columns: 1fr;
-      gap: 12px;
+      gap: 14px;
     }
-    .creator-slide-thumb { grid-row: auto; width: 100%; max-width: 100%; }
-    .creator-slide-actions { grid-column: 1; }
     .creator-slide-title { font-size: 20px; }
-    .creator-slide-desc { -webkit-line-clamp: 2; }
+    .creator-slide-desc { -webkit-line-clamp: 3; }
   }
 
   .feed-tabs { display: flex; align-items: center; gap: 6px; padding: 12px 20px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-card); position: sticky; top: 73px; z-index: 9; flex-wrap: wrap; }
