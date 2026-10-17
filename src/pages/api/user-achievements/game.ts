@@ -40,7 +40,7 @@ export const GET: APIRoute = async ({ url }) => {
     const { data, error } = await db
       .from("user_achievements")
       .select(
-        "display_name, description, icon_url, icon_gray_url, unlocked, unlock_time, global_percent, steam_game_title, games(title)",
+        "display_name, description, icon_url, icon_gray_url, unlocked, unlock_time, global_percent, hidden, steam_game_title, games(title)",
       )
       .eq("profile_id", profile.id)
       .eq("steam_appid", appid)
@@ -62,6 +62,7 @@ export const GET: APIRoute = async ({ url }) => {
         global_percent: r.global_percent ?? null,
         trophy_type: null as string | null,
         gamerscore: null as number | null,
+        hidden: !!r.hidden,
       }))
       .sort(sortAchievements);
     return json({
@@ -78,7 +79,7 @@ export const GET: APIRoute = async ({ url }) => {
     const { data, error } = await db
       .from("user_trophies")
       .select(
-        "name, description, icon_url, earned, earned_at, earned_rate, trophy_type, psn_platform, psn_game_title, games(title)",
+        "name, description, icon_url, earned, earned_at, earned_rate, trophy_type, hidden, psn_platform, psn_game_title, games(title)",
       )
       .eq("profile_id", profile.id)
       .eq("np_communication_id", id)
@@ -101,6 +102,7 @@ export const GET: APIRoute = async ({ url }) => {
         global_percent: r.earned_rate ?? null,
         trophy_type: r.trophy_type ?? null,
         gamerscore: null as number | null,
+        hidden: !!r.hidden,
       }))
       .sort(sortAchievements);
     return json({
@@ -139,6 +141,7 @@ export const GET: APIRoute = async ({ url }) => {
       global_percent: r.rarity ?? null,
       trophy_type: null as string | null,
       gamerscore: r.gamerscore ?? null,
+      hidden: false,
     }))
     .sort(sortAchievements);
   return json({

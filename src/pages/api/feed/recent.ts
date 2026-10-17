@@ -10,7 +10,7 @@ const REVIEW_FIELDS = `
   contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
   games ( id, title, slug, cover_img_url ),
-  profiles ( id, username, avatar_url ),
+  profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   review_votes( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),
   review_comments( id )
@@ -20,7 +20,7 @@ const REC_FIELDS = `
   id, body, contains_spoilers, created_at, profile_id,
   source_game:games!source_game_id ( id, title, slug, cover_img_url ),
   target_game:games!target_game_id ( id, title, slug, cover_img_url ),
-  profiles ( id, username, avatar_url ),
+  profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   recommendation_votes ( vote, profile_id ),
   recommendation_reactions ( reaction_type, profile_id ),
   recommendation_comments ( id )
@@ -28,7 +28,7 @@ const REC_FIELDS = `
 
 const LIST_FIELDS = `
   id, title, description, is_ranked, cover_image_url, created_at, profile_id,
-  profiles ( id, username, avatar_url ),
+  profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   list_entries ( games ( cover_img_url ) ),
   list_votes ( vote, profile_id ),
   list_comments ( id ),

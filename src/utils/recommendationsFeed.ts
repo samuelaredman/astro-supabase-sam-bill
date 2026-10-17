@@ -8,7 +8,7 @@ export const REC_SELECT = `
   id, body, contains_spoilers, created_at, profile_id,
   source_game:games!source_game_id ( id, title, slug, cover_img_url ),
   target_game:games!target_game_id ( id, title, slug, cover_img_url ),
-  profiles ( id, username, avatar_url ),
+  profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   recommendation_votes ( vote, profile_id ),
   recommendation_reactions ( reaction_type, profile_id ),
   recommendation_comments ( id )
@@ -24,6 +24,7 @@ export interface ShapedRec {
   targetGame: { id: string; title: string; slug: string; cover_img_url: string | null } | null;
   ownerUsername: string;
   ownerAvatar: string | null;
+  ownerBadgeSlugs: string[];
   upVotes: number;
   downVotes: number;
   myVote: number;
@@ -53,6 +54,9 @@ export function shapeRec(r: any, currentProfileId: string | null): ShapedRec {
     targetGame: r.target_game ?? null,
     ownerUsername: r.profiles?.username ?? '',
     ownerAvatar: r.profiles?.avatar_url ?? null,
+    ownerBadgeSlugs: Array.isArray(r.profiles?.profile_badges)
+      ? r.profiles.profile_badges.map((b: any) => b?.badge_slug).filter((s: any) => typeof s === 'string')
+      : [],
     upVotes: up,
     downVotes: down,
     myVote,

@@ -425,6 +425,12 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
         {xboxStatus === 'error' && (
           <div class="steam-banner steam-banner-err">Something went wrong connecting to Xbox. Try again in a moment.</div>
         )}
+        {xboxStatus === 'oauth-removed' && (
+          <div class="steam-banner steam-banner-err">OpenXBL took their one-click sign-in offline. Follow the three steps below to paste your API key instead — same result.</div>
+        )}
+        {xboxStatus === 'oauth-unavailable' && (
+          <div class="steam-banner steam-banner-err">Microsoft sign-in isn't set up yet on this environment. Use <strong>Paste API key instead</strong> below to connect your Xbox account.</div>
+        )}
 
         {profile.xbox_xuid ? (
           <>
@@ -481,17 +487,40 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
             <div class="settings-row-text">
               <div class="settings-row-label">Connect your Xbox account</div>
               <div class="settings-row-sub">
-                Microsoft doesn't offer a direct sign-in for hobby apps, so we use <a href="https://xbl.io" target="_blank" rel="noopener">OpenXBL</a> —
-                a community proxy. Clicking Connect Xbox opens a Microsoft sign-in window; after you approve, you'll be sent back here automatically.
+                Microsoft doesn't offer a direct sign-in for hobby apps, so we use <a href="https://xbl.io" target="_blank" rel="noopener">OpenXBL</a> — a community Xbox Live proxy. One-click sign-in with Microsoft below, or paste your own API key.
               </div>
             </div>
             <div class="psn-privacy-note">
-              We only get read access to your Xbox profile, games, and achievements — no writes or purchases. You can revoke access any time from <a href="https://xbl.io/profile" target="_blank" rel="noopener">xbl.io/profile</a>.
+              We only read your Xbox profile, games, and achievements — no writes or purchases. You can revoke access any time from your Microsoft account or by regenerating your key at xbl.io.
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-              <button class="settings-save-btn" id="xboxConnectBtn" onclick="xboxConnect()">Connect Xbox</button>
+              <button class="settings-save-btn" id="xboxConnectBtn" onclick="xboxConnectOauth()">Sign in with Microsoft</button>
+              <button type="button" class="settings-ghost-btn" id="xboxManualToggleBtn" onclick="xboxToggleManual()">Paste API key instead</button>
             </div>
             <div id="xboxConnectMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary)"></div>
+
+            <div id="xboxManualPanel" class="xbox-manual-panel" hidden>
+              <div class="settings-row-sub" style="margin-bottom:10px">
+                Already have an OpenXBL account? Paste your personal API key — same end result as Microsoft sign-in.
+              </div>
+              <ol class="xbox-steps">
+                <li>Open <a href="https://xbl.io/login" target="_blank" rel="noopener">xbl.io/login</a> and sign in with your Microsoft account.</li>
+                <li>Open your <a href="https://xbl.io/dashboard" target="_blank" rel="noopener">dashboard</a> — your <strong>API Key</strong> is at the top of the page.</li>
+                <li>Copy it and paste it here.</li>
+              </ol>
+              <div class="xbox-key-row" style="margin-top:12px">
+                <input
+                  type="text"
+                  id="xboxApiKeyInput"
+                  class="xbox-key-input"
+                  placeholder="Paste your OpenXBL API key"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button class="settings-save-btn" id="xboxManualConnectBtn" onclick="xboxConnectManual()">Connect with key</button>
+              </div>
+              <div id="xboxManualMsg" style="font-size:12px;min-height:16px;color:var(--text-secondary);margin-top:8px"></div>
+            </div>
           </div>
         )}
 
@@ -1226,6 +1255,47 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
     color: var(--text-secondary);
     line-height: 1.5;
   }
+  .xbox-steps {
+    margin: 0;
+    padding: 0 0 0 18px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.65;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .xbox-steps a { color: var(--accent); text-decoration: none; }
+  .xbox-steps a:hover { text-decoration: underline; }
+  .xbox-steps strong { color: var(--text-primary); font-weight: 600; }
+  .xbox-key-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .xbox-key-input {
+    flex: 1;
+    min-width: 220px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .xbox-key-input:focus { border-color: var(--accent); }
+  .xbox-manual-panel {
+    margin-top: 4px;
+    padding: 14px 14px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-hover);
+  }
+  .xbox-manual-panel[hidden] { display: none; }
 </style>
 
 <script>
@@ -1245,7 +1315,9 @@ declare global {
     psnSync: () => Promise<void>;
     psnSyncTrophies: () => Promise<void>;
     psnDisconnect: () => Promise<void>;
-    xboxConnect: () => void;
+    xboxConnectOauth: () => void;
+    xboxToggleManual: () => void;
+    xboxConnectManual: () => Promise<void>;
     xboxSync: () => Promise<void>;
     xboxSyncAchievements: () => Promise<void>;
     xboxDisconnect: () => Promise<void>;
@@ -1777,7 +1849,7 @@ async function psnDisconnect() {
 window.psnDisconnect = psnDisconnect;
 
 // ─── Xbox ───────────────────────────────────────────────────────────────────
-async function xboxConnect() {
+async function xboxConnectOauth() {
   const btn = document.getElementById('xboxConnectBtn') as HTMLButtonElement | null;
   const msg = document.getElementById('xboxConnectMsg');
   if (btn) {
@@ -1785,12 +1857,73 @@ async function xboxConnect() {
     btn.textContent = 'Redirecting…';
   }
   if (msg) {
-    msg.textContent = 'Opening Xbox sign-in…';
+    msg.textContent = 'Opening Microsoft sign-in…';
     (msg as HTMLElement).style.color = 'var(--text-secondary)';
   }
   window.location.href = '/api/auth/xbox-connect';
 }
-window.xboxConnect = xboxConnect;
+window.xboxConnectOauth = xboxConnectOauth;
+
+function xboxToggleManual() {
+  const panel = document.getElementById('xboxManualPanel');
+  const btn = document.getElementById('xboxManualToggleBtn');
+  if (!panel || !btn) return;
+  const isHidden = panel.hasAttribute('hidden');
+  if (isHidden) {
+    panel.removeAttribute('hidden');
+    btn.textContent = 'Hide API key form';
+    document.getElementById('xboxApiKeyInput')?.focus();
+  } else {
+    panel.setAttribute('hidden', '');
+    btn.textContent = 'Paste API key instead';
+  }
+}
+window.xboxToggleManual = xboxToggleManual;
+
+async function xboxConnectManual() {
+  const input = document.getElementById('xboxApiKeyInput') as HTMLInputElement | null;
+  const btn = document.getElementById('xboxManualConnectBtn') as HTMLButtonElement | null;
+  const msg = document.getElementById('xboxManualMsg');
+  if (!input || !btn || !msg) return;
+
+  const apiKey = input.value.trim();
+  if (!apiKey) {
+    msg.textContent = 'Paste your API key first.';
+    (msg as HTMLElement).style.color = '#f87171';
+    input.focus();
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting…';
+  msg.textContent = 'Checking your API key with OpenXBL…';
+  (msg as HTMLElement).style.color = 'var(--text-secondary)';
+
+  try {
+    const res = await fetch('/api/xbox/connect-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      msg.textContent = data.error ?? 'Something went wrong.';
+      (msg as HTMLElement).style.color = '#f87171';
+      btn.disabled = false;
+      btn.textContent = 'Connect with key';
+      return;
+    }
+    msg.textContent = `Connected as ${data.gamertag ?? data.xuid}. Reloading…`;
+    (msg as HTMLElement).style.color = '#4ade80';
+    setTimeout(() => { window.location.href = '/settings?xbox=connected#xbox'; }, 600);
+  } catch (e) {
+    msg.textContent = 'Network error. Try again.';
+    (msg as HTMLElement).style.color = '#f87171';
+    btn.disabled = false;
+    btn.textContent = 'Connect with key';
+  }
+}
+window.xboxConnectManual = xboxConnectManual;
 
 async function xboxSync() {
   const btn = document.getElementById('xboxSyncBtn') as HTMLButtonElement | null;

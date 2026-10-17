@@ -1,9 +1,15 @@
-// Newest upload on a YouTube channel, for the profile video showcase.
+// Newest upload on a YouTube channel + channel metadata (name, bio, subscriber
+// count, avatar), for the profile video showcase and the home-page Chekpoint
+// Creators strip.
 //
-// With YOUTUBE_API_KEY set it uses the Data API (channels.list → the channel's
-// uploads playlist → playlistItems.list, 2 quota units). Without a key, or if
-// the API fails, it reads the channel's public /videos tab, which lists uploads
-// newest first. (The channel RSS feed would be simpler but returns 404s.)
+// Data API path (requires YOUTUBE_API_KEY, ~3 quota units/creator): one
+// channels.list call pulls snippet + statistics + uploads playlist id, one
+// playlistItems.list gets the newest video, one videos.list fills in view
+// count + duration.
+//
+// Fallback scrape path (no key): reads the channel's /videos tab. Only yields
+// the latest video's id and title — channel info and video stats stay null.
+// (RSS would be simpler but YouTube now serves 404s on it.)
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const TIMEOUT_MS = 5000;
@@ -11,6 +17,23 @@ const TIMEOUT_MS = 5000;
 export interface LatestUpload {
   id: string;
   title: string | null;
+  description: string | null;
+  publishedAt: string | null;      // ISO 8601
+  viewCount: number | null;
+  durationSeconds: number | null;
+}
+
+export interface ChannelInfo {
+  name: string | null;
+  handle: string | null;           // includes leading @
+  bio: string | null;
+  avatarUrl: string | null;
+  subscriberCount: number | null;
+}
+
+export interface CreatorContent {
+  video: LatestUpload | null;
+  channel: ChannelInfo | null;
 }
 
 /** The channel part of a validated profile YouTube link: { kind, value }. */
@@ -25,7 +48,6 @@ export function parseChannelUrl(url: string | null | undefined): { kind: 'handle
 export function parseLatestFromVideosPage(html: string): LatestUpload | null {
   const start = html.search(/"richItemRenderer":\{"content":\{"lockupViewModel":\{/);
   if (start === -1) return null;
-  // Each lockup is ~12 KB; the next item's start bounds this one.
   const rest = html.slice(start + 1);
   const next = rest.search(/"richItemRenderer":\{/);
   const item = next === -1 ? rest.slice(0, 20000) : rest.slice(0, next);
@@ -37,34 +59,88 @@ export function parseLatestFromVideosPage(html: string): LatestUpload | null {
   if (raw) {
     try { title = JSON.parse(`"${raw}"`); } catch { title = null; }
   }
-  return { id, title };
+  return { id, title, description: null, publishedAt: null, viewCount: null, durationSeconds: null };
 }
 
-async function fromDataApi(channel: NonNullable<ReturnType<typeof parseChannelUrl>>, key: string): Promise<LatestUpload | null> {
+// PT1H2M3S → 3723. Returns null on anything that doesn't parse.
+export function parseIsoDuration(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const m = iso.match(/^P(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+  if (!m) return null;
+  const h = parseInt(m[1] ?? '0', 10);
+  const mn = parseInt(m[2] ?? '0', 10);
+  const s = parseInt(m[3] ?? '0', 10);
+  return h * 3600 + mn * 60 + s;
+}
+
+async function fromDataApi(channel: NonNullable<ReturnType<typeof parseChannelUrl>>, key: string): Promise<CreatorContent> {
   const k = encodeURIComponent(key);
   const filter =
     channel.kind === 'handle' ? `forHandle=${encodeURIComponent('@' + channel.value)}`
     : channel.kind === 'channel' ? `id=${encodeURIComponent(channel.value)}`
     : channel.kind === 'user' ? `forUsername=${encodeURIComponent(channel.value)}`
     : null; // legacy /c/ names have no API lookup
-  if (!filter) return null;
+  if (!filter) return { video: null, channel: null };
 
-  const chRes = await fetch(`https://www.googleapis.com/youtube/v3/channels?part=contentDetails&${filter}&key=${k}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  // One channels.list for everything we need about the channel.
+  const chRes = await fetch(`https://www.googleapis.com/youtube/v3/channels?part=contentDetails,snippet,statistics&${filter}&key=${k}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!chRes.ok) {
     console.error('[youtubeChannel] channels.list error:', chRes.status, await chRes.text().catch(() => ''));
-    return null;
+    return { video: null, channel: null };
   }
-  const uploads = (await chRes.json())?.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
-  if (!uploads) return null;
+  const chItem = (await chRes.json())?.items?.[0];
+  const uploads = chItem?.contentDetails?.relatedPlaylists?.uploads;
+
+  const avatarRaw = chItem?.snippet?.thumbnails?.medium?.url
+    ?? chItem?.snippet?.thumbnails?.high?.url
+    ?? chItem?.snippet?.thumbnails?.default?.url
+    ?? null;
+  const customUrl = typeof chItem?.snippet?.customUrl === 'string' ? chItem.snippet.customUrl : null;
+  const channelInfo: ChannelInfo = {
+    name: chItem?.snippet?.title ?? null,
+    handle: customUrl ? (customUrl.startsWith('@') ? customUrl : '@' + customUrl) : null,
+    bio: typeof chItem?.snippet?.description === 'string' ? chItem.snippet.description : null,
+    avatarUrl: avatarRaw,
+    subscriberCount: chItem?.statistics?.subscriberCount != null && !chItem.statistics.hiddenSubscriberCount
+      ? Number(chItem.statistics.subscriberCount)
+      : null,
+  };
+
+  if (!uploads) return { video: null, channel: channelInfo };
 
   const plRes = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=1&playlistId=${encodeURIComponent(uploads)}&key=${k}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (!plRes.ok) {
     console.error('[youtubeChannel] playlistItems.list error:', plRes.status, await plRes.text().catch(() => ''));
-    return null;
+    return { video: null, channel: channelInfo };
   }
   const snippet = (await plRes.json())?.items?.[0]?.snippet;
-  const id = snippet?.resourceId?.videoId;
-  return id && VIDEO_ID.test(id) ? { id, title: snippet?.title ?? null } : null;
+  const vid = snippet?.resourceId?.videoId;
+  if (!vid || !VIDEO_ID.test(vid)) return { video: null, channel: channelInfo };
+
+  // Fill in view count + duration via videos.list. If this errors, we still
+  // return what we have from the playlistItems snippet.
+  let viewCount: number | null = null;
+  let durationSeconds: number | null = null;
+  try {
+    const vRes = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails&id=${encodeURIComponent(vid)}&key=${k}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (vRes.ok) {
+      const v = (await vRes.json())?.items?.[0];
+      if (v?.statistics?.viewCount != null) viewCount = Number(v.statistics.viewCount);
+      durationSeconds = parseIsoDuration(v?.contentDetails?.duration);
+    }
+  } catch (e) {
+    console.error('[youtubeChannel] videos.list error:', e);
+  }
+
+  const video: LatestUpload = {
+    id: vid,
+    title: snippet?.title ?? null,
+    description: typeof snippet?.description === 'string' ? snippet.description : null,
+    publishedAt: typeof snippet?.publishedAt === 'string' ? snippet.publishedAt : null,
+    viewCount,
+    durationSeconds,
+  };
+  return { video, channel: channelInfo };
 }
 
 async function fromVideosPage(channelUrl: string): Promise<LatestUpload | null> {
@@ -76,13 +152,23 @@ async function fromVideosPage(channelUrl: string): Promise<LatestUpload | null> 
   return parseLatestFromVideosPage(await res.text());
 }
 
-/** Newest upload for a profile's YouTube link, or null (no link, no uploads, YouTube unreachable). */
-export async function fetchLatestUpload(channelUrl: string | null | undefined, apiKey?: string): Promise<LatestUpload | null> {
+/** Combined channel + latest-upload bundle. API path when key is set, scrape
+ *  fallback fills in just the video. Returns `{ video: null, channel: null }`
+ *  when nothing could be fetched. */
+export async function fetchCreatorContent(channelUrl: string | null | undefined, apiKey?: string): Promise<CreatorContent> {
   const channel = parseChannelUrl(channelUrl);
-  if (!channel || !channelUrl) return null;
+  if (!channel || !channelUrl) return { video: null, channel: null };
   if (apiKey) {
-    const viaApi = await fromDataApi(channel, apiKey).catch((e) => { console.error('[youtubeChannel] data api error:', e); return null; });
-    if (viaApi) return viaApi;
+    const viaApi = await fromDataApi(channel, apiKey).catch((e) => { console.error('[youtubeChannel] data api error:', e); return { video: null, channel: null } as CreatorContent; });
+    if (viaApi.video || viaApi.channel) return viaApi;
   }
-  return fromVideosPage(channelUrl.trim()).catch((e) => { console.error('[youtubeChannel] videos page error:', e); return null; });
+  const video = await fromVideosPage(channelUrl.trim()).catch((e) => { console.error('[youtubeChannel] videos page error:', e); return null; });
+  return { video, channel: null };
+}
+
+/** Newest upload only — kept for the profile video showcase that doesn't
+ *  need channel info. Thin wrapper over fetchCreatorContent. */
+export async function fetchLatestUpload(channelUrl: string | null | undefined, apiKey?: string): Promise<LatestUpload | null> {
+  const { video } = await fetchCreatorContent(channelUrl, apiKey);
+  return video;
 }

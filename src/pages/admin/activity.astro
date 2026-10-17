@@ -3,6 +3,7 @@ export const prerender = false;
 import Layout from "../../components/Layout.astro";
 import { resolveSiteAdminProfile } from "../../utils/api";
 import { getSupabaseAdmin } from "../../utils/database";
+import "../../styles/admin.css";
 
 const profile = await resolveSiteAdminProfile(Astro);
 if (!profile) return Astro.redirect('/404');
@@ -14,6 +15,24 @@ const { data: raw, error } = await db.rpc('admin_daily_activity', { days: 60 });
 if (error) {
   console.error('[admin/activity] rpc error:', JSON.stringify(error));
 }
+
+// 14-day retention cohorts over the trailing 90 days.
+const { data: retentionRaw, error: retError } = await db.rpc('admin_user_retention', { window_days: 90 });
+if (retError) {
+  console.error('[admin/activity] retention rpc error:', JSON.stringify(retError));
+}
+
+type RetentionRow = { cohort_week: string; cohort_size: number; retained_14d: number; retained_pct: number };
+const retentionRows: RetentionRow[] = ((retentionRaw as any[]) ?? []).map((r) => ({
+  cohort_week: r.cohort_week,
+  cohort_size: Number(r.cohort_size ?? 0),
+  retained_14d: Number(r.retained_14d ?? 0),
+  retained_pct: Number(r.retained_pct ?? 0),
+}));
+
+const retentionTotal = retentionRows.reduce((a, r) => a + r.cohort_size, 0);
+const retentionReturned = retentionRows.reduce((a, r) => a + r.retained_14d, 0);
+const retentionPct = retentionTotal === 0 ? 0 : Math.round((1000 * retentionReturned) / retentionTotal) / 10;
 
 type DayRow = {
   day: string;
@@ -73,7 +92,73 @@ const summary: Summary[] = METRICS.map(({ key, label }) => {
 // Last 30 days of day rows for the chart + table.
 const last30Rows = rows.slice(last30Start);
 
-const signupMax = Math.max(1, ...last30Rows.map((r) => r.signups));
+// ── Multi-line chart setup ────────────────────────────────────────────────
+// Shared Y axis across all metrics so volumes are directly comparable.
+const chartMax = Math.max(
+  1,
+  ...last30Rows.flatMap((r) => [r.signups, r.reviews, r.comments, r.recommendations, r.reports])
+);
+
+// SVG viewBox: 800 x 240, with padding for axis labels.
+const CHART_W = 800;
+const CHART_H = 240;
+const PAD_L = 32;
+const PAD_R = 12;
+const PAD_T = 12;
+const PAD_B = 32;
+const PLOT_W = CHART_W - PAD_L - PAD_R;
+const PLOT_H = CHART_H - PAD_T - PAD_B;
+const nPoints = last30Rows.length;
+const xStep = nPoints > 1 ? PLOT_W / (nPoints - 1) : 0;
+
+function xAt(i: number): number { return PAD_L + i * xStep; }
+function yAt(v: number): number { return PAD_T + PLOT_H - (v / chartMax) * PLOT_H; }
+
+const SERIES: { key: Metric; label: string; color: string }[] = [
+  { key: 'signups',         label: 'Signups',  color: '#6050c8' }, // --accent
+  { key: 'reviews',         label: 'Reviews',  color: '#27ae60' },
+  { key: 'comments',        label: 'Comments', color: '#3498db' },
+  { key: 'recommendations', label: 'Recs',     color: '#e67e22' },
+  { key: 'reports',         label: 'Reports',  color: '#c0392b' },
+];
+
+const seriesPaths = SERIES.map((s) => {
+  const d = last30Rows
+    .map((r, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(r[s.key]).toFixed(1)}`)
+    .join(' ');
+  return { ...s, d };
+});
+
+// Y-axis gridlines (0, 25%, 50%, 75%, 100% of max).
+const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => ({
+  y: PAD_T + PLOT_H - f * PLOT_H,
+  label: Math.round(chartMax * f).toString(),
+}));
+
+// X-axis labels: every ~5th day to avoid crowding.
+const xTickStep = Math.max(1, Math.ceil(nPoints / 6));
+const xTicks = last30Rows
+  .map((r, i) => ({ i, label: fmtDay(r.day).replace(/^\w+ /, '') }))
+  .filter(({ i }) => i % xTickStep === 0 || i === nPoints - 1);
+
+// Column hover zones — each covers half the gap on either side of its data point,
+// so hovering anywhere above that column pops the day's full stats tooltip.
+const hoverZones = last30Rows.map((_r, i) => {
+  const left  = i === 0            ? PAD_L : (xAt(i - 1) + xAt(i)) / 2;
+  const right = i === nPoints - 1  ? CHART_W - PAD_R : (xAt(i) + xAt(i + 1)) / 2;
+  return { i, x: left, width: right - left, cx: xAt(i) };
+});
+
+// Data for the client-side hover script — one record per day.
+const chartData = last30Rows.map((r) => ({
+  day: r.day,
+  signups: r.signups,
+  reviews: r.reviews,
+  comments: r.comments,
+  recommendations: r.recommendations,
+  reports: r.reports,
+}));
+const chartSeries = SERIES;
 
 function fmtDay(s: string): string {
   const d = new Date(s + 'T00:00:00');
@@ -86,62 +171,221 @@ function fmtWeekday(s: string): string {
 
 <Layout title="Activity — Admin" isLoggedIn={true} currentProfile={profile} activeNav="admin" variant="two-col">
   <main class="feed admin-main">
-    <div class="feed-header">
-      <div>
-        <div class="feed-title">Activity</div>
-        <div class="feed-subtitle">Daily signups + content, last 30 days. Trend vs the prior 30.</div>
-      </div>
-    </div>
-
     <div class="admin-content">
-      <a href="/admin" class="admin-back-link">&larr; Admin</a>
+      <a href="/admin" class="admin-back-link">← Admin</a>
+
+      <header class="admin-page-header">
+        <div>
+          <h1 class="admin-page-title">Activity</h1>
+          <p class="admin-page-subtitle">Daily signups and content over the last 30 days, compared with the prior 30.</p>
+        </div>
+      </header>
 
       {rows.length === 0 && <p class="admin-empty">No data yet — did the admin_daily_activity migration apply?</p>}
 
       {rows.length > 0 && (
         <>
-          <section class="summary-row">
+          <section class="admin-stat-row">
             {summary.map((s) => {
               const sign = s.delta30 === 0 ? '' : s.delta30 > 0 ? '+' : '';
               const trend = s.delta30 === 0 ? 'flat' : s.delta30 > 0 ? 'up' : 'down';
               return (
-                <div class="metric-card">
-                  <div class="metric-label">{s.label}</div>
-                  <div class="metric-value">{s.last30}</div>
-                  <div class="metric-sub">
-                    <span class="metric-sub-main">{s.last7} last 7d</span>
-                    <span class={`metric-delta metric-delta-${trend}`}>{sign}{s.delta30} vs prior 30</span>
+                <div class="admin-stat">
+                  <div class="admin-stat-label">{s.label}</div>
+                  <div class="admin-stat-num">{s.last30}</div>
+                  <div class="admin-stat-sub">
+                    <span class="admin-stat-sub-main">{s.last7} last 7d</span>
+                    <span class={`admin-stat-delta admin-stat-delta-${trend}`}>{sign}{s.delta30} vs prior 30</span>
                   </div>
                 </div>
               );
             })}
           </section>
 
-          <section class="chart-section">
-            <h3 class="admin-section-title">Signups per day — last 30</h3>
+          <section class="admin-section chart-section">
+            <h3 class="admin-section-title">Daily activity <span class="section-sub">last 30 days</span></h3>
             <div class="chart-wrap">
-              <div class="chart-bars" role="list">
-                {last30Rows.map((r) => {
-                  const pct = (r.signups / signupMax) * 100;
-                  return (
-                    <div class="chart-col" role="listitem" title={`${fmtDay(r.day)}: ${r.signups} signups`}>
-                      <div class="chart-bar-track">
-                        <div class="chart-bar" style={`height: ${pct}%`} data-zero={r.signups === 0 ? 'true' : 'false'}>
-                          <span class="chart-bar-label">{r.signups > 0 ? r.signups : ''}</span>
-                        </div>
-                      </div>
-                      <div class="chart-x">{fmtDay(r.day).replace(/^\w+ /, '')}</div>
-                    </div>
-                  );
-                })}
+              <div class="chart-legend">
+                {SERIES.map((s) => (
+                  <span class="legend-item">
+                    <span class="legend-swatch" style={`background:${s.color}`}></span>
+                    {s.label}
+                  </span>
+                ))}
               </div>
+              <div class="chart-plot">
+                <svg class="line-chart" viewBox={`0 0 ${CHART_W} ${CHART_H}`} role="img" aria-label="Daily activity trend chart">
+                  {/* Gridlines + y labels */}
+                  {yTicks.map((t) => (
+                    <g>
+                      <line x1={PAD_L} x2={CHART_W - PAD_R} y1={t.y} y2={t.y} class="grid-line" />
+                      <text x={PAD_L - 6} y={t.y + 3} class="axis-label axis-label-y">{t.label}</text>
+                    </g>
+                  ))}
+                  {/* X labels */}
+                  {xTicks.map((t) => (
+                    <text x={xAt(t.i)} y={CHART_H - PAD_B + 16} class="axis-label axis-label-x">{t.label}</text>
+                  ))}
+                  {/* Vertical crosshair guide (shown on hover) */}
+                  <line class="hover-guide" x1="0" x2="0" y1={PAD_T} y2={PAD_T + PLOT_H} />
+                  {/* Series lines (drawn after grid so they sit on top) */}
+                  {seriesPaths.map((s) => (
+                    <path d={s.d} fill="none" stroke={s.color} stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" />
+                  ))}
+                  {/* Point markers */}
+                  {seriesPaths.map((s) => (
+                    <g data-series={s.key}>
+                      {last30Rows.map((r, i) => (
+                        <circle
+                          cx={xAt(i)}
+                          cy={yAt(r[s.key])}
+                          r="2.2"
+                          fill={s.color}
+                          data-day-idx={i}
+                        />
+                      ))}
+                    </g>
+                  ))}
+                  {/* Column hover zones (invisible, pointer target) */}
+                  {hoverZones.map((z) => (
+                    <rect
+                      class="hover-zone"
+                      x={z.x}
+                      y={PAD_T}
+                      width={z.width}
+                      height={PLOT_H}
+                      data-idx={z.i}
+                      data-cx={z.cx}
+                    />
+                  ))}
+                </svg>
+                <div class="chart-tooltip" role="tooltip"></div>
+              </div>
+              <script is:inline define:vars={{ chartData, chartSeries }}>
+                (function () {
+                  var wrap = document.querySelector('.chart-plot');
+                  if (!wrap) return;
+                  var svg = wrap.querySelector('.line-chart');
+                  var tooltip = wrap.querySelector('.chart-tooltip');
+                  var guide = svg.querySelector('.hover-guide');
+                  var zones = svg.querySelectorAll('.hover-zone');
+
+                  function fmtDay(day) {
+                    var d = new Date(day + 'T00:00:00');
+                    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                  }
+
+                  function highlight(idx) {
+                    svg.querySelectorAll('circle[data-day-idx]').forEach(function (c) {
+                      if (parseInt(c.getAttribute('data-day-idx'), 10) === idx) {
+                        c.setAttribute('r', '4');
+                      } else {
+                        c.setAttribute('r', '2.2');
+                      }
+                    });
+                  }
+                  function clearHighlight() {
+                    svg.querySelectorAll('circle[data-day-idx]').forEach(function (c) { c.setAttribute('r', '2.2'); });
+                  }
+
+                  function showAt(idx, rect) {
+                    var row = chartData[idx];
+                    if (!row) return;
+                    var rows = chartSeries.map(function (s) {
+                      return '<div class="tt-row">'
+                        + '<span class="tt-dot" style="background:' + s.color + '"></span>'
+                        + '<span class="tt-label">' + s.label + '</span>'
+                        + '<span class="tt-val">' + row[s.key] + '</span>'
+                        + '</div>';
+                    }).join('');
+                    tooltip.innerHTML = '<div class="tt-day">' + fmtDay(row.day) + '</div>' + rows;
+                    tooltip.style.display = 'block';
+
+                    var wrapRect = wrap.getBoundingClientRect();
+                    var zoneRect = rect.getBoundingClientRect();
+                    var columnCenter = zoneRect.left - wrapRect.left + zoneRect.width / 2;
+                    var ttW = tooltip.offsetWidth;
+                    var ttH = tooltip.offsetHeight;
+                    // Prefer right side; flip to left if it'd overflow.
+                    var left = columnCenter + 12;
+                    if (left + ttW + 8 > wrap.clientWidth) left = columnCenter - ttW - 12;
+                    if (left < 4) left = 4;
+                    tooltip.style.left = left + 'px';
+                    tooltip.style.top = Math.max(4, Math.min(wrap.clientHeight - ttH - 4, 16)) + 'px';
+
+                    // Move the SVG guide line to the data point's x.
+                    var cx = rect.getAttribute('data-cx');
+                    guide.setAttribute('x1', cx);
+                    guide.setAttribute('x2', cx);
+                    guide.classList.add('on');
+
+                    highlight(idx);
+                  }
+
+                  function hide() {
+                    tooltip.style.display = 'none';
+                    guide.classList.remove('on');
+                    clearHighlight();
+                  }
+
+                  zones.forEach(function (rect) {
+                    var idx = parseInt(rect.getAttribute('data-idx'), 10);
+                    rect.addEventListener('mouseenter', function () { showAt(idx, rect); });
+                    rect.addEventListener('mousemove', function () { showAt(idx, rect); });
+                  });
+                  svg.addEventListener('mouseleave', hide);
+                })();
+              </script>
             </div>
           </section>
 
           <section class="admin-section">
+            <h3 class="admin-section-title">14-day retention <span class="section-sub">last 90 days</span></h3>
+            <p class="admin-section-note">Share of new users who posted a review, comment, or rec at least 14 days after signing up. Only cohorts that have fully aged (signup ≥ 14 days ago) are counted.</p>
+            {retentionRows.length === 0 ? (
+              <p class="admin-empty">No matured cohorts yet.</p>
+            ) : (
+              <>
+                <div class="retention-headline">
+                  <div class="retention-headline-pct">{retentionPct}%</div>
+                  <div class="retention-headline-sub">{retentionReturned} of {retentionTotal} new users came back after 2 weeks</div>
+                </div>
+                <div class="admin-table-wrap">
+                  <table class="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Signup week</th>
+                        <th class="num">Cohort</th>
+                        <th class="num">Retained</th>
+                        <th class="num">%</th>
+                        <th>&nbsp;</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {retentionRows.map((r) => (
+                        <tr>
+                          <td>{fmtDay(r.cohort_week)}</td>
+                          <td class={`num${r.cohort_size === 0 ? ' zero' : ''}`}>{r.cohort_size}</td>
+                          <td class={`num${r.retained_14d === 0 ? ' zero' : ''}`}>{r.retained_14d}</td>
+                          <td class="num">{r.retained_pct}%</td>
+                          <td>
+                            <div class="retention-bar">
+                              <div class="retention-bar-fill" style={`width:${Math.min(100, r.retained_pct)}%`}></div>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </section>
+
+          <section class="admin-section">
             <h3 class="admin-section-title">Daily breakdown</h3>
-            <div class="table-wrap">
-              <table class="activity-table">
+            <div class="admin-table-wrap">
+              <table class="admin-table">
                 <thead>
                   <tr>
                     <th>Day</th>
@@ -174,85 +418,112 @@ function fmtWeekday(s: string): string {
 </Layout>
 
 <style>
-  .admin-main { min-width: 0; }
-  .admin-content { padding: 20px; max-width: 960px; }
-  .admin-back-link { font-size: 13px; color: var(--text-secondary); text-decoration: none; margin-bottom: 12px; display: inline-block; }
-  .admin-back-link:hover { color: var(--accent); }
-  .admin-empty { color: var(--text-secondary); font-size: 14px; margin-top: 16px; }
-  .admin-section { margin-top: 24px; }
-  .admin-section-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); margin: 0 0 10px; }
-
-  .summary-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 10px;
-    margin-top: 16px;
-  }
-  .metric-card {
-    padding: 14px 16px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-card);
-  }
-  .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); }
-  .metric-value { font-size: 28px; font-weight: 700; line-height: 1.1; margin-top: 4px; }
-  .metric-sub { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-top: 8px; font-size: 11px; flex-wrap: wrap; }
-  .metric-sub-main { color: var(--text-tertiary); }
-  .metric-delta { font-weight: 600; }
-  .metric-delta-up { color: #27ae60; }
-  .metric-delta-down { color: #c0392b; }
-  .metric-delta-flat { color: var(--text-tertiary); }
-
-  .chart-section { margin-top: 24px; }
+  /* Page-local only — primitives in src/styles/admin.css. */
   .chart-wrap {
     padding: 16px;
     border: 1px solid var(--border);
     border-radius: 12px;
     background: var(--bg-card);
-    overflow-x: auto;
   }
-  .chart-bars {
+  .chart-legend {
     display: flex;
-    align-items: flex-end;
-    gap: 4px;
-    min-width: 480px;
-    height: 180px;
-  }
-  .chart-col { flex: 1; display: flex; flex-direction: column; align-items: stretch; min-width: 14px; }
-  .chart-bar-track { flex: 1; display: flex; align-items: flex-end; }
-  .chart-bar {
-    width: 100%;
-    background: var(--accent);
-    border-radius: 3px 3px 0 0;
-    min-height: 2px;
-    position: relative;
-    transition: opacity 0.15s ease;
-  }
-  .chart-bar[data-zero="true"] { background: var(--border); opacity: 0.5; min-height: 2px; }
-  .chart-bar:hover { opacity: 0.85; }
-  .chart-bar-label {
-    position: absolute;
-    left: 50%;
-    top: -14px;
-    transform: translateX(-50%);
-    font-size: 9px;
-    font-weight: 600;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    font-size: 12px;
     color: var(--text-secondary);
-    white-space: nowrap;
+    margin-bottom: 10px;
   }
-  .chart-x {
-    font-size: 9px;
-    text-align: center;
-    color: var(--text-tertiary);
-    margin-top: 4px;
-    white-space: nowrap;
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
   }
+  .line-chart {
+    width: 100%;
+    height: auto;
+    display: block;
+    overflow: visible;
+  }
+  .line-chart .grid-line { stroke: var(--border-subtle, var(--border)); stroke-width: 1; stroke-dasharray: 2 3; opacity: 0.6; }
+  .line-chart .axis-label { font-size: 10px; fill: var(--text-tertiary); font-family: inherit; }
+  .line-chart .axis-label-y { text-anchor: end; }
+  .line-chart .axis-label-x { text-anchor: middle; }
+  .line-chart circle { transition: r 0.08s ease; pointer-events: none; }
+  .line-chart .hover-guide {
+    stroke: var(--text-secondary);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.1s ease;
+  }
+  .line-chart .hover-guide.on { opacity: 0.5; }
+  .line-chart .hover-zone { fill: transparent; cursor: crosshair; }
 
-  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
-  .activity-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--bg-card); }
-  .activity-table th, .activity-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border-subtle); }
-  .activity-table tr:last-child td { border-bottom: none; }
-  .activity-table th { background: var(--bg-hover); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); }
-  .activity-table .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .activity-table .num.zero { color: var(--text-tertiary); }
+  .chart-plot { position: relative; }
+  .chart-tooltip {
+    display: none;
+    position: absolute;
+    pointer-events: none;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 12px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+    min-width: 160px;
+    z-index: 10;
+  }
+  .chart-tooltip .tt-day {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-subtle, var(--border));
+  }
+  .chart-tooltip .tt-row {
+    display: grid;
+    grid-template-columns: 10px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+  .chart-tooltip .tt-dot { width: 10px; height: 10px; border-radius: 2px; }
+  .chart-tooltip .tt-label { color: var(--text-secondary); }
+  .chart-tooltip .tt-val { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .retention-headline {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    padding: 18px 22px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-card);
+    margin-bottom: 14px;
+  }
+  .retention-headline-pct {
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.4px;
+    color: var(--accent);
+  }
+  .retention-headline-sub { font-size: 13.5px; color: var(--text-secondary); }
+  .retention-bar {
+    width: 120px;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .retention-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+  }
 </style>
