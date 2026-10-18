@@ -1,0 +1,166 @@
+---
+export const prerender = false;
+import Layout from "../../components/Layout.astro";
+import { resolveSiteAdminProfile } from "../../utils/api";
+import { getSupabaseAdmin } from "../../utils/database";
+import { fetchCreatorContent } from "../../utils/youtubeChannel";
+import "../../styles/admin.css";
+
+const profile = await resolveSiteAdminProfile(Astro);
+if (!profile) return Astro.redirect('/404');
+
+const YOUTUBE_API_KEY = import.meta.env.YOUTUBE_API_KEY || (globalThis as any).process?.env?.YOUTUBE_API_KEY;
+
+const db = getSupabaseAdmin() as any;
+
+// All creator badge assignments, newest first. Join profiles for display chrome;
+// nested select is fine here since profile_badges + profiles are small.
+const { data: badgeRows } = await db
+  .from('profile_badges')
+  .select('assigned_at, profiles!profile_badges_profile_id_fkey ( id, username, avatar_url, youtube_url )')
+  .eq('badge_slug', 'chekpoint-creator')
+  .order('assigned_at', { ascending: false });
+
+type Row = {
+  assigned_at: string;
+  profile: { id: string; username: string; avatar_url: string | null; youtube_url: string | null };
+  subs: number | null;
+  channelHandle: string | null;
+};
+
+// Pull live sub counts in parallel. One YouTube API call per creator; mirrors
+// the home-page strip's pattern. Failures surface as `subs: null` rather than
+// crashing the page.
+const base = ((badgeRows as any[]) ?? [])
+  .map((r) => ({ assigned_at: r.assigned_at as string, profile: r.profiles }))
+  .filter((r) => r.profile);
+
+const channels = await Promise.all(
+  base.map((r) =>
+    r.profile.youtube_url
+      ? fetchCreatorContent(r.profile.youtube_url, YOUTUBE_API_KEY).catch(() => ({ video: null, channel: null }))
+      : Promise.resolve({ video: null, channel: null })
+  )
+);
+
+const rows: Row[] = base.map((r, i) => ({
+  assigned_at: r.assigned_at,
+  profile: r.profile,
+  subs: channels[i]?.channel?.subscriberCount ?? null,
+  channelHandle: channels[i]?.channel?.handle ?? null,
+}));
+
+function formatCompactNumber(n: number | null | undefined): string | null {
+  if (n == null || isNaN(n)) return null;
+  if (n < 1_000) return String(n);
+  if (n < 10_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+  if (n < 1_000_000) return Math.round(n / 1_000) + 'K';
+  if (n < 10_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  return Math.round(n / 1_000_000) + 'M';
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+---
+
+<Layout title="Creators — Admin" isLoggedIn={true} currentProfile={profile} activeNav="admin" variant="two-col">
+  <main class="feed admin-main">
+    <div class="admin-content">
+      <a href="/admin" class="admin-back-link">← Admin</a>
+
+      <header class="admin-page-header">
+        <div>
+          <h1 class="admin-page-title">Chekpoint Creators</h1>
+          <p class="admin-page-subtitle">
+            Everyone with the Chekpoint Creator badge, newest first. Sub counts are live from YouTube.
+          </p>
+        </div>
+        <span class="admin-chip admin-chip-accent">{rows.length} total</span>
+      </header>
+
+      {rows.length === 0 && <p class="admin-empty">No creators yet.</p>}
+
+      {rows.length > 0 && (
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>Creator</th>
+                <th>YouTube</th>
+                <th class="num">Subs</th>
+                <th>Added</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const subsLabel = formatCompactNumber(r.subs);
+                return (
+                  <tr>
+                    <td>
+                      <a class="creator-cell" href={`/admin/users/${r.profile.username}`}>
+                        {r.profile.avatar_url
+                          ? <img src={r.profile.avatar_url} alt="" class="creator-avatar" />
+                          : <span class="creator-avatar creator-avatar-empty">{r.profile.username.slice(0, 2).toUpperCase()}</span>
+                        }
+                        <span class="creator-username">@{r.profile.username}</span>
+                      </a>
+                    </td>
+                    <td>
+                      {r.profile.youtube_url
+                        ? <a href={r.profile.youtube_url} target="_blank" rel="noopener noreferrer" class="creator-link">{r.channelHandle ?? r.profile.youtube_url.replace(/^https?:\/\/(www\.)?youtube\.com\//, '')}</a>
+                        : <span class="creator-muted">—</span>
+                      }
+                    </td>
+                    <td class="num">{subsLabel ?? <span class="creator-muted">—</span>}</td>
+                    <td>{formatDate(r.assigned_at)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  </main>
+</Layout>
+
+<style>
+  /* Page-local — primitives in src/styles/admin.css. */
+  .admin-table th.num,
+  .admin-table td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .creator-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-primary);
+    text-decoration: none;
+  }
+  .creator-cell:hover .creator-username { color: var(--accent); }
+  .creator-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    object-fit: cover;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-hover);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+  .creator-avatar-empty { border: 1px solid var(--border); }
+  .creator-username { font-weight: 600; }
+  .creator-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+  }
+  .creator-link:hover { color: var(--accent); }
+  .creator-muted { color: var(--text-tertiary); }
+</style>
