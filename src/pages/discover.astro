@@ -82,65 +82,6 @@ function platformAbbrevs(game: UpcomingGame): string[] {
   return out;
 }
 
-// ── Most Reviewed Today + Top Rated This Week ─────────────────────────────
-// Moved from the home feed so Discover is the single surface for curated
-// "what's hot on Chekpoint right now" content. Both read from recent reviews
-// — PST day window for the hero, trailing 7 days for the strip.
-const PST_OFFSET_MS = 8 * 60 * 60 * 1000;
-function getPstDayStart(daysAgo = 0): Date {
-  const pstNow = new Date(Date.now() - PST_OFFSET_MS);
-  return new Date(Date.UTC(
-    pstNow.getUTCFullYear(), pstNow.getUTCMonth(), pstNow.getUTCDate() - daysAgo,
-    8, 0, 0, 0,
-  ));
-}
-const _todayPstStart = getPstDayStart(0);
-const _yesterdayPstStart = getPstDayStart(1);
-const _oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-const [todayRawRes, weekReviewsRes] = await Promise.all([
-  (supabase as any)
-    .from('reviews').select('game_id, published_at, games(id, title, slug, cover_img_url)')
-    .eq('status', 'published').gte('published_at', _yesterdayPstStart.toISOString()).limit(200),
-  (supabase as any)
-    .from('reviews').select('game_id, score, games(id, title, slug, cover_img_url)')
-    .eq('status', 'published').gte('published_at', _oneWeekAgo).limit(500),
-]);
-
-type DayMap = Record<string, { title: string; slug: string; cover: string | null; count: number }>;
-const _todayMap: DayMap = {};
-const _yesterdayMap: DayMap = {};
-for (const r of (todayRawRes.data as any[]) ?? []) {
-  const g = r.games;
-  if (!g) continue;
-  const publishedAt = new Date(r.published_at);
-  const map = publishedAt >= _todayPstStart ? _todayMap : _yesterdayMap;
-  if (!map[g.id]) map[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 };
-  map[g.id].count++;
-}
-const mostReviewedToday = Object.values(_todayMap).sort((a, b) => b.count - a.count)[0] ?? null;
-const mostReviewedYesterday = Object.values(_yesterdayMap).sort((a, b) => b.count - a.count)[0] ?? null;
-const featuredGame = mostReviewedToday ?? mostReviewedYesterday;
-const featuredLabel = mostReviewedToday ? 'Most Reviewed Today' : 'Most Reviewed Yesterday';
-const featuredPeriod = mostReviewedToday ? 'today' : 'yesterday';
-
-const _weekGameMap: Record<string, { title: string; slug: string; cover: string | null; scores: number[] }> = {};
-for (const r of (weekReviewsRes.data as any[]) ?? []) {
-  const g = r.games;
-  if (!g) continue;
-  if (!_weekGameMap[g.id]) _weekGameMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, scores: [] };
-  if (r.score != null) _weekGameMap[g.id].scores.push(r.score);
-}
-const topRated = Object.entries(_weekGameMap)
-  .map(([id, g]) => {
-    if (g.scores.length < 2) return null;
-    const avg = g.scores.reduce((a, b) => a + b, 0) / g.scores.length;
-    return { id, ...g, avg_score: avg, review_count: g.scores.length };
-  })
-  .filter((g): g is NonNullable<typeof g> => !!g)
-  .sort((a, b) => b.avg_score - a.avg_score)
-  .slice(0, 12);
-
 if (currentProfile) {
   // Step 1: Games I've already reviewed
   const { data: myReviews } = await (supabase as any)
@@ -252,7 +193,7 @@ if (currentProfile) {
       <section
         class="upcoming-section"
         id="upcomingSection"
-        data-next-from={_upcomingToUnix}
+        data-next-from={Math.max(...upcomingInitial.map((g) => g.release_unix)) + 1}
         data-last-key={upcomingMonths[upcomingMonths.length - 1].key}
       >
         <div class="upcoming-header">
@@ -313,57 +254,6 @@ if (currentProfile) {
 
         <div class="upcoming-sentinel" id="upcomingSentinel" aria-hidden="true"></div>
       </section>
-    )}
-
-    {featuredGame && (
-      <div class="hero">
-        {igdbImage((featuredGame as any).cover, 't_1080p') && (
-          <div class="hero-bg" style={`background-image: url('${igdbImage((featuredGame as any).cover, 't_1080p')}')`}></div>
-        )}
-        <div class="hero-overlay"></div>
-        <div class="hero-content">
-          {igdbImage((featuredGame as any).cover)
-            ? <img class="hero-cover" src={igdbImage((featuredGame as any).cover) ?? ''} alt={(featuredGame as any).title} />
-            : <div class="hero-cover-placeholder">🎮</div>
-          }
-          <div class="hero-info">
-            <div class="hero-label">{featuredLabel}</div>
-            <div class="hero-title">{(featuredGame as any).title}</div>
-            <div class="hero-score">
-              <span class="hero-score-num">{(featuredGame as any).count}</span>
-              <span class="hero-score-label">{(featuredGame as any).count === 1 ? 'review' : 'reviews'} {featuredPeriod}</span>
-            </div>
-            <a href={`/games/${(featuredGame as any).slug}`} class="hero-cta">Read reviews →</a>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {topRated.length > 0 && (
-      <div class="section-block">
-        <div class="section-block-header">
-          <span class="section-block-title">Top Rated This Week</span>
-          <a href="/search?sort=highest" class="section-block-link">See all →</a>
-        </div>
-        <div class="top-rated-scroll">
-          {topRated.map((game) => (
-            <a href={`/games/${game.slug}`} class="top-rated-card">
-              <div class="top-rated-cover-wrap">
-                {igdbImage(game.cover)
-                  ? <img class="top-rated-cover" src={igdbImage(game.cover) ?? ''} alt={game.title} loading="lazy" />
-                  : <div class="top-rated-cover-placeholder">🎮</div>
-                }
-                <div class={`top-rated-badge ${scoreClass(game.avg_score)}`}>
-                  {game.avg_score.toFixed(1)}
-                </div>
-              </div>
-              <div class="top-rated-info">
-                <div class="top-rated-title">{game.title}</div>
-              </div>
-            </a>
-          ))}
-        </div>
-      </div>
     )}
 
     <div class="feed-header">
@@ -844,7 +734,12 @@ if (currentProfile) {
             }
           }
           if (appended) monthsContainer.insertAdjacentHTML('beforeend', appended);
-          state.nextFromUnix = state.nextFromUnix + 60 * 86400;
+          // Advance by the last-rendered release date, not a fixed window step,
+          // so a dense span (e.g. Nov games padding the limit) doesn't cause a
+          // gap to the next requested window.
+          var maxUnix = 0;
+          for (var j = 0; j < data.games.length; j++) if (data.games[j].release_unix > maxUnix) maxUnix = data.games[j].release_unix;
+          if (maxUnix > state.nextFromUnix) state.nextFromUnix = maxUnix + 1;
           state.lastKey = grouped.length ? grouped[grouped.length - 1].key : state.lastKey;
           if (!data.has_more && data.games.length < 20) state.exhausted = true;
         })
