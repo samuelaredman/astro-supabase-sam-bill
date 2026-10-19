@@ -25,20 +25,17 @@ if (user) {
 }
 
 // ── Upcoming release calendar ──────────────────────────────────────────────
-// First page is server-rendered so above-the-fold is static HTML; subsequent
-// months lazy-load from /api/discover/upcoming on scroll. IGDB-sourced, no
-// local upcoming-games table — see src/pages/api/discover/upcoming.ts.
+// Fixed 30-day window — no infinite scroll. The whole month is server-rendered,
+// kept small on purpose so Discover stays scannable. IGDB-sourced, no local
+// table; see src/pages/api/discover/upcoming.ts for the live endpoint used by
+// the platform-chip filter.
 const _upcomingFromUnix = Math.floor(Date.now() / 1000);
-const _upcomingWindowDays = 60;
+const _upcomingWindowDays = 30;
 const _upcomingToUnix = _upcomingFromUnix + _upcomingWindowDays * 86400;
-// 200 games on first paint — with hypes>0 filtering out shovelware, that's
-// typically enough to reach ~5-6 weeks out, so November's big releases
-// (GTA 6, OoT Switch 2, etc.) show without the user having to scroll past
-// the fold to trigger a lazy-load.
 const upcomingInitial: UpcomingGame[] = await fetchUpcomingReleases({
   fromUnix: _upcomingFromUnix,
   toUnix: _upcomingToUnix,
-  limit: 200,
+  limit: 300,
 }).catch((e) => { console.error('[discover] upcoming initial fetch error:', e); return []; });
 
 let upcomingSlugByIgdbId: Record<number, string> = {};
@@ -58,7 +55,7 @@ if (upcomingInitial.length > 0) {
 // than fit on the card. Sorting within a day by hypes DESC floats named
 // releases (GTA 6, OoT Switch 2, etc.) above shovelware that still passed
 // the hypes>0 filter.
-const DAY_PREVIEW_COUNT = 4;
+const DAY_PREVIEW_COUNT = 2;
 type UpcomingDay = { iso: string; label: string; weekday: string; total: number; preview: UpcomingGame[] };
 function groupByDay(games: UpcomingGame[]): UpcomingDay[] {
   const map = new Map<string, UpcomingGame[]>();
@@ -212,39 +209,24 @@ if (currentProfile) {
 
         <div class="upcoming-day-grid" id="upcomingDayGrid">
           {upcomingDays.map((day) => (
-            <article class="upcoming-day" data-day={day.iso}>
+            <a class="upcoming-day" href={`/discover/releases/${day.iso}`} data-day={day.iso}>
               <div class="upcoming-day-head">
                 <span class="upcoming-day-weekday">{day.weekday}</span>
                 <span class="upcoming-day-date">{day.label}</span>
               </div>
               <div class="upcoming-day-covers" data-count={day.total}>
-                {day.preview.map((game) => {
-                  const chekpointSlug = upcomingSlugByIgdbId[game.igdb_id] ?? null;
-                  return (
-                    <a
-                      class={`upcoming-day-cover ${chekpointSlug ? 'is-imported' : 'is-unimported'}`}
-                      href={chekpointSlug ? `/games/${chekpointSlug}` : '#'}
-                      data-igdb-id={game.igdb_id}
-                      data-chekpoint-slug={chekpointSlug ?? ''}
-                      title={game.title}
-                      aria-label={game.title}
-                    >
-                      {game.cover_url
-                        ? <img src={game.cover_url} alt={game.title} loading="lazy" />
-                        : <span class="upcoming-day-cover-empty">🎮</span>
-                      }
-                    </a>
-                  );
-                })}
+                {day.preview.map((game) => (
+                  game.cover_url
+                    ? <img src={game.cover_url} alt={game.title} title={game.title} loading="lazy" />
+                    : <span class="upcoming-day-cover-empty">🎮</span>
+                ))}
               </div>
-              <a class="upcoming-day-view-all" href={`/discover/releases/${day.iso}`}>
-                View all{day.total > DAY_PREVIEW_COUNT ? ` (${day.total})` : ''} →
-              </a>
-            </article>
+              <div class="upcoming-day-foot">
+                {day.total === 1 ? '1 release' : `${day.total} releases`}
+              </div>
+            </a>
           ))}
         </div>
-
-        <div class="upcoming-sentinel" id="upcomingSentinel" aria-hidden="true"></div>
       </section>
     )}
 
@@ -460,30 +442,33 @@ if (currentProfile) {
 </style>
 
 <style is:global>
-  /* ── Release calendar: one card per day ────────────────────────────────
-     Grid of day cards; each card has a date header, a 2×2 preview of the
-     day's top-N most-hyped covers, and a "View all" link to a day page
-     listing everything. Global so lazy-loaded day cards (added via
-     innerHTML, no Astro scoping attribute) pick up the styles too. */
+  /* ── Release calendar: compact day cards, fixed 30-day window ──────────
+     Each card is a link to /discover/releases/<iso>. Preview shows the top
+     two most-hyped covers side by side; footer says how many total. Global
+     so filter-rerender keeps the styles. */
   .upcoming-section {
-    padding: 20px 24px 20px;
+    padding: 16px 20px 14px;
     border-bottom: 1px solid var(--border-subtle);
-    background:
-      radial-gradient(ellipse 70% 60% at 10% 0%, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 65%),
-      var(--bg-card);
   }
-  .upcoming-header { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
-  .upcoming-head-row { display: flex; align-items: baseline; gap: 10px; }
-  .upcoming-title { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -0.3px; }
-  .upcoming-source { font-size: 11px; color: var(--text-tertiary); letter-spacing: 0.05em; text-transform: uppercase; }
-  .upcoming-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .upcoming-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .upcoming-head-row { display: inline-flex; align-items: baseline; gap: 8px; }
+  .upcoming-title { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: 0.01em; }
+  .upcoming-source { font-size: 10px; color: var(--text-tertiary); letter-spacing: 0.08em; text-transform: uppercase; }
+  .upcoming-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
   .upcoming-chip {
-    padding: 5px 12px;
+    padding: 3px 9px;
     border-radius: 999px;
     border: 1px solid var(--border);
-    background: var(--bg-card);
+    background: transparent;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
@@ -498,35 +483,41 @@ if (currentProfile) {
 
   .upcoming-day-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-    gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    gap: 8px;
   }
   .upcoming-day {
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: var(--bg-card);
-    padding: 10px 10px 8px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    transition: border-color 0.15s, transform 0.15s;
+    gap: 5px;
+    padding: 6px 6px 5px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-card);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.12s, transform 0.12s;
   }
-  .upcoming-day:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+  .upcoming-day:hover {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    transform: translateY(-1px);
+  }
   .upcoming-day-head {
     display: flex;
     align-items: baseline;
-    gap: 6px;
+    justify-content: space-between;
+    gap: 4px;
     padding: 0 2px;
   }
   .upcoming-day-weekday {
-    font-size: 12px;
+    font-size: 10px;
     font-weight: 700;
     color: var(--text-secondary);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
   }
   .upcoming-day-date {
-    font-size: 12px;
+    font-size: 10px;
     font-weight: 600;
     color: var(--text-tertiary);
     font-variant-numeric: tabular-nums;
@@ -535,47 +526,37 @@ if (currentProfile) {
   .upcoming-day-covers {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 4px;
+    gap: 3px;
   }
-  .upcoming-day-cover {
-    aspect-ratio: 3 / 4;
-    border-radius: 6px;
-    overflow: hidden;
-    border: 1px solid var(--border);
-    background: var(--bg-hover);
-    display: block;
-    transition: transform 0.15s, box-shadow 0.15s;
-    text-decoration: none;
-  }
-  .upcoming-day-cover:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4);
-    border-color: var(--accent);
-  }
-  .upcoming-day-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .upcoming-day-covers[data-count="1"] { grid-template-columns: 1fr; }
+  .upcoming-day-covers img,
   .upcoming-day-cover-empty {
-    display: flex; align-items: center; justify-content: center;
-    width: 100%; height: 100%; font-size: 20px;
-  }
-
-  .upcoming-day-view-all {
+    width: 100%;
+    aspect-ratio: 3 / 4;
+    object-fit: cover;
     display: block;
-    text-align: center;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-tertiary);
-    text-decoration: none;
-    padding: 4px 2px 2px;
-    letter-spacing: 0.02em;
-    transition: color 0.15s;
+    border-radius: 4px;
+    background: var(--bg-hover);
   }
-  .upcoming-day-view-all:hover { color: var(--accent); }
+  .upcoming-day-cover-empty {
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
 
-  .upcoming-sentinel { height: 1px; }
+  .upcoming-day-foot {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    text-align: center;
+    padding-top: 1px;
+    letter-spacing: 0.02em;
+  }
+  .upcoming-day:hover .upcoming-day-foot { color: var(--accent); }
 
   @media (max-width: 720px) {
-    .upcoming-section { padding: 16px 14px; }
-    .upcoming-day-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+    .upcoming-section { padding: 12px 12px 10px; }
+    .upcoming-day-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
+    .upcoming-day { padding: 5px 5px 4px; }
+    .upcoming-title { font-size: 14px; }
   }
 </style>
 
@@ -584,16 +565,10 @@ if (currentProfile) {
     var section = document.getElementById('upcomingSection');
     if (!section) return;
     var grid = document.getElementById('upcomingDayGrid');
-    var sentinel = document.getElementById('upcomingSentinel');
-    if (!grid || !sentinel) return;
+    if (!grid) return;
 
-    var DAY_PREVIEW_COUNT = 4;
-    var state = {
-      platform: '',
-      nextFromUnix: parseInt(section.getAttribute('data-next-from') || '0', 10),
-      loading: false,
-      exhausted: false,
-    };
+    var DAY_PREVIEW_COUNT = 2;
+    var state = { platform: '', loading: false };
 
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, function (c) {
@@ -607,41 +582,25 @@ if (currentProfile) {
     function monthDayLabel(iso) {
       var p = iso.split('-'); return (+p[1]) + '/' + (+p[2]);
     }
-
-    function renderCover(game) {
-      var slug = game.chekpoint_slug;
-      var href = slug ? '/games/' + slug : '#';
-      var body = game.cover_url
-        ? '<img src="' + escapeHtml(game.cover_url) + '" alt="' + escapeHtml(game.title) + '" loading="lazy" />'
+    function renderPreview(game) {
+      return game.cover_url
+        ? '<img src="' + escapeHtml(game.cover_url) + '" alt="' + escapeHtml(game.title) + '" title="' + escapeHtml(game.title) + '" loading="lazy" />'
         : '<span class="upcoming-day-cover-empty">🎮</span>';
-      return (
-        '<a class="upcoming-day-cover ' + (slug ? 'is-imported' : 'is-unimported') + '" ' +
-          'href="' + href + '" ' +
-          'data-igdb-id="' + game.igdb_id + '" ' +
-          'data-chekpoint-slug="' + escapeHtml(slug || '') + '" ' +
-          'title="' + escapeHtml(game.title) + '" ' +
-          'aria-label="' + escapeHtml(game.title) + '">' +
-          body +
-        '</a>'
-      );
     }
     function renderDay(day) {
-      // day = { iso, games (sorted hypes desc), total }
-      var covers = day.games.slice(0, DAY_PREVIEW_COUNT).map(renderCover).join('');
-      var viewAllLabel = 'View all' + (day.total > DAY_PREVIEW_COUNT ? ' (' + day.total + ')' : '') + ' →';
+      var preview = day.games.slice(0, DAY_PREVIEW_COUNT).map(renderPreview).join('');
+      var footLabel = day.total === 1 ? '1 release' : day.total + ' releases';
       return (
-        '<article class="upcoming-day" data-day="' + day.iso + '">' +
+        '<a class="upcoming-day" href="/discover/releases/' + day.iso + '" data-day="' + day.iso + '">' +
           '<div class="upcoming-day-head">' +
             '<span class="upcoming-day-weekday">' + escapeHtml(weekdayLabel(day.iso)) + '</span>' +
             '<span class="upcoming-day-date">' + escapeHtml(monthDayLabel(day.iso)) + '</span>' +
           '</div>' +
-          '<div class="upcoming-day-covers" data-count="' + day.total + '">' + covers + '</div>' +
-          '<a class="upcoming-day-view-all" href="/discover/releases/' + day.iso + '">' + viewAllLabel + '</a>' +
-        '</article>'
+          '<div class="upcoming-day-covers" data-count="' + day.total + '">' + preview + '</div>' +
+          '<div class="upcoming-day-foot">' + footLabel + '</div>' +
+        '</a>'
       );
     }
-
-    // Within a day, biggest-hyped games float left. Ties fall back to title.
     function groupByDay(games) {
       var map = Object.create(null); var order = [];
       for (var i = 0; i < games.length; i++) {
@@ -657,97 +616,31 @@ if (currentProfile) {
       });
     }
 
-    function fetchNextWindow() {
-      if (state.loading || state.exhausted) return;
-      state.loading = true;
-      var qs = 'from=' + state.nextFromUnix + '&days=60&limit=200';
-      if (state.platform) qs += '&platforms=' + encodeURIComponent(state.platform);
-      fetch('/api/discover/upcoming?' + qs)
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (data) {
-          state.loading = false;
-          if (!data || !data.games || data.games.length === 0) { state.exhausted = true; return; }
-          var days = groupByDay(data.games);
-          var appended = '';
-          for (var i = 0; i < days.length; i++) {
-            var d = days[i];
-            // If a day card already exists (overlap at cursor boundary), merge
-            // new games in by re-sorting the combined bucket.
-            var existing = grid.querySelector('.upcoming-day[data-day="' + d.iso + '"]');
-            if (existing) {
-              var covers = existing.querySelector('.upcoming-day-covers');
-              var existingTotal = parseInt(covers?.getAttribute('data-count') || '0', 10);
-              var newTotal = existingTotal + d.games.length;
-              covers?.setAttribute('data-count', String(newTotal));
-              // Re-render the preview tiles with the combined top-N by hype
-              // isn't trivial without the existing bucket; cheap approximation:
-              // append new covers if slots remain, else leave the preview alone.
-              var remaining = DAY_PREVIEW_COUNT - (covers?.childElementCount || 0);
-              if (remaining > 0 && covers) {
-                covers.insertAdjacentHTML('beforeend', d.games.slice(0, remaining).map(renderCover).join(''));
-              }
-              var vaLink = existing.querySelector('.upcoming-day-view-all');
-              if (vaLink) {
-                vaLink.textContent = 'View all' + (newTotal > DAY_PREVIEW_COUNT ? ' (' + newTotal + ')' : '') + ' →';
-              }
-            } else {
-              appended += renderDay(d);
-            }
-          }
-          if (appended) grid.insertAdjacentHTML('beforeend', appended);
-          var maxUnix = 0;
-          for (var j = 0; j < data.games.length; j++) if (data.games[j].release_unix > maxUnix) maxUnix = data.games[j].release_unix;
-          if (maxUnix > state.nextFromUnix) state.nextFromUnix = maxUnix + 1;
-          if (!data.has_more && data.games.length < 20) state.exhausted = true;
-        })
-        .catch(function (e) { state.loading = false; console.error('[upcoming] fetch', e); });
-    }
-
-    if ('IntersectionObserver' in window) {
-      var io = new IntersectionObserver(function (entries) {
-        for (var i = 0; i < entries.length; i++) if (entries[i].isIntersecting) fetchNextWindow();
-      }, { rootMargin: '800px 0px' });
-      io.observe(sentinel);
-    }
-
+    // Platform filter — refetches the full 30-day window and re-renders.
     section.querySelectorAll('.upcoming-chip').forEach(function (chip) {
       chip.addEventListener('click', function () {
         var next = chip.getAttribute('data-platform') || '';
-        if (next === state.platform) return;
+        if (next === state.platform || state.loading) return;
         state.platform = next;
-        state.nextFromUnix = Math.floor(Date.now() / 1000);
-        state.exhausted = false;
         section.querySelectorAll('.upcoming-chip').forEach(function (c) {
           var active = c === chip;
           c.classList.toggle('is-active', active);
           c.setAttribute('aria-selected', active ? 'true' : 'false');
         });
-        grid.innerHTML = '';
-        fetchNextWindow();
+        state.loading = true;
+        grid.style.opacity = '0.5';
+        var qs = 'from=' + Math.floor(Date.now() / 1000) + '&days=30&limit=300';
+        if (state.platform) qs += '&platforms=' + encodeURIComponent(state.platform);
+        fetch('/api/discover/upcoming?' + qs)
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            state.loading = false; grid.style.opacity = '';
+            if (!data || !data.games) { grid.innerHTML = ''; return; }
+            var days = groupByDay(data.games);
+            grid.innerHTML = days.map(renderDay).join('');
+          })
+          .catch(function (e) { state.loading = false; grid.style.opacity = ''; console.error('[upcoming] fetch', e); });
       });
-    });
-
-    // Click-to-adopt for unimported covers.
-    grid.addEventListener('click', function (e) {
-      var cover = e.target.closest('.upcoming-day-cover.is-unimported');
-      if (!cover) return;
-      e.preventDefault();
-      cover.style.opacity = '0.6';
-      var igdbId = cover.getAttribute('data-igdb-id');
-      fetch('/api/games/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ igdb_id: parseInt(igdbId, 10) }),
-      })
-        .then(function (r) {
-          if (r.status === 401) { window.location.href = '/signin?next=' + encodeURIComponent(window.location.pathname); return null; }
-          return r.ok ? r.json() : null;
-        })
-        .then(function (data) {
-          if (data && data.slug) { window.location.href = '/games/' + data.slug; }
-          else { cover.style.opacity = ''; }
-        })
-        .catch(function () { cover.style.opacity = ''; });
     });
   })();
 </script>
