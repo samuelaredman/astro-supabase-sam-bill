@@ -37,7 +37,7 @@ export const GET: APIRoute = async ({ url }) => {
         .filter((n) => Number.isFinite(n) && n > 0)
     : undefined;
 
-  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 50, 10), 100);
+  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 100, 10), 300);
   const offset = Math.max(Number(url.searchParams.get('offset')) || 0, 0);
 
   const games = await fetchUpcomingReleases({ fromUnix, toUnix, platforms, limit: limit + 1, offset });

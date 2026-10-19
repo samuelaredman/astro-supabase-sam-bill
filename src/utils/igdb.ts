@@ -114,7 +114,7 @@ export async function fetchUpcomingReleases(opts: {
   limit?: number;
   offset?: number;
 }): Promise<UpcomingGame[]> {
-  const limit = Math.min(opts.limit ?? 50, 100);
+  const limit = Math.min(opts.limit ?? 50, 500); // IGDB's per-request max is 500
   const offset = opts.offset ?? 0;
   const platformClause = opts.platforms && opts.platforms.length > 0
     ? ` & platforms = (${opts.platforms.map((n) => Number(n)).filter(Number.isFinite).join(',')})`
