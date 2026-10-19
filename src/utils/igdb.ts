@@ -120,16 +120,21 @@ export async function fetchUpcomingReleases(opts: {
     ? ` & platforms = (${opts.platforms.map((n) => Number(n)).filter(Number.isFinite).join(',')})`
     : '';
 
+  // `hypes > 0` drops micro-indie shovelware (there are 50+ zero-anticipation
+  // IGDB entries per day — enough to saturate the limit before any named
+  // release surfaces). Named titles like GTA 6 / Phantom Blade Zero have
+  // hundreds-to-thousands of hypes and still make the cut easily.
   const rows = await igdbFetch(
     'games',
     `
-      fields name, slug, first_release_date, cover.image_id,
+      fields name, slug, first_release_date, cover.image_id, hypes,
              platforms.id, platforms.name, platforms.abbreviation,
              genres.name;
       where first_release_date > ${Math.floor(opts.fromUnix)}
         & first_release_date < ${Math.floor(opts.toUnix)}
         & game_type = (0,2,4,8,9,10)
-        & cover != null${platformClause};
+        & cover != null
+        & hypes > 0${platformClause};
       sort first_release_date asc;
       limit ${limit};
       offset ${offset};
