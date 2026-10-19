@@ -96,9 +96,13 @@ export interface UpcomingGame {
 }
 
 /**
- * Pull upcoming full-game releases from IGDB. `category = 0` restricts to main
- * games (no DLC/bundles/mods), `first_release_date` is UTC seconds, `cover !=
- * null` drops entries with no artwork since they look broken in the reels.
+ * Pull upcoming full-game releases from IGDB. `game_type` (IGDB renamed
+ * `category` to `game_type` — the old name silently returns nothing) is
+ * restricted to the categories the project treats as distinct games (see
+ * ALLOWED_GAME_CATEGORIES in utils/games.ts): main games, expansions,
+ * standalone expansions, remakes, remasters, expanded games. `first_release_date`
+ * is UTC seconds; `cover != null` drops entries with no artwork since they
+ * look broken in the reels.
  *
  * Platform filter is OR'd — passing `[167, 169]` returns games launching on
  * either PS5 OR Xbox Series. Omitted ⇒ no platform constraint.
@@ -124,7 +128,7 @@ export async function fetchUpcomingReleases(opts: {
              genres.name;
       where first_release_date > ${Math.floor(opts.fromUnix)}
         & first_release_date < ${Math.floor(opts.toUnix)}
-        & category = 0
+        & game_type = (0,2,4,8,9,10)
         & cover != null${platformClause};
       sort first_release_date asc;
       limit ${limit};
