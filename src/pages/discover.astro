@@ -55,7 +55,9 @@ if (upcomingInitial.length > 0) {
 // than fit on the card. Sorting within a day by hypes DESC floats named
 // releases (GTA 6, OoT Switch 2, etc.) above shovelware that still passed
 // the hypes>0 filter.
-const DAY_PREVIEW_COUNT = 2;
+const DAY_PREVIEW_COUNT = 1;
+// 2 rows at the default 5-per-row grid = 10 visible before "See more".
+const INITIAL_DAYS_VISIBLE = 10;
 type UpcomingDay = { iso: string; label: string; weekday: string; total: number; preview: UpcomingGame[] };
 function groupByDay(games: UpcomingGame[]): UpcomingDay[] {
   const map = new Map<string, UpcomingGame[]>();
@@ -208,18 +210,21 @@ if (currentProfile) {
         </div>
 
         <div class="upcoming-day-grid" id="upcomingDayGrid">
-          {upcomingDays.map((day) => (
-            <a class="upcoming-day" href={`/discover/releases/${day.iso}`} data-day={day.iso}>
+          {upcomingDays.map((day, i) => (
+            <a
+              class={`upcoming-day${i >= INITIAL_DAYS_VISIBLE ? ' is-extra' : ''}`}
+              href={`/discover/releases/${day.iso}`}
+              data-day={day.iso}
+            >
               <div class="upcoming-day-head">
                 <span class="upcoming-day-weekday">{day.weekday}</span>
                 <span class="upcoming-day-date">{day.label}</span>
               </div>
-              <div class="upcoming-day-covers" data-count={day.total}>
-                {day.preview.map((game) => (
-                  game.cover_url
-                    ? <img src={game.cover_url} alt={game.title} title={game.title} loading="lazy" />
-                    : <span class="upcoming-day-cover-empty">🎮</span>
-                ))}
+              <div class="upcoming-day-cover-wrap">
+                {day.preview[0]?.cover_url
+                  ? <img src={day.preview[0].cover_url} alt={day.preview[0].title} title={day.preview[0].title} loading="lazy" />
+                  : <span class="upcoming-day-cover-empty">🎮</span>
+                }
               </div>
               <div class="upcoming-day-foot">
                 {day.total === 1 ? '1 release' : `${day.total} releases`}
@@ -227,6 +232,18 @@ if (currentProfile) {
             </a>
           ))}
         </div>
+
+        {upcomingDays.length > INITIAL_DAYS_VISIBLE && (
+          <button
+            type="button"
+            class="upcoming-expand"
+            id="upcomingExpand"
+            data-expanded="false"
+            data-total-days={upcomingDays.length}
+          >
+            See all {upcomingDays.length} days ↓
+          </button>
+        )}
       </section>
     )}
 
@@ -525,22 +542,24 @@ if (currentProfile) {
     font-variant-numeric: tabular-nums;
   }
 
-  .upcoming-day-covers {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px;
-  }
-  .upcoming-day-covers img,
-  .upcoming-day-cover-empty {
+  .upcoming-day-cover-wrap {
     width: 100%;
     aspect-ratio: 3 / 4;
-    object-fit: cover;
-    display: block;
-    border-radius: 5px;
+    border-radius: 6px;
+    overflow: hidden;
     background: var(--bg-hover);
   }
+  .upcoming-day-cover-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transition: transform 0.15s;
+  }
+  .upcoming-day:hover .upcoming-day-cover-wrap img { transform: scale(1.03); }
   .upcoming-day-cover-empty {
-    display: flex; align-items: center; justify-content: center; font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%; font-size: 22px;
   }
 
   .upcoming-day-foot {
@@ -552,6 +571,30 @@ if (currentProfile) {
     letter-spacing: 0.02em;
   }
   .upcoming-day:hover .upcoming-day-foot { color: var(--accent); }
+
+  /* "See all N days" toggle — days past the 10th are display:none by default
+     and revealed when the grid gets .is-expanded. */
+  .upcoming-day.is-extra { display: none; }
+  .upcoming-day-grid.is-expanded .upcoming-day.is-extra { display: flex; }
+  .upcoming-expand {
+    display: block;
+    margin: 12px auto 0;
+    padding: 7px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .upcoming-expand:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  }
 
   @media (max-width: 1100px) {
     .upcoming-day-grid { grid-template-columns: repeat(4, 1fr); }
@@ -572,7 +615,8 @@ if (currentProfile) {
     var grid = document.getElementById('upcomingDayGrid');
     if (!grid) return;
 
-    var DAY_PREVIEW_COUNT = 2;
+    var INITIAL_DAYS_VISIBLE = 10;
+    var expandBtn = document.getElementById('upcomingExpand');
     var state = { platform: '', loading: false };
 
     function escapeHtml(s) {
@@ -587,21 +631,20 @@ if (currentProfile) {
     function monthDayLabel(iso) {
       var p = iso.split('-'); return (+p[1]) + '/' + (+p[2]);
     }
-    function renderPreview(game) {
-      return game.cover_url
-        ? '<img src="' + escapeHtml(game.cover_url) + '" alt="' + escapeHtml(game.title) + '" title="' + escapeHtml(game.title) + '" loading="lazy" />'
+    function renderDay(day, index) {
+      var top = day.games[0];
+      var cover = top && top.cover_url
+        ? '<img src="' + escapeHtml(top.cover_url) + '" alt="' + escapeHtml(top.title) + '" title="' + escapeHtml(top.title) + '" loading="lazy" />'
         : '<span class="upcoming-day-cover-empty">🎮</span>';
-    }
-    function renderDay(day) {
-      var preview = day.games.slice(0, DAY_PREVIEW_COUNT).map(renderPreview).join('');
       var footLabel = day.total === 1 ? '1 release' : day.total + ' releases';
+      var extraCls = index >= INITIAL_DAYS_VISIBLE ? ' is-extra' : '';
       return (
-        '<a class="upcoming-day" href="/discover/releases/' + day.iso + '" data-day="' + day.iso + '">' +
+        '<a class="upcoming-day' + extraCls + '" href="/discover/releases/' + day.iso + '" data-day="' + day.iso + '">' +
           '<div class="upcoming-day-head">' +
             '<span class="upcoming-day-weekday">' + escapeHtml(weekdayLabel(day.iso)) + '</span>' +
             '<span class="upcoming-day-date">' + escapeHtml(monthDayLabel(day.iso)) + '</span>' +
           '</div>' +
-          '<div class="upcoming-day-covers" data-count="' + day.total + '">' + preview + '</div>' +
+          '<div class="upcoming-day-cover-wrap">' + cover + '</div>' +
           '<div class="upcoming-day-foot">' + footLabel + '</div>' +
         '</a>'
       );
@@ -618,6 +661,21 @@ if (currentProfile) {
           return (b.hypes - a.hypes) || a.title.localeCompare(b.title);
         });
         return { iso: iso, games: bucket, total: bucket.length };
+      });
+    }
+    function setExpandLabel(expanded, totalDays) {
+      if (!expandBtn) return;
+      expandBtn.setAttribute('data-expanded', expanded ? 'true' : 'false');
+      expandBtn.textContent = expanded ? 'See less ↑' : 'See all ' + totalDays + ' days ↓';
+    }
+
+    if (expandBtn) {
+      expandBtn.addEventListener('click', function () {
+        var expanded = grid.classList.toggle('is-expanded');
+        var total = parseInt(expandBtn.getAttribute('data-total-days') || '0', 10)
+          || grid.querySelectorAll('.upcoming-day').length;
+        setExpandLabel(expanded, total);
+        if (!expanded) grid.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     }
 
@@ -640,9 +698,19 @@ if (currentProfile) {
           .then(function (r) { return r.ok ? r.json() : null; })
           .then(function (data) {
             state.loading = false; grid.style.opacity = '';
-            if (!data || !data.games) { grid.innerHTML = ''; return; }
+            grid.classList.remove('is-expanded');
+            if (!data || !data.games) { grid.innerHTML = ''; if (expandBtn) expandBtn.style.display = 'none'; return; }
             var days = groupByDay(data.games);
             grid.innerHTML = days.map(renderDay).join('');
+            if (expandBtn) {
+              expandBtn.setAttribute('data-total-days', String(days.length));
+              if (days.length > INITIAL_DAYS_VISIBLE) {
+                expandBtn.style.display = '';
+                setExpandLabel(false, days.length);
+              } else {
+                expandBtn.style.display = 'none';
+              }
+            }
           })
           .catch(function (e) { state.loading = false; grid.style.opacity = ''; console.error('[upcoming] fetch', e); });
       });
