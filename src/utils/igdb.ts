@@ -73,14 +73,17 @@ export const IGDB_PLATFORM = {
   xbox_series: 169,
   xbox_one: 49,
   switch: 130,
+  switch2: 508,
 } as const;
 
-/** Platforms visible as filter chips on /discover's upcoming reels. */
+/** Platforms visible as filter chips on /discover's release calendar. The
+ *  "Switch" chip targets Switch 2 — the calendar is forward-looking and
+ *  almost all upcoming Nintendo releases are being listed on the new hardware. */
 export const DISCOVER_PLATFORM_FILTER: { key: keyof typeof IGDB_PLATFORM; label: string; igdbId: number }[] = [
   { key: 'pc', label: 'PC', igdbId: IGDB_PLATFORM.pc },
   { key: 'ps5', label: 'PS5', igdbId: IGDB_PLATFORM.ps5 },
   { key: 'xbox_series', label: 'Xbox', igdbId: IGDB_PLATFORM.xbox_series },
-  { key: 'switch', label: 'Switch', igdbId: IGDB_PLATFORM.switch },
+  { key: 'switch2', label: 'Switch 2', igdbId: IGDB_PLATFORM.switch2 },
   { key: 'ps4', label: 'PS4', igdbId: IGDB_PLATFORM.ps4 },
 ];
 
