@@ -5,6 +5,7 @@ import Layout from '../components/Layout.astro';
 import { igdbImage, scoreClass } from '../utils/format';
 import { GAME_CATEGORY_OR_FILTER } from '../utils/games';
 import { getPageUser } from '../utils/pageAuth';
+import { fetchUpcomingReleases, DISCOVER_PLATFORM_FILTER, type UpcomingGame } from '../utils/igdb';
 
 const supabase = getSupabase();
 const serverClient = createSupabaseServerClientFromContext(Astro);
@@ -21,6 +22,64 @@ if (user) {
   const { data: cpData } = await serverClient
     .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
   currentProfile = cpData;
+}
+
+// ── Upcoming release calendar ──────────────────────────────────────────────
+// First page is server-rendered so above-the-fold is static HTML; subsequent
+// months lazy-load from /api/discover/upcoming on scroll. IGDB-sourced, no
+// local upcoming-games table — see src/pages/api/discover/upcoming.ts.
+const _upcomingFromUnix = Math.floor(Date.now() / 1000);
+const _upcomingWindowDays = 60;
+const _upcomingToUnix = _upcomingFromUnix + _upcomingWindowDays * 86400;
+const upcomingInitial: UpcomingGame[] = await fetchUpcomingReleases({
+  fromUnix: _upcomingFromUnix,
+  toUnix: _upcomingToUnix,
+  limit: 50,
+}).catch((e) => { console.error('[discover] upcoming initial fetch error:', e); return []; });
+
+let upcomingSlugByIgdbId: Record<number, string> = {};
+if (upcomingInitial.length > 0) {
+  const ids = upcomingInitial.map((g) => g.igdb_id);
+  const { data: existing } = await (getSupabaseAdmin() as any)
+    .from('games')
+    .select('igdb_id, slug')
+    .in('igdb_id', ids);
+  for (const row of (existing as any[]) ?? []) {
+    if (row.slug) upcomingSlugByIgdbId[Number(row.igdb_id)] = String(row.slug);
+  }
+}
+
+type UpcomingMonth = { key: string; label: string; games: UpcomingGame[] };
+function groupByMonth(games: UpcomingGame[]): UpcomingMonth[] {
+  const map = new Map<string, UpcomingMonth>();
+  for (const g of games) {
+    const key = g.release_date.slice(0, 7);
+    if (!map.has(key)) {
+      const [y, m] = key.split('-').map(Number);
+      const label = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+      map.set(key, { key, label, games: [] });
+    }
+    map.get(key)!.games.push(g);
+  }
+  return [...map.values()];
+}
+const upcomingMonths = groupByMonth(upcomingInitial);
+
+function formatDayLabel(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+function platformAbbrevs(game: UpcomingGame): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of game.platforms) {
+    const label = p.abbrev ?? p.name;
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+    if (out.length >= 4) break;
+  }
+  return out;
 }
 
 // ── Most Reviewed Today + Top Rated This Week ─────────────────────────────
@@ -189,6 +248,73 @@ if (currentProfile) {
   activeNav="discover"
 >
   <main class="feed">
+    {upcomingMonths.length > 0 && (
+      <section
+        class="upcoming-section"
+        id="upcomingSection"
+        data-next-from={_upcomingToUnix}
+        data-last-key={upcomingMonths[upcomingMonths.length - 1].key}
+      >
+        <div class="upcoming-header">
+          <div class="upcoming-head-row">
+            <h2 class="upcoming-title">Upcoming releases</h2>
+            <div class="upcoming-source">via IGDB</div>
+          </div>
+          <div class="upcoming-chips" role="tablist" aria-label="Platform filter">
+            <button type="button" class="upcoming-chip is-active" data-platform="" role="tab" aria-selected="true">All</button>
+            {DISCOVER_PLATFORM_FILTER.map((p) => (
+              <button type="button" class="upcoming-chip" data-platform={String(p.igdbId)} role="tab" aria-selected="false">{p.label}</button>
+            ))}
+          </div>
+        </div>
+
+        <div class="upcoming-months" id="upcomingMonths">
+          {upcomingMonths.map((month) => (
+            <div class="upcoming-month" data-month-key={month.key}>
+              <div class="upcoming-month-head">
+                <div class="upcoming-month-label">{month.label}</div>
+                <div class="upcoming-month-nav">
+                  <button type="button" class="upcoming-nav-btn" data-nav="prev" aria-label="Scroll earlier">‹</button>
+                  <button type="button" class="upcoming-nav-btn" data-nav="next" aria-label="Scroll later">›</button>
+                </div>
+              </div>
+              <div class="upcoming-reel" role="list">
+                {month.games.map((game) => {
+                  const chekpointSlug = upcomingSlugByIgdbId[game.igdb_id] ?? null;
+                  const abbrevs = platformAbbrevs(game);
+                  return (
+                    <article
+                      class={`upcoming-card ${chekpointSlug ? 'is-imported' : 'is-unimported'}`}
+                      role="listitem"
+                      data-igdb-id={game.igdb_id}
+                      data-chekpoint-slug={chekpointSlug ?? ''}
+                      data-title={game.title}
+                    >
+                      <a class="upcoming-card-link" href={chekpointSlug ? `/games/${chekpointSlug}` : '#'}>
+                        <div class="upcoming-card-cover-wrap">
+                          {game.cover_url
+                            ? <img class="upcoming-card-cover" src={game.cover_url} alt={game.title} loading="lazy" />
+                            : <div class="upcoming-card-cover upcoming-card-cover-empty">🎮</div>
+                          }
+                          <div class="upcoming-card-date">{formatDayLabel(game.release_date)}</div>
+                        </div>
+                        <div class="upcoming-card-title">{game.title}</div>
+                        <div class="upcoming-card-platforms">
+                          {abbrevs.map((p) => <span class="upcoming-card-platform">{p}</span>)}
+                        </div>
+                      </a>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div class="upcoming-sentinel" id="upcomingSentinel" aria-hidden="true"></div>
+      </section>
+    )}
+
     {featuredGame && (
       <div class="hero">
         {igdbImage((featuredGame as any).cover, 't_1080p') && (
@@ -445,4 +571,338 @@ if (currentProfile) {
   .top-rated-badge.score-low    { background: rgba(48,14,14,.88); color: #f87171; border: 1px solid rgba(248,113,113,.4); }
   .top-rated-info { margin-top: 6px; }
   .top-rated-title { font-size: 11px; font-weight: 500; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); }
+
+  /* ── Upcoming release reels ─────────────────────────────────────────────
+     One section at the top of Discover. Each month is a horizontally
+     scrolling strip of cover cards; vertical scroll pages through months
+     lazily via /api/discover/upcoming. */
+  .upcoming-section {
+    padding: 20px 24px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+    background:
+      radial-gradient(ellipse 70% 60% at 10% 0%, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 65%),
+      var(--bg-card);
+  }
+  .upcoming-header { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .upcoming-head-row { display: flex; align-items: baseline; gap: 10px; }
+  .upcoming-title { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.2px; }
+  .upcoming-source { font-size: 11px; color: var(--text-tertiary); letter-spacing: 0.05em; text-transform: uppercase; }
+  .upcoming-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .upcoming-chip {
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+  }
+  .upcoming-chip:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+  .upcoming-chip.is-active {
+    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .upcoming-months { display: flex; flex-direction: column; gap: 22px; }
+  .upcoming-month-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .upcoming-month-label {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+  .upcoming-month-nav { display: flex; gap: 4px; }
+  .upcoming-nav-btn {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .upcoming-nav-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+  .upcoming-reel {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
+    padding-bottom: 8px;
+    scrollbar-width: thin;
+  }
+  .upcoming-reel::-webkit-scrollbar { height: 6px; }
+  .upcoming-reel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .upcoming-card {
+    flex: 0 0 140px;
+    scroll-snap-align: start;
+    min-width: 0;
+  }
+  .upcoming-card-link {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+  }
+  .upcoming-card-cover-wrap {
+    position: relative;
+    width: 140px;
+    aspect-ratio: 3 / 4;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--bg-hover);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .upcoming-card-link:hover .upcoming-card-cover-wrap {
+    transform: translateY(-3px);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
+  }
+  .upcoming-card-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .upcoming-card-cover-empty {
+    display: flex; align-items: center; justify-content: center; font-size: 28px;
+  }
+  .upcoming-card-date {
+    position: absolute;
+    bottom: 6px; left: 6px;
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.78);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    backdrop-filter: blur(4px);
+  }
+  .upcoming-card-title {
+    margin-top: 8px;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--text-primary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .upcoming-card-platforms {
+    display: flex; flex-wrap: wrap; gap: 3px;
+    margin-top: 4px;
+  }
+  .upcoming-card-platform {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    text-transform: uppercase;
+  }
+  .upcoming-card.is-unimported .upcoming-card-link { position: relative; }
+  .upcoming-card.is-loading .upcoming-card-cover-wrap::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .upcoming-sentinel { height: 1px; }
+
+  @media (max-width: 720px) {
+    .upcoming-section { padding: 16px 14px 4px; }
+    .upcoming-card, .upcoming-card-cover-wrap { width: 118px; flex-basis: 118px; }
+  }
 </style>
+
+<script is:inline>
+  (function () {
+    var section = document.getElementById('upcomingSection');
+    if (!section) return;
+    var monthsContainer = document.getElementById('upcomingMonths');
+    var sentinel = document.getElementById('upcomingSentinel');
+    if (!monthsContainer || !sentinel) return;
+
+    var state = {
+      platform: '',                                                    // empty = All
+      nextFromUnix: parseInt(section.getAttribute('data-next-from') || '0', 10),
+      lastKey: section.getAttribute('data-last-key') || '',
+      loading: false,
+      exhausted: false,
+    };
+
+    function monthLabel(key) {
+      var parts = key.split('-'); var y = parseInt(parts[0], 10); var m = parseInt(parts[1], 10);
+      return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    }
+    function dayLabel(iso) {
+      var p = iso.split('-'); var d = new Date(Date.UTC(+p[0], +p[1]-1, +p[2]));
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    }
+    function platformAbbrevs(game) {
+      var seen = {}; var out = [];
+      for (var i = 0; i < (game.platforms || []).length && out.length < 4; i++) {
+        var p = game.platforms[i]; var label = p.abbrev || p.name;
+        if (!label || seen[label]) continue;
+        seen[label] = true; out.push(label);
+      }
+      return out;
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; });
+    }
+
+    function renderCard(game) {
+      var slug = game.chekpoint_slug;
+      var href = slug ? '/games/' + slug : '#';
+      var abbrevs = platformAbbrevs(game).map(function (p) { return '<span class="upcoming-card-platform">' + escapeHtml(p) + '</span>'; }).join('');
+      var cover = game.cover_url
+        ? '<img class="upcoming-card-cover" src="' + escapeHtml(game.cover_url) + '" alt="" loading="lazy" />'
+        : '<div class="upcoming-card-cover upcoming-card-cover-empty">🎮</div>';
+      return (
+        '<article class="upcoming-card ' + (slug ? 'is-imported' : 'is-unimported') + '" ' +
+          'data-igdb-id="' + game.igdb_id + '" ' +
+          'data-chekpoint-slug="' + escapeHtml(slug || '') + '" ' +
+          'data-title="' + escapeHtml(game.title) + '">' +
+          '<a class="upcoming-card-link" href="' + href + '">' +
+            '<div class="upcoming-card-cover-wrap">' + cover +
+              '<div class="upcoming-card-date">' + escapeHtml(dayLabel(game.release_date)) + '</div>' +
+            '</div>' +
+            '<div class="upcoming-card-title">' + escapeHtml(game.title) + '</div>' +
+            '<div class="upcoming-card-platforms">' + abbrevs + '</div>' +
+          '</a>' +
+        '</article>'
+      );
+    }
+    function renderMonth(key, games) {
+      var reel = games.map(renderCard).join('');
+      return (
+        '<div class="upcoming-month" data-month-key="' + key + '">' +
+          '<div class="upcoming-month-head">' +
+            '<div class="upcoming-month-label">' + escapeHtml(monthLabel(key)) + '</div>' +
+            '<div class="upcoming-month-nav">' +
+              '<button type="button" class="upcoming-nav-btn" data-nav="prev" aria-label="Scroll earlier">‹</button>' +
+              '<button type="button" class="upcoming-nav-btn" data-nav="next" aria-label="Scroll later">›</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="upcoming-reel" role="list">' + reel + '</div>' +
+        '</div>'
+      );
+    }
+
+    function groupByMonth(games) {
+      var map = Object.create(null); var order = [];
+      for (var i = 0; i < games.length; i++) {
+        var g = games[i]; var k = g.release_date.slice(0, 7);
+        if (!map[k]) { map[k] = []; order.push(k); }
+        map[k].push(g);
+      }
+      return order.map(function (k) { return { key: k, games: map[k] }; });
+    }
+
+    function fetchNextWindow() {
+      if (state.loading || state.exhausted) return;
+      state.loading = true;
+      var qs = 'from=' + state.nextFromUnix + '&days=60&limit=80';
+      if (state.platform) qs += '&platforms=' + encodeURIComponent(state.platform);
+      fetch('/api/discover/upcoming?' + qs)
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          state.loading = false;
+          if (!data || !data.games || data.games.length === 0) { state.exhausted = true; return; }
+          var grouped = groupByMonth(data.games);
+          var appended = '';
+          for (var i = 0; i < grouped.length; i++) {
+            var m = grouped[i];
+            // If a month already exists (edge: last known month overlaps), append cards.
+            var existing = monthsContainer.querySelector('.upcoming-month[data-month-key="' + m.key + '"] .upcoming-reel');
+            if (existing) {
+              existing.insertAdjacentHTML('beforeend', m.games.map(renderCard).join(''));
+            } else {
+              appended += renderMonth(m.key, m.games);
+            }
+          }
+          if (appended) monthsContainer.insertAdjacentHTML('beforeend', appended);
+          state.nextFromUnix = state.nextFromUnix + 60 * 86400;
+          state.lastKey = grouped.length ? grouped[grouped.length - 1].key : state.lastKey;
+          if (!data.has_more && data.games.length < 20) state.exhausted = true;
+        })
+        .catch(function (e) { state.loading = false; console.error('[upcoming] fetch', e); });
+    }
+
+    // Infinite scroll
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) if (entries[i].isIntersecting) fetchNextWindow();
+      }, { rootMargin: '600px 0px' });
+      io.observe(sentinel);
+    }
+
+    // Platform filter — rebuilds the list from the first batch.
+    section.querySelectorAll('.upcoming-chip').forEach(function (chip) {
+      chip.addEventListener('click', function () {
+        var next = chip.getAttribute('data-platform') || '';
+        if (next === state.platform) return;
+        state.platform = next;
+        state.nextFromUnix = Math.floor(Date.now() / 1000);
+        state.lastKey = '';
+        state.exhausted = false;
+        section.querySelectorAll('.upcoming-chip').forEach(function (c) {
+          var active = c === chip;
+          c.classList.toggle('is-active', active);
+          c.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        monthsContainer.innerHTML = '';
+        fetchNextWindow();
+      });
+    });
+
+    // Reel arrows (delegated)
+    monthsContainer.addEventListener('click', function (e) {
+      var btn = e.target.closest('.upcoming-nav-btn'); if (!btn) return;
+      var reel = btn.closest('.upcoming-month')?.querySelector('.upcoming-reel');
+      if (!reel) return;
+      var dir = btn.getAttribute('data-nav') === 'next' ? 1 : -1;
+      reel.scrollBy({ left: dir * Math.min(reel.clientWidth * 0.85, 600), behavior: 'smooth' });
+    });
+
+    // Click-to-adopt for unimported games.
+    monthsContainer.addEventListener('click', function (e) {
+      var link = e.target.closest('.upcoming-card.is-unimported .upcoming-card-link');
+      if (!link) return;
+      e.preventDefault();
+      var card = link.closest('.upcoming-card');
+      var igdbId = card?.getAttribute('data-igdb-id');
+      if (!igdbId) return;
+      card.classList.add('is-loading');
+      fetch('/api/games/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ igdb_id: parseInt(igdbId, 10) }),
+      })
+        .then(function (r) {
+          if (r.status === 401) { window.location.href = '/signin?next=' + encodeURIComponent(window.location.pathname); return null; }
+          return r.ok ? r.json() : null;
+        })
+        .then(function (data) {
+          if (data && data.slug) { window.location.href = '/games/' + data.slug; }
+          else { card.classList.remove('is-loading'); }
+        })
+        .catch(function () { card.classList.remove('is-loading'); });
+    });
+  })();
+</script>

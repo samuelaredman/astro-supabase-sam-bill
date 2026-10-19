@@ -64,6 +64,102 @@ export async function igdbGameBySlug(
   return row && typeof row.id === "number" ? { id: row.id, name: row.name, slug: row.slug } : null;
 }
 
+/** IGDB platform ids for the small set of platforms exposed on the Discover
+ *  release calendar. Full list: https://api-docs.igdb.com/#platform. */
+export const IGDB_PLATFORM = {
+  pc: 6,            // Microsoft Windows
+  ps5: 167,
+  ps4: 48,
+  xbox_series: 169,
+  xbox_one: 49,
+  switch: 130,
+} as const;
+
+/** Platforms visible as filter chips on /discover's upcoming reels. */
+export const DISCOVER_PLATFORM_FILTER: { key: keyof typeof IGDB_PLATFORM; label: string; igdbId: number }[] = [
+  { key: 'pc', label: 'PC', igdbId: IGDB_PLATFORM.pc },
+  { key: 'ps5', label: 'PS5', igdbId: IGDB_PLATFORM.ps5 },
+  { key: 'xbox_series', label: 'Xbox', igdbId: IGDB_PLATFORM.xbox_series },
+  { key: 'switch', label: 'Switch', igdbId: IGDB_PLATFORM.switch },
+  { key: 'ps4', label: 'PS4', igdbId: IGDB_PLATFORM.ps4 },
+];
+
+export interface UpcomingGame {
+  igdb_id: number;
+  igdb_slug: string | null;
+  title: string;
+  cover_url: string | null;        // t_cover_big
+  release_date: string;             // ISO yyyy-mm-dd
+  release_unix: number;             // UTC seconds; stable for client-side grouping
+  platforms: { id: number; name: string; abbrev: string | null }[];
+  genres: string[];
+}
+
+/**
+ * Pull upcoming full-game releases from IGDB. `category = 0` restricts to main
+ * games (no DLC/bundles/mods), `first_release_date` is UTC seconds, `cover !=
+ * null` drops entries with no artwork since they look broken in the reels.
+ *
+ * Platform filter is OR'd — passing `[167, 169]` returns games launching on
+ * either PS5 OR Xbox Series. Omitted ⇒ no platform constraint.
+ */
+export async function fetchUpcomingReleases(opts: {
+  fromUnix: number;
+  toUnix: number;
+  platforms?: number[];
+  limit?: number;
+  offset?: number;
+}): Promise<UpcomingGame[]> {
+  const limit = Math.min(opts.limit ?? 50, 100);
+  const offset = opts.offset ?? 0;
+  const platformClause = opts.platforms && opts.platforms.length > 0
+    ? ` & platforms = (${opts.platforms.map((n) => Number(n)).filter(Number.isFinite).join(',')})`
+    : '';
+
+  const rows = await igdbFetch(
+    'games',
+    `
+      fields name, slug, first_release_date, cover.image_id,
+             platforms.id, platforms.name, platforms.abbreviation,
+             genres.name;
+      where first_release_date > ${Math.floor(opts.fromUnix)}
+        & first_release_date < ${Math.floor(opts.toUnix)}
+        & category = 0
+        & cover != null${platformClause};
+      sort first_release_date asc;
+      limit ${limit};
+      offset ${offset};
+    `,
+  );
+
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((r: any): UpcomingGame | null => {
+      if (!r?.id || !r?.name || !r?.first_release_date) return null;
+      const unix = Number(r.first_release_date);
+      if (!Number.isFinite(unix)) return null;
+      const iso = new Date(unix * 1000).toISOString().slice(0, 10);
+      const coverId = r?.cover?.image_id ?? null;
+      return {
+        igdb_id: Number(r.id),
+        igdb_slug: typeof r.slug === 'string' ? r.slug : null,
+        title: String(r.name),
+        cover_url: coverId ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${coverId}.jpg` : null,
+        release_date: iso,
+        release_unix: unix,
+        platforms: Array.isArray(r.platforms)
+          ? r.platforms
+              .filter((p: any) => p && typeof p.id === 'number')
+              .map((p: any) => ({ id: p.id, name: p.name ?? '', abbrev: p.abbreviation ?? null }))
+          : [],
+        genres: Array.isArray(r.genres)
+          ? r.genres.map((g: any) => g?.name).filter((n: unknown): n is string => typeof n === 'string')
+          : [],
+      };
+    })
+    .filter((g): g is UpcomingGame => !!g);
+}
+
 export async function getGameDetails(igdbId: number) {
   const [_, involvedCompanies, genres, gameModes, themes,
          franchises, engines, alternativeTitles, keywords] = await Promise.all([
