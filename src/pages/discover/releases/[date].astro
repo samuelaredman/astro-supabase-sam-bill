@@ -1,0 +1,243 @@
+---
+export const prerender = false;
+import Layout from '../../../components/Layout.astro';
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from '../../../utils/database';
+import { getPageUser } from '../../../utils/pageAuth';
+import { fetchUpcomingReleases, DISCOVER_PLATFORM_FILTER, type UpcomingGame } from '../../../utils/igdb';
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, serverClient);
+const isLoggedIn = !!user;
+
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
+if (user) {
+  const { data } = await serverClient
+    .from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = data;
+}
+
+// URL param is yyyy-mm-dd. Treat it as a UTC calendar day so grouping is
+// consistent with the home /discover grid (which groups by UTC date).
+const dateParam = String(Astro.params.date ?? '');
+const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateParam);
+if (!isoMatch) return Astro.redirect('/discover');
+const [_, yStr, mStr, dStr] = isoMatch;
+const dayStartUnix = Math.floor(Date.UTC(Number(yStr), Number(mStr) - 1, Number(dStr)) / 1000);
+const dayEndUnix = dayStartUnix + 86400;
+const dayLabel = new Date(Date.UTC(Number(yStr), Number(mStr) - 1, Number(dStr)))
+  .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+
+// `release_date > from & < to` on IGDB — same path as /discover's calendar,
+// just a 1-day window with no hypes>0 filter so this page shows *everything*
+// releasing today (including the small indies the overview hides).
+const games: UpcomingGame[] = await fetchUpcomingReleases({
+  fromUnix: dayStartUnix - 1,  // IGDB uses strict `>`; back off a second to catch midnight entries
+  toUnix: dayEndUnix,
+  limit: 500,
+}).catch((e) => { console.error('[releases/day] fetch error:', e); return []; });
+
+// Only keep games whose rounded date lands on the requested day — the IGDB
+// window above can include stragglers because `release_unix` is per-second.
+const dayGames = games.filter((g) => g.release_date === dateParam);
+// Sort by hype desc so headline releases are at the top.
+dayGames.sort((a, b) => (b.hypes - a.hypes) || a.title.localeCompare(b.title));
+
+let slugByIgdbId: Record<number, string> = {};
+if (dayGames.length > 0) {
+  const { data: existing } = await (getSupabaseAdmin() as any)
+    .from('games')
+    .select('igdb_id, slug')
+    .in('igdb_id', dayGames.map((g) => g.igdb_id));
+  for (const row of (existing as any[]) ?? []) {
+    if (row.slug) slugByIgdbId[Number(row.igdb_id)] = String(row.slug);
+  }
+}
+
+function platformAbbrevs(game: UpcomingGame): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of game.platforms) {
+    const label = p.abbrev ?? p.name;
+    if (!label || seen.has(label)) continue;
+    seen.add(label); out.push(label);
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+---
+
+<Layout
+  title={`Releases on ${dayLabel} — Chekpoint`}
+  description={`All games releasing on ${dayLabel} — sourced from IGDB.`}
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+  activeNav="discover"
+>
+  <main class="feed">
+    <section class="releases-day">
+      <a class="releases-back" href="/discover">← Discover</a>
+      <header class="releases-head">
+        <h1 class="releases-title">{dayLabel}</h1>
+        <p class="releases-sub">{dayGames.length === 0 ? 'No releases found for this day.' : `${dayGames.length} ${dayGames.length === 1 ? 'release' : 'releases'}`}</p>
+      </header>
+
+      {dayGames.length > 0 && (
+        <div class="releases-grid" id="releasesGrid">
+          {dayGames.map((game) => {
+            const chekpointSlug = slugByIgdbId[game.igdb_id] ?? null;
+            const abbrevs = platformAbbrevs(game);
+            return (
+              <article
+                class={`release-card ${chekpointSlug ? 'is-imported' : 'is-unimported'}`}
+                data-igdb-id={game.igdb_id}
+                data-chekpoint-slug={chekpointSlug ?? ''}
+              >
+                <a class="release-card-link" href={chekpointSlug ? `/games/${chekpointSlug}` : '#'}>
+                  <div class="release-card-cover">
+                    {game.cover_url
+                      ? <img src={game.cover_url} alt={game.title} loading="lazy" />
+                      : <span class="release-card-cover-empty">🎮</span>
+                    }
+                  </div>
+                  <div class="release-card-info">
+                    <div class="release-card-title">{game.title}</div>
+                    {game.genres.length > 0 && (
+                      <div class="release-card-genres">{game.genres.slice(0, 2).join(' · ')}</div>
+                    )}
+                    <div class="release-card-platforms">
+                      {abbrevs.map((p) => <span class="release-card-platform">{p}</span>)}
+                    </div>
+                  </div>
+                </a>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  </main>
+</Layout>
+
+<style is:global>
+  .releases-day {
+    padding: 24px 28px 48px;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .releases-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    text-decoration: none;
+    margin-bottom: 14px;
+    padding: 4px 8px 4px 0;
+  }
+  .releases-back:hover { color: var(--accent); }
+
+  .releases-head { margin-bottom: 20px; }
+  .releases-title {
+    font-size: 28px;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.3px;
+    color: var(--text-primary);
+  }
+  .releases-sub {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    margin: 6px 0 0;
+  }
+
+  .releases-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px;
+  }
+  .release-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-card);
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .release-card:hover {
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+    transform: translateY(-2px);
+  }
+  .release-card-link { display: block; text-decoration: none; color: inherit; }
+  .release-card-cover {
+    aspect-ratio: 3 / 4;
+    background: var(--bg-hover);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .release-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .release-card-cover-empty { font-size: 28px; }
+  .release-card-info { padding: 10px 10px 12px; }
+  .release-card-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--text-primary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .release-card-genres {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 4px;
+  }
+  .release-card-platforms {
+    display: flex; flex-wrap: wrap; gap: 3px;
+    margin-top: 6px;
+  }
+  .release-card-platform {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    text-transform: uppercase;
+  }
+
+  @media (max-width: 720px) {
+    .releases-day { padding: 18px 14px 36px; }
+    .releases-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+    .releases-title { font-size: 22px; }
+  }
+</style>
+
+<script is:inline>
+  (function () {
+    var grid = document.getElementById('releasesGrid'); if (!grid) return;
+    grid.addEventListener('click', function (e) {
+      var link = e.target.closest('.release-card.is-unimported .release-card-link');
+      if (!link) return;
+      e.preventDefault();
+      var card = link.closest('.release-card');
+      var igdbId = card?.getAttribute('data-igdb-id'); if (!igdbId) return;
+      card.style.opacity = '0.6';
+      fetch('/api/games/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ igdb_id: parseInt(igdbId, 10) }),
+      })
+        .then(function (r) {
+          if (r.status === 401) { window.location.href = '/signin?next=' + encodeURIComponent(window.location.pathname); return null; }
+          return r.ok ? r.json() : null;
+        })
+        .then(function (data) {
+          if (data && data.slug) { window.location.href = '/games/' + data.slug; }
+          else { card.style.opacity = ''; }
+        })
+        .catch(function () { card.style.opacity = ''; });
+    });
+  })();
+</script>

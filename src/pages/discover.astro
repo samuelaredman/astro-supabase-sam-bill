@@ -53,38 +53,36 @@ if (upcomingInitial.length > 0) {
   }
 }
 
-type UpcomingMonth = { key: string; label: string; games: UpcomingGame[] };
-function groupByMonth(games: UpcomingGame[]): UpcomingMonth[] {
-  const map = new Map<string, UpcomingMonth>();
+// One card per calendar day, each showing the top-N most-hyped releases plus
+// a "View all" link to /discover/releases/<iso> if the day has more games
+// than fit on the card. Sorting within a day by hypes DESC floats named
+// releases (GTA 6, OoT Switch 2, etc.) above shovelware that still passed
+// the hypes>0 filter.
+const DAY_PREVIEW_COUNT = 4;
+type UpcomingDay = { iso: string; label: string; weekday: string; total: number; preview: UpcomingGame[] };
+function groupByDay(games: UpcomingGame[]): UpcomingDay[] {
+  const map = new Map<string, UpcomingGame[]>();
   for (const g of games) {
-    const key = g.release_date.slice(0, 7);
-    if (!map.has(key)) {
-      const [y, m] = key.split('-').map(Number);
-      const label = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-      map.set(key, { key, label, games: [] });
-    }
-    map.get(key)!.games.push(g);
+    const arr = map.get(g.release_date) ?? [];
+    arr.push(g);
+    map.set(g.release_date, arr);
   }
-  return [...map.values()];
-}
-const upcomingMonths = groupByMonth(upcomingInitial);
-
-function formatDayLabel(iso: string): string {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-}
-function platformAbbrevs(game: UpcomingGame): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const p of game.platforms) {
-    const label = p.abbrev ?? p.name;
-    if (!label || seen.has(label)) continue;
-    seen.add(label);
-    out.push(label);
-    if (out.length >= 4) break;
+  const out: UpcomingDay[] = [];
+  for (const [iso, bucket] of map) {
+    const sorted = [...bucket].sort((a, b) => (b.hypes - a.hypes) || a.title.localeCompare(b.title));
+    const [y, m, d] = iso.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    out.push({
+      iso,
+      weekday: dt.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }),
+      label: `${m}/${d}`,
+      total: bucket.length,
+      preview: sorted.slice(0, DAY_PREVIEW_COUNT),
+    });
   }
-  return out;
+  return out.sort((a, b) => a.iso.localeCompare(b.iso));
 }
+const upcomingDays = groupByDay(upcomingInitial);
 
 if (currentProfile) {
   // Step 1: Games I've already reviewed
@@ -193,16 +191,15 @@ if (currentProfile) {
   activeNav="discover"
 >
   <main class="feed">
-    {upcomingMonths.length > 0 && (
+    {upcomingDays.length > 0 && (
       <section
         class="upcoming-section"
         id="upcomingSection"
         data-next-from={Math.max(...upcomingInitial.map((g) => g.release_unix)) + 1}
-        data-last-key={upcomingMonths[upcomingMonths.length - 1].key}
       >
         <div class="upcoming-header">
           <div class="upcoming-head-row">
-            <h2 class="upcoming-title">Upcoming releases</h2>
+            <h2 class="upcoming-title">Release calendar</h2>
             <div class="upcoming-source">via IGDB</div>
           </div>
           <div class="upcoming-chips" role="tablist" aria-label="Platform filter">
@@ -213,46 +210,37 @@ if (currentProfile) {
           </div>
         </div>
 
-        <div class="upcoming-months" id="upcomingMonths">
-          {upcomingMonths.map((month) => (
-            <div class="upcoming-month" data-month-key={month.key}>
-              <div class="upcoming-month-head">
-                <div class="upcoming-month-label">{month.label}</div>
-                <div class="upcoming-month-nav">
-                  <button type="button" class="upcoming-nav-btn" data-nav="prev" aria-label="Scroll earlier">‹</button>
-                  <button type="button" class="upcoming-nav-btn" data-nav="next" aria-label="Scroll later">›</button>
-                </div>
+        <div class="upcoming-day-grid" id="upcomingDayGrid">
+          {upcomingDays.map((day) => (
+            <article class="upcoming-day" data-day={day.iso}>
+              <div class="upcoming-day-head">
+                <span class="upcoming-day-weekday">{day.weekday}</span>
+                <span class="upcoming-day-date">{day.label}</span>
               </div>
-              <div class="upcoming-reel" role="list">
-                {month.games.map((game) => {
+              <div class="upcoming-day-covers" data-count={day.total}>
+                {day.preview.map((game) => {
                   const chekpointSlug = upcomingSlugByIgdbId[game.igdb_id] ?? null;
-                  const abbrevs = platformAbbrevs(game);
                   return (
-                    <article
-                      class={`upcoming-card ${chekpointSlug ? 'is-imported' : 'is-unimported'}`}
-                      role="listitem"
+                    <a
+                      class={`upcoming-day-cover ${chekpointSlug ? 'is-imported' : 'is-unimported'}`}
+                      href={chekpointSlug ? `/games/${chekpointSlug}` : '#'}
                       data-igdb-id={game.igdb_id}
                       data-chekpoint-slug={chekpointSlug ?? ''}
-                      data-title={game.title}
+                      title={game.title}
+                      aria-label={game.title}
                     >
-                      <a class="upcoming-card-link" href={chekpointSlug ? `/games/${chekpointSlug}` : '#'}>
-                        <div class="upcoming-card-cover-wrap">
-                          {game.cover_url
-                            ? <img class="upcoming-card-cover" src={game.cover_url} alt={game.title} loading="lazy" />
-                            : <div class="upcoming-card-cover upcoming-card-cover-empty">🎮</div>
-                          }
-                          <div class="upcoming-card-date">{formatDayLabel(game.release_date)}</div>
-                        </div>
-                        <div class="upcoming-card-title">{game.title}</div>
-                        <div class="upcoming-card-platforms">
-                          {abbrevs.map((p) => <span class="upcoming-card-platform">{p}</span>)}
-                        </div>
-                      </a>
-                    </article>
+                      {game.cover_url
+                        ? <img src={game.cover_url} alt={game.title} loading="lazy" />
+                        : <span class="upcoming-day-cover-empty">🎮</span>
+                      }
+                    </a>
                   );
                 })}
               </div>
-            </div>
+              <a class="upcoming-day-view-all" href={`/discover/releases/${day.iso}`}>
+                View all{day.total > DAY_PREVIEW_COUNT ? ` (${day.total})` : ''} →
+              </a>
+            </article>
           ))}
         </div>
 
@@ -472,21 +460,21 @@ if (currentProfile) {
 </style>
 
 <style is:global>
-  /* ── Upcoming release reels ─────────────────────────────────────────────
-     One section at the top of Discover. Each month is a horizontally
-     scrolling strip of cover cards; vertical scroll pages through months
-     lazily via /api/discover/upcoming. Global so dynamically-inserted
-     months (which lack Astro's scoping attribute) are styled too. */
+  /* ── Release calendar: one card per day ────────────────────────────────
+     Grid of day cards; each card has a date header, a 2×2 preview of the
+     day's top-N most-hyped covers, and a "View all" link to a day page
+     listing everything. Global so lazy-loaded day cards (added via
+     innerHTML, no Astro scoping attribute) pick up the styles too. */
   .upcoming-section {
-    padding: 20px 24px 8px;
+    padding: 20px 24px 20px;
     border-bottom: 1px solid var(--border-subtle);
     background:
       radial-gradient(ellipse 70% 60% at 10% 0%, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 65%),
       var(--bg-card);
   }
-  .upcoming-header { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .upcoming-header { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
   .upcoming-head-row { display: flex; align-items: baseline; gap: 10px; }
-  .upcoming-title { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.2px; }
+  .upcoming-title { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -0.3px; }
   .upcoming-source { font-size: 11px; color: var(--text-tertiary); letter-spacing: 0.05em; text-transform: uppercase; }
   .upcoming-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .upcoming-chip {
@@ -508,125 +496,86 @@ if (currentProfile) {
     border-color: var(--accent);
   }
 
-  .upcoming-months { display: flex; flex-direction: column; gap: 22px; }
-  .upcoming-month-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
+  .upcoming-day-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 14px;
   }
-  .upcoming-month-label {
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-secondary);
-  }
-  .upcoming-month-nav { display: flex; gap: 4px; }
-  .upcoming-nav-btn {
-    width: 26px; height: 26px;
-    border-radius: 50%;
+  .upcoming-day {
     border: 1px solid var(--border);
+    border-radius: 12px;
     background: var(--bg-card);
-    color: var(--text-secondary);
-    font-size: 16px;
-    line-height: 1;
-    cursor: pointer;
-    transition: color 0.15s, border-color 0.15s;
-  }
-  .upcoming-nav-btn:hover { color: var(--accent); border-color: var(--accent); }
-
-  .upcoming-reel {
+    padding: 10px 10px 8px;
     display: flex;
-    gap: 12px;
-    overflow-x: auto;
-    scroll-snap-type: x mandatory;
-    scroll-behavior: smooth;
-    padding-bottom: 8px;
-    scrollbar-width: thin;
+    flex-direction: column;
+    gap: 8px;
+    transition: border-color 0.15s, transform 0.15s;
   }
-  .upcoming-reel::-webkit-scrollbar { height: 6px; }
-  .upcoming-reel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .upcoming-day:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+  .upcoming-day-head {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 0 2px;
+  }
+  .upcoming-day-weekday {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .upcoming-day-date {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
 
-  .upcoming-card {
-    flex: 0 0 140px;
-    scroll-snap-align: start;
-    min-width: 0;
+  .upcoming-day-covers {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
   }
-  .upcoming-card-link {
-    display: block;
-    text-decoration: none;
-    color: inherit;
-    cursor: pointer;
-  }
-  .upcoming-card-cover-wrap {
-    position: relative;
-    width: 140px;
+  .upcoming-day-cover {
     aspect-ratio: 3 / 4;
-    border-radius: 10px;
+    border-radius: 6px;
     overflow: hidden;
     border: 1px solid var(--border);
     background: var(--bg-hover);
+    display: block;
     transition: transform 0.15s, box-shadow 0.15s;
+    text-decoration: none;
   }
-  .upcoming-card-link:hover .upcoming-card-cover-wrap {
-    transform: translateY(-3px);
-    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
+  .upcoming-day-cover:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4);
+    border-color: var(--accent);
   }
-  .upcoming-card-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .upcoming-card-cover-empty {
-    display: flex; align-items: center; justify-content: center; font-size: 28px;
-  }
-  .upcoming-card-date {
-    position: absolute;
-    bottom: 6px; left: 6px;
-    padding: 2px 7px;
-    border-radius: 5px;
-    background: rgba(0, 0, 0, 0.78);
-    color: #fff;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    backdrop-filter: blur(4px);
-  }
-  .upcoming-card-title {
-    margin-top: 8px;
-    font-size: 12.5px;
-    font-weight: 600;
-    line-height: 1.3;
-    color: var(--text-primary);
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .upcoming-card-platforms {
-    display: flex; flex-wrap: wrap; gap: 3px;
-    margin-top: 4px;
-  }
-  .upcoming-card-platform {
-    font-size: 9.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    color: var(--text-tertiary);
-    padding: 1px 5px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    text-transform: uppercase;
-  }
-  .upcoming-card.is-unimported .upcoming-card-link { position: relative; }
-  .upcoming-card.is-loading .upcoming-card-cover-wrap::after {
-    content: '';
-    position: absolute; inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+  .upcoming-day-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .upcoming-day-cover-empty {
     display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%; font-size: 20px;
   }
+
+  .upcoming-day-view-all {
+    display: block;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-decoration: none;
+    padding: 4px 2px 2px;
+    letter-spacing: 0.02em;
+    transition: color 0.15s;
+  }
+  .upcoming-day-view-all:hover { color: var(--accent); }
 
   .upcoming-sentinel { height: 1px; }
 
   @media (max-width: 720px) {
-    .upcoming-section { padding: 16px 14px 4px; }
-    .upcoming-card, .upcoming-card-cover-wrap { width: 118px; flex-basis: 118px; }
+    .upcoming-section { padding: 16px 14px; }
+    .upcoming-day-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
   }
 </style>
 
@@ -634,85 +583,78 @@ if (currentProfile) {
   (function () {
     var section = document.getElementById('upcomingSection');
     if (!section) return;
-    var monthsContainer = document.getElementById('upcomingMonths');
+    var grid = document.getElementById('upcomingDayGrid');
     var sentinel = document.getElementById('upcomingSentinel');
-    if (!monthsContainer || !sentinel) return;
+    if (!grid || !sentinel) return;
 
+    var DAY_PREVIEW_COUNT = 4;
     var state = {
-      platform: '',                                                    // empty = All
+      platform: '',
       nextFromUnix: parseInt(section.getAttribute('data-next-from') || '0', 10),
-      lastKey: section.getAttribute('data-last-key') || '',
       loading: false,
       exhausted: false,
     };
 
-    function monthLabel(key) {
-      var parts = key.split('-'); var y = parseInt(parts[0], 10); var m = parseInt(parts[1], 10);
-      return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-    }
-    function dayLabel(iso) {
-      var p = iso.split('-'); var d = new Date(Date.UTC(+p[0], +p[1]-1, +p[2]));
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-    }
-    function platformAbbrevs(game) {
-      var seen = {}; var out = [];
-      for (var i = 0; i < (game.platforms || []).length && out.length < 4; i++) {
-        var p = game.platforms[i]; var label = p.abbrev || p.name;
-        if (!label || seen[label]) continue;
-        seen[label] = true; out.push(label);
-      }
-      return out;
-    }
     function escapeHtml(s) {
-      return String(s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; });
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+      });
+    }
+    function weekdayLabel(iso) {
+      var p = iso.split('-');
+      return new Date(Date.UTC(+p[0], +p[1]-1, +p[2])).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+    }
+    function monthDayLabel(iso) {
+      var p = iso.split('-'); return (+p[1]) + '/' + (+p[2]);
     }
 
-    function renderCard(game) {
+    function renderCover(game) {
       var slug = game.chekpoint_slug;
       var href = slug ? '/games/' + slug : '#';
-      var abbrevs = platformAbbrevs(game).map(function (p) { return '<span class="upcoming-card-platform">' + escapeHtml(p) + '</span>'; }).join('');
-      var cover = game.cover_url
-        ? '<img class="upcoming-card-cover" src="' + escapeHtml(game.cover_url) + '" alt="" loading="lazy" />'
-        : '<div class="upcoming-card-cover upcoming-card-cover-empty">🎮</div>';
+      var body = game.cover_url
+        ? '<img src="' + escapeHtml(game.cover_url) + '" alt="' + escapeHtml(game.title) + '" loading="lazy" />'
+        : '<span class="upcoming-day-cover-empty">🎮</span>';
       return (
-        '<article class="upcoming-card ' + (slug ? 'is-imported' : 'is-unimported') + '" ' +
+        '<a class="upcoming-day-cover ' + (slug ? 'is-imported' : 'is-unimported') + '" ' +
+          'href="' + href + '" ' +
           'data-igdb-id="' + game.igdb_id + '" ' +
           'data-chekpoint-slug="' + escapeHtml(slug || '') + '" ' +
-          'data-title="' + escapeHtml(game.title) + '">' +
-          '<a class="upcoming-card-link" href="' + href + '">' +
-            '<div class="upcoming-card-cover-wrap">' + cover +
-              '<div class="upcoming-card-date">' + escapeHtml(dayLabel(game.release_date)) + '</div>' +
-            '</div>' +
-            '<div class="upcoming-card-title">' + escapeHtml(game.title) + '</div>' +
-            '<div class="upcoming-card-platforms">' + abbrevs + '</div>' +
-          '</a>' +
+          'title="' + escapeHtml(game.title) + '" ' +
+          'aria-label="' + escapeHtml(game.title) + '">' +
+          body +
+        '</a>'
+      );
+    }
+    function renderDay(day) {
+      // day = { iso, games (sorted hypes desc), total }
+      var covers = day.games.slice(0, DAY_PREVIEW_COUNT).map(renderCover).join('');
+      var viewAllLabel = 'View all' + (day.total > DAY_PREVIEW_COUNT ? ' (' + day.total + ')' : '') + ' →';
+      return (
+        '<article class="upcoming-day" data-day="' + day.iso + '">' +
+          '<div class="upcoming-day-head">' +
+            '<span class="upcoming-day-weekday">' + escapeHtml(weekdayLabel(day.iso)) + '</span>' +
+            '<span class="upcoming-day-date">' + escapeHtml(monthDayLabel(day.iso)) + '</span>' +
+          '</div>' +
+          '<div class="upcoming-day-covers" data-count="' + day.total + '">' + covers + '</div>' +
+          '<a class="upcoming-day-view-all" href="/discover/releases/' + day.iso + '">' + viewAllLabel + '</a>' +
         '</article>'
       );
     }
-    function renderMonth(key, games) {
-      var reel = games.map(renderCard).join('');
-      return (
-        '<div class="upcoming-month" data-month-key="' + key + '">' +
-          '<div class="upcoming-month-head">' +
-            '<div class="upcoming-month-label">' + escapeHtml(monthLabel(key)) + '</div>' +
-            '<div class="upcoming-month-nav">' +
-              '<button type="button" class="upcoming-nav-btn" data-nav="prev" aria-label="Scroll earlier">‹</button>' +
-              '<button type="button" class="upcoming-nav-btn" data-nav="next" aria-label="Scroll later">›</button>' +
-            '</div>' +
-          '</div>' +
-          '<div class="upcoming-reel" role="list">' + reel + '</div>' +
-        '</div>'
-      );
-    }
 
-    function groupByMonth(games) {
+    // Within a day, biggest-hyped games float left. Ties fall back to title.
+    function groupByDay(games) {
       var map = Object.create(null); var order = [];
       for (var i = 0; i < games.length; i++) {
-        var g = games[i]; var k = g.release_date.slice(0, 7);
+        var g = games[i]; var k = g.release_date;
         if (!map[k]) { map[k] = []; order.push(k); }
         map[k].push(g);
       }
-      return order.map(function (k) { return { key: k, games: map[k] }; });
+      return order.map(function (iso) {
+        var bucket = map[iso].slice().sort(function (a, b) {
+          return (b.hypes - a.hypes) || a.title.localeCompare(b.title);
+        });
+        return { iso: iso, games: bucket, total: bucket.length };
+      });
     }
 
     function fetchNextWindow() {
@@ -725,76 +667,73 @@ if (currentProfile) {
         .then(function (data) {
           state.loading = false;
           if (!data || !data.games || data.games.length === 0) { state.exhausted = true; return; }
-          var grouped = groupByMonth(data.games);
+          var days = groupByDay(data.games);
           var appended = '';
-          for (var i = 0; i < grouped.length; i++) {
-            var m = grouped[i];
-            // If a month already exists (edge: last known month overlaps), append cards.
-            var existing = monthsContainer.querySelector('.upcoming-month[data-month-key="' + m.key + '"] .upcoming-reel');
+          for (var i = 0; i < days.length; i++) {
+            var d = days[i];
+            // If a day card already exists (overlap at cursor boundary), merge
+            // new games in by re-sorting the combined bucket.
+            var existing = grid.querySelector('.upcoming-day[data-day="' + d.iso + '"]');
             if (existing) {
-              existing.insertAdjacentHTML('beforeend', m.games.map(renderCard).join(''));
+              var covers = existing.querySelector('.upcoming-day-covers');
+              var existingTotal = parseInt(covers?.getAttribute('data-count') || '0', 10);
+              var newTotal = existingTotal + d.games.length;
+              covers?.setAttribute('data-count', String(newTotal));
+              // Re-render the preview tiles with the combined top-N by hype
+              // isn't trivial without the existing bucket; cheap approximation:
+              // append new covers if slots remain, else leave the preview alone.
+              var remaining = DAY_PREVIEW_COUNT - (covers?.childElementCount || 0);
+              if (remaining > 0 && covers) {
+                covers.insertAdjacentHTML('beforeend', d.games.slice(0, remaining).map(renderCover).join(''));
+              }
+              var vaLink = existing.querySelector('.upcoming-day-view-all');
+              if (vaLink) {
+                vaLink.textContent = 'View all' + (newTotal > DAY_PREVIEW_COUNT ? ' (' + newTotal + ')' : '') + ' →';
+              }
             } else {
-              appended += renderMonth(m.key, m.games);
+              appended += renderDay(d);
             }
           }
-          if (appended) monthsContainer.insertAdjacentHTML('beforeend', appended);
-          // Advance by the last-rendered release date, not a fixed window step,
-          // so a dense span (e.g. Nov games padding the limit) doesn't cause a
-          // gap to the next requested window.
+          if (appended) grid.insertAdjacentHTML('beforeend', appended);
           var maxUnix = 0;
           for (var j = 0; j < data.games.length; j++) if (data.games[j].release_unix > maxUnix) maxUnix = data.games[j].release_unix;
           if (maxUnix > state.nextFromUnix) state.nextFromUnix = maxUnix + 1;
-          state.lastKey = grouped.length ? grouped[grouped.length - 1].key : state.lastKey;
           if (!data.has_more && data.games.length < 20) state.exhausted = true;
         })
         .catch(function (e) { state.loading = false; console.error('[upcoming] fetch', e); });
     }
 
-    // Infinite scroll
     if ('IntersectionObserver' in window) {
       var io = new IntersectionObserver(function (entries) {
         for (var i = 0; i < entries.length; i++) if (entries[i].isIntersecting) fetchNextWindow();
-      }, { rootMargin: '600px 0px' });
+      }, { rootMargin: '800px 0px' });
       io.observe(sentinel);
     }
 
-    // Platform filter — rebuilds the list from the first batch.
     section.querySelectorAll('.upcoming-chip').forEach(function (chip) {
       chip.addEventListener('click', function () {
         var next = chip.getAttribute('data-platform') || '';
         if (next === state.platform) return;
         state.platform = next;
         state.nextFromUnix = Math.floor(Date.now() / 1000);
-        state.lastKey = '';
         state.exhausted = false;
         section.querySelectorAll('.upcoming-chip').forEach(function (c) {
           var active = c === chip;
           c.classList.toggle('is-active', active);
           c.setAttribute('aria-selected', active ? 'true' : 'false');
         });
-        monthsContainer.innerHTML = '';
+        grid.innerHTML = '';
         fetchNextWindow();
       });
     });
 
-    // Reel arrows (delegated)
-    monthsContainer.addEventListener('click', function (e) {
-      var btn = e.target.closest('.upcoming-nav-btn'); if (!btn) return;
-      var reel = btn.closest('.upcoming-month')?.querySelector('.upcoming-reel');
-      if (!reel) return;
-      var dir = btn.getAttribute('data-nav') === 'next' ? 1 : -1;
-      reel.scrollBy({ left: dir * Math.min(reel.clientWidth * 0.85, 600), behavior: 'smooth' });
-    });
-
-    // Click-to-adopt for unimported games.
-    monthsContainer.addEventListener('click', function (e) {
-      var link = e.target.closest('.upcoming-card.is-unimported .upcoming-card-link');
-      if (!link) return;
+    // Click-to-adopt for unimported covers.
+    grid.addEventListener('click', function (e) {
+      var cover = e.target.closest('.upcoming-day-cover.is-unimported');
+      if (!cover) return;
       e.preventDefault();
-      var card = link.closest('.upcoming-card');
-      var igdbId = card?.getAttribute('data-igdb-id');
-      if (!igdbId) return;
-      card.classList.add('is-loading');
+      cover.style.opacity = '0.6';
+      var igdbId = cover.getAttribute('data-igdb-id');
       fetch('/api/games/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -806,9 +745,9 @@ if (currentProfile) {
         })
         .then(function (data) {
           if (data && data.slug) { window.location.href = '/games/' + data.slug; }
-          else { card.classList.remove('is-loading'); }
+          else { cover.style.opacity = ''; }
         })
-        .catch(function () { card.classList.remove('is-loading'); });
+        .catch(function () { cover.style.opacity = ''; });
     });
   })();
 </script>

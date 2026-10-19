@@ -91,6 +91,7 @@ export interface UpcomingGame {
   cover_url: string | null;        // t_cover_big
   release_date: string;             // ISO yyyy-mm-dd
   release_unix: number;             // UTC seconds; stable for client-side grouping
+  hypes: number;                    // IGDB anticipation counter (wishlist-ish)
   platforms: { id: number; name: string; abbrev: string | null }[];
   genres: string[];
 }
@@ -156,6 +157,7 @@ export async function fetchUpcomingReleases(opts: {
         cover_url: coverId ? `https://images.igdb.com/igdb/image/upload/t_cover_big/${coverId}.jpg` : null,
         release_date: iso,
         release_unix: unix,
+        hypes: Number.isFinite(Number(r.hypes)) ? Number(r.hypes) : 0,
         platforms: Array.isArray(r.platforms)
           ? r.platforms
               .filter((p: any) => p && typeof p.id === 'number')
