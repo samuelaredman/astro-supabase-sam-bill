@@ -68,6 +68,34 @@ function coerceInt(input: unknown): number | null {
   return null;
 }
 
+// Score coercion mirrors the IIFE's pickScore: integers 1–10 go through,
+// 0.5–5 fractional values are treated as half-stars and doubled, everything
+// else is rejected. Centralised here so an uploaded payload from a legacy
+// HLTB client is normalised at the server boundary rather than silently
+// rejected (reviews.score is CHECK(1..10) INT).
+function coerceScore(input: unknown): number | null {
+  let s: number;
+  if (typeof input === "number") s = input;
+  else if (typeof input === "string") s = parseFloat(input);
+  else return null;
+  if (!Number.isFinite(s) || s <= 0) return null;
+  if (!Number.isInteger(s) && s <= 5) s = s * 2;
+  const rounded = Math.round(s);
+  return rounded >= 1 && rounded <= 10 ? rounded : null;
+}
+
+// Accepts "YYYY-MM-DD" or any ISO-like date string. Returns null for anything
+// Date can't parse — otherwise an invalid value here would be injected as a
+// bad timestamp into reviews.published_at.
+function coerceDate(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const d = new Date(trimmed);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
 function coerceString(input: unknown, max: number): string | null {
   if (typeof input !== "string") return null;
   const trimmed = input.trim();
@@ -92,13 +120,9 @@ export function coerceHltbRow(input: unknown): HltbRow | null {
   const minutesRaw = coerceInt(r.minutes_played);
   const minutes_played = minutesRaw != null && minutesRaw > 0 ? minutesRaw : null;
 
-  // HLTB scores are 1–10 integer. Reject anything outside — the review would
-  // violate reviews.score CHECK (1..10) otherwise.
-  const scoreRaw = coerceInt(r.score);
-  const score = scoreRaw != null && scoreRaw >= 1 && scoreRaw <= 10 ? scoreRaw : null;
-
+  const score = coerceScore(r.score);
   const review_text = coerceString(r.review_text, REVIEW_MAX);
-  const review_date = coerceString(r.review_date, 10); // "YYYY-MM-DD"
+  const review_date = coerceDate(r.review_date);
 
   const hltb_id = coerceString(r.hltb_id, 32);
   const contains_spoilers = r.contains_spoilers === true;

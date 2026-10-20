@@ -53,6 +53,21 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
   var hm = location.pathname.match(/\/user\/[^\/]+\/([^\/]+)/);
   if (hm && !/^games$/i.test(hm[1])) username = hm[1];
 
+  // Cloudflare's "Just a Moment" / managed-challenge interstitial won't carry
+  // user data — the IIFE would see "zero games" and look like a success. Catch
+  // it explicitly like Backloggd catches its Anubis page.
+  function isChallengePage(html){
+    return /\bcf-chl-widget\b|Just a moment|Checking your browser|cf_challenge/i.test(html)
+      || /__cf_chl_tk|cdn-cgi\/challenge-platform/i.test(html);
+  }
+  // Who's actually signed in? Backloggd carries the viewer handle on the
+  // per-card quick-logs link; HLTB has a header dropdown that links at the
+  // signed-in profile. The bookmarklet is useless on someone else's page.
+  function viewerIdFrom(html){
+    var m = html.match(/\/user\/(\d+)\/[a-zA-Z0-9_-]+\/(?:profile|settings|games|home)/);
+    return m ? m[1] : null;
+  }
+
   // ── Strategy 1: Next.js hydration data ───────────────────────────────────
   // Collect everything we can from __NEXT_DATA__ on the current page. HLTB
   // puts the "all games" list behind an auth-gated API, so navigating the
@@ -127,18 +142,20 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
   }
 
   function pickScore(o){
-    // Stars on HLTB are 1–10. review_score is the canonical field.
+    // review_score is HLTB's canonical rating field. Modern HLTB stores an
+    // integer 1–10; legacy payloads sometimes carry a 0.5–5 half-star value
+    // as a fractional number (e.g. 4.5). Chekpoint stores integer 1–10, so:
+    //   - integers 1..10 go through
+    //   - fractional ≤ 5 is treated as half-star and doubled (3.5 → 7)
+    //   - anything else is rejected (0, 11, negative, non-numeric)
     var s = o.review_score != null ? o.review_score
           : o.review != null && typeof o.review === "object" ? o.review.score
           : o.rating;
     if (typeof s === "string") s = parseFloat(s);
-    if (typeof s !== "number" || !isFinite(s)) return null;
-    // Some payloads use a 0–5 half-star scale. Keep ints only — reviews.score
-    // is CHECK(1..10) INT. Treat 0–5 as "already doubled on the server" or
-    // leave for Chekpoint-side coercion.
-    if (s > 10) return null;
-    if (s < 1) return null;
-    return Math.round(s);
+    if (typeof s !== "number" || !isFinite(s) || s <= 0) return null;
+    if (!Number.isInteger(s) && s <= 5) s = s * 2;
+    s = Math.round(s);
+    return s >= 1 && s <= 10 ? s : null;
   }
 
   function pickReviewText(o){
@@ -222,53 +239,143 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     return isNaN(n) ? null : n;
   }
 
+  // 5000 games at ~20/page ≈ 250 pages. Same safety cap as Backloggd (200)
+  // plus headroom for HLTB's smaller page size.
+  var MAX_PAGES = 200;
+
   async function fetchText(url){
     var r = await fetch(url, { credentials: "include", headers: { "accept": "text/html" } });
     if (!r.ok) throw new Error("HLTB returned " + r.status + " for " + url);
-    return await r.text();
+    var html = await r.text();
+    if (isChallengePage(html)) throw new Error("HLTB is showing a Cloudflare challenge — reload the page and try again.");
+    return html;
   }
 
+  // Order matters: assignment is first-wins (per-slug), so a game in both
+  // "playing" and "completed" lands on "playing". The "retired" refinement
+  // below reaches into already-assigned "completed" rows and promotes them
+  // to "retired", mirroring Backloggd's retired-overrides-played rule.
   var SHELVES = [
-    { slug: "completed", status: "completed" },
     { slug: "playing",   status: "playing" },
-    { slug: "backlog",   status: "backlog" },
     { slug: "replays",   status: "replay" },
-    { slug: "retired",   status: "retired" },
+    { slug: "completed", status: "completed" },
+    { slug: "backlog",   status: "backlog" },
     { slug: "custom",    status: "custom" },
   ];
 
+  // Walk a shelf URL to completion. Returns the array of {hltb_id,title}
+  // entries. Stops early on empty pages or when the shelf-dedupe tripwire
+  // fires (silent page-1 echo for out-of-range page numbers).
+  async function crawlShelf(shelfSlug, label){
+    var out = [], seen = {};
+    for (var p = 1; p <= MAX_PAGES; p++) {
+      var url = "/user/" + userSlug + "/games/" + shelfSlug + "?page=" + p;
+      var html;
+      try { html = await fetchText(url); } catch (e) {
+        // 404 on an unused shelf is normal — just stop. Challenge pages
+        // bubble up from fetchText via throw.
+        if (p === 1) return [];
+        break;
+      }
+      var entries = parseShelfHtml(html);
+      if (!entries.length) break;
+      var before = out.length;
+      for (var i = 0; i < entries.length; i++) {
+        if (!seen[entries[i].hltb_id]) {
+          seen[entries[i].hltb_id] = 1;
+          out.push(entries[i]);
+        }
+      }
+      box.textContent = "Chekpoint HLTB: " + label + " — page " + p + " (" + out.length + ")";
+      if (out.length === before) break; // nothing new this page
+      await sleep(300);
+    }
+    return out;
+  }
+
+  // Collect every shelf, apply status priority. Tolerant of HLTB silently
+  // ignoring a filter (returning the whole library for each shelf) — if two
+  // shelves return the exact same slug set, the second is discarded. Same
+  // tripwire Backloggd uses for its ignored `status:*` filters.
   async function crawlShelves(){
-    var all = [];
-    for (var i=0;i<SHELVES.length;i++) {
+    var assigned = {};   // hltb_id -> { title, status }
+    var seenSets = [];   // sorted-id-list signatures of each kept shelf
+    for (var i = 0; i < SHELVES.length; i++) {
       var sh = SHELVES[i];
       box.textContent = "Chekpoint HLTB: reading " + sh.slug + "…";
-      var page = 1, seenSize = -1;
-      while (page <= 60) {
-        var url = "/user/" + userSlug + "/games/" + sh.slug + "?page=" + page;
-        var html;
-        try { html = await fetchText(url); } catch (e) { break; }
-        var entries = parseShelfHtml(html);
-        if (!entries.length) break;
-        // Stop when a page repeats everything we've already got for this
-        // shelf (HLTB silently returns page 1 for out-of-range values).
-        var before = all.length;
-        for (var j=0;j<entries.length;j++) {
-          all.push({ hltb_id: entries[j].hltb_id, game_title: entries[j].game_title,
-            hltb_status: sh.status });
+      var entries = await crawlShelf(sh.slug, sh.slug);
+      if (!entries.length) continue;
+      var ids = entries.map(function(e){ return e.hltb_id; }).sort();
+      var sig = ids.join(",");
+      if (seenSets.indexOf(sig) !== -1) continue; // same list as a prior shelf
+      seenSets.push(sig);
+      for (var j = 0; j < entries.length; j++) {
+        var e = entries[j];
+        if (!assigned[e.hltb_id]) {
+          assigned[e.hltb_id] = { title: e.game_title, status: sh.status };
         }
-        if (all.length === seenSize) break;
-        seenSize = all.length;
-        if (entries.length < 20 || all.length === before) break;
-        page++;
-        await sleep(400);
+      }
+      await sleep(300);
+    }
+
+    // Refinement: HLTB "Retired" means the user stopped without finishing.
+    // Parallel to Backloggd's retired-overrides-played — only promote rows
+    // currently sitting on "completed" so a Backlog or Playing label isn't
+    // overwritten.
+    box.textContent = "Chekpoint HLTB: reading retired…";
+    var retired = await crawlShelf("retired", "retired");
+    var retiredSig = retired.map(function(e){ return e.hltb_id; }).sort().join(",");
+    // Guard against the same filter-ignored trap: if the retired list is
+    // identical to one we've already kept, don't overwrite everything.
+    if (retired.length && seenSets.indexOf(retiredSig) === -1) {
+      for (var r = 0; r < retired.length; r++) {
+        var rid = retired[r].hltb_id;
+        if (!assigned[rid]) {
+          assigned[rid] = { title: retired[r].game_title, status: "retired" };
+        } else if (assigned[rid].status === "completed") {
+          assigned[rid].status = "retired";
+        }
       }
     }
-    return all;
+
+    var rows = [];
+    for (var id in assigned) {
+      rows.push({
+        hltb_id: id,
+        game_title: assigned[id].title,
+        hltb_status: assigned[id].status,
+        release_year: null,
+        minutes_played: null,
+        score: null,
+        review_text: null,
+        review_date: null,
+        contains_spoilers: false,
+      });
+    }
+    return rows;
   }
 
   // ── Drive ────────────────────────────────────────────────────────────────
   try {
     box.textContent = "Chekpoint HLTB: reading your games…";
+
+    // Verify (a) we're not inside a Cloudflare challenge, and (b) the viewer
+    // signed into HLTB is the owner of this profile. Both checks match the
+    // Backloggd scraper's Anubis/viewer-handle safeguards.
+    var currentHtml = document.documentElement.outerHTML;
+    if (isChallengePage(currentHtml)) {
+      box.textContent = "Chekpoint HLTB: Cloudflare is showing a challenge — refresh the page, wait a moment, then try again.";
+      return;
+    }
+    var viewer = viewerIdFrom(currentHtml);
+    // Only enforce the match when we can resolve both ids and they're both
+    // numeric. HLTB's URL sometimes uses the handle as the first segment,
+    // which would false-positive here.
+    if (viewer && /^\d+$/.test(userSlug) && /^\d+$/.test(viewer) && viewer !== userSlug) {
+      box.textContent = "Chekpoint HLTB: this is a different user's games tab. Open YOUR games tab (howlongtobeat.com/user/" + viewer + "/games) and run this there.";
+      return;
+    }
+
     var rows = [];
 
     // Try hydration data first.
@@ -284,7 +391,10 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
     // If that didn't surface a library, fall back to shelf walks.
     if (!rows.length) {
       box.textContent = "Chekpoint HLTB: no hydration data — walking shelves…";
-      try { rows = await crawlShelves(); } catch (e) { console.error(e); }
+      try { rows = await crawlShelves(); } catch (e) {
+        box.textContent = "Chekpoint HLTB importer: " + (e && e.message ? e.message : "failed to walk shelves");
+        throw e;
+      }
     }
 
     // Last-ditch: at least report what we're on.

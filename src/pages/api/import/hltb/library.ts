@@ -82,6 +82,12 @@ export const POST: APIRoute = async (context) => {
   // ── Process a bounded slice ──
   const started = Date.now();
   const unmatchedSample: string[] = [];
+  // Two HLTB rows that resolve to the same Chekpoint game (e.g. the same
+  // game sitting on multiple HLTB shelves, or an alt-name entry) must not
+  // both insert a review — the second would race against the first on the
+  // reviews_one_published_per_game constraint. Mirror the Backloggd library
+  // importer's per-chunk `seenGame` guard.
+  const seenGame = new Set<string>();
   let processed = 0;
   let appliedStatus = 0;
   let appliedPublished = 0;
@@ -132,6 +138,8 @@ export const POST: APIRoute = async (context) => {
       if (unmatchedSample.length < 15) unmatchedSample.push(row.game_title);
       continue;
     }
+    if (seenGame.has(match.gameId)) continue;
+    seenGame.add(match.gameId);
 
     // ── Library status + playtime ──
     const chekpointStatus = mapHltbStatus(row.hltb_status);
