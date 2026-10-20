@@ -8,20 +8,25 @@ import GroupCard, { type GroupCardSummary } from "../../components/groups/GroupC
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, supabase);
-if (!user) return Astro.redirect("/signin");
-
 const db = getSupabaseAdmin() as any;
 
-const { data: profile } = await db
-  .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
-if (!profile) return Astro.redirect("/signin");
+// Logged-out visitors see Discover only. Everything that keys off profile.id
+// (my groups, invites, pending requests) is skipped when there's no profile.
+let profile: { id: string; username: string; avatar_url: string | null } | null = null;
+if (user) {
+  const { data } = await db
+    .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
+  profile = data ?? null;
+}
+const isLoggedIn = !!profile;
 
-// My groups
-const { data: myMemberships } = await (supabase as any)
-  .from("group_members")
-  .select(`role, groups ( id, name, description, avatar_url, banner_url, banner_position, visibility, created_at, created_by )`)
-  .eq("profile_id", profile.id)
-  .order("joined_at", { ascending: false });
+const myMemberships = profile
+  ? (await (supabase as any)
+      .from("group_members")
+      .select(`role, groups ( id, name, description, avatar_url, banner_url, banner_position, visibility, created_at, created_by )`)
+      .eq("profile_id", profile.id)
+      .order("joined_at", { ascending: false })).data
+  : null;
 
 const myGroups = (myMemberships ?? []).map((m: any) => ({ ...m.groups, role: m.role }));
 
@@ -39,12 +44,14 @@ async function countMembers(ids: string[]): Promise<Record<string, number>> {
 const groupIds = myGroups.map((g: any) => g.id);
 const memberCounts = await countMembers(groupIds);
 
-// Pending invites
-const { data: pendingInvites } = await (supabase as any)
-  .from("group_invites")
-  .select(`id, group_id, groups ( id, name, description, visibility ), invited_by_profile:invited_by ( username, avatar_url )`)
-  .eq("invited_profile_id", profile.id)
-  .eq("status", "pending");
+// Pending invites — only make sense for a signed-in profile
+const pendingInvites = profile
+  ? (await (supabase as any)
+      .from("group_invites")
+      .select(`id, group_id, groups ( id, name, description, visibility ), invited_by_profile:invited_by ( username, avatar_url )`)
+      .eq("invited_profile_id", profile.id)
+      .eq("status", "pending")).data
+  : null;
 
 // Discover all groups the user isn't already a member of (including private — users can apply to join)
 const { data: discoverGroups } = await db
@@ -95,17 +102,19 @@ const creatorIds = Array.from(new Set([
 const creators = await loadCreators(creatorIds);
 
 // User's pending join requests (so we can show status in discover)
-const { data: pendingRequests } = await (supabase as any)
-  .from("group_join_requests")
-  .select("group_id")
-  .eq("profile_id", profile.id)
-  .eq("status", "pending");
+const pendingRequests = profile
+  ? (await (supabase as any)
+      .from("group_join_requests")
+      .select("group_id")
+      .eq("profile_id", profile.id)
+      .eq("status", "pending")).data
+  : null;
 const pendingRequestGroupIds = new Set((pendingRequests ?? []).map((r: any) => r.group_id));
 
 function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
 ---
 
-<Layout title="Groups — Chekpoint" isLoggedIn={true} currentProfile={profile} activeNav="groups" variant="two-col">
+<Layout title="Groups — Chekpoint" isLoggedIn={isLoggedIn} currentProfile={profile} activeNav="groups" variant="two-col">
 <style is:global>
   .groups-header { display:flex; align-items:center; justify-content:space-between; padding:24px 28px 0; }
   .groups-title { font-family:'DM Serif Display',serif; font-size:24px; }
@@ -140,7 +149,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
 <div class="feed">
   <div class="groups-header">
     <h1 class="groups-title">Groups</h1>
-    <a href="/groups/create" class="btn-primary">+ New Group</a>
+    <a href={isLoggedIn ? "/groups/create" : "/signin?next=/groups/create"} class="btn-primary">+ New Group</a>
   </div>
 
   {/* Pending invites */}
@@ -171,7 +180,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
       <div class="empty-hero-title">Bring your crew together</div>
       <p class="empty-hero-sub">Create a group to track scores, log game nights, and build a shared watchlist with your friends.</p>
       <div class="empty-hero-actions">
-        <a href="/groups/create" class="btn-primary">+ Create a Group</a>
+        <a href={isLoggedIn ? "/groups/create" : "/signin?next=/groups/create"} class="btn-primary">+ Create a Group</a>
       </div>
     </div>
   )}
