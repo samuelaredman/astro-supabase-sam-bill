@@ -19,7 +19,7 @@ if (!profile) return Astro.redirect("/signin");
 // My groups
 const { data: myMemberships } = await (supabase as any)
   .from("group_members")
-  .select(`role, groups ( id, name, description, avatar_url, banner_url, banner_position, visibility, created_at )`)
+  .select(`role, groups ( id, name, description, avatar_url, banner_url, banner_position, visibility, created_at, created_by )`)
   .eq("profile_id", profile.id)
   .order("joined_at", { ascending: false });
 
@@ -49,7 +49,7 @@ const { data: pendingInvites } = await (supabase as any)
 // Discover all groups the user isn't already a member of (including private — users can apply to join)
 const { data: discoverGroups } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, created_at")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, created_at, created_by")
   .in("visibility", ["public", "private"])
   .not("id", "in", `(${groupIds.length > 0 ? groupIds.join(",") : "00000000-0000-0000-0000-000000000000"})`)
   .order("created_at", { ascending: false })
@@ -68,6 +68,31 @@ async function loadSummaries(ids: string[]): Promise<Record<string, GroupCardSum
   return out;
 }
 const summaries = await loadSummaries([...groupIds, ...(discoverGroups ?? []).map((g: any) => g.id)]);
+
+// Creator byline + badges for every card
+type GroupCreator = { username: string; avatar_url: string | null; badges: string[] };
+async function loadCreators(ids: string[]): Promise<Record<string, GroupCreator>> {
+  const out: Record<string, GroupCreator> = {};
+  if (ids.length === 0) return out;
+  const { data, error } = await db
+    .from("profiles")
+    .select("id, username, avatar_url, profile_badges ( badge_slug )")
+    .in("id", ids);
+  if (error) console.error("[groups] creators error:", JSON.stringify(error));
+  for (const row of data ?? []) {
+    out[row.id] = {
+      username: row.username,
+      avatar_url: row.avatar_url,
+      badges: (row.profile_badges ?? []).map((b: any) => b.badge_slug).filter(Boolean),
+    };
+  }
+  return out;
+}
+const creatorIds = Array.from(new Set([
+  ...myGroups.map((g: any) => g.created_by),
+  ...(discoverGroups ?? []).map((g: any) => g.created_by),
+].filter(Boolean)));
+const creators = await loadCreators(creatorIds);
 
 // User's pending join requests (so we can show status in discover)
 const { data: pendingRequests } = await (supabase as any)
@@ -157,7 +182,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
       <div class="section-label">My Groups</div>
       <div class="group-grid">
         {myGroups.map((g: any) => (
-          <GroupCard group={g} memberCount={memberCounts[g.id] ?? 1} summary={summaries[g.id]}>
+          <GroupCard group={g} memberCount={memberCounts[g.id] ?? 1} summary={summaries[g.id]} creator={creators[g.created_by]}>
             <span slot="meta" class="visibility-badge">{g.visibility}</span>
             <span slot="badge" class="group-role">{g.role}</span>
           </GroupCard>
@@ -176,7 +201,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
           const isPrivate = g.visibility === "private";
           const needsApproval = isPrivate || !!g.requires_approval;
           return (
-            <GroupCard group={g} memberCount={discoverMemberCounts[g.id] ?? 0} summary={summaries[g.id]} isPrivate={isPrivate}>
+            <GroupCard group={g} memberCount={discoverMemberCounts[g.id] ?? 0} summary={summaries[g.id]} isPrivate={isPrivate} creator={creators[g.created_by]}>
               {isPrivate && <span slot="meta" class="visibility-badge">Private</span>}
               {!isPrivate && g.requires_approval && <span slot="meta" class="visibility-badge">Application required</span>}
               {isPending
