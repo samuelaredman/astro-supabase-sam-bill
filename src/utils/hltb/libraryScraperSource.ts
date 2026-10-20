@@ -296,7 +296,7 @@ export const LIBRARY_SCRAPER_SOURCE = String.raw`void (async function () {
   // Collect every shelf, apply status priority. Tolerant of HLTB silently
   // ignoring a filter (returning the whole library for each shelf) — if two
   // shelves return the exact same slug set, the second is discarded. Same
-  // tripwire Backloggd uses for its ignored `status:*` filters.
+  // tripwire Backloggd uses for its ignored 'status:*' filters.
   async function crawlShelves(){
     var assigned = {};   // hltb_id -> { title, status }
     var seenSets = [];   // sorted-id-list signatures of each kept shelf
