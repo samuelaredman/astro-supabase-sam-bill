@@ -3,11 +3,13 @@ export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../utils/database";
 import Layout from "../components/Layout.astro";
 import { LIBRARY_SCRAPER_SOURCE } from "../utils/backloggd/libraryScraperSource";
+import { LIBRARY_SCRAPER_SOURCE as HLTB_SCRAPER_SOURCE } from "../utils/hltb/libraryScraperSource";
 import { getPageUser } from "../utils/pageAuth";
 
-// Drag-to-bookmarks-bar bookmarklet: the library scraper as a javascript: URI.
+// Drag-to-bookmarks-bar bookmarklets: each importer's IIFE as a javascript: URI.
 // encodeURIComponent so it's safe inside a double-quoted href with no eval().
 const backloggdLibraryBookmarklet = `javascript:${encodeURIComponent(LIBRARY_SCRAPER_SOURCE)}`;
+const hltbLibraryBookmarklet = `javascript:${encodeURIComponent(HLTB_SCRAPER_SOURCE)}`;
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, serverClient);
@@ -617,6 +619,57 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
             </div>
           </details>
         </div>
+      </div>
+    </section>
+
+    <!-- HowLongToBeat -->
+    <section class="settings-section settings-section--collapsible" id="hltb" data-collapsed="true">
+      <button type="button" class="settings-section-header" onclick="toggleSettingsSection('hltb')" aria-expanded="false" aria-controls="hltbBody">
+        <span class="settings-section-header-label">HowLongToBeat</span>
+        <span class="settings-section-header-status">Import library &amp; reviews</span>
+        <svg class="settings-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div id="hltbBody" class="settings-row" style="flex-direction:column;align-items:stretch;gap:14px">
+        <div class="settings-row-text">
+          <div class="settings-row-label">Import your HLTB library</div>
+          <div class="settings-row-sub">
+            Brings every tracked game across with its play status (Completed, Playing, Backlog, Retired)
+            and your logged hours. HLTB entries you rated become Chekpoint reviews &mdash; a rating with a
+            written note posts as a published review; a rating with no note comes in as a draft so you
+            can finish it. We never overwrite statuses or reviews you&rsquo;ve already set here.
+          </div>
+          <div class="settings-row-sub" style="margin-top:8px">
+            HLTB blocks server-side access, so this runs in your browser:
+          </div>
+        </div>
+
+        <ol style="margin:0;padding-left:18px;line-height:1.8">
+          <li>Drag this to your bookmarks bar:
+            <a class="bl-bookmarklet" href={hltbLibraryBookmarklet}>&#128229; Import HLTB Library</a>
+          </li>
+          <li>Open <a href="https://howlongtobeat.com" target="_blank" rel="noopener">your HLTB games tab</a> (signed in, on <code>/user/&lt;you&gt;/games</code>), then click the bookmark. It downloads <code>hltb-chekpoint-library.json</code>.</li>
+          <li>Choose that file here:</li>
+        </ol>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px">
+          <input type="file" id="hltbFile" accept="application/json" />
+          <button class="settings-save-btn" id="hltbBtn" onclick="hltbImport()">Import</button>
+          <span id="hltbMsg" style="font-size:12px;color:var(--text-secondary)"></span>
+        </div>
+        <div id="hltbProgress" class="bl-progress" style="display:none">
+          <div class="bl-bar"><div class="bl-bar-fill" id="hltbBarFill"></div></div>
+          <div class="bl-progress-text" id="hltbProgressText"></div>
+        </div>
+        <div id="hltbResults" class="steam-results" style="display:none"></div>
+
+        <details class="bl-manual" style="margin-top:12px">
+          <summary>Can&rsquo;t use a bookmark? Use the console instead</summary>
+          <div class="bl-manual-body">
+            On <a href="https://howlongtobeat.com" target="_blank" rel="noopener">howlongtobeat.com</a> (signed in, on your games tab), open the developer console (F12 &rarr; Console) and run:
+            <code class="bl-snippet" id="hltbSnippet">fetch('https://chekpoint.gg/api/import/hltb/library-scraper.js').then(r=&gt;r.text()).then(eval)</code>
+            <button type="button" class="settings-ghost-btn" onclick="hltbCopySnippet()" style="margin-top:6px">Copy</button>
+            <div style="margin-top:6px">Then upload the downloaded file above.</div>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -1426,7 +1479,7 @@ window.toggleSettingsSection = toggleSettingsSection;
     if (params.has('steam')) shouldExpand.add('steam');
     if (params.has('psn')) shouldExpand.add('psn');
     if (params.has('xbox')) shouldExpand.add('xbox');
-    if (['steam', 'psn', 'xbox', 'backloggd'].includes(hash)) shouldExpand.add(hash);
+    if (['steam', 'psn', 'xbox', 'backloggd', 'hltb'].includes(hash)) shouldExpand.add(hash);
     shouldExpand.forEach((id) => {
       const section = document.getElementById(id);
       if (!section) return;
@@ -2363,6 +2416,122 @@ window.blLibImport = blLibImport;
     /* nothing to resume */
   }
 })();
+
+// ─── HowLongToBeat import ───────────────────────────────────────────────────
+// Chunked driver for /api/import/hltb/library. Reads the uploaded JSON file,
+// posts it with an advancing cursor until { done: true }, surfaces counts.
+const hltbEl = (id: string) => document.getElementById(id);
+
+function hltbCopySnippet() {
+  const el = hltbEl("hltbSnippet");
+  const msg = hltbEl("hltbMsg");
+  if (!el || !msg) return;
+  navigator.clipboard?.writeText(el.textContent ?? "").then(
+    () => { msg.textContent = "Copied — paste it into the console on howlongtobeat.com."; msg.style.color = "var(--score-great, #4ade80)"; },
+    () => { msg.textContent = "Press Ctrl/Cmd+C to copy."; msg.style.color = "#f87171"; },
+  );
+}
+(window as any).hltbCopySnippet = hltbCopySnippet;
+
+async function hltbImport() {
+  const fileInput = hltbEl("hltbFile") as HTMLInputElement | null;
+  const btn = hltbEl("hltbBtn") as HTMLButtonElement | null;
+  const msg = hltbEl("hltbMsg");
+  const progress = hltbEl("hltbProgress");
+  const fill = hltbEl("hltbBarFill") as HTMLElement | null;
+  const progressText = hltbEl("hltbProgressText");
+  const results = hltbEl("hltbResults");
+  if (!fileInput || !btn || !msg || !progress || !fill || !progressText || !results) return;
+  const file = fileInput.files?.[0];
+  if (!file) { msg.textContent = "Choose the exported .json file first."; msg.style.color = "#f87171"; return; }
+
+  let rows: unknown[];
+  try {
+    const parsed = JSON.parse(await file.text());
+    rows = Array.isArray(parsed) ? parsed : parsed?.rows;
+    if (!Array.isArray(rows) || !rows.length) throw new Error();
+  } catch {
+    msg.textContent = "That file doesn't look like a HowLongToBeat library export.";
+    msg.style.color = "#f87171";
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "Importing…";
+  msg.textContent = "";
+  results.style.display = "none";
+  progress.style.display = "block";
+
+  const totals = {
+    status: 0,
+    published: 0,
+    draft: 0,
+    alreadyStatus: 0,
+    alreadyReview: 0,
+    unmatched: 0,
+    imported: 0,
+    unmatchedSample: [] as string[],
+    total: rows.length,
+  };
+  let cursor: number | null = 0;
+
+  try {
+    while (cursor != null) {
+      const res = await fetch("/api/import/hltb/library", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows, cursor }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 429 && data?.retry_after) {
+        progressText.textContent = `Rate-limited — retrying in ${data.retry_after}s…`;
+        await new Promise((r) => setTimeout(r, (data.retry_after + 1) * 1000));
+        continue;
+      }
+      if (!res.ok) throw new Error(data?.error ?? "HLTB import failed.");
+
+      totals.status += data.applied_status ?? 0;
+      totals.published += data.applied_published ?? 0;
+      totals.draft += data.applied_draft ?? 0;
+      totals.alreadyStatus += data.already_status ?? 0;
+      totals.alreadyReview += data.already_review ?? 0;
+      totals.unmatched += data.unmatched ?? 0;
+      totals.imported += data.imported_from_igdb ?? 0;
+      for (const t of data.unmatched_sample ?? []) {
+        if (totals.unmatchedSample.length < 12) totals.unmatchedSample.push(t);
+      }
+      const doneCount = data.done ? data.total : data.next_cursor;
+      const frac = data.total ? doneCount / data.total : 0;
+      fill.style.width = `${Math.round(frac * 100)}%`;
+      progressText.textContent = data.done ? "HLTB import complete" : `Matching games… ${doneCount} / ${data.total}`;
+      cursor = data.done ? null : data.next_cursor;
+    }
+
+    results.style.display = "block";
+    const lines = [
+      totals.status ? `<strong>${totals.status}</strong> game${totals.status === 1 ? "" : "s"} added to your library` : "",
+      totals.published ? `<strong>${totals.published}</strong> review${totals.published === 1 ? "" : "s"} published` : "",
+      totals.draft ? `<strong>${totals.draft}</strong> draft${totals.draft === 1 ? "" : "s"} saved (score only, no note)` : "",
+      totals.imported ? `<strong>${totals.imported}</strong> new game${totals.imported === 1 ? "" : "s"} pulled in from IGDB` : "",
+      totals.alreadyStatus ? `<strong>${totals.alreadyStatus}</strong> already had a library status (left as-is)` : "",
+      totals.alreadyReview ? `<strong>${totals.alreadyReview}</strong> already had a Chekpoint review (left as-is)` : "",
+      totals.unmatched ? `<strong>${totals.unmatched}</strong> couldn't be identified` : "",
+    ].filter(Boolean);
+    results.innerHTML =
+      (lines.length ? lines.join("<br>") : "Nothing to do — everything from that file is already in your Chekpoint library.") +
+      (totals.unmatchedSample.length
+        ? `<br><span style="color:var(--text-tertiary);font-size:11px">e.g. ${totals.unmatchedSample.slice(0, 8).join(", ")}</span>`
+        : "");
+  } catch (e: any) {
+    msg.textContent = e?.message ?? "Could not reach the server. Try again.";
+    msg.style.color = "#f87171";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Import";
+    progress.style.display = "none";
+  }
+}
+(window as any).hltbImport = hltbImport;
 
 // ─── Steam review import ────────────────────────────────────────────────────
 import {
