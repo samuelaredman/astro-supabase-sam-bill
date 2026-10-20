@@ -153,7 +153,13 @@ export const POST: APIRoute = async (context) => {
       if (existing) {
         alreadyStatus++;
       } else {
-        const insertRow: Record<string, unknown> = {
+        const insertRow: {
+          profile_id: string;
+          game_id: string;
+          status: string;
+          updated_at: string;
+          hltb_playtime_minutes?: number | null;
+        } = {
           profile_id: profile.id,
           game_id: match.gameId,
           status: chekpointStatus,
@@ -188,7 +194,16 @@ export const POST: APIRoute = async (context) => {
       } else {
         const reviewStatus = reviewStatusFor(row);
         const nowIso = new Date().toISOString();
-        const insert: Record<string, unknown> = {
+        const insert: {
+          profile_id: string;
+          game_id: string;
+          score: number;
+          body: string;
+          status: string;
+          contains_spoilers: boolean;
+          published_at?: string;
+          play_time_hours?: number;
+        } = {
           profile_id: profile.id,
           game_id: match.gameId,
           score: row.score,
