@@ -2436,6 +2436,7 @@ export type Database = {
           favorite_game_id: string | null
           featured_group_id: string | null
           hidden_showcases: string[]
+          hltb_synced_at: string | null
           id: string
           instagram_url: string | null
           is_active: boolean
@@ -2509,6 +2510,7 @@ export type Database = {
           favorite_game_id?: string | null
           featured_group_id?: string | null
           hidden_showcases?: string[]
+          hltb_synced_at?: string | null
           id?: string
           instagram_url?: string | null
           is_active?: boolean
@@ -2582,6 +2584,7 @@ export type Database = {
           favorite_game_id?: string | null
           featured_group_id?: string | null
           hidden_showcases?: string[]
+          hltb_synced_at?: string | null
           id?: string
           instagram_url?: string | null
           is_active?: boolean
@@ -3570,6 +3573,7 @@ export type Database = {
         Row: {
           created_at: string
           game_id: string
+          hltb_playtime_minutes: number | null
           id: string
           is_hidden: boolean
           is_owned: boolean
@@ -3596,6 +3600,7 @@ export type Database = {
         Insert: {
           created_at?: string
           game_id: string
+          hltb_playtime_minutes?: number | null
           id?: string
           is_hidden?: boolean
           is_owned?: boolean
@@ -3622,6 +3627,7 @@ export type Database = {
         Update: {
           created_at?: string
           game_id?: string
+          hltb_playtime_minutes?: number | null
           id?: string
           is_hidden?: boolean
           is_owned?: boolean
