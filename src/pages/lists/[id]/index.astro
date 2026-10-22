@@ -100,18 +100,38 @@ if (list.show_achievements && _gameIds.length > 0 && list.profiles?.id) {
   const ugs = (_ugsRows ?? []) as any[];
   const hasAnySrc = ugs.some((r) => r.steam_appid != null || r.psn_np_communication_id != null || r.xbox_title_id != null);
   if (hasAnySrc) {
-    const [{ data: _stPct }, { data: _psPct }, { data: _xbPct }] = await Promise.all([
+    const psnNpCommIds = ugs.map((r) => r.psn_np_communication_id).filter((v: any): v is string => typeof v === 'string');
+    const [{ data: _stPct }, { data: _psPct }, { data: _xbPct }, { data: _psPlat }] = await Promise.all([
       db.rpc('achievement_completion_by_appid',        { p_profile_id: list.profiles.id }),
       db.rpc('trophy_completion_by_npcommid',          { p_profile_id: list.profiles.id }),
       db.rpc('xbox_achievement_completion_by_titleid', { p_profile_id: list.profiles.id }),
+      // PSN games award a Platinum once every non-DLC trophy is earned, so a
+      // Platinum = "100% complete" even when DLC trophies drag the pct under 1.
+      // Mirror that: if the owner has the Platinum, treat the PSN side as 1.
+      psnNpCommIds.length > 0
+        ? db.from('user_trophies')
+            .select('np_communication_id')
+            .eq('profile_id', list.profiles.id)
+            .eq('trophy_type', 'platinum')
+            .eq('earned', true)
+            .in('np_communication_id', psnNpCommIds)
+        : Promise.resolve({ data: [] as any[] }),
     ]);
     const steamPct = new Map<number, number>((_stPct ?? []).map((r: any) => [r.steam_appid, Number(r.pct)]));
     const psnPct   = new Map<string, number>((_psPct ?? []).map((r: any) => [r.np_communication_id, Number(r.pct)]));
     const xboxPct  = new Map<string, number>((_xbPct ?? []).map((r: any) => [r.xbox_title_id, Number(r.pct)]));
+    const psnPlat  = new Set<string>((_psPlat ?? []).map((r: any) => r.np_communication_id));
     for (const r of ugs) {
       const s: AchievementStatus = {};
       if (r.steam_appid != null)       { const v = steamPct.get(r.steam_appid);          if (typeof v === 'number') s.steam = v; }
-      if (r.psn_np_communication_id)   { const v = psnPct.get(r.psn_np_communication_id); if (typeof v === 'number') s.psn   = v; }
+      if (r.psn_np_communication_id) {
+        if (psnPlat.has(r.psn_np_communication_id)) {
+          s.psn = 1;
+        } else {
+          const v = psnPct.get(r.psn_np_communication_id);
+          if (typeof v === 'number') s.psn = v;
+        }
+      }
       if (r.xbox_title_id)             { const v = xboxPct.get(r.xbox_title_id);         if (typeof v === 'number') s.xbox  = v; }
       if (s.steam !== undefined || s.psn !== undefined || s.xbox !== undefined) {
         achievementByGameId[r.game_id] = s;
@@ -450,14 +470,18 @@ const ogImage = list.visibility !== "private"
   .entry-cover-xbox     { border: 2px solid #107c10; box-shadow: 0 0 0 1px rgba(111,230,168,.15), 0 0 12px rgba(16,124,16,.55), 0 0 24px rgba(16,124,16,.25); }
   .entry-item:hover .entry-cover-wrap.entry-cover-xbox { box-shadow: 0 8px 20px rgba(0,0,0,.3), 0 0 16px rgba(16,124,16,.7), 0 0 30px rgba(16,124,16,.3); }
 
-  .entry-perfect-ribbon { position: absolute; left: -13px; bottom: -9px; width: 36px; height: 42px; z-index: 2; pointer-events: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,.55)); }
+  /* 100% corner badges — sized ~1.7× the Library's crests because the list
+     grid's cover is roughly that much taller than the Library's thumbnail,
+     so a Library-size badge would look like a sticker on a billboard here. */
+  .entry-perfect-ribbon { position: absolute; left: -20px; bottom: -14px; width: 60px; height: 70px; z-index: 2; pointer-events: none; filter: drop-shadow(0 2px 3px rgba(0,0,0,.55)); }
   .entry-perfect-ribbon svg { width: 100%; height: 100%; display: block; }
-  .entry-plat-badge     { position: absolute; left: -13px; bottom: 4px;  width: 32px; height: 40px; z-index: 2; pointer-events: none; }
+  .entry-plat-badge     { position: absolute; left: -20px; bottom: 6px;   width: 54px; height: 68px; z-index: 2; pointer-events: none; filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
   .entry-plat-badge .entry-plat-svg { width: 100%; height: 100%; }
-  .entry-xbox-badge     { position: absolute; left: -13px; bottom: 4px;  width: 34px; height: 34px; z-index: 2; pointer-events: none; filter: drop-shadow(0 1px 3px rgba(0,0,0,.5)) drop-shadow(0 0 4px rgba(16,124,16,.45)); }
+  .entry-xbox-badge     { position: absolute; left: -20px; bottom: 6px;   width: 58px; height: 58px; z-index: 2; pointer-events: none; filter: drop-shadow(0 2px 4px rgba(0,0,0,.5)) drop-shadow(0 0 6px rgba(16,124,16,.45)); }
   .entry-xbox-badge svg { width: 100%; height: 100%; display: block; }
 
-  /* list-view (compact row) shrinks the perfect badges, matching Library's .lib-dt-cover sizing */
+  /* list-view (compact row) uses Library-ish dimensions — the row's cover is
+     roughly the Library detailed-view size. */
   .entry-list.list-view .entry-perfect-ribbon { left: -10px; bottom: -8px; width: 26px; height: 30px; }
   .entry-list.list-view .entry-plat-badge     { left: -10px; bottom: 3px;  width: 25px; height: 31px; }
   .entry-list.list-view .entry-xbox-badge     { left: -10px; bottom: 3px;  width: 26px; height: 26px; }
