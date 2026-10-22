@@ -3,6 +3,7 @@ export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
 import ShareButton from "../../../components/ShareButton.astro";
+import AchievementDetailModal from "../../../components/AchievementDetailModal.astro";
 import { igdbImage, timeAgo, scoreClass } from "../../../utils/format";
 import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../../../utils/reactions";
 import { setPageCacheHeaders } from "../../../utils/cache";
@@ -89,7 +90,10 @@ if (_gameIds.length > 0 && list.profiles?.id) {
 // each game_id → steam_appid / psn_np_communication_id / xbox_title_id and
 // keep every source's pct so the renderer can pick the right 100% badge
 // (Steam ribbon / PSN platinum / Xbox mythic) by source — not just the max.
-type AchievementStatus = { steam?: number; psn?: number; xbox?: number };
+// Per-source completion + the external id (steam appid / psn npCommId / xbox
+// titleId) so the achievement-detail modal can refetch the full list per source.
+type AchievementSource = { pct: number; sid: string };
+type AchievementStatus = { steam?: AchievementSource; psn?: AchievementSource; xbox?: AchievementSource };
 const achievementByGameId: Record<string, AchievementStatus> = {};
 if (list.show_achievements && _gameIds.length > 0 && list.profiles?.id) {
   const { data: _ugsRows } = await db
@@ -123,17 +127,23 @@ if (list.show_achievements && _gameIds.length > 0 && list.profiles?.id) {
     const psnPlat  = new Set<string>((_psPlat ?? []).map((r: any) => r.np_communication_id));
     for (const r of ugs) {
       const s: AchievementStatus = {};
-      if (r.steam_appid != null)       { const v = steamPct.get(r.steam_appid);          if (typeof v === 'number') s.steam = v; }
+      if (r.steam_appid != null) {
+        const v = steamPct.get(r.steam_appid);
+        if (typeof v === 'number') s.steam = { pct: v, sid: String(r.steam_appid) };
+      }
       if (r.psn_np_communication_id) {
         if (psnPlat.has(r.psn_np_communication_id)) {
-          s.psn = 1;
+          s.psn = { pct: 1, sid: r.psn_np_communication_id };
         } else {
           const v = psnPct.get(r.psn_np_communication_id);
-          if (typeof v === 'number') s.psn = v;
+          if (typeof v === 'number') s.psn = { pct: v, sid: r.psn_np_communication_id };
         }
       }
-      if (r.xbox_title_id)             { const v = xboxPct.get(r.xbox_title_id);         if (typeof v === 'number') s.xbox  = v; }
-      if (s.steam !== undefined || s.psn !== undefined || s.xbox !== undefined) {
+      if (r.xbox_title_id) {
+        const v = xboxPct.get(r.xbox_title_id);
+        if (typeof v === 'number') s.xbox = { pct: v, sid: r.xbox_title_id };
+      }
+      if (s.steam || s.psn || s.xbox) {
         achievementByGameId[r.game_id] = s;
       }
     }
@@ -142,18 +152,24 @@ if (list.show_achievements && _gameIds.length > 0 && list.profiles?.id) {
 
 // Pick the 100% badge for a game: PSN platinum > Xbox mythic > Steam ribbon
 // if the owner has multiple sources all at 100%. For partial completion, show
-// the highest pct across sources as a plain percent chip.
+// the highest pct across sources as a plain percent chip. The returned source
+// drives both the badge style and the modal's achievement-list fetch.
+type BadgeKind = 'steam' | 'psn' | 'xbox' | 'partial';
 function pickAchievementBadge(gameId: string | null | undefined):
-  { kind: 'steam' | 'psn' | 'xbox'; pct: 1 } | { kind: 'partial'; pct: number } | null {
+  { kind: BadgeKind; pct: number; src: 'steam' | 'psn' | 'xbox'; sid: string } | null {
   if (!gameId) return null;
   const s = achievementByGameId[gameId];
   if (!s) return null;
-  if (s.psn   === 1) return { kind: 'psn',   pct: 1 };
-  if (s.xbox  === 1) return { kind: 'xbox',  pct: 1 };
-  if (s.steam === 1) return { kind: 'steam', pct: 1 };
-  const parts = [s.steam, s.psn, s.xbox].filter((v): v is number => typeof v === 'number');
-  if (parts.length === 0) return null;
-  return { kind: 'partial', pct: Math.max(...parts) };
+  if (s.psn   && s.psn.pct   === 1) return { kind: 'psn',   pct: 1, src: 'psn',   sid: s.psn.sid };
+  if (s.xbox  && s.xbox.pct  === 1) return { kind: 'xbox',  pct: 1, src: 'xbox',  sid: s.xbox.sid };
+  if (s.steam && s.steam.pct === 1) return { kind: 'steam', pct: 1, src: 'steam', sid: s.steam.sid };
+  const sources: Array<{ src: 'steam' | 'psn' | 'xbox'; pct: number; sid: string }> = [];
+  if (s.steam) sources.push({ src: 'steam', pct: s.steam.pct, sid: s.steam.sid });
+  if (s.psn)   sources.push({ src: 'psn',   pct: s.psn.pct,   sid: s.psn.sid });
+  if (s.xbox)  sources.push({ src: 'xbox',  pct: s.xbox.pct,  sid: s.xbox.sid });
+  if (sources.length === 0) return null;
+  sources.sort((a, b) => b.pct - a.pct);
+  return { kind: 'partial', pct: sources[0].pct, src: sources[0].src, sid: sources[0].sid };
 }
 
 // Fetch the current viewer's own owned/played status for games in this list
@@ -244,6 +260,22 @@ const allDevNames = Object.keys(devCount).sort((a, b) => a.localeCompare(b));
 const reviewedEntries = Object.values(reviewByGameId);
 const reviewedCount = reviewedEntries.length;
 const totalHours = reviewedEntries.reduce((sum, r) => sum + (r.play_time_hours ?? 0), 0);
+
+// Average achievement completion across the games the owner has synced
+// (unsynced games don't count — otherwise one unsynced row drags the average
+// to 0). PSN Platinums already fold into s.psn.pct = 1 above, so a Platinum
+// game contributes a full 100% here even when DLC trophies hold the raw pct down.
+const _achStatuses = Object.values(achievementByGameId);
+const _achPcts = _achStatuses
+  .map((s) => {
+    const parts = [s.steam?.pct, s.psn?.pct, s.xbox?.pct].filter((v): v is number => typeof v === 'number');
+    return parts.length ? Math.max(...parts) : null;
+  })
+  .filter((v): v is number => v !== null);
+const avgAchievementPct = _achPcts.length > 0
+  ? _achPcts.reduce((sum, v) => sum + v, 0) / _achPcts.length
+  : null;
+const achievementTrackedCount = _achPcts.length;
 const avgScore = reviewedCount > 0
   ? reviewedEntries.reduce((sum, r) => sum + r.score, 0) / reviewedCount
   : null;
@@ -473,12 +505,18 @@ const ogImage = list.visibility !== "private"
   /* 100% corner badges — sized ~1.7× the Library's crests because the list
      grid's cover is roughly that much taller than the Library's thumbnail,
      so a Library-size badge would look like a sticker on a billboard here. */
-  .entry-perfect-ribbon { position: absolute; left: -20px; bottom: -14px; width: 60px; height: 70px; z-index: 2; pointer-events: none; filter: drop-shadow(0 2px 3px rgba(0,0,0,.55)); }
+  .entry-perfect-ribbon { position: absolute; left: -20px; bottom: -14px; width: 60px; height: 70px; z-index: 2; filter: drop-shadow(0 2px 3px rgba(0,0,0,.55)); }
   .entry-perfect-ribbon svg { width: 100%; height: 100%; display: block; }
-  .entry-plat-badge     { position: absolute; left: -20px; bottom: 6px;   width: 54px; height: 68px; z-index: 2; pointer-events: none; filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
+  .entry-plat-badge     { position: absolute; left: -20px; bottom: 6px;   width: 54px; height: 68px; z-index: 2; filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
   .entry-plat-badge .entry-plat-svg { width: 100%; height: 100%; }
-  .entry-xbox-badge     { position: absolute; left: -20px; bottom: 6px;   width: 58px; height: 58px; z-index: 2; pointer-events: none; filter: drop-shadow(0 2px 4px rgba(0,0,0,.5)) drop-shadow(0 0 6px rgba(16,124,16,.45)); }
+  .entry-xbox-badge     { position: absolute; left: -20px; bottom: 6px;   width: 58px; height: 58px; z-index: 2; filter: drop-shadow(0 2px 4px rgba(0,0,0,.5)) drop-shadow(0 0 6px rgba(16,124,16,.45)); }
   .entry-xbox-badge svg { width: 100%; height: 100%; display: block; }
+
+  /* Badges double as buttons that open the achievement-detail modal — reset
+     span/button chrome, give them a focus ring, and nudge on hover. */
+  .entry-ach-btn { cursor: pointer; background: transparent; border: none; padding: 0; margin: 0; font: inherit; color: inherit; transition: transform .12s, filter .12s; }
+  .entry-ach-btn:hover { transform: scale(1.06); }
+  .entry-ach-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
 
   /* list-view (compact row) uses Library-ish dimensions — the row's cover is
      roughly the Library detailed-view size. */
@@ -505,16 +543,21 @@ const ogImage = list.visibility !== "private"
   .entry-score-badge.score-mid     { background: rgba(26,20,0,.85);    color: #fbbf24; border: 1px solid rgba(251,191,36,.4); }
   .entry-score-badge.score-orange  { background: rgba(31,16,8,.85);    color: #fb923c; border: 1px solid rgba(251,146,60,.4); }
   .entry-score-badge.score-low     { background: rgba(32,8,8,.85);     color: #f87171; border: 1px solid rgba(248,113,113,.4); }
-  .entry-hours-badge { position: absolute; top: 4px; left: 4px; font-size: 10px; font-weight: 600; background: rgba(0,0,0,.65); color: rgba(255,255,255,.85); border-radius: 3px; padding: 2px 5px; line-height: 1.3; z-index: 1; }
+  .entry-hours-badge { position: absolute; top: 6px; left: 6px; font-size: 13px; font-weight: 700; background: rgba(0,0,0,.72); color: #fff; border-radius: 5px; padding: 3px 8px; line-height: 1.25; z-index: 1; }
   .entry-ach-badge {
-    position: absolute; top: 4px; right: 4px;
-    display: inline-flex; align-items: center; gap: 3px;
-    font-size: 10px; font-weight: 700;
-    background: rgba(0,0,0,.68); color: #F5C842;
-    border: 1px solid rgba(245,200,66,.35);
-    border-radius: 3px; padding: 2px 5px; line-height: 1.2; z-index: 1;
+    position: absolute; top: 6px; right: 6px;
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 13px; font-weight: 700;
+    background: rgba(0,0,0,.72); color: #F5C842;
+    border: 1px solid rgba(245,200,66,.4);
+    border-radius: 5px; padding: 3px 8px; line-height: 1.25; z-index: 1;
   }
-  .entry-ach-badge svg { flex-shrink: 0; }
+  .entry-ach-badge svg { flex-shrink: 0; width: 13px; height: 13px; }
+
+  /* list-view (compact row) keeps the chips smaller — the thumbnail is small. */
+  .entry-list.list-view .entry-hours-badge { top: 4px; left: 4px; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+  .entry-list.list-view .entry-ach-badge   { top: 4px; right: 4px; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+  .entry-list.list-view .entry-ach-badge svg { width: 11px; height: 11px; }
 
   /* ── List controls: search, sort, view toggle ── */
   .list-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -1339,7 +1382,7 @@ const ogImage = list.visibility !== "private"
                       {gameReview && <div class={`entry-score-badge ${scoreClass(gameReview.score)}`}>{gameReview.score}</div>}
                       {list.show_hours !== false && gameReview?.play_time_hours ? <div class="entry-hours-badge">{gameReview.play_time_hours}h</div> : null}
                       {achBadge?.kind === 'steam' ? (
-                        <span class="entry-perfect-ribbon" title="100% achievements on Steam">
+                        <span role="button" tabindex="0" class="entry-perfect-ribbon entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all achievements" title="100% achievements on Steam">
                           <svg viewBox="0 0 24 28" aria-hidden="true">
                             <path fill="#2f6fc4" d="M6.4 15l4.6 2-1.4 7.6-2-2.1-3 1.5z"/>
                             <path fill="#2f6fc4" d="M17.6 15l-4.6 2 1.4 7.6 2-2.1 3 1.5z"/>
@@ -1349,7 +1392,7 @@ const ogImage = list.visibility !== "private"
                           </svg>
                         </span>
                       ) : achBadge?.kind === 'psn' ? (
-                        <span class="entry-plat-badge" title="100% trophies on PlayStation">
+                        <span role="button" tabindex="0" class="entry-plat-badge entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all trophies" title="100% trophies on PlayStation">
                           <svg class="entry-plat-svg" viewBox="0 0 24 30" aria-hidden="true">
                             <circle cx="12" cy="9.5" r="7.5" fill="url(#entryPlatOrb)"/>
                             <g fill="none" stroke="#fff" stroke-width=".7" stroke-linecap="round" stroke-linejoin="round" opacity=".92">
@@ -1370,7 +1413,7 @@ const ogImage = list.visibility !== "private"
                           </svg>
                         </span>
                       ) : achBadge?.kind === 'xbox' ? (
-                        <span class="entry-xbox-badge" title="100% achievements on Xbox">
+                        <span role="button" tabindex="0" class="entry-xbox-badge entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all achievements" title="100% achievements on Xbox">
                           <svg viewBox="0 0 28 28" aria-hidden="true">
                             <circle cx="14" cy="12.5" r="9.4" fill="url(#entryXbMythDisc)"/>
                             <circle cx="14" cy="12.5" r="9" fill="none" stroke="#9af5c8" stroke-opacity=".5" stroke-width=".5"/>
@@ -1387,10 +1430,10 @@ const ogImage = list.visibility !== "private"
                           </svg>
                         </span>
                       ) : achBadge?.kind === 'partial' ? (
-                        <div class="entry-ach-badge" title={`${Math.round(achBadge.pct * 100)}% achievement completion`}>
+                        <span role="button" tabindex="0" class="entry-ach-badge entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all achievements" title={`${Math.round(achBadge.pct * 100)}% achievement completion`}>
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 5h-2V3H7v2H5a2 2 0 0 0-2 2v2a4 4 0 0 0 4 4h.3A5 5 0 0 0 11 15.9V18H7v2h10v-2h-4v-2.1a5 5 0 0 0 3.7-2.9H17a4 4 0 0 0 4-4V7a2 2 0 0 0-2-2zM7 11a2 2 0 0 1-2-2V7h2v4zm12-2a2 2 0 0 1-2 2V7h2v2z"/></svg>
                           <span>{Math.round(achBadge.pct * 100)}%</span>
-                        </div>
+                        </span>
                       ) : null}
                     </a>
                     <div class="entry-info">
@@ -1494,7 +1537,7 @@ const ogImage = list.visibility !== "private"
               <div class="lst-avg-lab">Avg Score</div>
             </div>
           )}
-          {reviewedCount > 0 && (
+          {(reviewedCount > 0 || (list.show_achievements && achievementTrackedCount > 0)) && (
             <div class="lst-numbers">
               {totalHours > 0 && (
                 <div class="lst-num">
@@ -1502,10 +1545,18 @@ const ogImage = list.visibility !== "private"
                   <div class="lst-lab">Hours</div>
                 </div>
               )}
-              <div class="lst-num">
-                <div class="lst-val">{reviewedCount}/{entryList.length}</div>
-                <div class="lst-lab">Reviewed</div>
-              </div>
+              {reviewedCount > 0 && (
+                <div class="lst-num">
+                  <div class="lst-val">{reviewedCount}/{entryList.length}</div>
+                  <div class="lst-lab">Reviewed</div>
+                </div>
+              )}
+              {list.show_achievements && avgAchievementPct !== null && (
+                <div class="lst-num">
+                  <div class="lst-val">{Math.round(avgAchievementPct * 100)}%</div>
+                  <div class="lst-lab">Avg Ach.</div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1818,6 +1869,8 @@ const ogImage = list.visibility !== "private"
     </div>
   </div>
 </main>
+
+{list.show_achievements && <AchievementDetailModal username={list.profiles?.username ?? ''} />}
 </Layout>
 
 <script is:inline define:vars={{ listId: list.id, imageEmotes: IMAGE_EMOTES, imageEmoteMap: IMAGE_EMOTE_MAP, currentProfileId: currentProfile?.id ?? null }}>
@@ -2784,5 +2837,36 @@ if (lcSubmit) {
   }
 
   if (searchInput) searchInput.addEventListener('input', applyFilterSort);
+})();
+</script>
+
+<script is:inline>
+// Open the achievement-detail modal when a cover's achievement badge is
+// clicked. The badges live inside the cover's <a>, so we preventDefault +
+// stopPropagation so the browser doesn't also follow the game link.
+(function() {
+  var listEl = document.getElementById('entry-list');
+  if (!listEl) return;
+  function handle(e) {
+    var btn = e.target && e.target.closest && e.target.closest('.entry-ach-btn');
+    if (!btn) return;
+    var src = btn.getAttribute('data-ach-src');
+    var sid = btn.getAttribute('data-ach-sid');
+    if (!src || !sid) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof window.openAchDetail === 'function') window.openAchDetail(src, sid);
+  }
+  listEl.addEventListener('click', handle);
+  listEl.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var btn = e.target && e.target.closest && e.target.closest('.entry-ach-btn');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var src = btn.getAttribute('data-ach-src');
+    var sid = btn.getAttribute('data-ach-sid');
+    if (src && sid && typeof window.openAchDetail === 'function') window.openAchDetail(src, sid);
+  });
 })();
 </script>
