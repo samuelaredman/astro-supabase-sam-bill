@@ -22,7 +22,7 @@ const db = getSupabaseAdmin() as any;
 
 const { data: list } = await db
   .from("lists")
-  .select("id, title, description, is_ranked, visibility, default_view, cover_image_url, created_at, updated_at, profiles ( id, username, avatar_url, search_indexable )")
+  .select("id, title, description, is_ranked, visibility, default_view, show_hours, show_achievements, cover_image_url, created_at, updated_at, profiles ( id, username, avatar_url, search_indexable )")
   .eq("id", id)
   .maybeSingle();
 
@@ -81,6 +81,59 @@ if (_gameIds.length > 0 && list.profiles?.id) {
   for (const r of _reviewRows ?? []) {
     reviewByGameId[r.game_id] = { id: r.id, score: r.score, play_time_hours: r.play_time_hours, platform_played_on: r.platform_played_on ?? null };
   }
+}
+
+// Owner's per-game achievement completion (shown when list.show_achievements).
+// Mirrors libraryQuery.ts: each source has its own RPC returning pct in 0..1,
+// keyed by that source's external id. We join via user_game_status to map
+// each game_id → steam_appid / psn_np_communication_id / xbox_title_id and
+// keep every source's pct so the renderer can pick the right 100% badge
+// (Steam ribbon / PSN platinum / Xbox mythic) by source — not just the max.
+type AchievementStatus = { steam?: number; psn?: number; xbox?: number };
+const achievementByGameId: Record<string, AchievementStatus> = {};
+if (list.show_achievements && _gameIds.length > 0 && list.profiles?.id) {
+  const { data: _ugsRows } = await db
+    .from('user_game_status')
+    .select('game_id, steam_appid, psn_np_communication_id, xbox_title_id')
+    .eq('profile_id', list.profiles.id)
+    .in('game_id', _gameIds);
+  const ugs = (_ugsRows ?? []) as any[];
+  const hasAnySrc = ugs.some((r) => r.steam_appid != null || r.psn_np_communication_id != null || r.xbox_title_id != null);
+  if (hasAnySrc) {
+    const [{ data: _stPct }, { data: _psPct }, { data: _xbPct }] = await Promise.all([
+      db.rpc('achievement_completion_by_appid',        { p_profile_id: list.profiles.id }),
+      db.rpc('trophy_completion_by_npcommid',          { p_profile_id: list.profiles.id }),
+      db.rpc('xbox_achievement_completion_by_titleid', { p_profile_id: list.profiles.id }),
+    ]);
+    const steamPct = new Map<number, number>((_stPct ?? []).map((r: any) => [r.steam_appid, Number(r.pct)]));
+    const psnPct   = new Map<string, number>((_psPct ?? []).map((r: any) => [r.np_communication_id, Number(r.pct)]));
+    const xboxPct  = new Map<string, number>((_xbPct ?? []).map((r: any) => [r.xbox_title_id, Number(r.pct)]));
+    for (const r of ugs) {
+      const s: AchievementStatus = {};
+      if (r.steam_appid != null)       { const v = steamPct.get(r.steam_appid);          if (typeof v === 'number') s.steam = v; }
+      if (r.psn_np_communication_id)   { const v = psnPct.get(r.psn_np_communication_id); if (typeof v === 'number') s.psn   = v; }
+      if (r.xbox_title_id)             { const v = xboxPct.get(r.xbox_title_id);         if (typeof v === 'number') s.xbox  = v; }
+      if (s.steam !== undefined || s.psn !== undefined || s.xbox !== undefined) {
+        achievementByGameId[r.game_id] = s;
+      }
+    }
+  }
+}
+
+// Pick the 100% badge for a game: PSN platinum > Xbox mythic > Steam ribbon
+// if the owner has multiple sources all at 100%. For partial completion, show
+// the highest pct across sources as a plain percent chip.
+function pickAchievementBadge(gameId: string | null | undefined):
+  { kind: 'steam' | 'psn' | 'xbox'; pct: 1 } | { kind: 'partial'; pct: number } | null {
+  if (!gameId) return null;
+  const s = achievementByGameId[gameId];
+  if (!s) return null;
+  if (s.psn   === 1) return { kind: 'psn',   pct: 1 };
+  if (s.xbox  === 1) return { kind: 'xbox',  pct: 1 };
+  if (s.steam === 1) return { kind: 'steam', pct: 1 };
+  const parts = [s.steam, s.psn, s.xbox].filter((v): v is number => typeof v === 'number');
+  if (parts.length === 0) return null;
+  return { kind: 'partial', pct: Math.max(...parts) };
 }
 
 // Fetch the current viewer's own owned/played status for games in this list
@@ -374,16 +427,40 @@ const ogImage = list.visibility !== "private"
      grid past its container. The 0 floor guarantees it always fits. */
   .entry-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; padding: 4px 0; }
   .entry-item { display: flex; flex-direction: column; }
+  /* overflow:visible so the Steam ribbon / platinum / mythic corner badges can
+     hang off the cover like they do in the Library. The image gets the radius
+     so corners still look rounded without clipping the badges. */
   .entry-cover-wrap {
     position: relative; width: 100%; aspect-ratio: 3/4;
-    border-radius: 8px; overflow: hidden;
+    border-radius: 8px; overflow: visible;
     background: var(--tag-bg); border: 1px solid var(--border);
     box-shadow: 0 2px 8px rgba(0,0,0,.15);
     transition: transform .15s, box-shadow .15s;
     display: flex; align-items: center; justify-content: center; font-size: 24px;
   }
   .entry-item:hover .entry-cover-wrap { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,.3); }
-  .entry-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .entry-cover { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }
+
+  /* 100% completion highlights — mirrored from the Library's lib-cover-* classes
+     so a game that owns the perfect ribbon on a user's profile keeps it in their lists. */
+  .entry-cover-perfect  { border: 2px solid #fbbf24; box-shadow: 0 0 12px 1px rgba(251,191,36,.55); }
+  .entry-item:hover .entry-cover-wrap.entry-cover-perfect { box-shadow: 0 8px 20px rgba(0,0,0,.3), 0 0 14px 2px rgba(251,191,36,.75); }
+  .entry-cover-platinum { border: 2px solid transparent; background: linear-gradient(var(--tag-bg), var(--tag-bg)) padding-box, linear-gradient(135deg, #e8ecf0 0%, #a8b3c0 45%, #e8ecf0 100%) border-box; box-shadow: 0 0 0 1px rgba(183,236,255,.15), 0 0 12px rgba(78,180,240,.45), 0 0 24px rgba(30,96,196,.25); }
+  .entry-item:hover .entry-cover-wrap.entry-cover-platinum { box-shadow: 0 8px 20px rgba(0,0,0,.3), 0 0 16px rgba(78,180,240,.6), 0 0 30px rgba(30,96,196,.3); }
+  .entry-cover-xbox     { border: 2px solid #107c10; box-shadow: 0 0 0 1px rgba(111,230,168,.15), 0 0 12px rgba(16,124,16,.55), 0 0 24px rgba(16,124,16,.25); }
+  .entry-item:hover .entry-cover-wrap.entry-cover-xbox { box-shadow: 0 8px 20px rgba(0,0,0,.3), 0 0 16px rgba(16,124,16,.7), 0 0 30px rgba(16,124,16,.3); }
+
+  .entry-perfect-ribbon { position: absolute; left: -13px; bottom: -9px; width: 36px; height: 42px; z-index: 2; pointer-events: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,.55)); }
+  .entry-perfect-ribbon svg { width: 100%; height: 100%; display: block; }
+  .entry-plat-badge     { position: absolute; left: -13px; bottom: 4px;  width: 32px; height: 40px; z-index: 2; pointer-events: none; }
+  .entry-plat-badge .entry-plat-svg { width: 100%; height: 100%; }
+  .entry-xbox-badge     { position: absolute; left: -13px; bottom: 4px;  width: 34px; height: 34px; z-index: 2; pointer-events: none; filter: drop-shadow(0 1px 3px rgba(0,0,0,.5)) drop-shadow(0 0 4px rgba(16,124,16,.45)); }
+  .entry-xbox-badge svg { width: 100%; height: 100%; display: block; }
+
+  /* list-view (compact row) shrinks the perfect badges, matching Library's .lib-dt-cover sizing */
+  .entry-list.list-view .entry-perfect-ribbon { left: -10px; bottom: -8px; width: 26px; height: 30px; }
+  .entry-list.list-view .entry-plat-badge     { left: -10px; bottom: 3px;  width: 25px; height: 31px; }
+  .entry-list.list-view .entry-xbox-badge     { left: -10px; bottom: 3px;  width: 26px; height: 26px; }
   .entry-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 24px; }
   .entry-rank { position: absolute; bottom: 5px; left: 5px; font-family: 'DM Serif Display', serif; font-size: 13px; font-weight: 700; background: rgba(0,0,0,.72); color: #fff; border-radius: 4px; padding: 1px 6px; line-height: 1.5; z-index: 1; }
   .entry-item:nth-child(1) .entry-rank, .entry-item:nth-child(1) .entry-rank-inline { color: #F5C842; }
@@ -405,6 +482,15 @@ const ogImage = list.visibility !== "private"
   .entry-score-badge.score-orange  { background: rgba(31,16,8,.85);    color: #fb923c; border: 1px solid rgba(251,146,60,.4); }
   .entry-score-badge.score-low     { background: rgba(32,8,8,.85);     color: #f87171; border: 1px solid rgba(248,113,113,.4); }
   .entry-hours-badge { position: absolute; top: 4px; left: 4px; font-size: 10px; font-weight: 600; background: rgba(0,0,0,.65); color: rgba(255,255,255,.85); border-radius: 3px; padding: 2px 5px; line-height: 1.3; z-index: 1; }
+  .entry-ach-badge {
+    position: absolute; top: 4px; right: 4px;
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 10px; font-weight: 700;
+    background: rgba(0,0,0,.68); color: #F5C842;
+    border: 1px solid rgba(245,200,66,.35);
+    border-radius: 3px; padding: 2px 5px; line-height: 1.2; z-index: 1;
+  }
+  .entry-ach-badge svg { flex-shrink: 0; }
 
   /* ── List controls: search, sort, view toggle ── */
   .list-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -1080,6 +1166,20 @@ const ogImage = list.visibility !== "private"
   }
 </style>
 
+<!-- Shared gradient defs for the 100%-completion corner badges (platinum trophy
+     + Xbox Mythic). url(#id) resolves to the first element with that id, so these
+     must live outside any display:none container; the entry-* ids are scoped so
+     they don't collide with the profile page's lib-* copies. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <radialGradient id="entryPlatOrb" cx="38%" cy="32%" r="70%"><stop offset="0" stop-color="#7fb4ff"/><stop offset=".45" stop-color="#2556c9"/><stop offset="1" stop-color="#0a1f63"/></radialGradient>
+    <linearGradient id="entryPlatSilver" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f7f9fb"/><stop offset=".45" stop-color="#aab4bf"/><stop offset=".7" stop-color="#e4e8ec"/><stop offset="1" stop-color="#7c8792"/></linearGradient>
+    <radialGradient id="entryXbMythDisc" cx="40%" cy="30%" r="75%"><stop offset="0" stop-color="#6fe6a8"/><stop offset=".55" stop-color="#1f9d5c"/><stop offset="1" stop-color="#0a5a32"/></radialGradient>
+    <linearGradient id="entryXbMythHi" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c4f0d8"/></linearGradient>
+    <linearGradient id="entryXbMythLo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a9dcc0"/><stop offset="1" stop-color="#6fb894"/></linearGradient>
+  </defs>
+</svg>
+
 <main class="list-page">
   <button class="list-back-btn" onclick="history.length > 1 ? history.back() : (window.location.href='/')">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8L10 4"/></svg>
@@ -1186,6 +1286,11 @@ const ogImage = list.visibility !== "private"
                 const entryStatus = entry.games?.id ? statusByGameId[entry.games.id] : null;
                 const isOwned = entryStatus?.owned ?? false;
                 const isPlayed = (entryStatus?.played ?? false) || (entry.games?.id ? viewerReviewedGameIds.has(entry.games.id) : false);
+                const achBadge = list.show_achievements ? pickAchievementBadge(entry.games?.id) : null;
+                const coverPerfectCls = achBadge?.kind === 'steam' ? ' entry-cover-perfect'
+                  : achBadge?.kind === 'psn' ? ' entry-cover-platinum'
+                  : achBadge?.kind === 'xbox' ? ' entry-cover-xbox'
+                  : '';
                 return (
                   <div
                     class="entry-item"
@@ -1201,14 +1306,68 @@ const ogImage = list.visibility !== "private"
                     data-played={isPlayed ? "1" : "0"}
                   >
                     {list.is_ranked && <div class="entry-rank-inline">{entry.position ?? i + 1}</div>}
-                    <a href={`/games/${entry.games?.slug}`} class="entry-cover-wrap">
+                    <a href={`/games/${entry.games?.slug}`} class={`entry-cover-wrap${coverPerfectCls}`}>
                       {cover
                         ? <img class="entry-cover" src={cover} alt={entry.games?.title} loading="lazy" />
                         : <div class="entry-cover-placeholder">🎮</div>
                       }
                       {list.is_ranked && <div class="entry-rank">{entry.position ?? i + 1}</div>}
                       {gameReview && <div class={`entry-score-badge ${scoreClass(gameReview.score)}`}>{gameReview.score}</div>}
-                      {gameReview?.play_time_hours ? <div class="entry-hours-badge">{gameReview.play_time_hours}h</div> : null}
+                      {list.show_hours !== false && gameReview?.play_time_hours ? <div class="entry-hours-badge">{gameReview.play_time_hours}h</div> : null}
+                      {achBadge?.kind === 'steam' ? (
+                        <span class="entry-perfect-ribbon" title="100% achievements on Steam">
+                          <svg viewBox="0 0 24 28" aria-hidden="true">
+                            <path fill="#2f6fc4" d="M6.4 15l4.6 2-1.4 7.6-2-2.1-3 1.5z"/>
+                            <path fill="#2f6fc4" d="M17.6 15l-4.6 2 1.4 7.6 2-2.1 3 1.5z"/>
+                            <path fill="#4a90e2" d="M12.00 1.00L13.65 2.79L15.90 1.89L16.61 4.21L19.04 4.39L18.67 6.79L20.77 8.00L19.40 10.00L20.77 12.00L18.67 13.21L19.04 15.61L16.61 15.79L15.90 18.11L13.65 17.21L12.00 19.00L10.35 17.21L8.10 18.11L7.39 15.79L4.96 15.61L5.33 13.21L3.23 12.00L4.60 10.00L3.23 8.00L5.33 6.79L4.96 4.39L7.39 4.21L8.10 1.89L10.35 2.79Z"/>
+                            <circle cx="12" cy="10" r="5.6" fill="#fcd462"/>
+                            <circle cx="12" cy="10" r="5.6" fill="none" stroke="#e8b43a" stroke-width=".6"/>
+                          </svg>
+                        </span>
+                      ) : achBadge?.kind === 'psn' ? (
+                        <span class="entry-plat-badge" title="100% trophies on PlayStation">
+                          <svg class="entry-plat-svg" viewBox="0 0 24 30" aria-hidden="true">
+                            <circle cx="12" cy="9.5" r="7.5" fill="url(#entryPlatOrb)"/>
+                            <g fill="none" stroke="#fff" stroke-width=".7" stroke-linecap="round" stroke-linejoin="round" opacity=".92">
+                              <rect x="7.6" y="5.6" width="2.6" height="2.6"/>
+                              <path d="M13.9 5.5l1.5 2.7h-3z"/>
+                              <path d="M7.7 10.4l2.4 2.4M10.1 10.4l-2.4 2.4"/>
+                              <circle cx="14.4" cy="11.6" r="1.3"/>
+                            </g>
+                            <g fill="url(#entryPlatSilver)">
+                              <path d="M11.6 23.2C5.6 20.8 2.6 14.2 3.4 6.4 4.9 11.4 7.6 15.6 12 18.6z"/>
+                              <path d="M12.4 23.2c6-2.4 9-9 8.2-16.8-1.5 5-4.2 9.2-8.6 12.2z"/>
+                              <path d="M11.7 23.4C8.2 21.8 6.1 18.4 5.8 13.8 7.6 16.8 9.6 18.8 12 19.9z"/>
+                              <path d="M12.3 23.4c3.5-1.6 5.6-5 5.9-9.6-1.8 3-3.8 5-6.2 6.1z"/>
+                              <path d="M8.6 23.6h6.8l1.2 1.9H7.4z"/>
+                              <rect x="6.2" y="25.3" width="11.6" height="3.4" rx="1.2"/>
+                            </g>
+                            <rect x="6.8" y="25.9" width="10.4" height=".5" rx=".25" fill="#fff" opacity=".55"/>
+                          </svg>
+                        </span>
+                      ) : achBadge?.kind === 'xbox' ? (
+                        <span class="entry-xbox-badge" title="100% achievements on Xbox">
+                          <svg viewBox="0 0 28 28" aria-hidden="true">
+                            <circle cx="14" cy="12.5" r="9.4" fill="url(#entryXbMythDisc)"/>
+                            <circle cx="14" cy="12.5" r="9" fill="none" stroke="#9af5c8" stroke-opacity=".5" stroke-width=".5"/>
+                            <path fill="#58c08c" d="M18.53 7.97L16.40 12.50L18.53 17.03L14.00 14.90L9.47 17.03L11.60 12.50L9.47 7.97L14.00 10.10Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M14.00 4.10L11.81 10.31L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M14.00 4.10L16.19 10.31L14 12.5Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M22.40 12.50L16.19 10.31L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M22.40 12.50L16.19 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M14.00 20.90L16.19 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M14.00 20.90L11.81 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M5.60 12.50L11.81 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M5.60 12.50L11.81 10.31L14 12.5Z"/>
+                            <path fill="#fff" d="M14 10.4L16.1 12.5 14 14.6 11.9 12.5Z"/>
+                          </svg>
+                        </span>
+                      ) : achBadge?.kind === 'partial' ? (
+                        <div class="entry-ach-badge" title={`${Math.round(achBadge.pct * 100)}% achievement completion`}>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 5h-2V3H7v2H5a2 2 0 0 0-2 2v2a4 4 0 0 0 4 4h.3A5 5 0 0 0 11 15.9V18H7v2h10v-2h-4v-2.1a5 5 0 0 0 3.7-2.9H17a4 4 0 0 0 4-4V7a2 2 0 0 0-2-2zM7 11a2 2 0 0 1-2-2V7h2v4zm12-2a2 2 0 0 1-2 2V7h2v2z"/></svg>
+                          <span>{Math.round(achBadge.pct * 100)}%</span>
+                        </div>
+                      ) : null}
                     </a>
                     <div class="entry-info">
                       <a href={`/games/${entry.games?.slug}`} class="entry-game-link">{entry.games?.title}</a>
