@@ -200,6 +200,7 @@ supabase/
 | `group_members` | `group_members_group_id_profile_id_key` | UNIQUE(group_id, profile_id) |
 | `group_invites` | `group_invites_group_id_invited_profile_id_key` | UNIQUE(group_id, invited_profile_id) |
 | `reports` | `reports_reporter_id_content_type_content_id_key` | UNIQUE(reporter_id, target_type, target_id) — one report per user per content item |
+| `game_aliases` | `game_aliases_game_title_key` | UNIQUE(game_id, title) — `importGameByIgdbId` upserts aliases on this |
 
 > ⚠️ `review_votes` currently has two redundant UNIQUE indexes on (profile_id, review_id):
 > `review_votes_one_per_review` and `review_votes_profile_review_unique`. Functionally
@@ -368,6 +369,7 @@ supabase/
 |-------|---------|
 | `contact_submissions` | Contact form entries — triggers email to team via Edge Function |
 | `reports` | User reports on content. `target_type` + `target_id` fields. UNIQUE(reporter_id, target_type, target_id) |
+| `game_aliases` | Alternative titles that resolve to a canonical game. Populated by `importGameByIgdbId` whenever it walks IGDB's `version_parent` chain (GOTY / Definitive / Complete / PS4 editions all collapse into the base row). Search integrations (`/api/games/search`, `/search`) query it via `searchGameAliases()` so a user typing "Sekiro GOTY" still finds Sekiro. Public read, service-role writes. UNIQUE(game_id, title) + UNIQUE(igdb_id) WHERE NOT NULL. |
 
 ---
 
@@ -394,6 +396,7 @@ policies. The anon client and user client are subject to them.
 | `review_media` | All rows |
 | `follows` | All rows |
 | `watchlist` | All rows |
+| `game_aliases` | All rows |
 
 ### Auth required to read
 

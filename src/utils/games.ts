@@ -125,21 +125,88 @@ export type ImportGameResult =
   | { ok: true; game: { id: string; title: string; slug: string; cover_img_url: string | null; date_released: string | null } }
   | { ok: false; error: string; status: number };
 
+export type CanonicalResolution = {
+  canonicalIgdbId: number;
+  /** Variant rows walked past on the way to the canonical row — their titles get
+   *  stored as aliases of the canonical game so search still finds them. */
+  variants: { igdbId: number; title: string }[];
+};
+
+/**
+ * Follow IGDB's `version_parent` chain to the base game. GOTY / Definitive /
+ * Complete / PS4 editions on IGDB are repackaged "versions" of a canonical row
+ * and point at it via `version_parent` — importing those directly is how we
+ * ended up with Sekiro, Sekiro GOTY and Sekiro GOTY PS4 as three separate
+ * games on the site. Resolving to the parent here means every caller of
+ * `importGameByIgdbId` ends up with the one canonical row.
+ *
+ * Chain depth is capped (3 hops) in case IGDB ever has a cycle or a nested
+ * edition; a broken parent id just stops the walk and we import whatever we
+ * last successfully fetched.
+ */
+export async function resolveCanonicalIgdbId(igdbId: number): Promise<CanonicalResolution> {
+  const variants: { igdbId: number; title: string }[] = [];
+  let current = igdbId;
+  for (let i = 0; i < 3; i++) {
+    const rows = await igdbFetch(
+      'games',
+      `fields name, version_parent; where id = ${current}; limit 1;`,
+    );
+    const row = rows?.[0];
+    const parent = row?.version_parent;
+    if (typeof parent !== 'number' || parent === current) {
+      return { canonicalIgdbId: current, variants };
+    }
+    if (typeof row?.name === 'string') variants.push({ igdbId: current, title: row.name });
+    current = parent;
+  }
+  return { canonicalIgdbId: current, variants };
+}
+
+/** Record variant titles as aliases of the canonical game so search still finds
+ *  them. Upserts on (game_id, title) — idempotent across repeat imports. */
+async function recordGameAliases(
+  db: any,
+  gameId: string,
+  variants: { igdbId: number; title: string }[],
+): Promise<void> {
+  for (const variant of variants) {
+    const { error } = await db
+      .from('game_aliases')
+      .upsert(
+        { game_id: gameId, title: variant.title, igdb_id: variant.igdbId, source: 'version_parent' },
+        { onConflict: 'game_id,title' },
+      );
+    if (error) console.error('[importGameByIgdbId] alias upsert error:', JSON.stringify(error));
+  }
+}
+
 /**
  * Imports a game from IGDB by igdb_id if it isn't already in the DB
  * (refreshing missing junction data if it is). Shared by the user-facing
  * "add a game" flow (api/games/import.ts) and the admin unmatched-titles
  * importer (api/admin/unmatched-games/import.ts) — kept in one place so a
  * fix to one doesn't silently miss the other.
+ *
+ * Resolves to the canonical IGDB row via `resolveCanonicalIgdbId` before
+ * doing any DB work, so a request to import a GOTY/Definitive variant ends
+ * up returning the base-game row.
  */
 export async function importGameByIgdbId(db: any, igdbId: number): Promise<ImportGameResult> {
+  const { canonicalIgdbId, variants } = await resolveCanonicalIgdbId(igdbId);
+  if (canonicalIgdbId !== igdbId) {
+    console.log(`[importGameByIgdbId] resolved variant igdb_id ${igdbId} → canonical ${canonicalIgdbId}`);
+  }
+
   const { data: existing } = await db
     .from('games')
     .select('id, title, slug, cover_img_url, date_released')
-    .eq('igdb_id', igdbId)
+    .eq('igdb_id', canonicalIgdbId)
     .maybeSingle();
 
   if (existing) {
+    if (variants.length > 0) await recordGameAliases(db, existing.id, variants);
+
     const [
       { count: platformCount },
       { count: genreCount },
@@ -166,7 +233,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
                game_modes.id, game_modes.name, game_modes.slug,
                franchises.id, franchises.name, franchises.slug,
                collections.id, collections.name, collections.slug;
-        where id = ${igdbId};
+        where id = ${canonicalIgdbId};
         limit 1;
       `);
       const g = refresh?.[0];
@@ -194,7 +261,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
            game_modes.id, game_modes.name, game_modes.slug,
            franchises.id, franchises.name, franchises.slug,
            collections.id, collections.name, collections.slug;
-    where id = ${igdbId};
+    where id = ${canonicalIgdbId};
     limit 1;
   `);
 
@@ -207,7 +274,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
 
   const slug = makeGameSlug(game.name, game.slug);
   const { data: slugConflict } = await db.from('games').select('id').eq('slug', slug).maybeSingle();
-  const finalSlug = slugConflict ? `${slug}-${igdbId}` : slug;
+  const finalSlug = slugConflict ? `${slug}-${canonicalIgdbId}` : slug;
 
   const { data: inserted, error: insertError } = await db
     .from('games')
@@ -241,5 +308,23 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
     upsertJunction(db, inserted.id, game.collections,'collections','game_collections','collection_id'),
   ]);
 
+  if (variants.length > 0) await recordGameAliases(db, inserted.id, variants);
+
   return { ok: true, game: inserted };
+}
+
+/** Look up game ids whose aliases match the query. Used by the search flows to
+ *  include canonical games whose variant titles (GOTY/Definitive/etc.) matched. */
+export async function searchGameAliases(db: any, query: string, limit = 8): Promise<string[]> {
+  if (!query || query.length < 2) return [];
+  const { data } = await db
+    .from('game_aliases')
+    .select('game_id')
+    .ilike('title', `%${query}%`)
+    .limit(limit);
+  const seen = new Set<string>();
+  for (const row of data ?? []) {
+    if (row?.game_id) seen.add(String(row.game_id));
+  }
+  return Array.from(seen);
 }
