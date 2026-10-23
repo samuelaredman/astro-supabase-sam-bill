@@ -419,6 +419,16 @@ const collageSrcs = list.cover_image_url
 
 function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
 
+// Hours readout — plain under 10k, k-suffix after that, M for the 7-figure
+// lists. Keeps the stat tile from blowing out horizontally when a long-time
+// list totals six-digit hours.
+function fmtHours(h: number): string {
+  if (!Number.isFinite(h) || h <= 0) return "0h";
+  if (h < 10000) return `${h.toLocaleString()}h`;
+  if (h < 1000000) return `${(h / 1000).toFixed(h >= 100000 ? 0 : 1)}k h`;
+  return `${(h / 1000000).toFixed(1)}M h`;
+}
+
 // Radar geometry — mirrors src/components/groups/CompareTab.astro so the two
 // charts share a visual language. Scale is a plain number; axes carry name +
 // pct in RADAR_SCALE units. Six axes keeps the labels off each other.
@@ -434,7 +444,7 @@ let radarRings: string[] = [];
 let radarSpokes: { x: number; y: number }[] = [];
 let radarPolygon = "";
 let radarDots: { x: number; y: number }[] = [];
-let radarLabels: { x: number; y: number; anchor: 'start' | 'middle' | 'end'; text: string; full: string; pct: number }[] = [];
+let radarLabels: { x: number; y: number; anchor: 'start' | 'middle' | 'end'; text: string; full: string; pct: number; count: number }[] = [];
 if (showRadar) {
   const n = radarGenres.length;
   radarRings = [1 / 3, 2 / 3, 1].map((f) => _pts(radarGenres.map((_, i) => _radarPoint(i, n, f * radarScale, radarScale))));
@@ -452,6 +462,7 @@ if (showRadar) {
       text: g.short,
       full: g.name,
       pct: g.pct,
+      count: g.count,
     };
   });
 }
@@ -826,32 +837,84 @@ const ogImage = list.visibility !== "private"
   .list-stats-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
+    border-radius: 14px;
+    padding: 18px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 16px;
   }
+
+  /* Avg Score feature chip — the headline number, with a score-coloured
+     border and a soft tinted background so it reads as the "big" stat and
+     the row below (hours, reviewed, achievements) stays supporting. */
+  .lst-score-feature {
+    --score-color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 20px;
+    border-radius: 12px;
+    border: 1.5px solid color-mix(in srgb, var(--score-color) 55%, transparent);
+    background: linear-gradient(135deg,
+      color-mix(in srgb, var(--score-color) 14%, var(--bg-hover)) 0%,
+      color-mix(in srgb, var(--score-color) 5%, var(--bg-hover)) 100%);
+    box-shadow: 0 1px 2px rgba(0,0,0,.15), inset 0 1px 0 color-mix(in srgb, var(--score-color) 18%, transparent);
+  }
+  .lst-score-feature.score-perfect { --score-color: #F5C842; }
+  .lst-score-feature.score-great   { --score-color: #4ade80; }
+  .lst-score-feature.score-teal    { --score-color: #2dd4bf; }
+  .lst-score-feature.score-good    { --score-color: #60a5fa; }
+  .lst-score-feature.score-mid     { --score-color: #fbbf24; }
+  .lst-score-feature.score-orange  { --score-color: #fb923c; }
+  .lst-score-feature.score-low     { --score-color: #f87171; }
+  .lst-score-val {
+    font-size: 34px;
+    font-weight: 700;
+    font-family: 'DM Serif Display', serif;
+    color: var(--score-color);
+    line-height: 1;
+    letter-spacing: -.01em;
+    text-shadow: 0 2px 10px color-mix(in srgb, var(--score-color) 40%, transparent);
+  }
+  .lst-score-lab {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    text-align: right;
+  }
+
+  /* Stats row — gives each tile real padding + a subtle divider so three stats
+     at wildly different widths (e.g. "5.8k h" vs "32/91" vs "100%") don't look
+     scrunched. flex-wrap handles any future fourth stat gracefully. */
   .lst-numbers {
     display: flex;
     gap: 0;
+    background: var(--bg-hover);
+    border-radius: 10px;
+    padding: 2px 0;
+    flex-wrap: wrap;
   }
-  .lst-num { position: relative; flex: 1; text-align: center; }
+  .lst-num { position: relative; flex: 1 1 0; min-width: 72px; text-align: center; padding: 10px 8px; }
   .lst-num + .lst-num::before {
     content: '';
     position: absolute;
     left: 0;
-    top: 15%;
-    bottom: 15%;
+    top: 20%;
+    bottom: 20%;
     width: 1px;
     background: var(--border-subtle);
   }
   .lst-val {
-    font-size: 22px;
+    font-size: 20px;
     font-weight: 700;
     font-family: 'DM Serif Display', serif;
     color: var(--text-primary);
     line-height: 1.1;
+    letter-spacing: -.01em;
+    white-space: nowrap;
   }
   .lst-val.score-perfect { color: #F5C842; }
   .lst-val.score-great   { color: #4ade80; }
@@ -870,15 +933,17 @@ const ogImage = list.visibility !== "private"
   .lst-radar-area { fill: var(--accent); fill-opacity: .18; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .lst-radar-dot { fill: var(--accent); stroke: none; transition: r .15s; filter: drop-shadow(0 0 3px var(--accent)); }
   .lst-radar-label { font-size: 11px; font-weight: 600; fill: var(--text-secondary); }
+  .lst-radar-count { fill: var(--text-tertiary); font-weight: 500; }
   .lst-radar-axis:hover .lst-radar-label { fill: var(--text-primary); }
   .lst-radar-axis:hover .lst-radar-dot { r: 5; }
   .lst-radar-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   .lst-lab {
-    font-size: 11px;
+    font-size: 10px;
+    font-weight: 600;
     color: var(--text-tertiary);
     text-transform: uppercase;
-    letter-spacing: .06em;
-    margin-top: 3px;
+    letter-spacing: .08em;
+    margin-top: 5px;
   }
   .lst-divider {
     height: 1px;
@@ -1591,28 +1656,31 @@ const ogImage = list.visibility !== "private"
                   <g class="lst-radar-axis">
                     <title>{`${l.full}: ${l.pct}%`}</title>
                     <circle class="lst-radar-dot" cx={radarDots[i].x} cy={radarDots[i].y} r="3.5" />
-                    <text class="lst-radar-label" x={l.x} y={l.y} text-anchor={l.anchor}>{l.text}</text>
+                    <text class="lst-radar-label" x={l.x} y={l.y} text-anchor={l.anchor}>
+                      {l.text}
+                      <tspan class="lst-radar-count"> ({l.count})</tspan>
+                    </text>
                   </g>
                 ))}
               </svg>
               <table class="lst-radar-sr">
-                <caption>Share of games in this list by genre</caption>
-                <thead><tr><th>Genre</th><th>Share</th></tr></thead>
-                <tbody>{radarGenres.map((g) => <tr><td>{g.name}</td><td>{g.pct}%</td></tr>)}</tbody>
+                <caption>Genre breakdown for games in this list</caption>
+                <thead><tr><th>Genre</th><th>Games</th><th>Share</th></tr></thead>
+                <tbody>{radarGenres.map((g) => <tr><td>{g.name}</td><td>{g.count}</td><td>{g.pct}%</td></tr>)}</tbody>
               </table>
             </div>
           )}
-          {(avgScore !== null || reviewedCount > 0 || (list.show_achievements && achievementTrackedCount > 0)) && (
+          {avgScore !== null && (
+            <div class={`lst-score-feature ${scoreClass(avgScore)}`}>
+              <div class="lst-score-val">{avgScore.toFixed(1)}</div>
+              <div class="lst-score-lab">Avg Score</div>
+            </div>
+          )}
+          {(reviewedCount > 0 || totalHours > 0 || (list.show_achievements && achievementTrackedCount > 0)) && (
             <div class="lst-numbers">
-              {avgScore !== null && (
-                <div class="lst-num">
-                  <div class={`lst-val ${scoreClass(avgScore)}`}>{avgScore.toFixed(1)}</div>
-                  <div class="lst-lab">Avg Score</div>
-                </div>
-              )}
               {totalHours > 0 && (
                 <div class="lst-num">
-                  <div class="lst-val">{totalHours}h</div>
+                  <div class="lst-val">{fmtHours(totalHours)}</div>
                   <div class="lst-lab">Hours</div>
                 </div>
               )}
@@ -1631,22 +1699,14 @@ const ogImage = list.visibility !== "private"
             </div>
           )}
 
-          {reviewedCount > 0 && (topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || minYear !== null) && (
+          {reviewedCount > 0 && (topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || minYear !== null) && (
             <div class="lst-divider"></div>
           )}
 
-          {(topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0) && (
+          {(topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0) && (
             <details class="lst-detail-collapse">
-              <summary class="lst-detail-summary">Genres &amp; studios</summary>
+              <summary class="lst-detail-summary">Studios &amp; platforms</summary>
               <div class="lst-detail">
-                {topGenres.length > 0 && (
-                  <div class="lst-row">
-                    <span class="lst-row-label">Genres</span>
-                    <div class="lst-genres">
-                      {topGenres.map(g => <span class="lst-genre-chip"><span class="lst-chip-name">{g.name}</span><span class="lst-genre-n">{g.count}</span></span>)}
-                    </div>
-                  </div>
-                )}
                 {topDevs.length > 0 && (
                   <div class="lst-row">
                     <span class="lst-row-label">Dev</span>
