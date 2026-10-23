@@ -22,7 +22,7 @@ if (!currentProfile) return Astro.redirect("/signin");
 
 const { data: list } = await db
   .from("lists")
-  .select("id, title, description, is_ranked, visibility, shared_to_feed, default_view, show_hours, show_achievements, cover_image_url, profile_id")
+  .select("id, title, description, is_ranked, visibility, last_posted_to_feed_at, default_view, show_hours, show_achievements, cover_image_url, profile_id")
   .eq("id", id)
   .maybeSingle();
 
@@ -270,7 +270,10 @@ const autoCoverSrcs = entryList
   }
   .el-share-text { flex: 1; }
   .el-share-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
-  .el-share-desc { font-size: 11px; color: var(--text-tertiary); }
+  .el-share-desc { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; }
+  .post-feed-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; flex-shrink: 0; min-width: 110px; }
+  .post-feed-actions .el-btn-primary,
+  .post-feed-actions .el-btn-secondary { padding: 7px 14px; font-size: 12px; border-radius: 18px; text-align: center; }
 
   /* ── save + delete footer of details card ── */
   .el-details-footer {
@@ -564,15 +567,15 @@ const autoCoverSrcs = entryList
             </div>
           </div>
           <div id="share-feed-group" style={list.visibility === "private" ? "display:none" : ""}>
-            <div class="el-share-row">
+            <div class="el-share-row" id="post-feed-row" data-last-posted={list.last_posted_to_feed_at ?? ''}>
               <div class="el-share-text">
-                <div class="el-share-title">Share to front page feed</div>
-                <div class="el-share-desc">Appears in the Recent Lists section on the home page</div>
+                <div class="el-share-title">Post to front-page feed</div>
+                <div class="el-share-desc" id="post-feed-desc">Appears in the Recent Lists section on the home page. One post per week.</div>
               </div>
-              <label class="el-toggle" style="margin-top:2px;flex-shrink:0">
-                <input type="checkbox" id="meta-share-feed" checked={list.shared_to_feed} />
-                <span class="el-track"></span>
-              </label>
+              <div class="post-feed-actions" id="post-feed-actions">
+                <button type="button" class="el-btn-primary" id="post-feed-btn">Post to feed</button>
+                <button type="button" class="el-btn-secondary" id="unpost-feed-btn" style="display:none">Remove</button>
+              </div>
             </div>
           </div>
           <div class="el-details-footer">
@@ -624,16 +627,12 @@ document.getElementById('meta-ranked').addEventListener('change', function() {
   renderEntries();
 });
 
-// ── Visibility → hide/show share-to-feed toggle ────────────────────────────
+// ── Visibility → hide/show post-to-feed section ────────────────────────────
+// Private lists can't post to feed; flip back to public shows the section
+// again. The actual post action lives in its own handler below.
 document.getElementById('meta-vis').addEventListener('change', function() {
   var shareGroup = document.getElementById('share-feed-group');
-  var shareToggle = document.getElementById('meta-share-feed');
-  if (this.value === 'private') {
-    shareGroup.style.display = 'none';
-    shareToggle.checked = false;
-  } else {
-    shareGroup.style.display = 'block';
-  }
+  shareGroup.style.display = this.value === 'private' ? 'none' : 'block';
 });
 
 // ── Metadata save ──────────────────────────────────────────────────────────
@@ -653,7 +652,6 @@ document.getElementById('meta-save-btn').addEventListener('click', async functio
       description: document.getElementById('meta-desc').value.trim() || null,
       is_ranked: document.getElementById('meta-ranked').checked,
       visibility: document.getElementById('meta-vis').value,
-      shared_to_feed: document.getElementById('meta-share-feed').checked,
       default_view: document.getElementById('meta-default-view').value,
       show_hours: document.getElementById('meta-show-hours').checked,
       show_achievements: document.getElementById('meta-show-achievements').checked,
@@ -1012,4 +1010,100 @@ document.getElementById('delete-btn').addEventListener('click', async function()
 
 // Initial render
 renderEntries();
+
+// ── Post to feed ───────────────────────────────────────────────────────────
+// Reads the current last_posted_to_feed_at off a data attribute and renders
+// one of three states:
+//   never posted  → "Post to feed" button
+//   within 7 days → disabled "Reposted Xd ago · Y days left"
+//   past 7 days   → "Repost" button + "Remove" secondary
+(function() {
+  var COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+  var row = document.getElementById('post-feed-row');
+  var postBtn = document.getElementById('post-feed-btn');
+  var unpostBtn = document.getElementById('unpost-feed-btn');
+  var desc = document.getElementById('post-feed-desc');
+  if (!row || !postBtn || !unpostBtn || !desc) return;
+
+  function fmtAgo(ms) {
+    var m = Math.floor(ms / 60000);
+    if (m < 60) return m + 'm';
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + 'h';
+    var d = Math.floor(h / 24);
+    return d + 'd';
+  }
+  function fmtLeft(ms) {
+    var d = Math.ceil(ms / (24 * 60 * 60 * 1000));
+    return d + ' day' + (d === 1 ? '' : 's');
+  }
+
+  function render() {
+    var raw = row.getAttribute('data-last-posted') || '';
+    var lastMs = raw ? new Date(raw).getTime() : NaN;
+    if (!raw || !Number.isFinite(lastMs)) {
+      postBtn.textContent = 'Post to feed';
+      postBtn.disabled = false;
+      unpostBtn.style.display = 'none';
+      desc.textContent = 'Appears in the Recent Lists section on the home page. One post per week.';
+      return;
+    }
+    var sinceMs = Date.now() - lastMs;
+    if (sinceMs < COOLDOWN_MS) {
+      var leftMs = COOLDOWN_MS - sinceMs;
+      postBtn.textContent = 'Repost';
+      postBtn.disabled = true;
+      unpostBtn.style.display = '';
+      desc.textContent = 'Posted ' + fmtAgo(sinceMs) + ' ago · can repost in ' + fmtLeft(leftMs) + '.';
+    } else {
+      postBtn.textContent = 'Repost';
+      postBtn.disabled = false;
+      unpostBtn.style.display = '';
+      desc.textContent = 'Posted ' + fmtAgo(sinceMs) + ' ago. Reposting pushes it back to the top of the feed.';
+    }
+  }
+  render();
+
+  postBtn.addEventListener('click', async function() {
+    postBtn.disabled = true;
+    var original = postBtn.textContent;
+    postBtn.textContent = 'Posting…';
+    var res = await fetch('/api/lists/post-to-feed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId }),
+    });
+    var data = await res.json().catch(function() { return {}; });
+    postBtn.textContent = original;
+    if (!res.ok) {
+      if (data.last_posted_at) row.setAttribute('data-last-posted', data.last_posted_at);
+      alert(data.error || 'Failed to post list to feed.');
+      render();
+      return;
+    }
+    row.setAttribute('data-last-posted', data.last_posted_at);
+    render();
+  });
+
+  unpostBtn.addEventListener('click', async function() {
+    if (!confirm('Remove this list from the home feed? You can post it again whenever you like.')) return;
+    unpostBtn.disabled = true;
+    var original = unpostBtn.textContent;
+    unpostBtn.textContent = 'Removing…';
+    var res = await fetch('/api/lists/post-to-feed', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId }),
+    });
+    unpostBtn.textContent = original;
+    unpostBtn.disabled = false;
+    if (!res.ok) {
+      var data = await res.json().catch(function() { return {}; });
+      alert(data.error || 'Failed to remove list from feed.');
+      return;
+    }
+    row.setAttribute('data-last-posted', '');
+    render();
+  });
+})();
 </script>

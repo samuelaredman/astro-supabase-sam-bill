@@ -27,7 +27,7 @@ const REC_FIELDS = `
 `;
 
 const LIST_FIELDS = `
-  id, title, description, is_ranked, cover_image_url, created_at, profile_id,
+  id, title, description, is_ranked, cover_image_url, created_at, last_posted_to_feed_at, profile_id,
   profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   list_entries ( games ( cover_img_url ) ),
   list_votes ( vote, profile_id ),
@@ -61,9 +61,9 @@ export const GET: APIRoute = async (context) => {
     db.from("lists")
       .select(LIST_FIELDS)
       .eq("visibility", "public")
-      .eq("shared_to_feed", true)
-      .lt("created_at", cursor)
-      .order("created_at", { ascending: false })
+      .not("last_posted_to_feed_at", "is", null)
+      .lt("last_posted_to_feed_at", cursor)
+      .order("last_posted_to_feed_at", { ascending: false })
       .limit(limit),
   ]);
 
@@ -94,7 +94,9 @@ export const GET: APIRoute = async (context) => {
     return {
       ...l,
       _type: "list",
-      _date: l.created_at,
+      // A list rides the feed on its last post time — a repost should surface
+      // the list again rather than keeping its original created_at position.
+      _date: l.last_posted_to_feed_at ?? l.created_at,
       entryCount: entries.length,
       coverUrls,
     };
