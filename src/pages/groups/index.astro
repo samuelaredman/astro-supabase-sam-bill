@@ -101,6 +101,17 @@ const creatorIds = Array.from(new Set([
 ].filter(Boolean)));
 const creators = await loadCreators(creatorIds);
 
+// Chekpoint Creator groups float to the top of Discover: a group whose owner
+// holds the 'chekpoint-creator' badge is a featured community and should be
+// discoverable before random user-created groups. Everything else keeps its
+// created_at DESC order from the query.
+const _isCreatorGroup = (g: any) => (creators[g.created_by]?.badges ?? []).includes('chekpoint-creator');
+const discoverGroupsSorted = [...(discoverGroups ?? [])].sort((a, b) => {
+  const aIsCreator = _isCreatorGroup(a) ? 1 : 0;
+  const bIsCreator = _isCreatorGroup(b) ? 1 : 0;
+  return bIsCreator - aIsCreator;
+});
+
 // User's pending join requests (so we can show status in discover)
 const pendingRequests = profile
   ? (await (supabase as any)
@@ -116,8 +127,18 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
 
 <Layout title="Groups — Chekpoint" isLoggedIn={isLoggedIn} currentProfile={profile} activeNav="groups" variant="two-col">
 <style is:global>
-  .groups-header { display:flex; align-items:center; justify-content:space-between; padding:24px 28px 0; }
+  .groups-header { display:flex; align-items:center; justify-content:space-between; padding:24px 28px 0; gap:16px; flex-wrap:wrap; }
   .groups-title { font-family:'DM Serif Display',serif; font-size:24px; }
+  .groups-search { position:relative; flex:1; max-width:360px; min-width:220px; }
+  .groups-search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color:var(--text-tertiary); pointer-events:none; }
+  .groups-search input { width:100%; padding:9px 14px 9px 36px; border-radius:22px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); font-size:13px; font-family:inherit; outline:none; transition:border-color .15s, background .15s; }
+  .groups-search input:focus { border-color:var(--accent); background:var(--bg); }
+  .groups-search input::placeholder { color:var(--text-tertiary); }
+  .groups-empty-filtered { padding:32px 28px; text-align:center; color:var(--text-tertiary); font-size:13px; display:none; }
+  @media (max-width: 640px) {
+    .groups-header { padding:20px 16px 0; }
+    .groups-search { max-width:none; width:100%; order:3; }
+  }
   .btn-primary { background:var(--accent); color:#fff; border:none; padding:9px 20px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
   .btn-primary:hover { opacity:.85; }
   .section-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--text-tertiary); padding:24px 28px 10px; }
@@ -149,8 +170,13 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
 <div class="feed">
   <div class="groups-header">
     <h1 class="groups-title">Groups</h1>
+    <div class="groups-search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="groups-search-input" type="search" placeholder="Search your groups and discover…" autocomplete="off" />
+    </div>
     <a href={isLoggedIn ? "/groups/create" : "/signin?next=/groups/create"} class="btn-primary">+ New Group</a>
   </div>
+  <div class="groups-empty-filtered" id="groups-empty-filtered">No groups match that search.</div>
 
   {/* Pending invites */}
   {(pendingInvites ?? []).length > 0 && (
@@ -201,11 +227,11 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
   )}
 
   {/* Discover public groups */}
-  {(discoverGroups ?? []).length > 0 && (
+  {discoverGroupsSorted.length > 0 && (
     <div>
       <div class="section-label">Discover Groups</div>
       <div class="group-grid">
-        {(discoverGroups ?? []).map((g: any) => {
+        {discoverGroupsSorted.map((g: any) => {
           const isPending = pendingRequestGroupIds.has(g.id);
           const isPrivate = g.visibility === "private";
           const needsApproval = isPrivate || !!g.requires_approval;
@@ -247,4 +273,39 @@ async function respondInvite(btn: HTMLButtonElement, action: 'accept' | 'decline
   }
 }
 (window as any).respondInvite = respondInvite;
+
+// Client-side search: filter the My Groups + Discover cards already on the
+// page by name/description. The grid shows only the first 20 discover results,
+// so this doesn't query new groups — it narrows what's visible.
+(function() {
+  const input = document.getElementById('groups-search-input') as HTMLInputElement | null;
+  if (!input) return;
+  const empty = document.getElementById('groups-empty-filtered') as HTMLElement | null;
+  const cards = Array.from(document.querySelectorAll('.gcard')) as HTMLAnchorElement[];
+
+  function apply() {
+    const q = input!.value.trim().toLowerCase();
+    let totalVisible = 0;
+    for (const card of cards) {
+      const name = card.dataset.groupName ?? '';
+      const desc = card.dataset.groupDesc ?? '';
+      const match = q === '' || name.includes(q) || desc.includes(q);
+      card.style.display = match ? '' : 'none';
+      if (match) totalVisible++;
+    }
+    // Hide a section-label + its grid when every card in that grid is filtered out.
+    document.querySelectorAll('.section-label').forEach((label) => {
+      const next = label.nextElementSibling as HTMLElement | null;
+      if (!next) return;
+      const sectionCards = next.querySelectorAll('.gcard');
+      if (sectionCards.length === 0) return;
+      const anyVisible = Array.from(sectionCards).some((c) => (c as HTMLElement).style.display !== 'none');
+      (label as HTMLElement).style.display = anyVisible ? '' : 'none';
+      next.style.display = anyVisible ? '' : 'none';
+    });
+    if (empty) empty.style.display = (q !== '' && totalVisible === 0) ? '' : 'none';
+  }
+
+  input.addEventListener('input', apply);
+})();
 </script>
