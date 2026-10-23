@@ -5,6 +5,7 @@ import Layout from "../../../components/Layout.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 import AchievementDetailModal from "../../../components/AchievementDetailModal.astro";
 import { igdbImage, timeAgo, scoreClass } from "../../../utils/format";
+import { shortGenre } from "../../../utils/groupCompare";
 import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../../../utils/reactions";
 import { setPageCacheHeaders } from "../../../utils/cache";
 import { getPageUser } from "../../../utils/pageAuth";
@@ -236,6 +237,25 @@ for (const row of (genreRows ?? []) as any[]) {
 const topGenres = Object.entries(genreCount).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name, count]) => ({ name, count }));
 const allGenreNames = Object.keys(genreCount).sort((a, b) => a.localeCompare(b));
 
+// Genre radar — same visual language as the groups Stats-tab radar, one
+// polygon instead of two sides. Six axes keeps the labels legible; each
+// axis's value is the percent of games in the list tagged with that genre.
+// Scale is pct of the top-genre share (so the busiest genre fills the ring).
+const RADAR_AXES_MAX = 6;
+const radarGenresRaw = Object.entries(genreCount)
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, RADAR_AXES_MAX);
+const radarTotalGames = entryList.length || 1;
+const radarGenres = radarGenresRaw.map(([name, count]) => ({
+  name,
+  short: shortGenre(name),
+  pct: Math.round((count / radarTotalGames) * 100),
+  count,
+}));
+const radarScale = radarGenres.length > 0 ? Math.max(...radarGenres.map((g) => g.pct), 10) : 10;
+// Radar needs at least 3 axes to form a polygon; otherwise fall back to nothing.
+const showRadar = radarGenres.length >= 3;
+
 // Developers & publishers
 const devCount: Record<string, number> = {};
 const pubCount: Record<string, number> = {};
@@ -399,6 +419,43 @@ const collageSrcs = list.cover_image_url
 
 function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
 
+// Radar geometry — mirrors src/components/groups/CompareTab.astro so the two
+// charts share a visual language. Scale is a plain number; axes carry name +
+// pct in RADAR_SCALE units. Six axes keeps the labels off each other.
+const RADAR = { w: 260, h: 220, cx: 130, cy: 110, r: 70 };
+const _radarAngle = (i: number, n: number) => -Math.PI / 2 + (2 * Math.PI * i) / n;
+const _radarPoint = (i: number, n: number, value: number, scale: number) => {
+  const a = _radarAngle(i, n);
+  const d = (Math.min(value, scale) / scale) * RADAR.r;
+  return { x: RADAR.cx + Math.cos(a) * d, y: RADAR.cy + Math.sin(a) * d };
+};
+const _pts = (list: { x: number; y: number }[]) => list.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+let radarRings: string[] = [];
+let radarSpokes: { x: number; y: number }[] = [];
+let radarPolygon = "";
+let radarDots: { x: number; y: number }[] = [];
+let radarLabels: { x: number; y: number; anchor: 'start' | 'middle' | 'end'; text: string; full: string; pct: number }[] = [];
+if (showRadar) {
+  const n = radarGenres.length;
+  radarRings = [1 / 3, 2 / 3, 1].map((f) => _pts(radarGenres.map((_, i) => _radarPoint(i, n, f * radarScale, radarScale))));
+  radarSpokes = radarGenres.map((_, i) => _radarPoint(i, n, radarScale, radarScale));
+  const area = radarGenres.map((g, i) => _radarPoint(i, n, g.pct, radarScale));
+  radarPolygon = _pts(area);
+  radarDots = area;
+  radarLabels = radarGenres.map((g, i) => {
+    const ang = _radarAngle(i, n);
+    const cos = Math.cos(ang), sin = Math.sin(ang);
+    return {
+      x: RADAR.cx + cos * (RADAR.r + 14),
+      y: RADAR.cy + sin * (RADAR.r + 14) + (sin > 0.5 ? 9 : sin < -0.5 ? -3 : 4),
+      anchor: cos > 0.3 ? 'start' : cos < -0.3 ? 'end' : 'middle',
+      text: g.short,
+      full: g.name,
+      pct: g.pct,
+    };
+  });
+}
+
 // Unlike Supabase auth redirects (which must match an exact allowlisted domain,
 // so they use Astro.site), this URL is purely self-referential — it should point
 // at whatever host is actually serving this request, so preview/branch deploys
@@ -546,6 +603,10 @@ const ogImage = list.visibility !== "private"
   .entry-score-badge.score-mid     { background: #1a1400;        color: #fbbf24; border: 1.5px solid rgba(251,191,36,.75); }
   .entry-score-badge.score-orange  { background: #1f1008;        color: #fb923c; border: 1.5px solid rgba(251,146,60,.75); }
   .entry-score-badge.score-low     { background: #200808;        color: #f87171; border: 1.5px solid rgba(248,113,113,.75); }
+  /* Score chip doubles as a link to the owner's review for this game. */
+  .entry-score-link { cursor: pointer; text-decoration: none; transition: transform .12s, filter .12s; }
+  .entry-score-link:hover { transform: scale(1.08); filter: brightness(1.1); }
+  .entry-score-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   .entry-hours-badge { position: absolute; top: 6px; left: 6px; font-size: 13px; font-weight: 700; background: rgba(0,0,0,.72); color: #fff; border-radius: 5px; padding: 3px 8px; line-height: 1.25; z-index: 1; }
   .entry-ach-badge {
     position: absolute; top: 6px; right: 6px;
@@ -799,44 +860,19 @@ const ogImage = list.visibility !== "private"
   .lst-val.score-mid     { color: #fbbf24; }
   .lst-val.score-orange  { color: #fb923c; }
   .lst-val.score-low     { color: #f87171; }
-  .lst-avg {
-    --score-color: var(--text-primary);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 16px 14px;
-    border-radius: 12px;
-    background: linear-gradient(135deg,
-      color-mix(in srgb, var(--score-color) 14%, var(--bg-hover)) 0%,
-      color-mix(in srgb, var(--score-color) 6%, var(--bg-hover)) 100%);
-    border: 1px solid color-mix(in srgb, var(--score-color) 32%, transparent);
-    box-shadow: 0 1px 2px rgba(0,0,0,.1), inset 0 1px 0 color-mix(in srgb, var(--score-color) 20%, transparent);
-  }
-  .lst-avg.score-perfect { --score-color: #F5C842; }
-  .lst-avg.score-great   { --score-color: #4ade80; }
-  .lst-avg.score-teal    { --score-color: #2dd4bf; }
-  .lst-avg.score-good    { --score-color: #60a5fa; }
-  .lst-avg.score-mid     { --score-color: #fbbf24; }
-  .lst-avg.score-orange  { --score-color: #fb923c; }
-  .lst-avg.score-low     { --score-color: #f87171; }
-  .lst-avg-val {
-    font-size: 38px;
-    font-weight: 700;
-    font-family: 'DM Serif Display', serif;
-    color: var(--score-color);
-    line-height: 1;
-    text-shadow: 0 2px 12px color-mix(in srgb, var(--score-color) 45%, transparent);
-    letter-spacing: -.01em;
-  }
-  .lst-avg-lab {
-    font-size: 10px;
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: .1em;
-    font-weight: 600;
-    margin-top: 6px;
-  }
+  /* Genre radar — single-polygon version of the groups Stats-tab radar. Same
+     ring/spoke/dot vocabulary; the fill reads as the list's accent instead of
+     the two-side gv-l / gv-r colours. */
+  .lst-radar-wrap { padding: 2px 0; }
+  .lst-radar { width: 100%; height: auto; max-height: 220px; display: block; overflow: visible; }
+  .lst-radar-ring { fill: none; stroke: var(--border); stroke-width: 1; opacity: .7; }
+  .lst-radar-spoke { stroke: var(--border); stroke-width: 1; opacity: .7; }
+  .lst-radar-area { fill: var(--accent); fill-opacity: .18; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .lst-radar-dot { fill: var(--accent); stroke: none; transition: r .15s; filter: drop-shadow(0 0 3px var(--accent)); }
+  .lst-radar-label { font-size: 11px; font-weight: 600; fill: var(--text-secondary); }
+  .lst-radar-axis:hover .lst-radar-label { fill: var(--text-primary); }
+  .lst-radar-axis:hover .lst-radar-dot { r: 5; }
+  .lst-radar-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   .lst-lab {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -1382,7 +1418,18 @@ const ogImage = list.visibility !== "private"
                         : <div class="entry-cover-placeholder">🎮</div>
                       }
                       {list.is_ranked && <div class="entry-rank">{entry.position ?? i + 1}</div>}
-                      {gameReview && <div class={`entry-score-badge ${scoreClass(gameReview.score)}`}>{gameReview.score}</div>}
+                      {gameReview && (
+                        <span
+                          role="button"
+                          tabindex="0"
+                          class={`entry-score-badge entry-score-link ${scoreClass(gameReview.score)}`}
+                          data-review-id={gameReview.id}
+                          aria-label={`Open ${entry.games?.title ?? 'this'} review`}
+                          title="Open review"
+                        >
+                          {gameReview.score}
+                        </span>
+                      )}
                       {list.show_hours !== false && gameReview?.play_time_hours ? <div class="entry-hours-badge">{gameReview.play_time_hours}h</div> : null}
                       {achBadge?.kind === 'steam' ? (
                         <span role="button" tabindex="0" class="entry-perfect-ribbon entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all achievements" title="100% achievements on Steam">
@@ -1534,14 +1581,35 @@ const ogImage = list.visibility !== "private"
       <!-- Stats card -->
       {hasStats && (
         <div class="list-stats-card">
-          {avgScore !== null && (
-            <div class={`lst-avg ${scoreClass(avgScore)}`}>
-              <div class="lst-avg-val">{avgScore.toFixed(1)}</div>
-              <div class="lst-avg-lab">Avg Score</div>
+          {showRadar && (
+            <div class="lst-radar-wrap">
+              <svg class="lst-radar" viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} role="img" aria-label={`Genre mix: ${radarGenres.map((g) => `${g.name} ${g.pct}%`).join(', ')}`}>
+                {radarRings.map((ring) => <polygon class="lst-radar-ring" points={ring} />)}
+                {radarSpokes.map((p) => <line class="lst-radar-spoke" x1={RADAR.cx} y1={RADAR.cy} x2={p.x} y2={p.y} />)}
+                <polygon class="lst-radar-area" points={radarPolygon} />
+                {radarLabels.map((l, i) => (
+                  <g class="lst-radar-axis">
+                    <title>{`${l.full}: ${l.pct}%`}</title>
+                    <circle class="lst-radar-dot" cx={radarDots[i].x} cy={radarDots[i].y} r="3.5" />
+                    <text class="lst-radar-label" x={l.x} y={l.y} text-anchor={l.anchor}>{l.text}</text>
+                  </g>
+                ))}
+              </svg>
+              <table class="lst-radar-sr">
+                <caption>Share of games in this list by genre</caption>
+                <thead><tr><th>Genre</th><th>Share</th></tr></thead>
+                <tbody>{radarGenres.map((g) => <tr><td>{g.name}</td><td>{g.pct}%</td></tr>)}</tbody>
+              </table>
             </div>
           )}
-          {(reviewedCount > 0 || (list.show_achievements && achievementTrackedCount > 0)) && (
+          {(avgScore !== null || reviewedCount > 0 || (list.show_achievements && achievementTrackedCount > 0)) && (
             <div class="lst-numbers">
+              {avgScore !== null && (
+                <div class="lst-num">
+                  <div class={`lst-val ${scoreClass(avgScore)}`}>{avgScore.toFixed(1)}</div>
+                  <div class="lst-lab">Avg Score</div>
+                </div>
+              )}
               {totalHours > 0 && (
                 <div class="lst-num">
                   <div class="lst-val">{totalHours}h</div>
@@ -2844,32 +2912,37 @@ if (lcSubmit) {
 </script>
 
 <script is:inline>
-// Open the achievement-detail modal when a cover's achievement badge is
-// clicked. The badges live inside the cover's <a>, so we preventDefault +
-// stopPropagation so the browser doesn't also follow the game link.
+// Cover-overlay click handlers: achievement badge opens the modal, score chip
+// navigates to the owner's review. Both live inside the cover's <a>, so each
+// path preventDefault + stopPropagation so the browser doesn't also follow the
+// game link.
 (function() {
   var listEl = document.getElementById('entry-list');
   if (!listEl) return;
-  function handle(e) {
-    var btn = e.target && e.target.closest && e.target.closest('.entry-ach-btn');
-    if (!btn) return;
-    var src = btn.getAttribute('data-ach-src');
-    var sid = btn.getAttribute('data-ach-sid');
-    if (!src || !sid) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (typeof window.openAchDetail === 'function') window.openAchDetail(src, sid);
+  function activate(e, isKey) {
+    var ach = e.target && e.target.closest && e.target.closest('.entry-ach-btn');
+    if (ach) {
+      var src = ach.getAttribute('data-ach-src');
+      var sid = ach.getAttribute('data-ach-sid');
+      if (!src || !sid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof window.openAchDetail === 'function') window.openAchDetail(src, sid);
+      return;
+    }
+    var score = e.target && e.target.closest && e.target.closest('.entry-score-link');
+    if (score) {
+      var reviewId = score.getAttribute('data-review-id');
+      if (!reviewId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      window.location.href = '/reviews/' + reviewId;
+    }
   }
-  listEl.addEventListener('click', handle);
+  listEl.addEventListener('click', function(e) { activate(e, false); });
   listEl.addEventListener('keydown', function(e) {
     if (e.key !== 'Enter' && e.key !== ' ') return;
-    var btn = e.target && e.target.closest && e.target.closest('.entry-ach-btn');
-    if (!btn) return;
-    e.preventDefault();
-    e.stopPropagation();
-    var src = btn.getAttribute('data-ach-src');
-    var sid = btn.getAttribute('data-ach-sid');
-    if (src && sid && typeof window.openAchDetail === 'function') window.openAchDetail(src, sid);
+    activate(e, true);
   });
 })();
 </script>
