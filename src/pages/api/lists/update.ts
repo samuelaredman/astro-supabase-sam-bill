@@ -6,7 +6,7 @@ export const POST: APIRoute = async (context) => {
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { list_id, title, description, is_ranked, visibility, shared_to_feed, default_view } = await context.request.json();
+  const { list_id, title, description, is_ranked, visibility, shared_to_feed, default_view, show_hours, show_achievements } = await context.request.json();
 
   if (!list_id) return json({ error: "list_id is required." }, 400);
   if (title !== undefined && !title?.trim()) return json({ error: "Title cannot be empty." }, 400);
@@ -36,6 +36,8 @@ export const POST: APIRoute = async (context) => {
     if (!["grid", "list"].includes(default_view)) return json({ error: "default_view must be 'grid' or 'list'." }, 400);
     updates.default_view = default_view;
   }
+  if (show_hours !== undefined) updates.show_hours = !!show_hours;
+  if (show_achievements !== undefined) updates.show_achievements = !!show_achievements;
 
   const { error } = await (db as any).from("lists").update(updates).eq("id", list_id);
 
