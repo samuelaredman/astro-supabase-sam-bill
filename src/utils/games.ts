@@ -353,6 +353,20 @@ export function foldDiacritics(str: string): string {
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
+/** Resolve a game id to its canonical row. A collapsed-edition row returns the
+ *  main game it collapses into; a canonical row (or missing row) returns itself.
+ *  Write-path endpoints call this before any insert/dedupe check so a stale
+ *  client posting an edition id still lands on the reviewable canonical row \u2014
+ *  matches the `canonical_game_id IS NULL` read-path filter. */
+export async function resolveCanonicalGameId(db: any, gameId: string): Promise<string> {
+  const { data } = await db
+    .from('games')
+    .select('canonical_game_id')
+    .eq('id', gameId)
+    .maybeSingle();
+  return (data?.canonical_game_id as string | null) ?? gameId;
+}
+
 function makeGameSlug(title: string, igdbSlug?: string): string {
   if (igdbSlug) return igdbSlug;
   return foldDiacritics(title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
