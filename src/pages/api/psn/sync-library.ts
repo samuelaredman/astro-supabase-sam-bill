@@ -214,13 +214,69 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: titles.length, total: titles.length });
   }
 
-  // Existing user_game_status rows for the matched games — don't clobber
-  // manual statuses (playing/completed/dropped/etc.). We only insert new rows
-  // with 'owned' status; existing rows just get PSN metadata refreshed.
+  // Resolve matched ids to canonical rows — ownership + trophy progress belong
+  // on the main game, not the collapsed edition. Multiple editions collapsing
+  // to the same canonical fold into one row; keep the most-recently-played
+  // edition's PSN metadata (fallback: higher trophy progress %).
   const matchedGameIds = matches.map((m) => m.id);
+  const canonicalOf = new Map<string, string>();
+  const canonChunks = await Promise.all(
+    chunk(matchedGameIds, IN_CHUNK).map((ids) =>
+      (db as any).from('games').select('id, canonical_game_id').in('id', ids),
+    ),
+  );
+  for (const { data: rows } of canonChunks) {
+    for (const r of ((rows ?? []) as any[])) {
+      canonicalOf.set(r.id, r.canonical_game_id ?? r.id);
+    }
+  }
+
+  const collapsedByLowerName = new Map(collapsed.map((c) => [c.name.toLowerCase(), c]));
+
+  type AggRow = {
+    row: Record<string, unknown>;
+    _lastPlayedTs: number;
+    _bestProgress: number;
+  };
+  const perCanonical = new Map<string, AggRow>();
+  for (const match of matches) {
+    const psnEntry = collapsedByLowerName.get((match.psn_title ?? match.title).toLowerCase().trim());
+    if (!psnEntry) continue;
+    const canonicalId = canonicalOf.get(match.id) ?? match.id;
+    const playtime = playtimeByLowerName.get(psnEntry.name.toLowerCase()) ?? null;
+    const lastPlayedAt = playtime?.lastPlayed ?? psnEntry.lastUpdatedDateTime ?? null;
+    const row: Record<string, unknown> = {
+      psn_np_communication_id: psnEntry.npCommId,
+      psn_platform: psnEntry.platform,
+      psn_trophies_earned: psnEntry.earned,
+      psn_trophies_total: psnEntry.total,
+      psn_progress: psnEntry.progress,
+      psn_playtime_minutes: playtime?.minutes ?? null,
+      psn_last_played_at: lastPlayedAt,
+    };
+    const lastPlayedTs = lastPlayedAt ? Date.parse(lastPlayedAt) : 0;
+
+    const existing = perCanonical.get(canonicalId);
+    const beats =
+      !existing ||
+      lastPlayedTs > existing._lastPlayedTs ||
+      (lastPlayedTs === existing._lastPlayedTs && psnEntry.progress > existing._bestProgress);
+    if (beats) {
+      perCanonical.set(canonicalId, {
+        row,
+        _lastPlayedTs: lastPlayedTs,
+        _bestProgress: psnEntry.progress,
+      });
+    }
+  }
+
+  // Existing user_game_status rows keyed by canonical — don't clobber manual
+  // statuses (playing/completed/dropped/etc.). Only new rows get status='owned';
+  // existing rows just get PSN metadata refreshed.
+  const canonicalIds = [...perCanonical.keys()];
   const existingByGameId = new Map<string, string>();
   const existingChunks = await Promise.all(
-    chunk(matchedGameIds, IN_CHUNK).map((ids) =>
+    chunk(canonicalIds, IN_CHUNK).map((ids) =>
       (db as any)
         .from('user_game_status')
         .select('game_id, status')
@@ -232,36 +288,20 @@ export const POST: APIRoute = async (context) => {
     for (const r of (rows ?? [])) existingByGameId.set(r.game_id, r.status);
   }
 
-  const collapsedByLowerName = new Map(collapsed.map((c) => [c.name.toLowerCase(), c]));
-
   const toInsert: any[] = [];
   const toUpdate: Array<{ game_id: string; row: Record<string, unknown> }> = [];
 
-  for (const match of matches) {
-    const psnEntry = collapsedByLowerName.get((match.psn_title ?? match.title).toLowerCase().trim());
-    if (!psnEntry) continue;
-    const playtime = playtimeByLowerName.get(psnEntry.name.toLowerCase()) ?? null;
-
-    const row: Record<string, unknown> = {
-      psn_np_communication_id: psnEntry.npCommId,
-      psn_platform: psnEntry.platform,
-      psn_trophies_earned: psnEntry.earned,
-      psn_trophies_total: psnEntry.total,
-      psn_progress: psnEntry.progress,
-      psn_playtime_minutes: playtime?.minutes ?? null,
-      psn_last_played_at: playtime?.lastPlayed ?? psnEntry.lastUpdatedDateTime ?? null,
-    };
-
-    if (!existingByGameId.has(match.id)) {
+  for (const [canonicalId, agg] of perCanonical) {
+    if (!existingByGameId.has(canonicalId)) {
       toInsert.push({
         profile_id: profile.id,
-        game_id: match.id,
+        game_id: canonicalId,
         status: 'owned',
         is_owned: true,
-        ...row,
+        ...agg.row,
       });
     } else {
-      toUpdate.push({ game_id: match.id, row });
+      toUpdate.push({ game_id: canonicalId, row: agg.row });
     }
   }
 

@@ -4,6 +4,7 @@ import { requireAuth, json } from '../../../utils/api';
 import { validateSocialUrl } from '../../../utils/socialLinks';
 import { parseYouTubeId } from '../../../utils/youtube';
 import { readShowcaseKeys } from '../../../utils/profileShowcases';
+import { resolveCanonicalGameId } from '../../../utils/games';
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -55,6 +56,21 @@ export const POST: APIRoute = async (context) => {
 
   if (Object.keys(update).length === 0)
     return json({ error: 'Nothing to update.' }, 400);
+
+  // Pin any game-referencing field to the canonical row. The showcase/favorite
+  // picker UI already filters to canonical rows, but a stale open tab could
+  // still submit an edition id — write the canonical so profile reads align
+  // with /games/[slug] (which 301s editions to canonical) and so the
+  // "showcase" of a GOTY and the user's canonical review of the same game
+  // don't appear to be on two different "games".
+  if ('favorite_game_id' in update && typeof update.favorite_game_id === 'string') {
+    update.favorite_game_id = await resolveCanonicalGameId(db, update.favorite_game_id);
+  }
+  if ('showcase_games' in update && Array.isArray(update.showcase_games)) {
+    const ids = (update.showcase_games as unknown[]).filter((v): v is string => typeof v === 'string');
+    const resolved = await Promise.all(ids.map((id) => resolveCanonicalGameId(db, id)));
+    update.showcase_games = [...new Set(resolved)];
+  }
 
   for (const key of urlFields) {
     if (!(key in update)) continue;

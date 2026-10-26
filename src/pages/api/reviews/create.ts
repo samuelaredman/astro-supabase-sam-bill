@@ -4,6 +4,7 @@ import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
 import { readYouTubeField } from "../../../utils/youtube";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -11,10 +12,16 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json();
-  const { game_id, score, title, body: reviewBody, platform_played_on, play_time_hours, contains_spoilers } = body;
+  const { score, title, body: reviewBody, platform_played_on, play_time_hours, contains_spoilers } = body;
   const isDraft = body.status === "draft";
 
-  if (!game_id) return json({ error: "Missing game." }, 400);
+  if (!body.game_id) return json({ error: "Missing game." }, 400);
+
+  // Collapse any edition id to its canonical before anything else uses it, so a
+  // stale client posting the GOTY/Definitive/etc. row still lands on the main
+  // reviewable game. All downstream code (dupe check, insert, finalize) sees the
+  // canonical id.
+  const game_id = await resolveCanonicalGameId(db, body.game_id);
 
   const youtube = readYouTubeField(body);
   if ("error" in youtube) return json({ error: youtube.error }, 400);

@@ -24,7 +24,16 @@ const lockup = (id: string, title: string) =>
 describe('parseLatestFromVideosPage', () => {
   it('returns the first (newest) video', () => {
     const html = `{"header":{}},${lockup('pRrmQUm6Zvg', 'Turning the YouTube Logo Into a Monster')},${lockup('wGA27zJEnaU', 'Older')}`;
-    expect(parseLatestFromVideosPage(html)).toEqual({ id: 'pRrmQUm6Zvg', title: 'Turning the YouTube Logo Into a Monster' });
+    // Scrape path only pulls id + title; the stats fields exist on LatestUpload
+    // for parity with the Data API path and come back null.
+    expect(parseLatestFromVideosPage(html)).toEqual({
+      id: 'pRrmQUm6Zvg',
+      title: 'Turning the YouTube Logo Into a Monster',
+      description: null,
+      publishedAt: null,
+      viewCount: null,
+      durationSeconds: null,
+    });
   });
 
   it('decodes escaped titles', () => {

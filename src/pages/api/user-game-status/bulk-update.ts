@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 const VALID_STATUSES = ["playing", "want_to_play", "owned", "completed", "hundred_percent", "dropped"] as const;
 
@@ -20,14 +21,24 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json();
-  const { game_ids, action, status } = body;
+  const { action, status } = body;
+  const rawGameIds: unknown = body.game_ids;
 
-  if (!Array.isArray(game_ids) || game_ids.length === 0)
+  if (!Array.isArray(rawGameIds) || rawGameIds.length === 0)
     return json({ error: "game_ids must be a non-empty array" }, 400);
   if (!["delete", "set_status"].includes(action))
     return json({ error: "action must be 'delete' or 'set_status'" }, 400);
   if (action === "set_status" && !VALID_STATUSES.includes(status))
     return json({ error: `status must be one of: ${VALID_STATUSES.join(", ")}` }, 400);
+
+  // Resolve every id to its canonical row and de-dupe. The caller may pass a
+  // mix of canonical and edition ids (e.g. a page built before the backfill);
+  // both must act on the one canonical row rather than silently affect zero
+  // rows for the editions.
+  const resolved = await Promise.all(
+    (rawGameIds as string[]).map((id) => resolveCanonicalGameId(db, id))
+  );
+  const game_ids = [...new Set(resolved)];
 
   if (action === "delete") {
     for (const ids of chunk(game_ids, CHUNK_SIZE)) {
@@ -46,7 +57,7 @@ export const POST: APIRoute = async (context) => {
   // set_status — upsert all. Owned is not mutually exclusive with status —
   // every status except want_to_play implies ownership by default.
   const isOwned = status !== "want_to_play";
-  const rows = game_ids.map((game_id: string) => ({
+  const rows = game_ids.map((game_id) => ({
     profile_id: profile.id,
     game_id,
     status,

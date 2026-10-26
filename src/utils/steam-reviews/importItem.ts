@@ -138,12 +138,25 @@ export async function importSteamReviewItem(
     return { status: "needs_mapping", matched_game_id: null, detail: "no game match" };
   }
 
+  // Resolve collapsed editions to their canonical row so Steam-imported
+  // reviews land on the main game, matching how Steam library sync records
+  // ownership on canonical. Backing conflict detection against the canonical
+  // row also catches cases where the user already published a review on the
+  // main game and the Steam import matched a collapsed GOTY variant.
+  const { data: canon } = await db
+    .from("games")
+    .select("canonical_game_id")
+    .eq("id", gameId)
+    .maybeSingle();
+  gameId = ((canon as any)?.canonical_game_id as string | null) ?? gameId;
+
   // ── 2. Skip if this user already has a review for the game ────────────────
   // A user can legitimately have multiple drafts for the same game (the
-  // reviews_one_published_per_game unique index is partial — WHERE
-  // status='published'). Rank published-over-draft so the surfaced conflict
-  // is the one the user most likely cares about, then take a single row —
-  // .maybeSingle() would throw the moment there's more than one match.
+  // reviews_one_published_per_revision unique index is partial — WHERE
+  // status='published' AND revision_id IS NOT NULL). Rank published-over-draft
+  // so the surfaced conflict is the one the user most likely cares about, then
+  // take a single row — .maybeSingle() would throw the moment there's more
+  // than one match.
   const { data: existingRows } = await db
     .from("reviews")
     .select("id, status, body")

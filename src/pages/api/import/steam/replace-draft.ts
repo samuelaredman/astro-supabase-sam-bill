@@ -2,6 +2,7 @@ import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../../utils/api";
 import { clampImportedDateIso, loadOwnedJob, recountJob } from "../../../../utils/importJob";
 import { resolvePCPlatformId } from "../../../../utils/steam-reviews/importItem";
+import { resolveCanonicalGameId } from "../../../../utils/games";
 
 // POST { item_id } -> for a skipped Steam item whose conflict is a DRAFT,
 // delete the user's existing draft and insert the Steam text as a new draft.
@@ -72,11 +73,15 @@ export const POST: APIRoute = async (context) => {
       ? Math.max(0, Math.round(item.hours_at_review))
       : null;
 
+  // Items matched before the canonical backfill could still carry an edition
+  // id — pin the replacement draft to the canonical row.
+  const canonicalGameId = await resolveCanonicalGameId(db, item.matched_game_id);
+
   const { data: inserted, error: insError } = await db
     .from("reviews")
     .insert({
       profile_id: profile.id,
-      game_id: item.matched_game_id,
+      game_id: canonicalGameId,
       score: null,
       title: null,
       body: item.review_text,
