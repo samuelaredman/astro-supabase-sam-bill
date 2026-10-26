@@ -111,8 +111,24 @@ async function main() {
   const lowConfidence: string[] = [];       // needs a human call
 
   for (const g of games) {
-    if (classifyGameType(g.igdb_category) !== 'collapse') continue;
     if (g.canonical_locked) continue;
+
+    // Collapse eligibility — three gates, in priority order:
+    //  (1) classify === 'collapse' (bundle/port/remaster/pack): the common path.
+    //  (2) igdb_version_parent set, any category: a `main_game` tagged "GOTY /
+    //      Definitive / Collector's" that IGDB mislabeled as main_game but still
+    //      marked version_parent (Sekiro GOTY, Persona 5 Royal LE, RDR GOTY, …).
+    //      version_parent is definitionally "this is a version of X" so it's
+    //      safe even when the category is wrong.
+    //  (3) category === 14 (update) with igdb_parent_game set: patches / edition
+    //      rebrands IGDB tags as "update" (Sekiro GOTY, Black Mesa: Definitive,
+    //      Mario Kart 8 Update 4.0, …). Updates are hidden from browse anyway,
+    //      so collapsing them just stops them cluttering admin views.
+    const type = classifyGameType(g.igdb_category);
+    const isCollapseCategory   = type === 'collapse';
+    const hasVersionParent     = g.igdb_version_parent != null;
+    const isUpdateWithParent   = g.igdb_category === 14 && g.igdb_parent_game != null;
+    if (!isCollapseCategory && !hasVersionParent && !isUpdateWithParent) continue;
 
     // (a) version_parent / parent_game
     let picked: Proposal | null = null;
@@ -171,6 +187,20 @@ async function main() {
   console.log('── Sample proposals (first 30) ──');
   for (const f of finals.slice(0, 30)) {
     console.log(`  "${f.game.title}" (${catName(f.game.igdb_category)}) → "${byId.get(f.rootId)?.title}"  [${f.reason}]`);
+  }
+
+  // Optional substring filter — spot-check specific titles without reading all 1000 proposals.
+  const grepArg = process.argv.find((a) => a.startsWith('--grep='))?.slice('--grep='.length);
+  if (grepArg) {
+    const needle = grepArg.toLowerCase();
+    const matches = finals.filter(
+      (f) => f.game.title.toLowerCase().includes(needle) ||
+             (byId.get(f.rootId)?.title ?? '').toLowerCase().includes(needle)
+    );
+    console.log(`\n── Proposals matching "${grepArg}" (${matches.length}) ──`);
+    for (const f of matches) {
+      console.log(`  "${f.game.title}" (${catName(f.game.igdb_category)}) → "${byId.get(f.rootId)?.title}"  [${f.reason}]`);
+    }
   }
 
   // Ambiguous title clusters with >1 main_game — likely a series IGDB models flatly
