@@ -138,8 +138,18 @@ export const POST: APIRoute = async (context) => {
       if (unmatchedSample.length < 15) unmatchedSample.push(row.game_title);
       continue;
     }
-    if (seenGame.has(match.gameId)) continue;
-    seenGame.add(match.gameId);
+
+    // Resolve to canonical so library + review land on the main game, not a
+    // collapsed edition.
+    const { data: canon } = await db
+      .from("games")
+      .select("canonical_game_id")
+      .eq("id", match.gameId)
+      .maybeSingle();
+    const gameId = (canon?.canonical_game_id as string | null) ?? match.gameId;
+
+    if (seenGame.has(gameId)) continue;
+    seenGame.add(gameId);
 
     // ── Library status + playtime ──
     const chekpointStatus = mapHltbStatus(row.hltb_status);
@@ -148,7 +158,7 @@ export const POST: APIRoute = async (context) => {
         .from("user_game_status")
         .select("game_id")
         .eq("profile_id", profile.id)
-        .eq("game_id", match.gameId)
+        .eq("game_id", gameId)
         .maybeSingle();
       if (existing) {
         alreadyStatus++;
@@ -161,7 +171,7 @@ export const POST: APIRoute = async (context) => {
           hltb_playtime_minutes?: number | null;
         } = {
           profile_id: profile.id,
-          game_id: match.gameId,
+          game_id: gameId,
           status: chekpointStatus,
           updated_at: new Date().toISOString(),
         };
@@ -187,7 +197,7 @@ export const POST: APIRoute = async (context) => {
         .from("reviews")
         .select("id")
         .eq("profile_id", profile.id)
-        .eq("game_id", match.gameId)
+        .eq("game_id", gameId)
         .maybeSingle();
       if (existingReview) {
         alreadyReview++;
@@ -205,7 +215,7 @@ export const POST: APIRoute = async (context) => {
           play_time_hours?: number;
         } = {
           profile_id: profile.id,
-          game_id: match.gameId,
+          game_id: gameId,
           score: row.score,
           body: row.review_text ?? "",
           status: reviewStatus,
@@ -231,7 +241,7 @@ export const POST: APIRoute = async (context) => {
             try {
               await finalizePublishedReview(db, {
                 reviewId: inserted.id,
-                gameId: match.gameId,
+                gameId,
                 profileId: profile.id,
                 score: row.score,
               });

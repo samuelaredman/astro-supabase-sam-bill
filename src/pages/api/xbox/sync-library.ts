@@ -90,10 +90,64 @@ export const POST: APIRoute = async (context) => {
   const titlesByLowerName = new Map<string, XboxTitleSummary>();
   for (const t of titles) titlesByLowerName.set(t.name.toLowerCase().trim(), t);
 
+  // Resolve matched ids to their canonical rows — a title that matches a
+  // collapsed edition records ownership on the main game. Multiple editions
+  // collapsing into the same canonical fold into one row; pick the
+  // most-recently-played edition's Xbox metadata (fallback: highest gamerscore).
   const matchedGameIds = matches.map((m) => m.id);
+  const canonicalOf = new Map<string, string>();
+  const canonChunks = await Promise.all(
+    chunk(matchedGameIds, IN_CHUNK).map((ids) =>
+      (db as any).from('games').select('id, canonical_game_id').in('id', ids),
+    ),
+  );
+  for (const { data: rows } of canonChunks) {
+    for (const r of ((rows ?? []) as any[])) {
+      canonicalOf.set(r.id, r.canonical_game_id ?? r.id);
+    }
+  }
+
+  type AggRow = {
+    row: Record<string, unknown>;
+    _lastPlayedTs: number;
+    _bestGamerscore: number;
+  };
+  const perCanonical = new Map<string, AggRow>();
+  for (const match of matches) {
+    const xt = titlesByLowerName.get((match.xbox_title ?? match.title).toLowerCase().trim());
+    if (!xt) continue;
+    const canonicalId = canonicalOf.get(match.id) ?? match.id;
+    const progress = xt.maxGamerscore > 0
+      ? Math.round((xt.currentGamerscore / xt.maxGamerscore) * 100)
+      : 0;
+    const row: Record<string, unknown> = {
+      xbox_title_id: xt.titleId,
+      xbox_platform: xt.platform,
+      xbox_current_gamerscore: xt.currentGamerscore,
+      xbox_max_gamerscore: xt.maxGamerscore,
+      xbox_progress: progress,
+      xbox_last_played_at: xt.lastPlayed,
+    };
+    const lastPlayedTs = xt.lastPlayed ? Date.parse(xt.lastPlayed) : 0;
+
+    const existing = perCanonical.get(canonicalId);
+    const beats =
+      !existing ||
+      lastPlayedTs > existing._lastPlayedTs ||
+      (lastPlayedTs === existing._lastPlayedTs && xt.currentGamerscore > existing._bestGamerscore);
+    if (beats) {
+      perCanonical.set(canonicalId, {
+        row,
+        _lastPlayedTs: lastPlayedTs,
+        _bestGamerscore: xt.currentGamerscore,
+      });
+    }
+  }
+
+  const canonicalIds = [...perCanonical.keys()];
   const existingByGameId = new Map<string, string>();
   const existingChunks = await Promise.all(
-    chunk(matchedGameIds, IN_CHUNK).map((ids) =>
+    chunk(canonicalIds, IN_CHUNK).map((ids) =>
       (db as any)
         .from('user_game_status')
         .select('game_id, status')
@@ -108,32 +162,17 @@ export const POST: APIRoute = async (context) => {
   const toInsert: any[] = [];
   const toUpdate: Array<{ game_id: string; row: Record<string, unknown> }> = [];
 
-  for (const match of matches) {
-    const xt = titlesByLowerName.get((match.xbox_title ?? match.title).toLowerCase().trim());
-    if (!xt) continue;
-    const progress = xt.maxGamerscore > 0
-      ? Math.round((xt.currentGamerscore / xt.maxGamerscore) * 100)
-      : 0;
-
-    const row: Record<string, unknown> = {
-      xbox_title_id: xt.titleId,
-      xbox_platform: xt.platform,
-      xbox_current_gamerscore: xt.currentGamerscore,
-      xbox_max_gamerscore: xt.maxGamerscore,
-      xbox_progress: progress,
-      xbox_last_played_at: xt.lastPlayed,
-    };
-
-    if (!existingByGameId.has(match.id)) {
+  for (const [canonicalId, agg] of perCanonical) {
+    if (!existingByGameId.has(canonicalId)) {
       toInsert.push({
         profile_id: profile.id,
-        game_id: match.id,
+        game_id: canonicalId,
         status: 'owned',
         is_owned: true,
-        ...row,
+        ...agg.row,
       });
     } else {
-      toUpdate.push({ game_id: match.id, row });
+      toUpdate.push({ game_id: canonicalId, row: agg.row });
     }
   }
 

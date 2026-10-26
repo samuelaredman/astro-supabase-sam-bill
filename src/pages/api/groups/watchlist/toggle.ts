@@ -1,13 +1,17 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../../utils/api";
+import { resolveCanonicalGameId } from "../../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { group_id, game_id } = await context.request.json();
-  if (!group_id || !game_id) return json({ error: "group_id and game_id required" }, 400);
+  const body = await context.request.json();
+  const { group_id } = body;
+  if (!group_id || !body.game_id) return json({ error: "group_id and game_id required" }, 400);
+  // Track the canonical row — see watchlist/toggle.ts for the rationale.
+  const game_id = await resolveCanonicalGameId(db, body.game_id);
 
   const { data: membership } = await db.from("group_members")
     .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();

@@ -3,18 +3,29 @@ import { requireAuth, json } from "../../../utils/api";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { notifyRecommendationPublished } from "../../../utils/recommendationPublish";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { source_game_id, target_game_id, body, contains_spoilers, status } = await context.request.json();
+  const requestBody = await context.request.json();
+  const { body, contains_spoilers, status } = requestBody;
   const isDraft = status === "draft";
 
   // Both games are always required — the whole post is "if you liked A, try B".
-  if (!source_game_id || !target_game_id)
+  if (!requestBody.source_game_id || !requestBody.target_game_id)
     return json({ error: "Pick both games." }, 400);
+
+  // Resolve both to canonical before the equality check and the dedupe query,
+  // so an edition→canonical rec and a canonical→canonical rec collapse to
+  // the same unordered pair.
+  const [source_game_id, target_game_id] = await Promise.all([
+    resolveCanonicalGameId(db, requestBody.source_game_id),
+    resolveCanonicalGameId(db, requestBody.target_game_id),
+  ]);
+
   if (source_game_id === target_game_id)
     return json({ error: "Pick two different games." }, 400);
   if (body && body.trim().length > 5000)

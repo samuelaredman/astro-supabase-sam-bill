@@ -1,14 +1,18 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../../utils/api";
+import { resolveCanonicalGameId } from "../../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { group_id, game_id, played_at, notes, attendee_ids } = await context.request.json();
-  if (!group_id || !game_id || !played_at)
+  const body = await context.request.json();
+  const { group_id, played_at, notes, attendee_ids } = body;
+  if (!group_id || !body.game_id || !played_at)
     return json({ error: "group_id, game_id, and played_at are required" }, 400);
+  // Sessions point at the canonical row.
+  const game_id = await resolveCanonicalGameId(db, body.game_id);
 
   const { data: membership } = await db.from("group_members")
     .select("role, custom_role_id").eq("group_id", group_id).eq("profile_id", profile.id).maybeSingle();

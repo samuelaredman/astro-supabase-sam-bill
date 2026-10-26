@@ -132,6 +132,18 @@ export function classifyGameType(category: number | null | undefined): GameNodeC
   return 'connected';
 }
 
+// At import time, parent_game-based collapses are only safe for rows IGDB
+// classifies as a collapse category (bundle/port/remaster/pack) or as an update
+// — anything else (DLC/expansion/sequel) is a separately-reviewable node that
+// shares a parent_game with another game but shouldn't collapse into it. Mirrors
+// the widened eligibility in scripts/backfill-canonical.ts so new imports and
+// the backfill reach the same canonical for the same row.
+export function isImportCollapseCategory(category: number | null | undefined): boolean {
+  if (category == null) return false;
+  if (COLLAPSE_CATEGORIES.includes(category)) return true;
+  return category === 14; // update
+}
+
 // True when this row is a reviewable node: it is canonical (nothing collapsed it
 // into another row) and its category is not hidden. This is the Phase-5
 // replacement for isAllowedGameCategory once canonical_game_id is populated.
@@ -497,6 +509,30 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
   const { data: slugConflict } = await db.from('games').select('id').eq('slug', slug).maybeSingle();
   const finalSlug = slugConflict ? `${slug}-${igdbId}` : slug;
 
+  // Resolve a parent/version link at import time so new editions don't show up
+  // in search until the next backfill. version_parent is a definitional "edition
+  // of X" link so it's always safe; parent_game is only safe for rows IGDB
+  // itself classifies as a collapse type (bundle/port/remaster/pack) or as an
+  // update — anything else is a separately-reviewable node (DLC, expansion,
+  // sequel) and must stay canonical. If the parent isn't in the DB yet, we
+  // leave canonical_game_id null and let the next backfill sweep it.
+  const parentIgdbId  = asIgdbId(game.parent_game);
+  const versionIgdbId = asIgdbId(game.version_parent);
+  const collapseCandidate =
+    versionIgdbId ?? (parentIgdbId != null && isImportCollapseCategory(game.game_type) ? parentIgdbId : null);
+  let importedCanonicalId: string | null = null;
+  if (collapseCandidate != null) {
+    const { data: parentRow } = await db
+      .from('games')
+      .select('id, canonical_game_id')
+      .eq('igdb_id', collapseCandidate)
+      .maybeSingle();
+    if (parentRow) {
+      // One-level flat: if the parent is itself an edition, point at its root.
+      importedCanonicalId = (parentRow as any).canonical_game_id ?? (parentRow as any).id;
+    }
+  }
+
   const { data: inserted, error: insertError } = await db
     .from('games')
     .insert({
@@ -506,9 +542,10 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
       storyline:        game.storyline ?? null,
       igdb_category:    game.game_type ?? null,
       igdb_status:      game.status    ?? null,
-      igdb_parent_game:    asIgdbId(game.parent_game),
-      igdb_version_parent: asIgdbId(game.version_parent),
+      igdb_parent_game:    parentIgdbId,
+      igdb_version_parent: versionIgdbId,
       version_title:       game.version_title ?? null,
+      canonical_game_id:   importedCanonicalId,
       cover_img_url:    coverUrl,
       date_released:    game.first_release_date
         ? new Date(game.first_release_date * 1000).toISOString().split('T')[0]

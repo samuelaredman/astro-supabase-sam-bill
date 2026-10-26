@@ -3,6 +3,7 @@ import { requireAuth, json } from "../../../utils/api";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { notifyRecommendationPublished } from "../../../utils/recommendationPublish";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -44,14 +45,24 @@ export const POST: APIRoute = async (context) => {
 
   const publishing = rec.status !== "published";
 
-  // Enforce one published recommendation per directional game pair before flipping
-  // status (friendlier than letting the partial unique index throw).
+  // If the draft was created on an edition row (pre-canonical-backfill or via a
+  // stale client), publishing pins both ends to the canonical game so the dedupe
+  // check and downstream reads see the main games — not the collapsed editions.
+  const [canonicalSourceId, canonicalTargetId] = publishing
+    ? await Promise.all([
+        resolveCanonicalGameId(db, rec.source_game_id),
+        resolveCanonicalGameId(db, rec.target_game_id),
+      ])
+    : [rec.source_game_id, rec.target_game_id];
+
+  // Enforce one published recommendation per directional canonical pair before
+  // flipping status (friendlier than letting the partial unique index throw).
   if (publishing) {
     const { data: existingPublished } = await (db as any)
       .from("recommendations").select("id")
       .eq("profile_id", profile.id)
-      .eq("source_game_id", rec.source_game_id)
-      .eq("target_game_id", rec.target_game_id)
+      .eq("source_game_id", canonicalSourceId)
+      .eq("target_game_id", canonicalTargetId)
       .eq("status", "published")
       .neq("id", recommendation_id)
       .maybeSingle();
@@ -62,7 +73,11 @@ export const POST: APIRoute = async (context) => {
     body: body.trim(),
     contains_spoilers: contains_spoilers ?? false,
   };
-  if (publishing) updatePayload.status = "published";
+  if (publishing) {
+    updatePayload.status = "published";
+    if (canonicalSourceId !== rec.source_game_id) updatePayload.source_game_id = canonicalSourceId;
+    if (canonicalTargetId !== rec.target_game_id) updatePayload.target_game_id = canonicalTargetId;
+  }
 
   const { error } = await (db as any).from("recommendations").update(updatePayload).eq("id", recommendation_id);
   if (error) {

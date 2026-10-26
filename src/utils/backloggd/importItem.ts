@@ -74,6 +74,16 @@ export async function importBacklogItem(
     return { status: "needs_mapping", matched_game_id: null, detail: "no game match" };
   }
 
+  // Resolve a collapsed edition match to its canonical row before anything
+  // else — review + library status both belong on the main game, matching the
+  // library-import side of this flow.
+  const { data: canon } = await db
+    .from("games")
+    .select("canonical_game_id")
+    .eq("id", gameId)
+    .maybeSingle();
+  gameId = (canon?.canonical_game_id as string | null) ?? gameId;
+
   // ── 2. Skip if this user already has a review for the game ─────────────────
   const { data: existing } = await db
     .from("reviews")
@@ -120,7 +130,7 @@ export async function importBacklogItem(
     .single();
 
   if (error) {
-    // 23505 = reviews_one_published_per_game — a race with step 2 or a prior run.
+    // 23505 = reviews_one_published_per_revision — a race with step 2 or a prior run.
     if ((error as { code?: string }).code === "23505") {
       return { status: "skipped", matched_game_id: gameId, detail: "duplicate review" };
     }

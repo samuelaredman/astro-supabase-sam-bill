@@ -1,15 +1,20 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../../utils/api";
+import { resolveCanonicalGameId } from "../../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { list_id, game_id, notes } = await context.request.json();
+  const body = await context.request.json();
+  const { list_id, notes } = body;
 
   if (!list_id) return json({ error: "list_id is required." }, 400);
-  if (!game_id) return json({ error: "game_id is required." }, 400);
+  if (!body.game_id) return json({ error: "game_id is required." }, 400);
+  // List entries point at canonical rows so an edition and its main game can't
+  // both appear in the same list, and the UNIQUE(list_id, game_id) dedupe works.
+  const game_id = await resolveCanonicalGameId(db, body.game_id);
 
   const { data: list } = await (db as any)
     .from("lists")

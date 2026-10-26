@@ -1,13 +1,17 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { game_id } = await context.request.json();
-  if (!game_id) return json({ error: "game_id is required." }, 400);
+  const body = await context.request.json();
+  if (!body.game_id) return json({ error: "game_id is required." }, 400);
+  // Track the canonical row — a stale "add to watchlist" from an edition page
+  // mustn't split the user's status across two rows.
+  const game_id = await resolveCanonicalGameId(db, body.game_id);
 
   // Delegate to user_game_status — 'want_to_play' is the equivalent of the old watchlist.
   // The watchlist table is kept in the DB but no longer written to.

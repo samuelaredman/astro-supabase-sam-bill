@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 const VALID_STATUSES = ["playing", "want_to_play", "owned", "completed", "hundred_percent", "dropped"] as const;
 
@@ -9,9 +10,12 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json();
-  const { game_id, status, owned } = body;
+  const { status, owned } = body;
 
-  if (!game_id) return json({ error: "game_id is required" }, 400);
+  if (!body.game_id) return json({ error: "game_id is required" }, 400);
+  // All status is tracked against the canonical row — an edition page's track
+  // buttons mustn't create a parallel status row from a stale open tab.
+  const game_id = await resolveCanonicalGameId(db, body.game_id);
 
   // null status = remove tracking entirely
   if (status === null) {
