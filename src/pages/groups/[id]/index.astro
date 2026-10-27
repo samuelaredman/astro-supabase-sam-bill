@@ -280,6 +280,51 @@ if (canSeeMemberContent) {
   }
 }
 
+// ── Forums tab (full-list announcements + polls, including featured-game polls) ──
+// Overview's showcases render the latest few; Forums is the full view behind "See all →".
+const forumSection: "announcements" | "polls" =
+  Astro.url.searchParams.get("section") === "polls" ? "polls" : "announcements";
+let forumAnnouncements: any[] = [];
+let forumPolls: any[] = [];
+if (canSeeMemberContent && activeTab === "forums") {
+  const [annRes, pollRowsRes] = await Promise.all([
+    fetchAll((from, to) => db
+      .from("group_announcements")
+      .select("id, body, pinned, created_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .eq("group_id", id)
+      .order("pinned", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(from, to)),
+    db.from("group_polls")
+      .select("id, question, closed, created_at, profile_id, featured_game_id, games!featured_game_id ( id, title, slug, cover_img_url )")
+      .eq("group_id", id)
+      .order("created_at", { ascending: false })
+      .limit(200),
+  ]);
+  forumAnnouncements = annRes ?? [];
+  const pollRows = pollRowsRes.data ?? [];
+  if (pollRows.length) {
+    const pollIds = pollRows.map((p: any) => p.id);
+    const [{ data: optionRows }, voteRows] = await Promise.all([
+      db.from("group_poll_options").select("id, poll_id, label, position")
+        .in("poll_id", pollIds).order("position", { ascending: true }),
+      fetchAll((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
+        .in("poll_id", pollIds).order("id").range(from, to)),
+    ]);
+    forumPolls = pollRows.map((p: any) => {
+      const options = (optionRows ?? []).filter((o: any) => o.poll_id === p.id);
+      const votes = (voteRows ?? []).filter((v: any) => v.poll_id === p.id);
+      const myVote = currentProfile ? votes.find((v: any) => v.profile_id === currentProfile.id) : null;
+      return {
+        ...p,
+        options: options.map((o: any) => ({ ...o, count: votes.filter((v: any) => v.option_id === o.id).length })),
+        totalVotes: votes.length,
+        myOptionId: myVote?.option_id ?? null,
+      };
+    });
+  }
+}
+
 // ── Custom roles — graceful fallback if migration not yet applied ──
 let groupRoles: any[] = [];
 try {
@@ -440,6 +485,66 @@ const hotTake = hotTakeRow && extraGameById[hotTakeRow.game_id]
       return { game: extraGameById[hotTakeRow.game_id], groupAvg, commAvg, delta: +(groupAvg - commAvg).toFixed(1) };
     })()
   : null;
+
+// ── Verdict board ──
+// Hot take + Consensus/Divisive + Hidden gems folded into one strip:
+// each game as a small tile tagged with its verdict kind, so first-time
+// visitors read the whole shape of the group's taste in one row.
+type VerdictItem = {
+  kind: 'hot_take' | 'consensus' | 'divisive' | 'gem';
+  kindLabel: string;
+  game: { id: string; title: string; slug: string | null; cover_img_url: string | null };
+  score: number;
+  delta?: number;
+  meta: string;
+};
+const verdictItems: VerdictItem[] = [];
+const seenVerdictGameIds = new Set<string>();
+function pushVerdict(it: VerdictItem) {
+  if (!it.game?.id || seenVerdictGameIds.has(it.game.id)) return;
+  seenVerdictGameIds.add(it.game.id);
+  verdictItems.push(it);
+}
+if (hotTake) {
+  pushVerdict({
+    kind: 'hot_take',
+    kindLabel: 'Hot take',
+    game: hotTake.game,
+    score: hotTake.groupAvg,
+    delta: hotTake.delta,
+    meta: `${hotTake.commAvg} elsewhere`,
+  });
+}
+for (const r of consensusRows.slice(0, 2)) {
+  const avg = +r.avg_score.toFixed(1);
+  pushVerdict({
+    kind: 'consensus',
+    kindLabel: 'Consensus',
+    game: { id: r.game_id, title: r.title, slug: r.slug, cover_img_url: r.cover_img_url },
+    score: avg,
+    meta: `${r.review_count} agree`,
+  });
+}
+for (const r of divergentRows.slice(0, 2)) {
+  const avg = +r.avg_score.toFixed(1);
+  pushVerdict({
+    kind: 'divisive',
+    kindLabel: 'Divisive',
+    game: { id: r.game_id, title: r.title, slug: r.slug, cover_img_url: r.cover_img_url },
+    score: avg,
+    meta: `scores ${r.min_score}–${r.max_score}`,
+  });
+}
+for (const r of hiddenGemRows.slice(0, 2)) {
+  const avg = +r.group_avg.toFixed(1);
+  pushVerdict({
+    kind: 'gem',
+    kindLabel: 'Hidden gem',
+    game: { id: r.game_id, title: r.title, slug: r.slug, cover_img_url: r.cover_img_url },
+    score: avg,
+    meta: `${r.group_count} love${r.group_count === 1 ? 's' : ''} it`,
+  });
+}
 
 // ── Feed tab ──
 // Like the Stats tab, built only when it's the tab in the URL. Filter changes
@@ -654,7 +759,42 @@ const groupOgDescription = group.description
   .tab-panel{display:none}
   .tab-panel.active{display:block}
 
-  /* ── Hot Take ── */
+  /* ── Forums sub-nav ── */
+  .forums-subnav{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0}
+  .forums-sub-link{padding:8px 14px;font-size:13px;font-weight:600;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px;display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s}
+  .forums-sub-link:hover{color:var(--text-primary)}
+  .forums-sub-link.active{color:var(--accent);border-bottom-color:var(--accent)}
+  .forums-section{display:none}
+  .forums-section.active{display:block}
+  .poll-game-tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:600;color:var(--text-tertiary);text-decoration:none;background:var(--tag-bg);border-radius:999px;padding:4px 10px 4px 4px;margin-bottom:8px}
+  .poll-game-tag:hover{color:var(--accent)}
+  .poll-game-tag img{width:20px;height:20px;border-radius:50%;object-fit:cover}
+
+  /* ── Verdict board (unified hot take / consensus / divisive / hidden gems) ── */
+  .vb-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .vb-sub{font-size:11px;color:var(--text-tertiary)}
+  .vb-strip{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x proximity;padding-bottom:4px;margin:0 -4px;scrollbar-width:thin}
+  .vb-strip::-webkit-scrollbar{height:6px}
+  .vb-strip::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+  .vb-tile{flex:0 0 128px;scroll-snap-align:start;display:flex;flex-direction:column;gap:6px;padding:4px;border-radius:10px;text-decoration:none;color:inherit;transition:background .12s,transform .12s}
+  .vb-tile:hover{background:var(--bg-hover)}
+  .vb-tile:hover .vb-cover{transform:translateY(-2px)}
+  .vb-tile:hover .vb-title{color:var(--accent)}
+  .vb-cover-wrap{position:relative;width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);box-shadow:0 4px 12px rgba(0,0,0,.25)}
+  .vb-cover{width:100%;height:100%;object-fit:cover;display:block;transition:transform .15s}
+  .vb-cover-placeholder{display:block}
+  .vb-chip{position:absolute;top:6px;left:6px;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;padding:3px 7px;border-radius:999px;background:rgba(0,0,0,.72);color:#fff;backdrop-filter:blur(4px);line-height:1}
+  .vb-chip-hot_take{background:rgba(248,113,113,.9)}
+  .vb-chip-consensus{background:rgba(74,222,128,.9)}
+  .vb-chip-divisive{background:rgba(251,191,36,.9);color:#1a1200}
+  .vb-chip-gem{background:rgba(167,139,250,.9)}
+  .vb-score{position:absolute;bottom:6px;right:6px;width:30px;height:30px;font-size:12px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+  .vb-title{font-size:12px;font-weight:600;color:var(--text-primary);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;transition:color .12s}
+  .vb-meta{font-size:10px;color:var(--text-tertiary);display:flex;align-items:center;gap:5px;flex-wrap:wrap;line-height:1.3}
+  .vb-delta{font-weight:700;font-variant-numeric:tabular-nums}
+  @media(max-width:560px){.vb-tile{flex-basis:110px}.vb-score{width:26px;height:26px;font-size:11px}}
+
+  /* ── Hot Take (legacy, kept for now) ── */
   .hot-take-inner{display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit}
   .hot-take-cover{width:52px;height:70px;border-radius:8px;object-fit:cover;flex-shrink:0;background:var(--tag-bg)}
   .hot-take-body{flex:1;min-width:0}
@@ -1716,6 +1856,9 @@ const groupOgDescription = group.description
     </a>
     )}
     <a href={`/groups/${group.id}?tab=feed`} class={`tab-link${activeTab === "feed" ? " active" : ""}`}>Feed</a>
+    {canSeeMemberContent && (
+    <a href={`/groups/${group.id}?tab=forums`} class={`tab-link${activeTab === "forums" ? " active" : ""}`}>Forums</a>
+    )}
     {showSessions && (
     <a href={`/groups/${group.id}?tab=sessions`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
       Sessions {(sessionsData ?? []).length > 0 && <span class="tab-count">{(sessionsData ?? []).length}</span>}
@@ -1840,9 +1983,12 @@ const groupOgDescription = group.description
             <div class="card">
               <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
                 <span>Announcements</span>
-                {isAdminOrOwner && (
-                  <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
-                )}
+                <span style="display:flex;align-items:center;gap:10px">
+                  <a href={`/groups/${group.id}?tab=forums&section=announcements`} class="see-all-link">See all →</a>
+                  {isAdminOrOwner && (
+                    <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+                  )}
+                </span>
               </div>
 
               {isAdminOrOwner && (
@@ -1959,128 +2105,36 @@ const groupOgDescription = group.description
           )}
             </ShowcaseSection>
           ) :
-          key === "hot_take" ? (
-            <ShowcaseSection section="hot_take" label={groupShowcaseLabel("hot_take")} hidden={overviewHidden.has("hot_take")} isOwner={canEditOverview}>
-          {hotTake && (
+          key === "verdict_board" ? (
+            <ShowcaseSection section="verdict_board" label={groupShowcaseLabel("verdict_board")} hidden={overviewHidden.has("verdict_board")} isOwner={canEditOverview}>
+          {verdictItems.length > 0 && (
             <div class="card">
-              <div class="card-title">Group's Hot Take</div>
-              <a class="hot-take-inner" href={`/games/${hotTake.game.slug}`}>
-                {igdbCover(hotTake.game.cover_img_url, "t_cover_small")
-                  ? <img class="hot-take-cover" src={igdbCover(hotTake.game.cover_img_url, "t_cover_small")!} alt={hotTake.game.title} loading="lazy" />
-                  : <div class="hot-take-cover" />
-                }
-                <div class="hot-take-body">
-                  <div class="hot-take-title">{hotTake.game.title}</div>
-                  <div class="hot-take-scores">
-                    <div>
-                      <div class={`score-badge ${scoreClass(hotTake.groupAvg)}`}>{formatScore(hotTake.groupAvg)}</div>
-                      <div class="hot-take-lbl">Group</div>
-                    </div>
-                    <div class="hot-take-vs">vs</div>
-                    <div>
-                      <div class={`score-badge ${scoreClass(hotTake.commAvg)}`}>{formatScore(hotTake.commAvg)}</div>
-                      <div class="hot-take-lbl">World</div>
-                    </div>
-                  </div>
-                  <div class={`hot-take-delta ${hotTake.delta > 0 ? "delta-up" : "delta-down"}`}>
-                    {hotTake.delta > 0 ? "+" : ""}{formatScore(hotTake.delta)} vs the world
-                  </div>
-                </div>
-              </a>
-            </div>
-          )}
-            </ShowcaseSection>
-          ) :
-          key === "agreement" ? (
-            <ShowcaseSection section="agreement" label={groupShowcaseLabel("agreement")} hidden={overviewHidden.has("agreement")} isOwner={canEditOverview}>
-          {((consensusRows.length > 0) || (divergentRows.length > 0)) && (
-            <div class="card">
-              <div class="agreement-grid">
-                {consensusRows.length > 0 && (
-                  <div class="agreement-col">
-                    <div class="mini-card-header">
-                      <div class="card-title" style="margin-bottom:0">Consensus Picks</div>
-                      <a class="see-all-link" href={`/groups/${group.id}/consensus`}>See all →</a>
-                    </div>
-                    <div class="mini-rank-list">
-                      {consensusRows.map((r: any, i: number) => {
-                        const avg = +r.avg_score.toFixed(1);
-                        return (
-                          <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                            <div class="mini-rank-num">{i + 1}</div>
-                            {igdbCover(r.cover_img_url, "t_thumb")
-                              ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                              : <div class="mini-rank-cover mini-rank-cover-placeholder" />
-                            }
-                            <div class="mini-rank-info">
-                              <div class="mini-rank-title">{r.title}</div>
-                              <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
-                            </div>
-                            <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                          </a>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-                {divergentRows.length > 0 && (
-                  <div class="agreement-col">
-                    <div class="mini-card-header">
-                      <div class="card-title" style="margin-bottom:0">Most Divisive</div>
-                      <a class="see-all-link" href={`/groups/${group.id}/divergent`}>See all →</a>
-                    </div>
-                    <div class="mini-rank-list">
-                      {divergentRows.map((r: any, i: number) => {
-                        const avg = +r.avg_score.toFixed(1);
-                        return (
-                          <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                            <div class="mini-rank-num">{i + 1}</div>
-                            {igdbCover(r.cover_img_url, "t_thumb")
-                              ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                              : <div class="mini-rank-cover mini-rank-cover-placeholder" />
-                            }
-                            <div class="mini-rank-info">
-                              <div class="mini-rank-title">{r.title}</div>
-                              <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
-                            </div>
-                            <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                          </a>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+              <div class="vb-head">
+                <div class="card-title" style="margin-bottom:0">Verdict board</div>
+                <div class="vb-sub">What the group plays differently</div>
               </div>
-            </div>
-          )}
-            </ShowcaseSection>
-          ) :
-          key === "hidden_gems" ? (
-            <ShowcaseSection section="hidden_gems" label={groupShowcaseLabel("hidden_gems")} hidden={overviewHidden.has("hidden_gems")} isOwner={canEditOverview}>
-          {hiddenGemRows.length > 0 && (
-            <div class="card">
-              <div class="mini-card-header">
-                <div class="card-title" style="margin-bottom:0">Hidden Gems</div>
-                <a class="see-all-link" href={`/groups/${group.id}/hidden-gems`}>See all →</a>
-              </div>
-              <div class="mini-rank-list">
-                {hiddenGemRows.map((r: any, i: number) => {
-                  const avg = +r.group_avg.toFixed(1);
-                  return (
-                    <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                      <div class="mini-rank-num">{i + 1}</div>
-                      {igdbCover(r.cover_img_url, "t_thumb")
-                        ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                        : <div class="mini-rank-cover mini-rank-cover-placeholder" />
+              <div class="vb-strip" role="list">
+                {verdictItems.map((it) => (
+                  <a class={`vb-tile vb-tile-${it.kind}`} href={it.game.slug ? `/games/${it.game.slug}` : '#'} role="listitem" aria-label={`${it.kindLabel}: ${it.game.title}`}>
+                    <div class="vb-cover-wrap">
+                      {igdbCover(it.game.cover_img_url, "t_cover_small")
+                        ? <img class="vb-cover" src={igdbCover(it.game.cover_img_url, "t_cover_small")!} alt="" loading="lazy" />
+                        : <div class="vb-cover vb-cover-placeholder" />
                       }
-                      <div class="mini-rank-info">
-                        <div class="mini-rank-title">{r.title}</div>
-                        <div class="mini-rank-meta">{r.group_count} group review{r.group_count !== 1 ? 's' : ''} · {r.community_count} elsewhere</div>
-                      </div>
-                      <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                    </a>
-                  );
-                })}
+                      <span class={`vb-chip vb-chip-${it.kind}`}>{it.kindLabel}</span>
+                      <div class={`vb-score score-badge ${scoreClass(it.score)}`}>{formatScore(it.score)}</div>
+                    </div>
+                    <div class="vb-title">{it.game.title}</div>
+                    <div class="vb-meta">
+                      {it.delta !== undefined && (
+                        <span class={`vb-delta ${it.delta > 0 ? 'delta-up' : 'delta-down'}`}>
+                          {it.delta > 0 ? '+' : ''}{formatScore(it.delta)}
+                        </span>
+                      )}
+                      <span>{it.meta}</span>
+                    </div>
+                  </a>
+                ))}
               </div>
             </div>
           )}
@@ -2288,9 +2342,12 @@ const groupOgDescription = group.description
             <div class="card">
               <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
                 <span>Polls</span>
-                {isAdminOrOwner && (
-                  <button onclick="togglePollForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
-                )}
+                <span style="display:flex;align-items:center;gap:10px">
+                  <a href={`/groups/${group.id}?tab=forums&section=polls`} class="see-all-link">See all →</a>
+                  {isAdminOrOwner && (
+                    <button onclick="togglePollForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+                  )}
+                </span>
               </div>
 
               {isAdminOrOwner && (
@@ -2457,6 +2514,152 @@ const groupOgDescription = group.description
         isAdminOrOwner={isAdminOrOwner}
       />
     )}
+  </div>
+  )}
+
+  <!-- Forums tab -->
+  {canSeeMemberContent && (
+  <div class={`tab-panel${activeTab === "forums" ? " active" : ""}`} id="tab-forums">
+    <nav class="forums-subnav" role="tablist">
+      <a href={`/groups/${group.id}?tab=forums&section=announcements`}
+        class={`forums-sub-link${forumSection === "announcements" ? " active" : ""}`}
+        data-section="announcements">
+        Announcements {forumAnnouncements.length > 0 && <span class="tab-count">{forumAnnouncements.length}</span>}
+      </a>
+      <a href={`/groups/${group.id}?tab=forums&section=polls`}
+        class={`forums-sub-link${forumSection === "polls" ? " active" : ""}`}
+        data-section="polls">
+        Polls {forumPolls.length > 0 && <span class="tab-count">{forumPolls.length}</span>}
+      </a>
+    </nav>
+
+    <!-- Announcements section -->
+    <div class={`forums-section${forumSection === "announcements" ? " active" : ""}`} data-section="announcements">
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          <span>Announcements</span>
+          {isAdminOrOwner && (
+            <button onclick="toggleAnnouncementForm('forum-')" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+          )}
+        </div>
+
+        {isAdminOrOwner && (
+          <div id="forum-announcement-form" class="compose-form" style="display:none">
+            <textarea id="forum-announcement-body" class="compose-input" placeholder="Share an update with the group…" maxlength="2000"></textarea>
+            <div class="compose-row">
+              <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="postAnnouncement('forum-')">Post</button>
+              <label class="compose-check">
+                <input type="checkbox" id="forum-announcement-pinned" style="accent-color:var(--accent)" />
+                Pin to top
+              </label>
+            </div>
+            <div id="forum-announcement-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+          </div>
+        )}
+
+        {forumAnnouncements.length === 0
+          ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
+          : forumAnnouncements.map((a: any) => (
+            <div class="announcement-item" data-announcement-id={a.id}>
+              <div class="announcement-head">
+                <div class="announcement-avatar">
+                  {a.profiles?.avatar_url
+                    ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
+                    : getInitials(a.profiles?.username ?? "?")}
+                </div>
+                <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
+                {readBadgeSlugs(a.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" />)}
+                <span class="announcement-time">· {timeAgo(a.created_at)}</span>
+                {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
+              </div>
+              <div class="announcement-body">{a.body}</div>
+              {isAdminOrOwner && (
+                <div class="announcement-actions">
+                  <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
+                  <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
+                </div>
+              )}
+            </div>
+          ))
+        }
+      </div>
+    </div>
+
+    <!-- Polls section -->
+    <div class={`forums-section${forumSection === "polls" ? " active" : ""}`} data-section="polls">
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          <span>Polls</span>
+          {isAdminOrOwner && (
+            <button onclick="togglePollForm('forum-')" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+          )}
+        </div>
+
+        {isAdminOrOwner && (
+          <div id="forum-poll-form" class="compose-form" style="display:none">
+            <input id="forum-poll-question" class="compose-input" style="min-height:auto" type="text" placeholder="Ask the group something…" maxlength="300" />
+            <div id="forum-poll-options" style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+              <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
+              <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
+            </div>
+            <div class="compose-row">
+              <button class="btn-copy" style="font-size:11px;padding:5px 10px" onclick="addPollOption('forum-')">+ Option</button>
+              <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="createPoll('forum-')">Create Poll</button>
+            </div>
+            <div id="forum-poll-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+          </div>
+        )}
+
+        {forumPolls.length === 0
+          ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No polls yet.</div>
+          : forumPolls.map((p: any) => {
+            const hasVoted = !!p.myOptionId;
+            const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+            const showResults = hasVoted || p.closed;
+            return (
+              <div class="poll-item" data-poll-id={p.id}>
+                {p.featured_game_id && p.games && (
+                  <a href={`/groups/${group.id}?tab=games`} class="poll-game-tag">
+                    {igdbCover(p.games.cover_img_url, "t_thumb") && (
+                      <img src={igdbCover(p.games.cover_img_url, "t_thumb")!} alt="" />
+                    )}
+                    <span>Featured game · {p.games.title}</span>
+                  </a>
+                )}
+                <div class="poll-question">{p.question}</div>
+                {showResults
+                  ? p.options.map((o: any) => {
+                      const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
+                      const isMine = o.id === p.myOptionId;
+                      return (
+                        <div class={`poll-result${isMine ? " voted" : ""}`}>
+                          <div class="poll-result-bar" style={`width:${pct}%`}></div>
+                          <div class="poll-result-label">
+                            <span>{o.label}{isMine ? " ✓" : ""}</span>
+                            <span>{pct}% ({o.count})</span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  : p.options.map((o: any) => (
+                      <button class="poll-option" onclick={`votePoll('${p.id}', '${o.id}')`}>{o.label}</button>
+                    ))
+                }
+                <div class="poll-meta">
+                  <span>{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}{p.closed ? " · Closed" : ""}</span>
+                  {canManagePoll && !p.featured_game_id && (
+                    <span class="poll-meta-actions">
+                      <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
+                      <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        }
+      </div>
+    </div>
   </div>
   )}
 
@@ -2979,16 +3182,18 @@ async function deleteSession(sessionId) {
 window.deleteSession = deleteSession;
 
 // ── Announcements ──
-function toggleAnnouncementForm() {
-  const form = document.getElementById('announcement-form');
+function toggleAnnouncementForm(prefix) {
+  prefix = prefix || '';
+  const form = document.getElementById(prefix + 'announcement-form');
   if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
 }
 window.toggleAnnouncementForm = toggleAnnouncementForm;
 
-async function postAnnouncement() {
-  const bodyEl = document.getElementById('announcement-body');
-  const pinnedEl = document.getElementById('announcement-pinned');
-  const errEl = document.getElementById('announcement-err');
+async function postAnnouncement(prefix) {
+  prefix = prefix || '';
+  const bodyEl = document.getElementById(prefix + 'announcement-body');
+  const pinnedEl = document.getElementById(prefix + 'announcement-pinned');
+  const errEl = document.getElementById(prefix + 'announcement-err');
   const body = bodyEl?.value?.trim();
   if (errEl) errEl.style.display = 'none';
   if (!body) { if (errEl) { errEl.textContent = 'Write something first'; errEl.style.display = 'block'; } return; }
@@ -3026,19 +3231,22 @@ async function deleteAnnouncement(announcementId) {
 window.deleteAnnouncement = deleteAnnouncement;
 
 // ── Polls ──
-function togglePollForm() {
-  const form = document.getElementById('poll-form');
+function togglePollForm(prefix) {
+  prefix = prefix || '';
+  const form = document.getElementById(prefix + 'poll-form');
   if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
 }
 window.togglePollForm = togglePollForm;
 
-function addPollOption() {
-  const container = document.getElementById('poll-options');
+function addPollOption(prefix) {
+  prefix = prefix || '';
+  const container = document.getElementById(prefix + 'poll-options');
   if (!container) return;
-  const inputs = container.querySelectorAll('.poll-option-input');
+  const optClass = prefix + 'poll-option-input';
+  const inputs = container.querySelectorAll('.' + optClass);
   if (inputs.length >= 6) return;
   const input = document.createElement('input');
-  input.className = 'compose-input poll-option-input';
+  input.className = 'compose-input ' + optClass;
   input.style.minHeight = 'auto';
   input.type = 'text';
   input.maxLength = 80;
@@ -3047,11 +3255,13 @@ function addPollOption() {
 }
 window.addPollOption = addPollOption;
 
-async function createPoll() {
-  const questionEl = document.getElementById('poll-question');
-  const errEl = document.getElementById('poll-err');
+async function createPoll(prefix) {
+  prefix = prefix || '';
+  const questionEl = document.getElementById(prefix + 'poll-question');
+  const errEl = document.getElementById(prefix + 'poll-err');
   const question = questionEl?.value?.trim();
-  const options = Array.from(document.querySelectorAll('.poll-option-input')).map(i => i.value.trim()).filter(Boolean);
+  const optClass = prefix + 'poll-option-input';
+  const options = Array.from(document.querySelectorAll('.' + optClass)).map(i => i.value.trim()).filter(Boolean);
   if (errEl) errEl.style.display = 'none';
   if (!question) { if (errEl) { errEl.textContent = 'Add a question'; errEl.style.display = 'block'; } return; }
   if (options.length < 2) { if (errEl) { errEl.textContent = 'Add at least 2 options'; errEl.style.display = 'block'; } return; }
