@@ -45,6 +45,18 @@ export const POST: APIRoute = async (context) => {
   if (join_prompt !== undefined)  updates.join_prompt = join_prompt?.trim() || null;
   if (stats_config !== undefined) updates.stats_config = stats_config;
 
+  // Accent color: #rrggbb or '' / null to clear (same shape as profile accent_color)
+  if ("accent_color" in body) {
+    const raw = body.accent_color;
+    if (raw === null || raw === "") {
+      updates.accent_color = null;
+    } else if (typeof raw === "string" && /^#[0-9a-f]{6}$/i.test(raw)) {
+      updates.accent_color = raw.toLowerCase();
+    } else {
+      return json({ error: "Invalid accent color" }, 400);
+    }
+  }
+
   // Overview showcases, from "Customize" on the Overview (src/utils/groupShowcases.ts)
   if ("overview_order" in body) {
     const order = readGroupShowcaseKeys(body.overview_order);
