@@ -379,8 +379,13 @@ const OVERVIEW_LIST_LIMIT = 5;
 
 if (canViewContent && memberProfileIds.length > 0) {
   const gameStats = () => db.rpc("group_game_review_stats", statArgs);
+  // Score distribution: read scores straight out of group_reviews() and tally in
+  // JS so the histogram's totals always add up to the summary's review_count.
+  // group_score_distribution had a drift bug — the function body wasn't counting
+  // every published review back from the same group_reviews() source the summary
+  // reads from, which left the per-score bars reading absurdly low (e.g. 1 ten).
   const [summaryRes, memberStatsRows, topGamesRes, topRatedRes, hotTakeRes, activityRes,
-         consensusRes, divergentRes, hiddenGemsRes, scoreDistRes] = await Promise.all([
+         consensusRes, divergentRes, hiddenGemsRes, scoreRows] = await Promise.all([
     db.rpc("group_review_summary", statArgs).maybeSingle(),
     fetchAll((from, to) => db.rpc("group_member_review_stats", statArgs).order("profile_id").range(from, to)),
     gameStats().order("review_count", { ascending: false }).order("avg_score", { ascending: false }).order("game_id").limit(7),
@@ -394,11 +399,11 @@ if (canViewContent && memberProfileIds.length > 0) {
     db.rpc("group_consensus_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
     db.rpc("group_divergent_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
     db.rpc("group_hidden_gems", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
-    db.rpc("group_score_distribution", { p_group_id: group.id,
-      p_genre_id: statArgs.p_genre_id, p_platform_id: statArgs.p_platform_id }),
+    fetchAll<{ score: number }>((from, to) =>
+      db.rpc("group_reviews", statArgs).select("score").order("id").range(from, to)),
   ]);
   for (const res of [summaryRes, topGamesRes, topRatedRes, hotTakeRes, activityRes,
-                     consensusRes, divergentRes, hiddenGemsRes, scoreDistRes]) {
+                     consensusRes, divergentRes, hiddenGemsRes]) {
     if (res.error) console.error("[groups/[id]] stats error:", JSON.stringify(res.error));
   }
   summary = summaryRes.data ?? null;
@@ -410,12 +415,11 @@ if (canViewContent && memberProfileIds.length > 0) {
   consensusRows = consensusRes.data ?? [];
   divergentRows = divergentRes.data ?? [];
   hiddenGemRows = hiddenGemsRes.data ?? [];
-  // group_score_distribution returns one row per (profile_id, score); the
-  // group-wide row has profile_id = NULL. Sum by score across the null rows.
   const distByScore: Record<number, number> = {};
-  for (const row of scoreDistRes.data ?? []) {
-    if ((row as any).profile_id != null) continue;
-    distByScore[(row as any).score] = ((row as any).review_count as number) ?? 0;
+  for (const row of scoreRows ?? []) {
+    const s = Number((row as any).score);
+    if (!Number.isInteger(s) || s < 1 || s > 10) continue;
+    distByScore[s] = (distByScore[s] ?? 0) + 1;
   }
   scoreDistRows = Array.from({ length: 10 }, (_, i) => ({ score: i + 1, review_count: distByScore[i + 1] ?? 0 }));
 }
