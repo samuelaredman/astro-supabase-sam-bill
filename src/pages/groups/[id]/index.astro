@@ -399,12 +399,12 @@ if (canViewContent && memberProfileIds.length > 0) {
     db.rpc("group_consensus_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
     db.rpc("group_divergent_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
     db.rpc("group_hidden_gems", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
-    fetchAll<{ score: number | null }>((from, to) =>
-      db.rpc("group_reviews", statArgs).select("score").order("id").range(from, to)),
+    db.rpc("group_score_distribution", { p_group_id: group.id,
+      p_genre_id: statArgs.p_genre_id, p_platform_id: statArgs.p_platform_id }),
   ]);
   for (const res of [summaryRes, topGamesRes, topRatedRes, hotTakeRes, activityRes,
-                     consensusRes, divergentRes, hiddenGemsRes]) {
-    if (res.error) console.error("[groups/[id]] stats error:", JSON.stringify(res.error));
+                     consensusRes, divergentRes, hiddenGemsRes, scoreRows]) {
+    if ((res as any).error) console.error("[groups/[id]] stats error:", JSON.stringify((res as any).error));
   }
   summary = summaryRes.data ?? null;
   memberStats = memberStatsRows;
@@ -415,11 +415,14 @@ if (canViewContent && memberProfileIds.length > 0) {
   consensusRows = consensusRes.data ?? [];
   divergentRows = divergentRes.data ?? [];
   hiddenGemRows = hiddenGemsRes.data ?? [];
+  // group_score_distribution returns one row per (profile_id, score). The
+  // group-wide totals are the rows where profile_id IS NULL.
   const distByScore: Record<number, number> = {};
-  for (const row of scoreRows ?? []) {
-    const s = Number((row as any).score);
+  for (const row of (scoreRows.data ?? []) as any[]) {
+    if (row.profile_id != null) continue;
+    const s = Number(row.score);
     if (!Number.isInteger(s) || s < 1 || s > 10) continue;
-    distByScore[s] = (distByScore[s] ?? 0) + 1;
+    distByScore[s] = row.review_count ?? 0;
   }
   scoreDistRows = Array.from({ length: 10 }, (_, i) => ({ score: i + 1, review_count: distByScore[i + 1] ?? 0 }));
 }
