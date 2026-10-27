@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -7,10 +8,11 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json();
-  const { game_id, hidden } = body;
+  const { hidden } = body;
 
-  if (!game_id || typeof hidden !== "boolean")
+  if (!body.game_id || typeof hidden !== "boolean")
     return json({ error: "game_id and hidden (boolean) are required" }, 400);
+  const game_id = await resolveCanonicalGameId(db, body.game_id);
 
   const { data: existing } = await db
     .from("user_game_status")

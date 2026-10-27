@@ -5,6 +5,7 @@ import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
 import { readYouTubeField } from "../../../utils/youtube";
 import { attachReviewVideos } from "../../../utils/reviewVideos";
+import { resolveCanonicalGameId } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -75,12 +76,21 @@ export const POST: APIRoute = async (context) => {
 
   const publishing = review.status !== "published";
 
-  // Enforce one published review per game before flipping status (friendlier than
-  // letting the reviews_one_published_per_game partial unique index throw).
+  // If the stored game_id is a collapsed edition (draft created before the
+  // canonical backfill, or via a stale client), publishing it needs to land on
+  // the canonical row — otherwise the dupe check below sees a different
+  // game_id than the user's other canonical review and misses the conflict.
+  const canonicalGameId = publishing
+    ? await resolveCanonicalGameId(db, review.game_id)
+    : review.game_id;
+
+  // Enforce one published review per canonical game before flipping status
+  // (friendlier than letting the reviews_one_published_per_revision unique
+  // index throw on finalize).
   if (publishing) {
     const { data: existingPublished } = await db
       .from("reviews").select("id")
-      .eq("profile_id", profile.id).eq("game_id", review.game_id).eq("status", "published")
+      .eq("profile_id", profile.id).eq("game_id", canonicalGameId).eq("status", "published")
       .neq("id", review_id).maybeSingle();
     if (existingPublished) return json({ error: "You've already published a review for this game." }, 409);
   }
@@ -97,6 +107,9 @@ export const POST: APIRoute = async (context) => {
   if (publishing) {
     updatePayload.status = "published";
     updatePayload.published_at = new Date().toISOString();
+    // Pin the row to the canonical game when publishing a draft that was
+    // created on an edition row.
+    if (canonicalGameId !== review.game_id) updatePayload.game_id = canonicalGameId;
   }
 
   const { error: updateError } = await db.from("reviews").update(updatePayload).eq("id", review_id);
@@ -120,7 +133,7 @@ export const POST: APIRoute = async (context) => {
 
   const reveal = await finalizePublishedReview(db, {
     reviewId: review_id,
-    gameId: review.game_id,
+    gameId: canonicalGameId,
     profileId: profile.id,
     score: parseFloat(score),
   });

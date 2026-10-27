@@ -70,6 +70,7 @@ export const GET: APIRoute = async ({ request }) => {
       .from("games")
       .select("id, title, slug, cover_img_url, date_released")
       .in("id", mergedIds)
+      .is("canonical_game_id", null)   // only canonical main games — collapsed editions reroute
       .or(GAME_CATEGORY_OR_FILTER);
     const orderMap = new Map(mergedIds.map((id, i) => [id, i]));
     dbGames = (data ?? []).sort(
@@ -81,6 +82,7 @@ export const GET: APIRoute = async ({ request }) => {
       .from("games")
       .select("id, title, slug, cover_img_url, date_released")
       .ilike("title", `%${q}%`)
+      .is("canonical_game_id", null)   // only canonical main games — collapsed editions reroute
       .or(GAME_CATEGORY_OR_FILTER)
       .limit(8);
     dbGames = data ?? [];

@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../../utils/api";
-import { importGameByIgdbId } from "../../../../utils/games";
+import { importGameByIgdbId, resolveCanonicalGameId } from "../../../../utils/games";
 import { readYouTubeField } from "../../../../utils/youtube";
 import { canFeatureGames, createFeaturedPoll, readFeaturedNote, readFeaturedPoll, FEATURED_GAMES_MAX } from "../../../../utils/groupFeaturedGames";
 
@@ -33,11 +33,14 @@ export const POST: APIRoute = async (context) => {
   if ((count ?? 0) >= FEATURED_GAMES_MAX)
     return json({ error: `A group can feature up to ${FEATURED_GAMES_MAX} games. Remove one first.` }, 400);
 
-  let gameId: string = game_id;
-  if (!gameId) {
+  let gameId: string;
+  if (game_id) {
+    // Feature the canonical row — editions reroute to it anyway.
+    gameId = await resolveCanonicalGameId(db, game_id);
+  } else {
     const imported = await importGameByIgdbId(db, Number(igdb_id));
     if (!imported.ok) return json({ error: imported.error }, imported.status);
-    gameId = imported.game.id;
+    gameId = await resolveCanonicalGameId(db, imported.game.id);
   }
 
   const { data: featured, error } = await db.from("group_featured_games").insert({

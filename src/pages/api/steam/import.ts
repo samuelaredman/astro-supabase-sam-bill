@@ -167,14 +167,72 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: steamGames.length, total: steamGames.length });
   }
 
-  // Get this user's existing game statuses to avoid overwriting manual entries.
-  // Chunk .in() to avoid URL truncation — large arrays get silently cut off by
-  // PostgREST's query-string encoding, causing games to appear non-existent and
-  // then fail on INSERT with a unique-constraint violation.
+  // Resolve every matched row to its canonical main game — a collapsed edition
+  // (port/remaster/GOTY) records ownership on the game it belongs to, not itself.
+  // Chunk .in() to avoid URL truncation (PostgREST query-string encoding).
   const matchedGameIds = matches.map(m => m.id);
+  const canonicalOf = new Map<string, string>();
+  const canonChunks = await Promise.all(
+    chunk(matchedGameIds, IN_CHUNK).map(ids =>
+      db.from('games').select('id, canonical_game_id').in('id', ids)
+    )
+  );
+  for (const { data: rows } of canonChunks) {
+    for (const r of ((rows ?? []) as any[])) {
+      canonicalOf.set(r.id, r.canonical_game_id ?? r.id);
+    }
+  }
+
+  // For each canonical game, aggregate playtime across every owned edition that
+  // collapses into it. Pick appid / last_played from whichever edition the user
+  // has played most recently (fallback: highest-playtime edition) so refresh
+  // writes reflect the primary edition they're actually playing.
+  const perCanonical = new Map<string, {
+    playtime: number;
+    appid: number | null;
+    lastPlayed: string | null;
+    _lastPlayedTs: number;
+    _bestPlaytime: number;
+  }>();
+  for (const game of matches) {
+    const canonicalId = canonicalOf.get(game.id) ?? game.id;
+    // Key off the Steam-sent title, not ours — they diverge after normalization.
+    const key        = (game.steam_title ?? game.title).toLowerCase().trim();
+    const playtime   = steamByTitle.get(key) ?? 0;
+    const appid      = appidByTitle.get(key) ?? null;
+    const lastPlayed = lastPlayedByTitle.get(key) ?? null;
+    const lastPlayedTs = lastPlayed ? Date.parse(lastPlayed) : 0;
+
+    const existing = perCanonical.get(canonicalId);
+    if (!existing) {
+      perCanonical.set(canonicalId, {
+        playtime,
+        appid,
+        lastPlayed,
+        _lastPlayedTs: lastPlayedTs,
+        _bestPlaytime: playtime,
+      });
+    } else {
+      existing.playtime += playtime;
+      // Prefer most-recently-played edition's appid/last_played; fall back to
+      // highest-playtime edition's.
+      const beats =
+        lastPlayedTs > existing._lastPlayedTs ||
+        (lastPlayedTs === existing._lastPlayedTs && playtime > existing._bestPlaytime);
+      if (beats) {
+        existing.appid = appid;
+        existing.lastPlayed = lastPlayed;
+        existing._lastPlayedTs = lastPlayedTs;
+        existing._bestPlaytime = playtime;
+      }
+    }
+  }
+
+  // Load existing statuses keyed by canonical game, chunked for URL safety.
+  const canonicalIds = [...perCanonical.keys()];
   const existingByGameId = new Map<string, string>();
   const existingChunks = await Promise.all(
-    chunk(matchedGameIds, IN_CHUNK).map(ids =>
+    chunk(canonicalIds, IN_CHUNK).map(ids =>
       (db as any)
         .from('user_game_status')
         .select('game_id, status')
@@ -188,27 +246,17 @@ export const POST: APIRoute = async (context) => {
 
   const toInsert: any[] = [];
   const toUpdatePlaytime: Array<{ game_id: string; playtime: number; appid: number | null; last_played: string | null }> = [];
-  const seenGameIds = new Set<string>();
 
-  for (const game of matches) {
-    // Deduplicate — match_steam_games can return the same game_id multiple times
-    // if several Steam titles match the same Chekpoint game (e.g. GOTY editions)
-    if (seenGameIds.has(game.id)) continue;
-    seenGameIds.add(game.id);
-
-    // Key off the Steam-sent title, not ours — they diverge after normalization.
-    const key        = (game.steam_title ?? game.title).toLowerCase().trim();
-    const playtime   = steamByTitle.get(key) ?? 0;
-    const appid      = appidByTitle.get(key) ?? null;
-    const lastPlayed = lastPlayedByTitle.get(key) ?? null;
-    const existing   = existingByGameId.get(game.id);
+  for (const [gameId, agg] of perCanonical) {
+    const { playtime, appid, lastPlayed } = agg;
+    const existing = existingByGameId.get(gameId);
 
     if (!existing) {
       // Skip 0-hour games when playedOnly is set
       if (playedOnly && playtime === 0) continue;
       toInsert.push({
         profile_id: profile.id,
-        game_id: game.id,
+        game_id: gameId,
         status: 'owned',
         is_owned: true,
         steam_playtime_minutes: playtime,
@@ -218,7 +266,7 @@ export const POST: APIRoute = async (context) => {
     } else {
       // Already tracked (e.g. auto-added when the user reviewed it) — refresh
       // playtime / appid / last-played without touching their chosen status.
-      toUpdatePlaytime.push({ game_id: game.id, playtime, appid, last_played: lastPlayed });
+      toUpdatePlaytime.push({ game_id: gameId, playtime, appid, last_played: lastPlayed });
     }
   }
 

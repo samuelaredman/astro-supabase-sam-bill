@@ -32,7 +32,7 @@ async function computeSiteStats(): Promise<SiteStats> {
     db.from('recommendations').select('*', { count: 'exact', head: true }).eq('status', 'published'),
     // `estimated` = planner row estimate for big tables; the exact scan here was
     // the slowest of the four and the displayed number is bucketed anyway.
-    db.from('games').select('*', { count: 'estimated', head: true }).or(GAME_CATEGORY_OR_FILTER),
+    db.from('games').select('*', { count: 'estimated', head: true }).is('canonical_game_id', null).or(GAME_CATEGORY_OR_FILTER),
     db.from('profiles').select('*', { count: 'estimated', head: true }),
   ]);
 
