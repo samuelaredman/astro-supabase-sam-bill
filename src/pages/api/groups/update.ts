@@ -44,6 +44,30 @@ export const POST: APIRoute = async (context) => {
   if (description !== undefined)  updates.description = description?.trim() || null;
   if (join_prompt !== undefined)  updates.join_prompt = join_prompt?.trim() || null;
   if (stats_config !== undefined) updates.stats_config = stats_config;
+  if ("polls_everyone" in body)   updates.polls_everyone = !!body.polls_everyone;
+
+  // Overview Polls showcase mode + target poll
+  if ("polls_showcase_mode" in body) {
+    const mode = body.polls_showcase_mode;
+    if (!["latest", "pinned", "featured"].includes(mode))
+      return json({ error: "Invalid polls_showcase_mode" }, 400);
+    updates.polls_showcase_mode = mode;
+    // Only 'featured' uses a specific poll id; clear it otherwise
+    if (mode !== "featured") updates.polls_showcase_poll_id = null;
+  }
+  if ("polls_showcase_poll_id" in body) {
+    const pollId = body.polls_showcase_poll_id;
+    if (pollId === null || pollId === "") {
+      updates.polls_showcase_poll_id = null;
+    } else {
+      // Make sure the poll exists and belongs to this group
+      const { data: p } = await db.from("group_polls")
+        .select("id, group_id").eq("id", pollId).maybeSingle();
+      if (!p || p.group_id !== group_id)
+        return json({ error: "Chosen poll is not in this group" }, 400);
+      updates.polls_showcase_poll_id = pollId;
+    }
+  }
 
   // Accent color: #rrggbb or '' / null to clear (same shape as profile accent_color)
   if ("accent_color" in body) {

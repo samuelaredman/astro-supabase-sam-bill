@@ -6,7 +6,7 @@ export const POST: APIRoute = async (context) => {
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { group_id, question, options } = await context.request.json();
+  const { group_id, question, options, game_id } = await context.request.json();
   if (!group_id || !question?.trim())
     return json({ error: "group_id and question are required" }, 400);
   if (question.trim().length > 300)
@@ -27,11 +27,24 @@ export const POST: APIRoute = async (context) => {
       .select("can_edit_group").eq("id", membership.custom_role_id).maybeSingle();
     canPost = !!cr?.can_edit_group;
   }
+  if (!canPost) {
+    const { data: g } = await db.from("groups").select("polls_everyone").eq("id", group_id).maybeSingle();
+    if ((g as any)?.polls_everyone) canPost = true;
+  }
   if (!canPost) return json({ error: "Your role does not have permission to create polls" }, 403);
+
+  // Validate game_id if provided — it's optional
+  let validatedGameId: string | null = null;
+  if (game_id) {
+    const { data: g } = await db.from("games").select("id").eq("id", game_id).maybeSingle();
+    if (!g) return json({ error: "Selected game not found" }, 400);
+    validatedGameId = g.id;
+  }
 
   const { data: poll, error } = await db.from("group_polls").insert({
     group_id, profile_id: profile.id, question: question.trim(),
-  }).select("id").single();
+    game_id: validatedGameId,
+  } as any).select("id").single();
   if (error) {
     console.error("[groups/polls/create] error:", JSON.stringify(error));
     return json({ error: "Failed to create poll" }, 500);
