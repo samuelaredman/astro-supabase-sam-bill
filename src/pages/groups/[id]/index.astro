@@ -343,10 +343,10 @@ if (canSeeMemberContent && activeTab === "forums") {
   const directGameIds = basePollRows.map((p: any) => p.game_id).filter(Boolean);
   const [featRes, directRes] = await Promise.all([
     featuredIds.length
-      ? db.from("group_featured_games").select("id, games ( id, title, slug, cover_img_url )").in("id", featuredIds)
+      ? db.from("group_featured_games").select("id, games ( id, title, slug, cover_img_url, date_released )").in("id", featuredIds)
       : Promise.resolve({ data: [] as any[] }),
     directGameIds.length
-      ? db.from("games").select("id, title, slug, cover_img_url").in("id", directGameIds)
+      ? db.from("games").select("id, title, slug, cover_img_url, date_released").in("id", directGameIds)
       : Promise.resolve({ data: [] as any[] }),
   ]);
   const featuredMap = new Map<string, any>();
@@ -413,9 +413,19 @@ if (canSeeMemberContent && activeTab === "forums") {
     const relevantVotes = (answerVoteRows ?? []).filter((v: any) => allAnswerIds.has(v.answer_id));
     const relevantReplies = (replyRows ?? []).filter((r: any) => allAnswerIds.has(r.answer_id));
 
+    // Voter avatars for the Voted-by cluster under each poll — one batched fetch,
+    // sorted so the newest voters bubble to the front of the strip.
+    const voterIds = Array.from(new Set((voteRows ?? []).map((v: any) => v.profile_id).filter(Boolean)));
+    const { data: voterRows } = voterIds.length
+      ? await db.from("profiles").select("id, username, avatar_url").in("id", voterIds)
+      : { data: [] as any[] };
+    const voterById = new Map<string, any>();
+    for (const vp of voterRows ?? []) voterById.set(vp.id, vp);
+
     forumPolls = pollRows.map((p: any) => {
       const options = (optionRows ?? []).filter((o: any) => o.poll_id === p.id);
       const votes = (voteRows ?? []).filter((v: any) => v.poll_id === p.id);
+      const voters = votes.map((v: any) => voterById.get(v.profile_id)).filter(Boolean);
       const myVote = currentProfile ? votes.find((v: any) => v.profile_id === currentProfile.id) : null;
       const myAnswerRow = currentProfile
         ? (answerRows ?? []).find((a: any) => a.poll_id === p.id && a.profile_id === currentProfile.id) ?? null
@@ -448,11 +458,23 @@ if (canSeeMemberContent && activeTab === "forums") {
           };
         })
         .sort((a, b) => b.upvotes - a.upvotes || b.createdAt.localeCompare(a.createdAt));
+      // Winner is the single top-count option — ties don't highlight one over the other
+      const sortedByCount = options.map((o: any) => votes.filter((v: any) => v.option_id === o.id).length);
+      const topCount = Math.max(0, ...sortedByCount);
+      const winnersWithTopCount = sortedByCount.filter((c: number) => c === topCount).length;
       return {
         ...p,
-        options: options.map((o: any) => ({ ...o, count: votes.filter((v: any) => v.option_id === o.id).length })),
+        options: options.map((o: any) => {
+          const count = votes.filter((v: any) => v.option_id === o.id).length;
+          return {
+            ...o,
+            count,
+            isWinner: topCount > 0 && count === topCount && winnersWithTopCount === 1,
+          };
+        }),
         totalVotes: votes.length,
         myOptionId: myVote?.option_id ?? null,
+        voters,
         answers: pollAnswers,
         myAnswerBody: myAnswerRow?.body ?? null,
       };
@@ -1093,47 +1115,94 @@ const groupOgDescription = group.description
   .compose-row{display:flex;align-items:center;gap:10px;margin-top:8px}
   .compose-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer}
 
-  /* ── Forum polls (compact single-column card with inline options and a thread) ── */
+  /* ── Forum polls — dense card with game cover on the right of the options ── */
   .forum-polls-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding:0 2px}
   .forum-polls-head-label{font-size:12px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em}
   .forum-polls-new-btn{background:none;border:none;cursor:pointer;color:var(--accent);font-size:12px;font-family:inherit;font-weight:600;padding:0}
-  .fp-poll{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px}
-  .fp-poll-pinned{border-color:var(--accent)}
-  .fp-poll-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;line-height:1.2}
-  .fp-poll-avatar{width:22px;height:22px;border-radius:50%;background:var(--accent-subtle);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0;text-decoration:none}
+  .fp-poll{position:relative;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:14px 16px;margin-bottom:12px;transition:border-color .15s,box-shadow .15s}
+  .fp-poll:hover{border-color:var(--border)}
+  .fp-poll-pinned{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+  .fp-poll-closed{opacity:.88}
+
+  /* Header: author line + chips + admin actions */
+  .fp-poll-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:8px;line-height:1.2}
+  .fp-poll-avatar{width:26px;height:26px;border-radius:50%;background:var(--accent-subtle);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0;text-decoration:none}
   .fp-poll-avatar img{width:100%;height:100%;object-fit:cover}
-  .fp-poll-author{font-size:12px;font-weight:600;color:inherit;text-decoration:none}
+  .fp-poll-author{font-size:13px;font-weight:600;color:inherit;text-decoration:none}
   .fp-poll-author:hover{color:var(--accent)}
   .fp-poll-role{font-size:10px;font-weight:700;padding:1px 7px;border-radius:8px;letter-spacing:.02em}
   .fp-poll-role-owner{color:var(--accent);background:var(--accent-subtle)}
   .fp-poll-role-admin{color:#f0b429;background:rgba(240,180,41,.14)}
   .fp-poll-role-staff{color:#60a5fa;background:rgba(96,165,250,.14)}
   .fp-poll-time{font-size:11px;color:var(--text-tertiary)}
-  .fp-poll-pin{font-size:11px;color:var(--accent)}
+  .fp-poll-chip{font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;letter-spacing:.02em;display:inline-flex;align-items:center;gap:4px}
+  .fp-poll-chip-pin{color:var(--accent);background:var(--accent-subtle)}
+  .fp-poll-chip-closed{color:#9ca3af;background:rgba(156,163,175,.12)}
+  .fp-poll-chip-featured{color:#f0b429;background:rgba(240,180,41,.14)}
   .fp-poll-admin-actions{margin-left:auto;display:flex;gap:10px}
-  .fp-poll-gametag{display:inline-flex;align-items:center;gap:8px;background:var(--bg-hover);border:1px solid var(--border);border-radius:999px;padding:3px 10px 3px 3px;margin:0 0 8px 0;text-decoration:none;color:var(--text-secondary);font-size:11px;font-weight:600;max-width:100%}
-  .fp-poll-gametag:hover{color:var(--accent);border-color:var(--accent)}
-  .fp-poll-gametag img{width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0}
-  .fp-poll-gametag-kicker{font-size:9px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.07em}
-  .fp-poll-question{font-size:14px;font-weight:600;line-height:1.35;margin:4px 0 10px;color:var(--text-primary)}
-  .fp-poll-options{display:flex;flex-direction:column;gap:4px}
-  .fp-opt-vote{display:block;width:100%;text-align:left;background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;font-family:inherit;color:var(--text-primary);cursor:pointer;transition:border-color .12s,background .12s}
-  .fp-opt-vote:hover:not(:disabled){border-color:var(--accent);background:var(--bg-card)}
+
+  /* Question */
+  .fp-poll-question{font-size:16px;font-weight:700;line-height:1.3;margin:2px 0 10px;color:var(--text-primary);letter-spacing:-.01em}
+
+  /* Body: options on the left, cover on the right */
+  .fp-poll-body{display:grid;grid-template-columns:1fr;gap:14px;align-items:stretch}
+  .fp-poll-with-game .fp-poll-body{grid-template-columns:1fr 128px}
+
+  .fp-poll-options{display:flex;flex-direction:column;gap:6px;min-width:0}
+  .fp-opt-vote{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:9px 12px;font-size:13px;font-family:inherit;color:var(--text-primary);cursor:pointer;transition:border-color .12s,background .12s,transform .08s}
+  .fp-opt-vote:hover:not(:disabled){border-color:var(--accent);background:var(--bg-card);transform:translateX(2px)}
   .fp-opt-vote:disabled{cursor:default;opacity:.6}
-  .fp-opt-result{position:relative;border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;display:flex;justify-content:space-between;gap:10px;overflow:hidden}
-  .fp-opt-bar{position:absolute;inset:0;background:var(--accent-subtle);z-index:0}
-  .fp-opt-label{position:relative;z-index:1;color:var(--text-primary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .fp-opt-pct{position:relative;z-index:1;color:var(--text-secondary);flex-shrink:0;font-variant-numeric:tabular-nums}
+  .fp-opt-vote-dot{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--text-tertiary);flex-shrink:0;transition:border-color .12s}
+  .fp-opt-vote:hover:not(:disabled) .fp-opt-vote-dot{border-color:var(--accent)}
+  .fp-opt-result{position:relative;border:1px solid var(--border);border-radius:10px;padding:9px 12px;font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:10px;overflow:hidden;background:var(--bg-hover)}
+  .fp-opt-bar{position:absolute;inset:0;background:var(--accent-subtle);z-index:0;border-radius:9px 0 0 9px;transition:width .3s ease}
+  .fp-opt-label{position:relative;z-index:1;color:var(--text-primary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;display:inline-flex;align-items:center;gap:6px}
+  .fp-opt-check{color:var(--accent);font-weight:700}
+  .fp-opt-crown{font-size:12px;opacity:.9}
+  .fp-opt-pct{position:relative;z-index:1;color:var(--text-primary);flex-shrink:0;font-variant-numeric:tabular-nums;display:inline-flex;align-items:baseline;gap:5px}
+  .fp-opt-pct strong{font-size:13px;font-weight:700}
+  .fp-opt-count{color:var(--text-tertiary);font-size:11px;font-weight:500}
   .fp-opt-result.voted{border-color:var(--accent)}
-  .fp-poll-foot{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;color:var(--text-tertiary)}
-  .fp-poll-foot-btn{background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:11px;font-family:inherit;font-weight:600;padding:3px 6px;border-radius:6px;display:inline-flex;align-items:center;gap:5px;transition:background .12s,color .12s}
+  .fp-opt-result.winner{border-color:var(--accent);background:linear-gradient(90deg, var(--accent-subtle), var(--bg-hover))}
+  .fp-opt-result.winner .fp-opt-bar{background:var(--accent);opacity:.22}
+
+  /* Game cover card on the right */
+  .fp-poll-gamecard{position:relative;display:block;border-radius:10px;overflow:hidden;background:var(--tag-bg);text-decoration:none;color:inherit;aspect-ratio:3/4;min-height:164px;flex-shrink:0;transition:transform .18s,box-shadow .18s}
+  .fp-poll-gamecard:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.3)}
+  .fp-poll-gamecard img{width:100%;height:100%;object-fit:cover;display:block}
+  .fp-poll-gamecard-nocover{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px;background:var(--bg-hover)}
+  .fp-poll-gamecard-overlay{position:absolute;inset:auto 0 0 0;padding:16px 10px 8px;background:linear-gradient(to top, rgba(0,0,0,.92) 0%, rgba(0,0,0,.6) 55%, rgba(0,0,0,0) 100%);color:#fff}
+  .fp-poll-gamecard-kicker{font-size:9px;font-weight:800;color:#f0b429;text-transform:uppercase;letter-spacing:.08em;margin-bottom:2px}
+  .fp-poll-gamecard-title{font-size:12px;font-weight:700;line-height:1.25;color:#fff;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .fp-poll-gamecard-year{font-size:10px;color:rgba(255,255,255,.7);margin-top:2px;font-weight:500}
+
+  /* Footer: voter strip + comments button */
+  .fp-poll-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle)}
+  .fp-poll-foot-left{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}
+  .fp-voter-strip{display:inline-flex;align-items:center}
+  .fp-voter{width:22px;height:22px;border-radius:50%;background:var(--accent-subtle);display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--accent);overflow:hidden;border:2px solid var(--bg-card);margin-left:-6px;transition:transform .12s;text-decoration:none}
+  .fp-voter:first-child{margin-left:0}
+  .fp-voter:hover{transform:translateY(-2px);z-index:1}
+  .fp-voter img{width:100%;height:100%;object-fit:cover}
+  .fp-voter-more{background:var(--bg-hover);color:var(--text-secondary);font-size:10px;cursor:default}
+  .fp-voter-more:hover{transform:none}
+  .fp-no-votes{font-size:11px;color:var(--text-tertiary);font-style:italic}
+  .fp-poll-count{font-size:11px;color:var(--text-tertiary);font-weight:500}
+  .fp-poll-foot-btn{background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:12px;font-family:inherit;font-weight:600;padding:5px 10px;border-radius:8px;display:inline-flex;align-items:center;gap:6px;transition:background .12s,color .12s}
   .fp-poll-foot-btn:hover{background:var(--bg-hover);color:var(--accent)}
   .fp-poll-foot-btn[aria-expanded="true"]{color:var(--accent);background:var(--bg-hover)}
-  .fp-poll-closed-tag{font-weight:600}
-  .fp-poll-comments{margin-top:10px;padding-top:10px;border-top:1px solid var(--border-subtle)}
+
+  /* Comment thread */
+  .fp-poll-comments{margin-top:12px;padding-top:12px;border-top:1px solid var(--border-subtle)}
   .fp-poll-reply-form{display:flex;flex-direction:column;gap:6px}
   .fp-poll-reply-row{display:flex;align-items:center;gap:10px}
   .fp-poll-reply-err{font-size:11px;color:#f87171;margin:0}
+
+  @media (max-width: 640px){
+    .fp-poll-with-game .fp-poll-body{grid-template-columns:1fr;gap:10px}
+    .fp-poll-gamecard{aspect-ratio:16/9;min-height:120px;max-height:160px}
+    .fp-poll-gamecard img{object-position:center 25%}
+  }
 
   /* Game picker inside the create-poll form */
   .fp-game-picker{position:relative}
@@ -2821,8 +2890,12 @@ const groupOgDescription = group.description
             : p.authorRole === "Staff" ? "fp-poll-role-staff"
             : "";
           const commentCount = (p.answers?.length ?? 0) + (p.answers?.reduce((n: number, a: any) => n + a.replies.length, 0) ?? 0);
+          const gameYear = game?.date_released ? new Date(game.date_released).getFullYear() : null;
+          const voters = (p.voters ?? []) as any[];
+          const voterStrip = voters.slice(0, 6);
+          const extraVoters = Math.max(0, voters.length - voterStrip.length);
           return (
-            <article class={`fp-poll${p.pinned ? " fp-poll-pinned" : ""}`} data-poll-id={p.id}>
+            <article class={`fp-poll${p.pinned ? " fp-poll-pinned" : ""}${p.closed ? " fp-poll-closed" : ""}${game ? " fp-poll-with-game" : ""}`} data-poll-id={p.id}>
               <header class="fp-poll-head">
                 <a href={author?.username ? `/reviewers/${author.username}` : "#"} class="fp-poll-avatar">
                   {author?.avatar_url
@@ -2833,7 +2906,9 @@ const groupOgDescription = group.description
                 {readBadgeSlugs(author).map((slug) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
                 {p.authorRole && <span class={`fp-poll-role ${roleTagClass}`}>{p.authorRole}</span>}
                 <span class="fp-poll-time">· {timeAgo(p.created_at)}</span>
-                {p.pinned && <span class="fp-poll-pin">📌</span>}
+                {p.pinned && <span class="fp-poll-chip fp-poll-chip-pin">📌 Pinned</span>}
+                {p.closed && <span class="fp-poll-chip fp-poll-chip-closed">🔒 Closed</span>}
+                {p.featured_game_id && <span class="fp-poll-chip fp-poll-chip-featured">★ Featured</span>}
                 {canManagePoll && (
                   <span class="fp-poll-admin-actions">
                     {canEditOverview && (
@@ -2849,45 +2924,68 @@ const groupOgDescription = group.description
                 )}
               </header>
 
-              {game && (
-                <a href={gameHref ?? "#"} class="fp-poll-gametag">
-                  {igdbCover(game.cover_img_url, "t_thumb") && (
-                    <img src={igdbCover(game.cover_img_url, "t_thumb")!} alt="" />
-                  )}
-                  {p.featured_game_id && <span class="fp-poll-gametag-kicker">Featured</span>}
-                  <span>{game.title}</span>
-                </a>
-              )}
-
               <h3 class="fp-poll-question">{p.question}</h3>
 
-              <div class="fp-poll-options">
-                {showResults
-                  ? p.options.map((o: any) => {
-                      const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
-                      const isMine = o.id === p.myOptionId;
-                      return (
-                        <div class={`fp-opt-result${isMine ? " voted" : ""}`}>
-                          <div class="fp-opt-bar" style={`width:${pct}%`}></div>
-                          <span class="fp-opt-label">{o.label}{isMine ? " ✓" : ""}</span>
-                          <span class="fp-opt-pct">{pct}% · {o.count}</span>
-                        </div>
-                      );
-                    })
-                  : p.options.map((o: any) => (
-                      <button class="fp-opt-vote" onclick={`votePoll('${p.id}', '${o.id}')`} disabled={p.closed}>{o.label}</button>
-                    ))
-                }
+              <div class="fp-poll-body">
+                <div class="fp-poll-options">
+                  {showResults
+                    ? p.options.map((o: any) => {
+                        const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
+                        const isMine = o.id === p.myOptionId;
+                        return (
+                          <div class={`fp-opt-result${isMine ? " voted" : ""}${o.isWinner ? " winner" : ""}`}>
+                            <div class="fp-opt-bar" style={`width:${pct}%`}></div>
+                            <span class="fp-opt-label">{isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}</span>
+                            <span class="fp-opt-pct"><strong>{pct}%</strong><span class="fp-opt-count">· {o.count}</span></span>
+                          </div>
+                        );
+                      })
+                    : p.options.map((o: any) => (
+                        <button class="fp-opt-vote" onclick={`votePoll('${p.id}', '${o.id}')`} disabled={p.closed}>
+                          <span class="fp-opt-vote-dot"></span>{o.label}
+                        </button>
+                      ))
+                  }
+                </div>
+
+                {game && (
+                  <a href={gameHref ?? "#"} class="fp-poll-gamecard" title={game.title}>
+                    {igdbCover(game.cover_img_url, "t_cover_big")
+                      ? <img src={igdbCover(game.cover_img_url, "t_cover_big")!} alt={game.title} loading="lazy" />
+                      : <div class="fp-poll-gamecard-nocover">🎮</div>
+                    }
+                    <div class="fp-poll-gamecard-overlay">
+                      {p.featured_game_id && <div class="fp-poll-gamecard-kicker">Featured</div>}
+                      <div class="fp-poll-gamecard-title">{game.title}</div>
+                      {gameYear && <div class="fp-poll-gamecard-year">{gameYear}</div>}
+                    </div>
+                  </a>
+                )}
               </div>
 
               <footer class="fp-poll-foot">
-                <span>{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}</span>
-                <span>·</span>
+                <div class="fp-poll-foot-left">
+                  {voterStrip.length > 0
+                    ? (
+                      <div class="fp-voter-strip">
+                        {voterStrip.map((v: any) => (
+                          <a href={`/reviewers/${v.username}`} class="fp-voter" title={`@${v.username}`}>
+                            {v.avatar_url
+                              ? <img src={v.avatar_url} alt="" loading="lazy" />
+                              : (v.username ? v.username.slice(0, 2).toUpperCase() : "?")}
+                          </a>
+                        ))}
+                        {extraVoters > 0 && <span class="fp-voter fp-voter-more">+{extraVoters}</span>}
+                      </div>
+                    )
+                    : <span class="fp-no-votes">Be the first to vote</span>
+                  }
+                  <span class="fp-poll-count">{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}</span>
+                </div>
                 <button class="fp-poll-foot-btn" onclick={`toggleForumPollComments('${p.id}')`} aria-expanded="false">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
                   {commentCount > 0 ? `${commentCount} comment${commentCount !== 1 ? "s" : ""}` : "Reply"}
                 </button>
-                {p.closed && <><span>·</span><span class="fp-poll-closed-tag">Closed</span></>}
               </footer>
 
               <div class="fp-poll-comments" data-poll-comments={p.id} hidden>
