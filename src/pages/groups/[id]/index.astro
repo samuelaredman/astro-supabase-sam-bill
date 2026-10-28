@@ -17,6 +17,8 @@ import {
 } from '../../../utils/groupFeed';
 import FeedTab from '../../../components/groups/FeedTab.astro';
 import GamesTab from '../../../components/groups/GamesTab.astro';
+import PollAnswer from '../../../components/groups/PollAnswer.astro';
+import { POLL_ANSWER_MAX } from '../../../utils/groupFeaturedGames';
 import { buildFeaturedStats, canFeatureGames, formatHours, loadGroupFeaturedGames, type FeaturedStats, type GroupGamesData } from '../../../utils/groupFeaturedGames';
 import { groupOwnerYouTube, groupShowcaseLabel, readGroupShowcaseHidden, readGroupShowcaseOrder, showcaseColumn, type GroupShowcaseKey } from '../../../utils/groupShowcases';
 import ShowcaseSection from '../../../components/profile/ShowcaseSection.astro';
@@ -381,21 +383,78 @@ if (canSeeMemberContent && activeTab === "forums") {
   });
   if (pollRows.length) {
     const pollIds = pollRows.map((p: any) => p.id);
-    const [{ data: optionRows }, voteRows] = await Promise.all([
+    // Options, votes, and the full comment thread (answers + answer-votes + replies)
+    // for every poll — all reused from the featured-game poll endpoints.
+    const [{ data: optionRows }, voteRows, { data: answerRows }, { data: answerVoteRows }, { data: replyRows }] = await Promise.all([
       db.from("group_poll_options").select("id, poll_id, label, position")
         .in("poll_id", pollIds).order("position", { ascending: true }),
       fetchAll((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
         .in("poll_id", pollIds).order("id").range(from, to)),
+      db.from("group_poll_answers")
+        .select("id, poll_id, profile_id, body, created_at, updated_at, profiles ( username, avatar_url )")
+        .in("poll_id", pollIds)
+        .order("created_at", { ascending: false }),
+      db.from("group_poll_answer_votes").select("answer_id, profile_id"),
+      db.from("group_poll_answer_replies")
+        .select("id, answer_id, profile_id, body, created_at, profiles ( username, avatar_url )")
+        .order("created_at", { ascending: true }),
     ]);
+    // Only answer_votes/replies for THIS batch of polls (we read all; filter in JS)
+    const pollIdSet = new Set(pollIds);
+    const answerIdByPoll = new Map<string, Set<string>>();
+    for (const a of (answerRows ?? []) as any[]) {
+      if (!pollIdSet.has(a.poll_id)) continue;
+      let s = answerIdByPoll.get(a.poll_id);
+      if (!s) { s = new Set(); answerIdByPoll.set(a.poll_id, s); }
+      s.add(a.id);
+    }
+    const allAnswerIds = new Set<string>();
+    for (const s of answerIdByPoll.values()) for (const id of s) allAnswerIds.add(id);
+    const relevantVotes = (answerVoteRows ?? []).filter((v: any) => allAnswerIds.has(v.answer_id));
+    const relevantReplies = (replyRows ?? []).filter((r: any) => allAnswerIds.has(r.answer_id));
+
     forumPolls = pollRows.map((p: any) => {
       const options = (optionRows ?? []).filter((o: any) => o.poll_id === p.id);
       const votes = (voteRows ?? []).filter((v: any) => v.poll_id === p.id);
       const myVote = currentProfile ? votes.find((v: any) => v.profile_id === currentProfile.id) : null;
+      const myAnswerRow = currentProfile
+        ? (answerRows ?? []).find((a: any) => a.poll_id === p.id && a.profile_id === currentProfile.id) ?? null
+        : null;
+      // Build comment list: sort by upvotes desc, then newest first
+      const pollAnswers = (answerRows ?? [])
+        .filter((a: any) => a.poll_id === p.id && a.profiles)
+        .map((a: any) => {
+          const ups = relevantVotes.filter((v: any) => v.answer_id === a.id);
+          return {
+            id: a.id,
+            profileId: a.profile_id,
+            username: a.profiles.username,
+            avatarUrl: a.profiles.avatar_url,
+            body: a.body,
+            createdAt: a.created_at,
+            edited: a.updated_at !== a.created_at,
+            upvotes: ups.length,
+            myUpvote: !!currentProfile && ups.some((v: any) => v.profile_id === currentProfile.id),
+            replies: relevantReplies
+              .filter((r: any) => r.answer_id === a.id && r.profiles)
+              .map((r: any) => ({
+                id: r.id,
+                profileId: r.profile_id,
+                username: r.profiles.username,
+                avatarUrl: r.profiles.avatar_url,
+                body: r.body,
+                createdAt: r.created_at,
+              })),
+          };
+        })
+        .sort((a, b) => b.upvotes - a.upvotes || b.createdAt.localeCompare(a.createdAt));
       return {
         ...p,
         options: options.map((o: any) => ({ ...o, count: votes.filter((v: any) => v.option_id === o.id).length })),
         totalVotes: votes.length,
         myOptionId: myVote?.option_id ?? null,
+        answers: pollAnswers,
+        myAnswerBody: myAnswerRow?.body ?? null,
       };
     });
   }
@@ -1034,14 +1093,14 @@ const groupOgDescription = group.description
   .compose-row{display:flex;align-items:center;gap:10px;margin-top:8px}
   .compose-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer}
 
-  /* ── Forum polls (side-by-side card: game+question on left, options on right) ── */
-  .forum-polls-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding:0 2px}
+  /* ── Forum polls (compact single-column card with inline options and a thread) ── */
+  .forum-polls-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding:0 2px}
   .forum-polls-head-label{font-size:12px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em}
   .forum-polls-new-btn{background:none;border:none;cursor:pointer;color:var(--accent);font-size:12px;font-family:inherit;font-weight:600;padding:0}
-  .fp-poll{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:12px}
+  .fp-poll{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px}
   .fp-poll-pinned{border-color:var(--accent)}
-  .fp-poll-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px}
-  .fp-poll-avatar{width:22px;height:22px;border-radius:50%;background:var(--accent-subtle);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
+  .fp-poll-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;line-height:1.2}
+  .fp-poll-avatar{width:22px;height:22px;border-radius:50%;background:var(--accent-subtle);display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0;text-decoration:none}
   .fp-poll-avatar img{width:100%;height:100%;object-fit:cover}
   .fp-poll-author{font-size:12px;font-weight:600;color:inherit;text-decoration:none}
   .fp-poll-author:hover{color:var(--accent)}
@@ -1050,22 +1109,31 @@ const groupOgDescription = group.description
   .fp-poll-role-admin{color:#f0b429;background:rgba(240,180,41,.14)}
   .fp-poll-role-staff{color:#60a5fa;background:rgba(96,165,250,.14)}
   .fp-poll-time{font-size:11px;color:var(--text-tertiary)}
-  .fp-poll-pin-tag{font-size:10px;font-weight:700;color:var(--accent);background:var(--accent-subtle);padding:1px 7px;border-radius:8px;margin-left:auto}
-  .fp-poll-left{padding:14px 16px;border-right:1px solid var(--border);background:var(--bg-hover);display:flex;flex-direction:column;gap:8px;min-width:0}
-  .fp-poll-right{padding:14px 16px;display:flex;flex-direction:column;gap:6px;justify-content:center;min-width:0}
-  .fp-poll-right .poll-option,.fp-poll-right .poll-result{margin-bottom:0}
-  .fp-poll-cover-link{display:block;line-height:0}
-  .fp-poll-cover{width:72px;height:96px;object-fit:cover;border-radius:6px;background:var(--tag-bg)}
-  .fp-poll-game{display:flex;flex-direction:column;gap:2px;margin-top:-2px}
-  .fp-poll-kicker{font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.06em}
-  .fp-poll-game-title{font-size:13px;font-weight:600;color:var(--text-primary);text-decoration:none}
-  a.fp-poll-game-title:hover{color:var(--accent)}
-  .fp-poll-question{font-size:14px;font-weight:600;line-height:1.35;margin-top:2px}
-  .fp-poll-meta{margin-top:auto;font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
-  @media (max-width: 640px){
-    .fp-poll{grid-template-columns:minmax(0,1fr)}
-    .fp-poll-left{border-right:none;border-bottom:1px solid var(--border)}
-  }
+  .fp-poll-pin{font-size:11px;color:var(--accent)}
+  .fp-poll-admin-actions{margin-left:auto;display:flex;gap:10px}
+  .fp-poll-gametag{display:inline-flex;align-items:center;gap:8px;background:var(--bg-hover);border:1px solid var(--border);border-radius:999px;padding:3px 10px 3px 3px;margin:0 0 8px 0;text-decoration:none;color:var(--text-secondary);font-size:11px;font-weight:600;max-width:100%}
+  .fp-poll-gametag:hover{color:var(--accent);border-color:var(--accent)}
+  .fp-poll-gametag img{width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0}
+  .fp-poll-gametag-kicker{font-size:9px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.07em}
+  .fp-poll-question{font-size:14px;font-weight:600;line-height:1.35;margin:4px 0 10px;color:var(--text-primary)}
+  .fp-poll-options{display:flex;flex-direction:column;gap:4px}
+  .fp-opt-vote{display:block;width:100%;text-align:left;background:var(--bg-hover);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;font-family:inherit;color:var(--text-primary);cursor:pointer;transition:border-color .12s,background .12s}
+  .fp-opt-vote:hover:not(:disabled){border-color:var(--accent);background:var(--bg-card)}
+  .fp-opt-vote:disabled{cursor:default;opacity:.6}
+  .fp-opt-result{position:relative;border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;display:flex;justify-content:space-between;gap:10px;overflow:hidden}
+  .fp-opt-bar{position:absolute;inset:0;background:var(--accent-subtle);z-index:0}
+  .fp-opt-label{position:relative;z-index:1;color:var(--text-primary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fp-opt-pct{position:relative;z-index:1;color:var(--text-secondary);flex-shrink:0;font-variant-numeric:tabular-nums}
+  .fp-opt-result.voted{border-color:var(--accent)}
+  .fp-poll-foot{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;color:var(--text-tertiary)}
+  .fp-poll-foot-btn{background:none;border:none;cursor:pointer;color:var(--text-secondary);font-size:11px;font-family:inherit;font-weight:600;padding:3px 6px;border-radius:6px;display:inline-flex;align-items:center;gap:5px;transition:background .12s,color .12s}
+  .fp-poll-foot-btn:hover{background:var(--bg-hover);color:var(--accent)}
+  .fp-poll-foot-btn[aria-expanded="true"]{color:var(--accent);background:var(--bg-hover)}
+  .fp-poll-closed-tag{font-weight:600}
+  .fp-poll-comments{margin-top:10px;padding-top:10px;border-top:1px solid var(--border-subtle)}
+  .fp-poll-reply-form{display:flex;flex-direction:column;gap:6px}
+  .fp-poll-reply-row{display:flex;align-items:center;gap:10px}
+  .fp-poll-reply-err{font-size:11px;color:#f87171;margin:0}
 
   /* Game picker inside the create-poll form */
   .fp-game-picker{position:relative}
@@ -2752,73 +2820,101 @@ const groupOgDescription = group.description
             : p.authorRole === "Admin" ? "fp-poll-role-admin"
             : p.authorRole === "Staff" ? "fp-poll-role-staff"
             : "";
+          const commentCount = (p.answers?.length ?? 0) + (p.answers?.reduce((n: number, a: any) => n + a.replies.length, 0) ?? 0);
           return (
-            <div class={`fp-poll${p.pinned ? " fp-poll-pinned" : ""}`} data-poll-id={p.id}>
-              <div class="fp-poll-left">
-                <div class="fp-poll-head">
-                  <div class="fp-poll-avatar">
-                    {author?.avatar_url
-                      ? <img src={author.avatar_url} alt={author?.username ?? ""} />
-                      : (author?.username ? author.username.slice(0, 2).toUpperCase() : "?")}
-                  </div>
-                  <a href={author?.username ? `/reviewers/${author.username}` : "#"} class="fp-poll-author">@{author?.username ?? "unknown"}</a>
-                  {readBadgeSlugs(author).map((slug) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
-                  {p.authorRole && <span class={`fp-poll-role ${roleTagClass}`}>{p.authorRole}</span>}
-                  <span class="fp-poll-time">· {timeAgo(p.created_at)}</span>
-                  {p.pinned && <span class="fp-poll-pin-tag">📌 Pinned</span>}
-                </div>
-                {game && igdbCover(game.cover_img_url, "t_cover_big") && (
-                  gameHref
-                    ? <a href={gameHref} class="fp-poll-cover-link"><img src={igdbCover(game.cover_img_url, "t_cover_big")!} alt={game.title} class="fp-poll-cover" /></a>
-                    : <img src={igdbCover(game.cover_img_url, "t_cover_big")!} alt={game.title} class="fp-poll-cover" />
+            <article class={`fp-poll${p.pinned ? " fp-poll-pinned" : ""}`} data-poll-id={p.id}>
+              <header class="fp-poll-head">
+                <a href={author?.username ? `/reviewers/${author.username}` : "#"} class="fp-poll-avatar">
+                  {author?.avatar_url
+                    ? <img src={author.avatar_url} alt="" />
+                    : (author?.username ? author.username.slice(0, 2).toUpperCase() : "?")}
+                </a>
+                <a href={author?.username ? `/reviewers/${author.username}` : "#"} class="fp-poll-author">@{author?.username ?? "unknown"}</a>
+                {readBadgeSlugs(author).map((slug) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
+                {p.authorRole && <span class={`fp-poll-role ${roleTagClass}`}>{p.authorRole}</span>}
+                <span class="fp-poll-time">· {timeAgo(p.created_at)}</span>
+                {p.pinned && <span class="fp-poll-pin">📌</span>}
+                {canManagePoll && (
+                  <span class="fp-poll-admin-actions">
+                    {canEditOverview && (
+                      <button class="announcement-action" onclick={`togglePollPinned('${p.id}', ${!p.pinned})`}>{p.pinned ? "Unpin" : "Pin"}</button>
+                    )}
+                    {!p.featured_game_id && (
+                      <>
+                        <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
+                        <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
+                      </>
+                    )}
+                  </span>
                 )}
-                {game && (
-                  <div class="fp-poll-game">
-                    {p.featured_game_id && <div class="fp-poll-kicker">Featured game</div>}
-                    {gameHref
-                      ? <a href={gameHref} class="fp-poll-game-title">{game.title}</a>
-                      : <div class="fp-poll-game-title">{game.title}</div>}
-                  </div>
-                )}
-                <div class="fp-poll-question">{p.question}</div>
-                <div class="fp-poll-meta">
-                  <span>{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}{p.closed ? " · Closed" : ""}</span>
-                  {canManagePoll && (
-                    <span class="poll-meta-actions">
-                      {canEditOverview && (
-                        <button class="announcement-action" onclick={`togglePollPinned('${p.id}', ${!p.pinned})`}>{p.pinned ? "Unpin" : "Pin"}</button>
-                      )}
-                      {!p.featured_game_id && (
-                        <>
-                          <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
-                          <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
-                        </>
-                      )}
-                    </span>
+              </header>
+
+              {game && (
+                <a href={gameHref ?? "#"} class="fp-poll-gametag">
+                  {igdbCover(game.cover_img_url, "t_thumb") && (
+                    <img src={igdbCover(game.cover_img_url, "t_thumb")!} alt="" />
                   )}
-                </div>
-              </div>
-              <div class="fp-poll-right">
+                  {p.featured_game_id && <span class="fp-poll-gametag-kicker">Featured</span>}
+                  <span>{game.title}</span>
+                </a>
+              )}
+
+              <h3 class="fp-poll-question">{p.question}</h3>
+
+              <div class="fp-poll-options">
                 {showResults
                   ? p.options.map((o: any) => {
                       const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
                       const isMine = o.id === p.myOptionId;
                       return (
-                        <div class={`poll-result${isMine ? " voted" : ""}`}>
-                          <div class="poll-result-bar" style={`width:${pct}%`}></div>
-                          <div class="poll-result-label">
-                            <span>{o.label}{isMine ? " ✓" : ""}</span>
-                            <span>{pct}% ({o.count})</span>
-                          </div>
+                        <div class={`fp-opt-result${isMine ? " voted" : ""}`}>
+                          <div class="fp-opt-bar" style={`width:${pct}%`}></div>
+                          <span class="fp-opt-label">{o.label}{isMine ? " ✓" : ""}</span>
+                          <span class="fp-opt-pct">{pct}% · {o.count}</span>
                         </div>
                       );
                     })
                   : p.options.map((o: any) => (
-                      <button class="poll-option" onclick={`votePoll('${p.id}', '${o.id}')`}>{o.label}</button>
+                      <button class="fp-opt-vote" onclick={`votePoll('${p.id}', '${o.id}')`} disabled={p.closed}>{o.label}</button>
                     ))
                 }
               </div>
-            </div>
+
+              <footer class="fp-poll-foot">
+                <span>{p.totalVotes} vote{p.totalVotes !== 1 ? "s" : ""}</span>
+                <span>·</span>
+                <button class="fp-poll-foot-btn" onclick={`toggleForumPollComments('${p.id}')`} aria-expanded="false">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+                  {commentCount > 0 ? `${commentCount} comment${commentCount !== 1 ? "s" : ""}` : "Reply"}
+                </button>
+                {p.closed && <><span>·</span><span class="fp-poll-closed-tag">Closed</span></>}
+              </footer>
+
+              <div class="fp-poll-comments" data-poll-comments={p.id} hidden>
+                {isMember && !p.closed && (
+                  <form class="fp-poll-reply-form" data-poll-reply={p.id}>
+                    <textarea class="compose-input" name="body" rows="2" maxlength={POLL_ANSWER_MAX} placeholder="Add a comment…">{p.myAnswerBody ?? ""}</textarea>
+                    <div class="fp-poll-reply-row">
+                      <button type="submit" class="btn-copy" style="font-size:11px;padding:5px 12px">{p.myAnswerBody ? "Update" : "Comment"}</button>
+                      {p.myAnswerBody && (
+                        <button type="button" class="announcement-action" data-poll-answer-delete={p.id}>Delete mine</button>
+                      )}
+                      <p class="fp-poll-reply-err" hidden></p>
+                    </div>
+                  </form>
+                )}
+                {p.answers.length > 0 && (
+                  <ul class="gg-answers" style="padding:0;list-style:none;margin:10px 0 0">
+                    {p.answers.map((a: any) => (
+                      <PollAnswer answer={a} viewerProfileId={currentProfile?.id ?? null} isMember={isMember} closed={p.closed} canModerate={canManagePoll} />
+                    ))}
+                  </ul>
+                )}
+                {p.answers.length === 0 && !isMember && (
+                  <div style="font-size:12px;color:var(--text-tertiary);padding:8px 0">No comments yet.</div>
+                )}
+              </div>
+            </article>
           );
         })
       }
@@ -3526,6 +3622,53 @@ async function votePoll(pollId, optionId) {
   else { const d = await res.json(); alert(d.error ?? 'Error voting'); }
 }
 window.votePoll = votePoll;
+
+function toggleForumPollComments(pollId) {
+  const box = document.querySelector(`[data-poll-comments="${pollId}"]`);
+  const btn = document.querySelector(`[data-poll-id="${pollId}"] .fp-poll-foot-btn`);
+  if (!box) return;
+  const willOpen = box.hidden;
+  box.hidden = !willOpen;
+  if (btn) btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  if (willOpen) box.querySelector('textarea[name="body"]')?.focus();
+}
+window.toggleForumPollComments = toggleForumPollComments;
+
+// Comment form submit (writes/updates the viewer's own answer on a poll)
+document.addEventListener('submit', (e) => {
+  const form = e.target instanceof HTMLFormElement ? e.target : null;
+  if (!form || !form.classList.contains('fp-poll-reply-form')) return;
+  e.preventDefault();
+  const pollId = form.getAttribute('data-poll-reply');
+  if (!pollId) return;
+  const errEl = form.querySelector('.fp-poll-reply-err');
+  if (errEl) errEl.hidden = true;
+  const body = String(new FormData(form).get('body') ?? '').trim();
+  if (!body) { if (errEl) { errEl.textContent = 'Write a comment first.'; errEl.hidden = false; } return; }
+  const submit = form.querySelector('button[type=submit]');
+  if (submit) submit.disabled = true;
+  fetch('/api/groups/polls/answer', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ poll_id: pollId, body }),
+  }).then(async (res) => {
+    const d = await res.json().catch(() => ({}));
+    if (res.ok) return window.location.reload();
+    if (submit) submit.disabled = false;
+    if (errEl) { errEl.textContent = d.error ?? "Couldn't post your comment."; errEl.hidden = false; }
+  });
+});
+
+// Delete-my-own-answer (the "Delete mine" button next to the Comment form)
+document.addEventListener('click', (e) => {
+  const btn = e.target instanceof HTMLElement ? e.target.closest('[data-poll-answer-delete]') : null;
+  if (!btn) return;
+  const pollId = btn.getAttribute('data-poll-answer-delete');
+  if (!pollId || !confirm('Delete your comment?')) return;
+  fetch('/api/groups/polls/answer', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ poll_id: pollId, body: '' }),
+  }).then((res) => { if (res.ok) window.location.reload(); });
+});
 
 async function togglePollPinned(pollId, pinned) {
   const res = await fetch('/api/groups/polls/pin', {
