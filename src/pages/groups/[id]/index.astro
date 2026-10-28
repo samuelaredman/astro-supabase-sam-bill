@@ -296,13 +296,31 @@ if (canSeeMemberContent && activeTab === "forums") {
       .order("created_at", { ascending: false })
       .range(from, to)),
     db.from("group_polls")
-      .select("id, question, closed, created_at, profile_id, featured_game_id, games!featured_game_id ( id, title, slug, cover_img_url )")
+      .select("id, question, closed, created_at, profile_id, featured_game_id")
       .eq("group_id", id)
       .order("created_at", { ascending: false })
       .limit(200),
   ]);
   forumAnnouncements = annRes ?? [];
-  const pollRows = pollRowsRes.data ?? [];
+  if (pollRowsRes.error) {
+    console.error("[groups/forum-polls] query error:", JSON.stringify(pollRowsRes.error));
+  }
+  const basePollRows = pollRowsRes.data ?? [];
+  // Fetch featured-game data for polls that have a featured_game_id, in a separate query
+  // (embedding games through group_featured_games is fragile — resolve it manually).
+  const featuredIds = basePollRows.map((p: any) => p.featured_game_id).filter(Boolean);
+  let featuredMap = new Map<string, any>();
+  if (featuredIds.length) {
+    const { data: featRows } = await db
+      .from("group_featured_games")
+      .select("id, games ( id, title, slug, cover_img_url )")
+      .in("id", featuredIds);
+    for (const f of featRows ?? []) featuredMap.set(f.id, (f as any).games ?? null);
+  }
+  const pollRows = basePollRows.map((p: any) => ({
+    ...p,
+    games: p.featured_game_id ? featuredMap.get(p.featured_game_id) ?? null : null,
+  }));
   if (pollRows.length) {
     const pollIds = pollRows.map((p: any) => p.id);
     const [{ data: optionRows }, voteRows] = await Promise.all([
