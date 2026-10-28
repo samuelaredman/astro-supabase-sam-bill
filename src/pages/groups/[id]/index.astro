@@ -416,13 +416,13 @@ if (canViewContent && activeTab === "forums") {
     const pollIds = pollRows.map((p: any) => p.id);
     // Options, votes, and the full comment thread (answers + answer-votes + replies)
     // for every poll — all reused from the featured-game poll endpoints.
-    const [{ data: optionRows }, voteRows, { data: answerRows }, { data: answerVoteRows }, { data: replyRows }] = await Promise.all([
+    const [optionsRes, voteRows, answersRes, answerVotesRes, repliesRes] = await Promise.all([
       db.from("group_poll_options").select("id, poll_id, label, position, color")
         .in("poll_id", pollIds).order("position", { ascending: true }),
       fetchAll((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
         .in("poll_id", pollIds).order("id").range(from, to)),
       db.from("group_poll_answers")
-        .select("id, poll_id, profile_id, body, created_at, updated_at, profiles ( username, avatar_url )")
+        .select("id, poll_id, profile_id, body, created_at, updated_at, profiles!profile_id ( username, avatar_url )")
         .in("poll_id", pollIds)
         .order("created_at", { ascending: false }),
       db.from("group_poll_answer_votes").select("answer_id, profile_id"),
@@ -430,6 +430,14 @@ if (canViewContent && activeTab === "forums") {
       // their full content is loaded on the dedicated poll page instead.
       db.from("group_poll_answer_replies").select("id, answer_id"),
     ]);
+    // Log any query errors so a bad embed/filter doesn't silently hide comments
+    for (const [name, res] of [["options", optionsRes], ["answers", answersRes], ["answer-votes", answerVotesRes], ["replies", repliesRes]] as const) {
+      if ((res as any)?.error) console.error(`[groups/forum-polls] ${name} error:`, JSON.stringify((res as any).error));
+    }
+    const optionRows = (optionsRes as any).data;
+    const answerRows = (answersRes as any).data;
+    const answerVoteRows = (answerVotesRes as any).data;
+    const replyRows = (repliesRes as any).data;
     // Only answer_votes/replies for THIS batch of polls (we read all; filter in JS)
     const pollIdSet = new Set(pollIds);
     const answerIdByPoll = new Map<string, Set<string>>();
@@ -458,16 +466,18 @@ if (canViewContent && activeTab === "forums") {
       const votes = (voteRows ?? []).filter((v: any) => v.poll_id === p.id);
       const voters = votes.map((v: any) => voterById.get(v.profile_id)).filter(Boolean);
       const myVote = currentProfile ? votes.find((v: any) => v.profile_id === currentProfile.id) : null;
-      // Build comment list: sort by upvotes desc, then newest first
+      // Build comment list: sort by upvotes desc, then newest first.
+      // Don't drop answers whose profile join came back null — a deleted author
+      // or an unresolved embed shouldn't silently hide a real poll answer.
       const pollAnswers = (answerRows ?? [])
-        .filter((a: any) => a.poll_id === p.id && a.profiles)
+        .filter((a: any) => a.poll_id === p.id)
         .map((a: any) => {
           const ups = relevantVotes.filter((v: any) => v.answer_id === a.id);
           return {
             id: a.id,
             profileId: a.profile_id,
-            username: a.profiles.username,
-            avatarUrl: a.profiles.avatar_url,
+            username: a.profiles?.username ?? "unknown",
+            avatarUrl: a.profiles?.avatar_url ?? null,
             body: a.body,
             createdAt: a.created_at,
             edited: a.updated_at !== a.created_at,
