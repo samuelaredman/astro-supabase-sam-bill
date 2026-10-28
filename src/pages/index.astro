@@ -17,6 +17,7 @@ import { getPageUser } from '../utils/pageAuth';
 import { BADGES } from '../utils/badges';
 import { fetchCreatorContent } from '../utils/youtubeChannel';
 import { groupPath } from '../utils/groupSlug';
+import { LANDING_CTAS } from '../utils/landingCtas';
 
 const YOUTUBE_API_KEY = import.meta.env.YOUTUBE_API_KEY || (globalThis as any).process?.env?.YOUTUBE_API_KEY;
 
@@ -452,14 +453,25 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   <main class="feed">
 
     {!isLoggedIn && (
-      <div class="welcome-banner" id="welcomeBanner">
-        <div class="welcome-banner-body">
-          <div class="welcome-banner-text">
-            <strong>Welcome to Chekpoint</strong> — <span class="welcome-banner-full">a community-driven game review site where real players score, review, and discuss the games they've played.</span><span class="welcome-banner-short">game reviews by real players.</span>
-            <a href="/signup" class="welcome-banner-cta">Create a free account →</a>
+      <div class="welcome-hero" id="welcomeHero">
+        <button class="welcome-hero-dismiss" id="dismissWelcome" aria-label="Dismiss">✕</button>
+        <div class="welcome-hero-main">
+          <h2 class="welcome-hero-title">Honest game reviews, by real players</h2>
+          <p class="welcome-hero-desc">Chekpoint is a community game-review site — score games 1–10, write reviews, build lists, and follow reviewers whose taste matches yours. No algorithm deciding what you see.</p>
+          <div class="welcome-hero-chips">
+            <span class="welcome-hero-chip">Score &amp; review</span>
+            <span class="welcome-hero-chip">Build lists</span>
+            <span class="welcome-hero-chip">Follow reviewers</span>
           </div>
-          <button class="welcome-banner-dismiss" id="dismissWelcome" aria-label="Dismiss">✕</button>
         </div>
+        <div class="welcome-hero-cta">
+          <p class="welcome-hero-pitch" id="welcomeCtaPitch">Join a community that actually plays.</p>
+          <div class="welcome-hero-actions">
+            <a href="/signup" class="welcome-hero-btn" id="welcomeSignupBtn">Create a free account</a>
+            <a href="/signin" class="welcome-hero-signin">Have an account? Sign in</a>
+          </div>
+        </div>
+        <script type="application/json" id="ctaData" set:html={JSON.stringify(LANDING_CTAS)}></script>
       </div>
     )}
 
@@ -969,17 +981,87 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     })();
 
     (function () {
-      var banner = document.getElementById('welcomeBanner');
-      if (!banner) return;
-      if (localStorage.getItem('ck_welcome_dismissed')) { banner.style.display = 'none'; return; }
-      document.getElementById('dismissWelcome').addEventListener('click', function () {
-        localStorage.setItem('ck_welcome_dismissed', '1');
-        banner.style.display = 'none';
+      var hero = document.getElementById('welcomeHero');
+      if (!hero) return;
+
+      var DISMISS_KEY = 'ck_welcome_dismissed_until';
+      var CTA_KEY = 'ck_cta';
+      var DISMISS_MS = 7 * 24 * 60 * 60 * 1000;
+
+      // Re-nudge after 7 days: hide only while the dismissal is still fresh.
+      try {
+        var until = parseInt(localStorage.getItem(DISMISS_KEY) || '0', 10);
+        if (until && Date.now() < until) { hero.style.display = 'none'; return; }
+      } catch (e) {}
+
+      // Load the phrase list emitted alongside the hero.
+      var ctas = [];
+      try {
+        var dataEl = document.getElementById('ctaData');
+        if (dataEl) ctas = JSON.parse(dataEl.textContent || '[]');
+      } catch (e) {}
+      if (!ctas.length) return;
+
+      // Assign one CTA uniformly at random, then remember it so the same
+      // visitor sees the same phrase (and we can attribute a later signup).
+      var chosen = null;
+      try {
+        var saved = JSON.parse(localStorage.getItem(CTA_KEY) || 'null');
+        if (saved && saved.id) {
+          for (var i = 0; i < ctas.length; i++) { if (ctas[i].id === saved.id) { chosen = ctas[i]; break; } }
+        }
+      } catch (e) {}
+      if (!chosen) {
+        chosen = ctas[Math.floor(Math.random() * ctas.length)];
+        try { localStorage.setItem(CTA_KEY, JSON.stringify({ id: chosen.id, ts: Date.now() })); } catch (e) {}
+      }
+
+      var pitch = document.getElementById('welcomeCtaPitch');
+      if (pitch) pitch.textContent = chosen.text;
+
+      // Easter egg: on the "press F" phrase, pressing F jumps to signup
+      // (ignored while typing in a field, and when a modifier is held).
+      if (chosen.easterEgg === 'f-key') {
+        document.addEventListener('keydown', function (e) {
+          if (e.key !== 'f' && e.key !== 'F') return;
+          if (e.metaKey || e.ctrlKey || e.altKey) return;
+          var t = e.target;
+          var tag = t && t.tagName ? t.tagName.toLowerCase() : '';
+          if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+          window.location.href = '/signup';
+        });
+      }
+
+      var dismiss = document.getElementById('dismissWelcome');
+      if (dismiss) dismiss.addEventListener('click', function () {
+        try { localStorage.setItem(DISMISS_KEY, String(Date.now() + DISMISS_MS)); } catch (e) {}
+        hero.style.display = 'none';
       });
     })();
   </script>
 
   <script is:inline define:vars={{ isLoggedIn }}>
+    // Signup CTA attribution: a visitor who saw a landing nudge and has now
+    // signed up (same device) — record which phrase, once. The endpoint only
+    // writes for a just-created account, so a stale localStorage value is a
+    // harmless no-op.
+    if (isLoggedIn) {
+      (function () {
+        try {
+          if (localStorage.getItem('ck_cta_recorded')) return;
+          var saved = JSON.parse(localStorage.getItem('ck_cta') || 'null');
+          if (!saved || !saved.id) return;
+          fetch('/api/profile/signup-cta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cta: saved.id }),
+          }).then(function () {
+            try { localStorage.setItem('ck_cta_recorded', '1'); } catch (e) {}
+          }).catch(function () {});
+        } catch (e) {}
+      })();
+    }
+
     function openComposer() {
       document.getElementById('composer').style.display = 'block'
       document.getElementById('composerOverlay').style.display = 'block'
@@ -2056,23 +2138,29 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   .side-foot a:hover { color: var(--text-secondary); }
   .side-foot-copy { font-size: 12px; color: var(--text-tertiary); line-height: 1.5; }
 
-  .welcome-banner { background: var(--accent-subtle); border-bottom: 1px solid var(--border); }
-  .welcome-banner-body { display: flex; align-items: center; gap: 12px; padding: 12px 20px; }
-  .welcome-banner-text { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
-  .welcome-banner-text strong { color: var(--text-primary); }
-  .welcome-banner-cta { display: inline-block; margin-left: 10px; color: var(--accent); font-weight: 500; white-space: nowrap; }
-  .welcome-banner-cta:hover { text-decoration: underline; }
-  .welcome-banner-short { display: none; }
-  /* Phones: shorter tagline + tighter padding so the banner costs ~2 lines, not ~4. */
-  @media (max-width: 640px) {
-    .welcome-banner-full { display: none; }
-    .welcome-banner-short { display: inline; }
-    .welcome-banner-body { padding: 10px 16px; gap: 8px; }
-    .welcome-banner-text { font-size: 12.5px; }
-    .welcome-banner-cta { margin-left: 0; }
+  /* Logged-out landing nudge: explains the site + a rotating sign-up hook.
+     Soft (dismissible, re-nudges after 7 days) — the feed stays below it. */
+  .welcome-hero { position: relative; display: flex; align-items: center; gap: 24px; padding: 18px 44px 18px 20px; background: var(--accent-subtle); border-bottom: 1px solid var(--border); }
+  .welcome-hero-main { flex: 1; min-width: 0; }
+  .welcome-hero-title { margin: 0 0 6px; font-size: 19px; font-weight: 700; line-height: 1.25; color: var(--text-primary); }
+  .welcome-hero-desc { margin: 0 0 12px; font-size: 13.5px; line-height: 1.55; color: var(--text-secondary); }
+  .welcome-hero-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .welcome-hero-chip { font-size: 12px; font-weight: 500; color: var(--text-secondary); background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+  .welcome-hero-cta { flex-shrink: 0; width: 250px; display: flex; flex-direction: column; gap: 10px; }
+  .welcome-hero-pitch { margin: 0; font-size: 14.5px; font-weight: 600; line-height: 1.35; color: var(--text-primary); }
+  .welcome-hero-actions { display: flex; flex-direction: column; gap: 6px; }
+  .welcome-hero-btn { display: inline-flex; align-items: center; justify-content: center; padding: 10px 16px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; font-size: 14px; text-align: center; transition: filter 0.15s; }
+  .welcome-hero-btn:hover { filter: brightness(1.08); }
+  .welcome-hero-signin { font-size: 12.5px; text-align: center; color: var(--text-secondary); }
+  .welcome-hero-signin:hover { color: var(--accent); text-decoration: underline; }
+  .welcome-hero-dismiss { position: absolute; top: 8px; right: 8px; display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 36px; background: none; border: none; color: var(--text-tertiary); font-size: 14px; cursor: pointer; border-radius: 6px; line-height: 1; transition: color 0.15s; }
+  .welcome-hero-dismiss:hover { color: var(--text-primary); }
+  /* Phones: stack the two columns so the nudge stays short above the feed. */
+  @media (max-width: 768px) {
+    .welcome-hero { flex-direction: column; align-items: stretch; gap: 14px; padding: 16px; }
+    .welcome-hero-title { padding-right: 32px; font-size: 18px; }
+    .welcome-hero-cta { width: auto; }
   }
-  .welcome-banner-dismiss { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; margin: -8px -8px -8px 0; background: none; border: none; color: var(--text-tertiary); font-size: 14px; cursor: pointer; border-radius: 4px; line-height: 1; transition: color 0.15s; }
-  .welcome-banner-dismiss:hover { color: var(--text-primary); }
 
   /* ── "+ Post" dropdown in the feed header ── */
   .post-menu-wrap { position: relative; }
