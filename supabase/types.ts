@@ -431,6 +431,41 @@ export type Database = {
         }
         Relationships: []
       }
+      game_aliases: {
+        Row: {
+          created_at: string
+          game_id: string
+          id: string
+          igdb_id: number | null
+          source: string
+          title: string
+        }
+        Insert: {
+          created_at?: string
+          game_id: string
+          id?: string
+          igdb_id?: number | null
+          source?: string
+          title: string
+        }
+        Update: {
+          created_at?: string
+          game_id?: string
+          id?: string
+          igdb_id?: number | null
+          source?: string
+          title?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "game_aliases_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       game_collections: {
         Row: {
           collection_id: string
@@ -1295,18 +1330,21 @@ export type Database = {
       }
       group_poll_options: {
         Row: {
+          color: string | null
           id: string
           label: string
           poll_id: string
           position: number
         }
         Insert: {
+          color?: string | null
           id?: string
           label: string
           poll_id: string
           position?: number
         }
         Update: {
+          color?: string | null
           id?: string
           label?: string
           poll_id?: string
@@ -1373,8 +1411,10 @@ export type Database = {
           closed: boolean
           created_at: string
           featured_game_id: string | null
+          game_id: string | null
           group_id: string
           id: string
+          pinned: boolean
           profile_id: string
           question: string
         }
@@ -1382,8 +1422,10 @@ export type Database = {
           closed?: boolean
           created_at?: string
           featured_game_id?: string | null
+          game_id?: string | null
           group_id: string
           id?: string
+          pinned?: boolean
           profile_id: string
           question: string
         }
@@ -1391,8 +1433,10 @@ export type Database = {
           closed?: boolean
           created_at?: string
           featured_game_id?: string | null
+          game_id?: string | null
           group_id?: string
           id?: string
+          pinned?: boolean
           profile_id?: string
           question?: string
         }
@@ -1402,6 +1446,13 @@ export type Database = {
             columns: ["featured_game_id"]
             isOneToOne: false
             referencedRelation: "group_featured_games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_polls_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
             referencedColumns: ["id"]
           },
           {
@@ -1612,6 +1663,7 @@ export type Database = {
       }
       groups: {
         Row: {
+          accent_color: string | null
           avatar_url: string | null
           banner_position: string
           banner_url: string | null
@@ -1625,6 +1677,9 @@ export type Database = {
           name: string
           overview_hidden: string[] | null
           overview_order: string[]
+          polls_everyone: boolean
+          polls_showcase_mode: string
+          polls_showcase_poll_id: string | null
           requires_approval: boolean
           showcase_video_id: string | null
           showcase_video_mode: string | null
@@ -1633,6 +1688,7 @@ export type Database = {
           visibility: string
         }
         Insert: {
+          accent_color?: string | null
           avatar_url?: string | null
           banner_position?: string
           banner_url?: string | null
@@ -1646,6 +1702,9 @@ export type Database = {
           name: string
           overview_hidden?: string[] | null
           overview_order?: string[]
+          polls_everyone?: boolean
+          polls_showcase_mode?: string
+          polls_showcase_poll_id?: string | null
           requires_approval?: boolean
           showcase_video_id?: string | null
           showcase_video_mode?: string | null
@@ -1654,6 +1713,7 @@ export type Database = {
           visibility?: string
         }
         Update: {
+          accent_color?: string | null
           avatar_url?: string | null
           banner_position?: string
           banner_url?: string | null
@@ -1667,6 +1727,9 @@ export type Database = {
           name?: string
           overview_hidden?: string[] | null
           overview_order?: string[]
+          polls_everyone?: boolean
+          polls_showcase_mode?: string
+          polls_showcase_poll_id?: string | null
           requires_approval?: boolean
           showcase_video_id?: string | null
           showcase_video_mode?: string | null
@@ -1680,6 +1743,13 @@ export type Database = {
             columns: ["created_by"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "groups_polls_showcase_poll_id_fkey"
+            columns: ["polls_showcase_poll_id"]
+            isOneToOne: false
+            referencedRelation: "group_polls"
             referencedColumns: ["id"]
           },
         ]
@@ -2141,8 +2211,11 @@ export type Database = {
           description: string | null
           id: string
           is_ranked: boolean
+          last_posted_to_feed_at: string | null
           profile_id: string
           shared_to_feed: boolean
+          show_achievements: boolean
+          show_hours: boolean
           title: string
           updated_at: string
           visibility: string
@@ -2154,8 +2227,11 @@ export type Database = {
           description?: string | null
           id?: string
           is_ranked?: boolean
+          last_posted_to_feed_at?: string | null
           profile_id: string
           shared_to_feed?: boolean
+          show_achievements?: boolean
+          show_hours?: boolean
           title: string
           updated_at?: string
           visibility?: string
@@ -2167,8 +2243,11 @@ export type Database = {
           description?: string | null
           id?: string
           is_ranked?: boolean
+          last_posted_to_feed_at?: string | null
           profile_id?: string
           shared_to_feed?: boolean
+          show_achievements?: boolean
+          show_hours?: boolean
           title?: string
           updated_at?: string
           visibility?: string
@@ -2463,6 +2542,7 @@ export type Database = {
           showcase_order: string[]
           showcase_video_id: string | null
           showcase_video_mode: string | null
+          signup_cta: string | null
           steam_id: string | null
           steam_reviews_import_done_at: string | null
           steam_synced_at: string | null
@@ -2537,6 +2617,7 @@ export type Database = {
           showcase_order?: string[]
           showcase_video_id?: string | null
           showcase_video_mode?: string | null
+          signup_cta?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
@@ -2611,6 +2692,7 @@ export type Database = {
           showcase_order?: string[]
           showcase_video_id?: string | null
           showcase_video_mode?: string | null
+          signup_cta?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
@@ -3360,6 +3442,75 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      reviews_backup_20261026: {
+        Row: {
+          body: string | null
+          contains_spoilers: boolean | null
+          created_at: string | null
+          edited: boolean | null
+          game_id: string | null
+          id: string | null
+          platform_played_on: string | null
+          play_time_days: number | null
+          play_time_hours: number | null
+          play_time_months: number | null
+          play_time_weeks: number | null
+          play_time_years: number | null
+          profile_id: string | null
+          published_at: string | null
+          revision_id: string | null
+          score: number | null
+          status: string | null
+          title: string | null
+          updated_at: string | null
+          youtube_video_id: string | null
+        }
+        Insert: {
+          body?: string | null
+          contains_spoilers?: boolean | null
+          created_at?: string | null
+          edited?: boolean | null
+          game_id?: string | null
+          id?: string | null
+          platform_played_on?: string | null
+          play_time_days?: number | null
+          play_time_hours?: number | null
+          play_time_months?: number | null
+          play_time_weeks?: number | null
+          play_time_years?: number | null
+          profile_id?: string | null
+          published_at?: string | null
+          revision_id?: string | null
+          score?: number | null
+          status?: string | null
+          title?: string | null
+          updated_at?: string | null
+          youtube_video_id?: string | null
+        }
+        Update: {
+          body?: string | null
+          contains_spoilers?: boolean | null
+          created_at?: string | null
+          edited?: boolean | null
+          game_id?: string | null
+          id?: string | null
+          platform_played_on?: string | null
+          play_time_days?: number | null
+          play_time_hours?: number | null
+          play_time_months?: number | null
+          play_time_weeks?: number | null
+          play_time_years?: number | null
+          profile_id?: string | null
+          published_at?: string | null
+          revision_id?: string | null
+          score?: number | null
+          status?: string | null
+          title?: string | null
+          updated_at?: string | null
+          youtube_video_id?: string | null
+        }
+        Relationships: []
       }
       reviews_repoint_backup_20260909: {
         Row: {
