@@ -6,7 +6,7 @@ export const POST: APIRoute = async (context) => {
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { group_id, question, options, game_id } = await context.request.json();
+  const { group_id, question, options, colors, game_id } = await context.request.json();
   if (!group_id || !question?.trim())
     return json({ error: "group_id and question are required" }, 400);
   if (question.trim().length > 300)
@@ -17,6 +17,15 @@ export const POST: APIRoute = async (context) => {
     : [];
   if (cleanOptions.length < 2 || cleanOptions.length > 6)
     return json({ error: "A poll needs between 2 and 6 options" }, 400);
+
+  // Colors are optional; validate each as #rrggbb and align by index to options
+  const colorHex = /^#[0-9a-f]{6}$/i;
+  const cleanColors: (string | null)[] = cleanOptions.map((_, i) => {
+    const raw = Array.isArray(colors) ? colors[i] : null;
+    if (typeof raw !== "string" || !raw) return null;
+    if (!colorHex.test(raw)) return null;
+    return raw.toLowerCase();
+  });
 
   const membership = await getGroupAuthority(db, group_id, profile.id);
   if (!membership) return json({ error: "Not a member of this group" }, 403);
@@ -51,7 +60,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   const { error: optError } = await db.from("group_poll_options").insert(
-    cleanOptions.map((label, i) => ({ poll_id: poll.id, label, position: i }))
+    cleanOptions.map((label, i) => ({ poll_id: poll.id, label, position: i, color: cleanColors[i] } as any))
   );
   if (optError) {
     console.error("[groups/polls/create] option insert error:", JSON.stringify(optError));

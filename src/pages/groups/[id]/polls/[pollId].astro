@@ -68,7 +68,7 @@ if (poll.featured_game_id) {
 
 // Options, votes, voters, answers, answer-votes, replies — same batch pattern as the forum list
 const [{ data: optionRows }, { data: voteRows }, { data: answerRows }, { data: answerVoteRows }, { data: replyRows }] = await Promise.all([
-  db.from("group_poll_options").select("id, poll_id, label, position")
+  db.from("group_poll_options").select("id, poll_id, label, position, color")
     .eq("poll_id", pollId).order("position", { ascending: true }),
   db.from("group_poll_votes").select("poll_id, option_id, profile_id").eq("poll_id", pollId),
   db.from("group_poll_answers")
@@ -106,6 +106,34 @@ const options = (optionRows ?? []).map((o: any) => {
   const count = (voteRows ?? []).filter((v: any) => v.option_id === o.id).length;
   return { ...o, count, isWinner: topCount > 0 && count === topCount && winnersWithTopCount === 1 };
 });
+
+const POLL_SLICE_COLORS = ['#6050c8', '#22c55e', '#f0b429', '#ef4444', '#06b6d4', '#ec4899'];
+function pieSlices(opts: any[], total: number) {
+  if (total === 0) return [] as any[];
+  const r = 48, cx = 50, cy = 50;
+  const withVotes = opts.filter((o: any) => o.count > 0);
+  if (withVotes.length === 1) {
+    const o = withVotes[0];
+    const color = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+    return [{
+      path: `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`,
+      color, pct: 1, label: o.label, count: o.count,
+    }];
+  }
+  let a = -Math.PI / 2;
+  return withVotes.map((o: any) => {
+    const pct = o.count / total;
+    const b = a + pct * 2 * Math.PI;
+    const sx = cx + r * Math.cos(a), sy = cy + r * Math.sin(a);
+    const ex = cx + r * Math.cos(b), ey = cy + r * Math.sin(b);
+    const largeArc = pct > 0.5 ? 1 : 0;
+    const path = `M ${cx} ${cy} L ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey} Z`;
+    const color = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+    a = b;
+    return { path, color, pct, label: o.label, count: o.count };
+  });
+}
+const slices = pieSlices(options, totalVotes);
 
 const myAnswerRow = currentProfile ? (answerRows ?? []).find((a: any) => a.profile_id === currentProfile.id) ?? null : null;
 const answers = (answerRows ?? [])
@@ -191,20 +219,43 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
             ? options.map((o: any) => {
                 const pct = totalVotes > 0 ? Math.round((o.count / totalVotes) * 100) : 0;
                 const isMine = o.id === myOptionId;
+                const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
                 return (
                   <div class={`fp-opt-result${isMine ? " voted" : ""}${o.isWinner ? " winner" : ""}`}>
-                    <div class="fp-opt-bar" style={`width:${pct}%`}></div>
-                    <span class="fp-opt-label">{isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}</span>
+                    <div class="fp-opt-bar" style={`width:${pct}%;background:${sliceColor}22`}></div>
+                    <span class="fp-opt-label">
+                      <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>
+                      {isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}
+                    </span>
                     <span class="fp-opt-pct"><strong>{pct}%</strong><span class="fp-opt-count">· {o.count}</span></span>
                   </div>
                 );
               })
-            : options.map((o: any) => (
-                <button class="fp-opt-vote" onclick={`votePoll('${poll.id}', '${o.id}')`} disabled={poll.closed}>
-                  <span class="fp-opt-vote-dot"></span>{o.label}
-                </button>
-              ))
+            : options.map((o: any) => {
+                const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+                return (
+                  <button class="fp-opt-vote" onclick={`votePoll('${poll.id}', '${o.id}')`} disabled={poll.closed}>
+                    <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>{o.label}
+                  </button>
+                );
+              })
           }
+        </div>
+
+        <div class="fp-pie-wrap">
+          <svg class="fp-pie" viewBox="0 0 100 100">
+            {slices.length === 0
+              ? <circle cx="50" cy="50" r="48" fill="none" stroke="var(--border)" stroke-width="2" stroke-dasharray="3 3" />
+              : slices.map((s: any) => (
+                  <path d={s.path} fill={s.color}>
+                    <title>{s.label}: {Math.round(s.pct * 100)}% ({s.count})</title>
+                  </path>
+                ))
+            }
+            <circle cx="50" cy="50" r="22" fill="var(--bg-card)" />
+            <text x="50" y="48" text-anchor="middle" font-size="15" font-weight="700" fill="var(--text-primary)" dominant-baseline="middle">{totalVotes}</text>
+            <text x="50" y="62" text-anchor="middle" font-size="7" fill="var(--text-tertiary)" dominant-baseline="middle" style="text-transform:uppercase;letter-spacing:.08em;font-weight:700">vote{totalVotes !== 1 ? "s" : ""}</text>
+          </svg>
         </div>
 
         {game && (
@@ -274,12 +325,13 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
   .poll-breadcrumbs a{color:inherit;text-decoration:none}
   .poll-breadcrumbs a:hover{color:var(--accent)}
 
-  /* Full-page poll card — same visuals as fp-poll but with a 3-col body */
+  /* Full-page poll card — options · pie · (game cover) */
   .fp-poll-full{padding:20px 22px}
   .fp-poll-full .fp-poll-question{font-size:22px;line-height:1.25;margin:4px 0 16px}
-  .poll-full-body{display:grid;grid-template-columns:1fr;gap:16px}
-  .fp-poll-full:has(.fp-poll-gamecard) .poll-full-body{grid-template-columns:1fr 160px}
+  .poll-full-body{display:grid;grid-template-columns:minmax(0,1fr) 140px;gap:20px;align-items:start}
+  .fp-poll-full:has(.fp-poll-gamecard) .poll-full-body{grid-template-columns:minmax(0,1fr) 140px 170px}
   .poll-full-body .fp-poll-gamecard{aspect-ratio:3/4;min-height:200px}
+  .poll-full-body .fp-pie{width:140px;height:140px}
   .poll-full-voters{display:flex;align-items:center;gap:12px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-subtle);flex-wrap:wrap}
   .poll-full-voters-label{font-size:12px;color:var(--text-tertiary);font-weight:600}
 
@@ -289,7 +341,9 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
   .poll-thread-empty{text-align:center;padding:24px;font-size:13px;color:var(--text-tertiary);background:var(--bg-card);border:1px dashed var(--border);border-radius:12px}
 
   @media (max-width: 640px){
-    .fp-poll-full:has(.fp-poll-gamecard) .poll-full-body{grid-template-columns:1fr}
+    .poll-full-body,
+    .fp-poll-full:has(.fp-poll-gamecard) .poll-full-body{grid-template-columns:1fr;gap:14px}
+    .poll-full-body .fp-pie{margin:0 auto}
     .poll-full-body .fp-poll-gamecard{aspect-ratio:16/9;min-height:140px;max-height:180px}
     .poll-full-body .fp-poll-gamecard img{object-position:center 25%}
   }

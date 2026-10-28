@@ -191,6 +191,38 @@ if (!canEditOverview && authority?.custom_role_id) {
 // Who can create forum polls: everyone who can already edit the group, plus any
 // member if the owner has flipped the polls_everyone switch in group settings.
 const canPostPoll = canEditOverview || (!!(group as any).polls_everyone && isMember);
+
+// Pie chart colors — fallback palette used when the poll creator didn't pick a
+// color for an option. Also lives in the inline JS so the create form can offer
+// matching defaults.
+const POLL_SLICE_COLORS = ['#6050c8', '#22c55e', '#f0b429', '#ef4444', '#06b6d4', '#ec4899'];
+function pieSlices(options: any[], total: number) {
+  if (total === 0) return [] as { path: string; color: string; pct: number; label: string; count: number }[];
+  const r = 48, cx = 50, cy = 50;
+  const withVotes = options.filter((o: any) => o.count > 0);
+  // A single 100% slice can't be drawn as a wedge (the arc degenerates); use two
+  // semicircles glued into a full circle instead.
+  if (withVotes.length === 1) {
+    const o = withVotes[0];
+    const color = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+    return [{
+      path: `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`,
+      color, pct: 1, label: o.label, count: o.count,
+    }];
+  }
+  let a = -Math.PI / 2;
+  return withVotes.map((o: any) => {
+    const pct = o.count / total;
+    const b = a + pct * 2 * Math.PI;
+    const sx = cx + r * Math.cos(a), sy = cy + r * Math.sin(a);
+    const ex = cx + r * Math.cos(b), ey = cy + r * Math.sin(b);
+    const largeArc = pct > 0.5 ? 1 : 0;
+    const path = `M ${cx} ${cy} L ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey} Z`;
+    const color = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+    a = b;
+    return { path, color, pct, label: o.label, count: o.count };
+  });
+}
 const overviewOrder = readGroupShowcaseOrder(group.overview_order);
 const overviewHidden = readGroupShowcaseHidden(group.overview_hidden, group.stats_config as any);
 const overviewMain = showcaseColumn(overviewOrder, "main");
@@ -384,7 +416,7 @@ if (canViewContent && activeTab === "forums") {
     // Options, votes, and the full comment thread (answers + answer-votes + replies)
     // for every poll — all reused from the featured-game poll endpoints.
     const [{ data: optionRows }, voteRows, { data: answerRows }, { data: answerVoteRows }, { data: replyRows }] = await Promise.all([
-      db.from("group_poll_options").select("id, poll_id, label, position")
+      db.from("group_poll_options").select("id, poll_id, label, position, color")
         .in("poll_id", pollIds).order("position", { ascending: true }),
       fetchAll((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
         .in("poll_id", pollIds).order("id").range(from, to)),
@@ -1129,19 +1161,35 @@ const groupOgDescription = group.description
   /* Question */
   .fp-poll-question{font-size:16px;font-weight:700;line-height:1.3;margin:2px 0 10px;color:var(--text-primary);letter-spacing:-.01em}
 
-  /* Body: options on the left, game cover in the middle, comments on the right.
-     No hard borders between columns — just whitespace. */
-  .fp-poll-body{display:grid;grid-template-columns:1fr;gap:16px;align-items:stretch}
-  .fp-poll[data-cols="game"] .fp-poll-body{grid-template-columns:minmax(0,1fr) 128px}
-  .fp-poll[data-cols="comments"] .fp-poll-body{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr)}
-  .fp-poll[data-cols="both"] .fp-poll-body{grid-template-columns:minmax(0,1.4fr) 128px minmax(0,1fr)}
+  /* Body: options · pie chart · game cover · comments preview — no hard borders. */
+  .fp-poll-body{display:grid;grid-template-columns:minmax(0,1fr) 108px;gap:16px;align-items:stretch}
+  .fp-poll[data-cols="game"] .fp-poll-body{grid-template-columns:minmax(0,1fr) 108px 128px}
+  .fp-poll[data-cols="comments"] .fp-poll-body{grid-template-columns:minmax(0,1.3fr) 108px minmax(0,1fr)}
+  .fp-poll[data-cols="both"] .fp-poll-body{grid-template-columns:minmax(0,1.3fr) 108px 128px minmax(0,1fr)}
+
+  /* Pie chart — SVG with a hollow center showing the total */
+  .fp-pie-wrap{display:flex;align-items:center;justify-content:center;min-width:0}
+  .fp-pie{width:108px;height:108px;max-width:100%;max-height:100%;display:block}
+  .fp-pie path{transition:opacity .12s;cursor:default}
+  .fp-pie:hover path{opacity:.65}
+  .fp-pie path:hover{opacity:1}
+
+  /* Color dot next to each option (matches its pie slice) */
+  .fp-opt-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;display:inline-block}
+
+  /* Color + text input pair in the create form */
+  .fp-opt-input-row{display:flex;align-items:center;gap:8px}
+  .fp-opt-color{width:34px;height:34px;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);cursor:pointer;flex-shrink:0}
+  .fp-opt-color::-webkit-color-swatch-wrapper{padding:3px;border-radius:6px}
+  .fp-opt-color::-webkit-color-swatch{border:none;border-radius:5px}
+  .fp-opt-color::-moz-color-swatch{border:none;border-radius:5px}
+  .fp-opt-input-row .forum-poll-option-input{flex:1}
 
   .fp-poll-options{display:flex;flex-direction:column;gap:6px;min-width:0}
   .fp-opt-vote{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:var(--bg-hover);border:1px solid var(--border);border-radius:10px;padding:9px 12px;font-size:13px;font-family:inherit;color:var(--text-primary);cursor:pointer;transition:border-color .12s,background .12s,transform .08s}
   .fp-opt-vote:hover:not(:disabled){border-color:var(--accent);background:var(--bg-card);transform:translateX(2px)}
   .fp-opt-vote:disabled{cursor:default;opacity:.6}
-  .fp-opt-vote-dot{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--text-tertiary);flex-shrink:0;transition:border-color .12s}
-  .fp-opt-vote:hover:not(:disabled) .fp-opt-vote-dot{border-color:var(--accent)}
+  .fp-opt-vote .fp-opt-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
   .fp-opt-result{position:relative;border:1px solid var(--border);border-radius:10px;padding:9px 12px;font-size:13px;display:flex;justify-content:space-between;align-items:center;gap:10px;overflow:hidden;background:var(--bg-hover)}
   .fp-opt-bar{position:absolute;inset:0;background:var(--accent-subtle);z-index:0;border-radius:9px 0 0 9px;transition:width .3s ease}
   .fp-opt-label{position:relative;z-index:1;color:var(--text-primary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;display:inline-flex;align-items:center;gap:6px}
@@ -1201,16 +1249,23 @@ const groupOgDescription = group.description
   .fp-poll-reply-row{display:flex;align-items:center;gap:10px}
   .fp-poll-reply-err{font-size:11px;color:#f87171;margin:0}
 
-  @media (max-width: 820px){
-    .fp-poll[data-cols="both"] .fp-poll-body{grid-template-columns:minmax(0,1fr) 110px}
+  @media (max-width: 900px){
+    .fp-poll[data-cols="both"] .fp-poll-body{grid-template-columns:minmax(0,1fr) 100px 110px}
     .fp-poll[data-cols="both"] .fp-comments-preview{grid-column:1 / -1}
   }
-  @media (max-width: 540px){
+  @media (max-width: 680px){
     .fp-poll[data-cols="both"] .fp-poll-body,
-    .fp-poll[data-cols="game"] .fp-poll-body,
-    .fp-poll[data-cols="comments"] .fp-poll-body{grid-template-columns:1fr;gap:10px}
-    .fp-poll-gamecard{aspect-ratio:16/9;min-height:120px;max-height:160px}
-    .fp-poll-gamecard img{object-position:center 25%}
+    .fp-poll[data-cols="game"] .fp-poll-body{grid-template-columns:minmax(0,1fr) 90px}
+    .fp-poll[data-cols="both"] .fp-poll-gamecard,
+    .fp-poll[data-cols="game"] .fp-poll-gamecard{grid-column:1 / -1;aspect-ratio:16/9;min-height:120px;max-height:160px}
+    .fp-poll[data-cols="both"] .fp-poll-gamecard img,
+    .fp-poll[data-cols="game"] .fp-poll-gamecard img{object-position:center 25%}
+    .fp-poll[data-cols="comments"] .fp-poll-body{grid-template-columns:minmax(0,1fr) 90px}
+    .fp-poll[data-cols="comments"] .fp-comments-preview{grid-column:1 / -1}
+  }
+  @media (max-width: 420px){
+    .fp-poll .fp-poll-body{grid-template-columns:1fr !important;gap:12px}
+    .fp-poll .fp-pie{margin:0 auto}
   }
 
   /* Game picker inside the create-poll form */
@@ -2871,9 +2926,16 @@ const groupOgDescription = group.description
               <div id="forum-poll-game-results" class="fp-game-results"></div>
             </div>
           </div>
-          <div id="forum-poll-options" style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
-            <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
-            <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
+          <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Options <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-tertiary)">· pick a color for each slice of the pie</span></div>
+          <div id="forum-poll-options" style="display:flex;flex-direction:column;gap:6px">
+            <div class="fp-opt-input-row">
+              <input class="fp-opt-color" type="color" value="#6050c8" title="Slice color" />
+              <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
+            </div>
+            <div class="fp-opt-input-row">
+              <input class="fp-opt-color" type="color" value="#22c55e" title="Slice color" />
+              <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
+            </div>
           </div>
           <div class="compose-row">
             <button class="btn-copy" style="font-size:11px;padding:5px 10px" onclick="addPollOption('forum-')">+ Option</button>
@@ -2905,6 +2967,7 @@ const groupOgDescription = group.description
           const extraVoters = Math.max(0, voters.length - voterStrip.length);
           const previewComments = (p.answers ?? []).slice(0, 3);
           const pollPageHref = `/groups/${group.id}/polls/${p.id}`;
+          const slices = pieSlices(p.options, p.totalVotes);
           const bodyCols = game && previewComments.length ? "both"
             : game ? "game"
             : previewComments.length ? "comments"
@@ -2947,20 +3010,43 @@ const groupOgDescription = group.description
                     ? p.options.map((o: any) => {
                         const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
                         const isMine = o.id === p.myOptionId;
+                        const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
                         return (
                           <div class={`fp-opt-result${isMine ? " voted" : ""}${o.isWinner ? " winner" : ""}`}>
-                            <div class="fp-opt-bar" style={`width:${pct}%`}></div>
-                            <span class="fp-opt-label">{isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}</span>
+                            <div class="fp-opt-bar" style={`width:${pct}%;background:${sliceColor}22`}></div>
+                            <span class="fp-opt-label">
+                              <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>
+                              {isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}
+                            </span>
                             <span class="fp-opt-pct"><strong>{pct}%</strong><span class="fp-opt-count">· {o.count}</span></span>
                           </div>
                         );
                       })
-                    : p.options.map((o: any) => (
-                        <button class="fp-opt-vote" onclick={`votePoll('${p.id}', '${o.id}')`} disabled={p.closed}>
-                          <span class="fp-opt-vote-dot"></span>{o.label}
-                        </button>
-                      ))
+                    : p.options.map((o: any) => {
+                        const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+                        return (
+                          <button class="fp-opt-vote" onclick={`votePoll('${p.id}', '${o.id}')`} disabled={p.closed}>
+                            <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>{o.label}
+                          </button>
+                        );
+                      })
                   }
+                </div>
+
+                <div class="fp-pie-wrap" aria-label={`Poll results: ${p.totalVotes} vote${p.totalVotes !== 1 ? "s" : ""}`}>
+                  <svg class="fp-pie" viewBox="0 0 100 100">
+                    {slices.length === 0
+                      ? <circle cx="50" cy="50" r="48" fill="none" stroke="var(--border)" stroke-width="2" stroke-dasharray="3 3" />
+                      : slices.map((s: any) => (
+                          <path d={s.path} fill={s.color}>
+                            <title>{s.label}: {Math.round(s.pct * 100)}% ({s.count})</title>
+                          </path>
+                        ))
+                    }
+                    <circle cx="50" cy="50" r="22" fill="var(--bg-card)" />
+                    <text x="50" y="48" text-anchor="middle" font-size="15" font-weight="700" fill="var(--text-primary)" dominant-baseline="middle">{p.totalVotes}</text>
+                    <text x="50" y="62" text-anchor="middle" font-size="7" fill="var(--text-tertiary)" dominant-baseline="middle" style="text-transform:uppercase;letter-spacing:.08em;font-weight:700">vote{p.totalVotes !== 1 ? "s" : ""}</text>
+                  </svg>
                 </div>
 
                 {game && (
@@ -3654,6 +3740,7 @@ function togglePollForm(prefix) {
 }
 window.togglePollForm = togglePollForm;
 
+const POLL_SLICE_COLORS = ['#6050c8', '#22c55e', '#f0b429', '#ef4444', '#06b6d4', '#ec4899'];
 function addPollOption(prefix) {
   prefix = prefix || '';
   const container = document.getElementById(prefix + 'poll-options');
@@ -3661,13 +3748,22 @@ function addPollOption(prefix) {
   const optClass = prefix + 'poll-option-input';
   const inputs = container.querySelectorAll('.' + optClass);
   if (inputs.length >= 6) return;
+  const row = document.createElement('div');
+  row.className = 'fp-opt-input-row';
+  const color = document.createElement('input');
+  color.type = 'color';
+  color.className = 'fp-opt-color';
+  color.title = 'Slice color';
+  color.value = POLL_SLICE_COLORS[inputs.length % POLL_SLICE_COLORS.length];
   const input = document.createElement('input');
   input.className = 'compose-input ' + optClass;
   input.style.minHeight = 'auto';
   input.type = 'text';
   input.maxLength = 80;
   input.placeholder = `Option ${inputs.length + 1}`;
-  container.appendChild(input);
+  row.appendChild(color);
+  row.appendChild(input);
+  container.appendChild(row);
 }
 window.addPollOption = addPollOption;
 
@@ -3677,7 +3773,17 @@ async function createPoll(prefix) {
   const errEl = document.getElementById(prefix + 'poll-err');
   const question = questionEl?.value?.trim();
   const optClass = prefix + 'poll-option-input';
-  const options = Array.from(document.querySelectorAll('.' + optClass)).map(i => i.value.trim()).filter(Boolean);
+  const optionInputs = Array.from(document.querySelectorAll('.' + optClass));
+  const options = [];
+  const colors = [];
+  for (const input of optionInputs) {
+    const label = input.value.trim();
+    if (!label) continue;
+    options.push(label);
+    // Each option-input lives inside .fp-opt-input-row with a sibling .fp-opt-color
+    const colorInput = input.closest('.fp-opt-input-row')?.querySelector('.fp-opt-color');
+    colors.push(colorInput?.value || null);
+  }
   if (errEl) errEl.style.display = 'none';
   if (!question) { if (errEl) { errEl.textContent = 'Add a question'; errEl.style.display = 'block'; } return; }
   if (options.length < 2) { if (errEl) { errEl.textContent = 'Add at least 2 options'; errEl.style.display = 'block'; } return; }
@@ -3685,7 +3791,7 @@ async function createPoll(prefix) {
   const game_id = prefix === 'forum-' ? (window.__forumPollGameId || null) : null;
   const res = await fetch('/api/groups/polls/create', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, question, options, game_id }),
+    body: JSON.stringify({ group_id: groupData.id, question, options, colors, game_id }),
   });
   if (res.ok) window.location.reload();
   else {

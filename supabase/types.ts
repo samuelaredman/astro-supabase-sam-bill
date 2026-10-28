@@ -1330,18 +1330,21 @@ export type Database = {
       }
       group_poll_options: {
         Row: {
+          color: string | null
           id: string
           label: string
           poll_id: string
           position: number
         }
         Insert: {
+          color?: string | null
           id?: string
           label: string
           poll_id: string
           position?: number
         }
         Update: {
+          color?: string | null
           id?: string
           label?: string
           poll_id?: string
