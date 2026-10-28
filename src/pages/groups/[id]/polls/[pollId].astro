@@ -3,13 +3,14 @@ export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../../utils/database";
 import Layout from "../../../../components/Layout.astro";
 import ProfileBadge from "../../../../components/ProfileBadge.astro";
-import PollAnswer from "../../../../components/groups/PollAnswer.astro";
+import CommentThread from "../../../../components/CommentThread.astro";
 import { readBadgeSlugs } from "../../../../utils/badges";
 import { timeAgo, igdbImage as igdbCover } from "../../../../utils/format";
 import { getGroupAuthority } from "../../../../utils/api";
 import { getPageUser } from "../../../../utils/pageAuth";
-import { POLL_ANSWER_MAX } from "../../../../utils/groupFeaturedGames";
+import type { CommentData } from "../../../../utils/comments";
 import "../../../../styles/forum-poll.css";
+import "../../../../styles/comments.css";
 
 const groupId = Astro.params.id;
 const pollId = Astro.params.pollId;
@@ -137,29 +138,39 @@ function pieSlices(opts: any[], total: number) {
 const slices = pieSlices(options, totalVotes);
 
 const myAnswerRow = currentProfile ? (answerRows ?? []).find((a: any) => a.profile_id === currentProfile.id) ?? null : null;
-const answers = (answerRows ?? [])
+// Shape poll answers into CommentData for the shared CommentThread component.
+const canManagePoll = isAdminOrOwner || poll.profile_id === currentProfile?.id;
+const comments: CommentData[] = (answerRows ?? [])
   .filter((a: any) => a.profiles)
-  .map((a: any) => {
+  .map((a: any): CommentData => {
     const ups = relevantAnswerVotes.filter((v: any) => v.answer_id === a.id);
+    const isMine = currentProfile?.id === a.profile_id;
     return {
       id: a.id,
-      profileId: a.profile_id,
-      username: a.profiles.username,
-      avatarUrl: a.profiles.avatar_url,
+      author: {
+        id: a.profile_id,
+        username: a.profiles.username,
+        avatarUrl: a.profiles.avatar_url,
+      },
       body: a.body,
       createdAt: a.created_at,
-      edited: a.updated_at !== a.created_at,
+      updatedAt: a.updated_at,
       upvotes: ups.length,
-      myUpvote: !!currentProfile && ups.some((v: any) => v.profile_id === currentProfile.id),
+      myVote: !!currentProfile && ups.some((v: any) => v.profile_id === currentProfile.id) ? 1 : 0,
+      canDelete: isMine || canManagePoll,
       replies: relevantReplies
         .filter((r: any) => r.answer_id === a.id && r.profiles)
-        .map((r: any) => ({
+        .map((r: any): CommentData => ({
           id: r.id,
-          profileId: r.profile_id,
-          username: r.profiles.username,
-          avatarUrl: r.profiles.avatar_url,
+          author: {
+            id: r.profile_id,
+            username: r.profiles.username,
+            avatarUrl: r.profiles.avatar_url,
+          },
           body: r.body,
           createdAt: r.created_at,
+          upvotes: 0,
+          canDelete: currentProfile?.id === r.profile_id || canManagePoll,
         })),
     };
   })
@@ -184,7 +195,6 @@ const roleTagClass = authorRole === "Owner" ? "fp-poll-role-owner"
 const hasVoted = !!myOptionId;
 const showResults = hasVoted || poll.closed;
 const author: any = poll.profiles;
-const canManagePoll = isAdminOrOwner || poll.profile_id === currentProfile?.id;
 const gameHref = poll.featured_game_id
   ? `/groups/${groupId}?tab=games`
   : (game?.slug ? `/games/${game.slug}` : null);
@@ -291,31 +301,18 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
 
     <section class="poll-thread">
       <h2 class="poll-thread-title">
-        {answers.length} comment{answers.length !== 1 ? "s" : ""}
+        {comments.length} comment{comments.length !== 1 ? "s" : ""}
       </h2>
 
-      {!poll.closed && (
-        <form class="fp-poll-reply-form poll-thread-form" data-poll-reply={poll.id}>
-          <textarea class="compose-input" name="body" rows="3" maxlength={POLL_ANSWER_MAX} placeholder={myAnswerRow ? "Update your comment…" : "Add a comment…"}>{myAnswerRow?.body ?? ""}</textarea>
-          <div class="fp-poll-reply-row">
-            <button type="submit" class="btn-primary" style="font-size:13px;padding:7px 16px">{myAnswerRow ? "Update" : "Comment"}</button>
-            {myAnswerRow && (
-              <button type="button" class="announcement-action" data-poll-answer-delete={poll.id}>Delete mine</button>
-            )}
-            <p class="fp-poll-reply-err" hidden></p>
-          </div>
-        </form>
-      )}
-
-      {answers.length > 0 ? (
-        <ul class="gg-answers" style="padding:0;list-style:none;margin:16px 0 0">
-          {answers.map((a: any) => (
-            <PollAnswer answer={a} viewerProfileId={currentProfile?.id ?? null} isMember={true} closed={poll.closed} canModerate={canManagePoll} />
-          ))}
-        </ul>
-      ) : (
-        <div class="poll-thread-empty">No comments yet. Be the first.</div>
-      )}
+      <CommentThread
+        comments={comments}
+        currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
+        target={{ type: "poll_answer", id: poll.id }}
+        canCompose={!poll.closed && isMember}
+        myDraftBody={myAnswerRow?.body ?? null}
+        isModerator={canManagePoll}
+        signinReturnTo={Astro.url.pathname + Astro.url.search}
+      />
     </section>
   </div>
 </Layout>
@@ -344,8 +341,6 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
 
   .poll-thread{margin-top:28px}
   .poll-thread-title{font-size:16px;font-weight:700;color:var(--text-primary);margin:0 0 14px;letter-spacing:-.01em}
-  .poll-thread-form{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
-  .poll-thread-empty{text-align:center;padding:24px;font-size:13px;color:var(--text-tertiary);background:var(--bg-card);border:1px dashed var(--border);border-radius:12px}
 
   @media (max-width: 640px){
     .fp-poll-full .fp-pie{width:130px;height:130px}
@@ -353,10 +348,6 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
     .fp-poll-full .fp-poll-gamecard{width:110px;flex:0 0 110px}
   }
 </style>
-
-<script>
-  import "../../../../scripts/group-games";
-</script>
 
 <script is:inline>
   async function votePoll(pollId, optionId) {
@@ -368,74 +359,20 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
     else { const d = await res.json(); alert(d.error ?? 'Error voting'); }
   }
   window.votePoll = votePoll;
-
-  // Reply form submit (writes/updates viewer's own answer)
-  document.addEventListener('submit', (e) => {
-    const form = e.target instanceof HTMLFormElement ? e.target : null;
-    if (!form || !form.classList.contains('fp-poll-reply-form')) return;
-    e.preventDefault();
-    const pollId = form.getAttribute('data-poll-reply');
-    if (!pollId) return;
-    const errEl = form.querySelector('.fp-poll-reply-err');
-    if (errEl) errEl.hidden = true;
-    const body = String(new FormData(form).get('body') ?? '').trim();
-    if (!body) { if (errEl) { errEl.textContent = 'Write a comment first.'; errEl.hidden = false; } return; }
-    const submit = form.querySelector('button[type=submit]');
-    if (submit) submit.disabled = true;
-    fetch('/api/groups/polls/answer', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ poll_id: pollId, body }),
-    }).then(async (res) => {
-      const d = await res.json().catch(() => ({}));
-      if (res.ok) return window.location.reload();
-      if (submit) submit.disabled = false;
-      if (errEl) { errEl.textContent = d.error ?? "Couldn't post your comment."; errEl.hidden = false; }
-    });
-  });
-
-  // Delete my own answer
-  document.addEventListener('click', (e) => {
-    const btn = e.target instanceof HTMLElement ? e.target.closest('[data-poll-answer-delete]') : null;
-    if (!btn) return;
-    const pollId = btn.getAttribute('data-poll-answer-delete');
-    if (!pollId || !confirm('Delete your comment?')) return;
-    fetch('/api/groups/polls/answer', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ poll_id: pollId, body: '' }),
-    }).then((res) => { if (res.ok) window.location.reload(); });
-  });
 </script>
 
 <script is:inline define:vars={{ isSignedIn: !!currentProfile }}>
-  // Signed-out visitors: intercept any write-ish click and send them to /signin
+  // Signed-out visitors: redirect the ONE non-comment interactive thing on this
+  // page — the poll vote buttons — to /signin. CommentThread handles its own.
   if (!isSignedIn) {
-    const toSignin = () => {
-      const returnTo = window.location.pathname + window.location.search + window.location.hash;
-      window.location.href = '/signin?returnTo=' + encodeURIComponent(returnTo);
-    };
-    document.addEventListener('DOMContentLoaded', () => {
-      document.querySelectorAll('.gg-upvote[disabled]').forEach((b) => { b.disabled = false; });
-    });
     document.addEventListener('click', (e) => {
       const t = e.target instanceof HTMLElement ? e.target : null;
-      if (!t) return;
-      const trigger = t.closest(
-        '.fp-opt-vote, .gg-upvote, [data-gg-action="upvote"], [data-poll-answer-delete], ' +
-        '.fp-poll-reply-form button[type="submit"], .gg-reply-form button[type="submit"]'
-      );
+      const trigger = t?.closest('.fp-opt-vote');
       if (!trigger || trigger.tagName === 'A') return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      toSignin();
-    }, true);
-    document.addEventListener('submit', (e) => {
-      const f = e.target instanceof HTMLFormElement ? e.target : null;
-      if (!f) return;
-      if (f.classList.contains('fp-poll-reply-form') || f.hasAttribute('data-gg-reply')) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        toSignin();
-      }
+      const returnTo = window.location.pathname + window.location.search + window.location.hash;
+      window.location.href = '/signin?returnTo=' + encodeURIComponent(returnTo);
     }, true);
   }
 </script>
