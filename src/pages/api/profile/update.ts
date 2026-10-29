@@ -66,9 +66,20 @@ export const POST: APIRoute = async (context) => {
   if ('favorite_game_id' in update && typeof update.favorite_game_id === 'string') {
     update.favorite_game_id = await resolveCanonicalGameId(db, update.favorite_game_id);
   }
-  if ('showcase_games' in update && Array.isArray(update.showcase_games)) {
-    const ids = (update.showcase_games as unknown[]).filter((v): v is string => typeof v === 'string');
-    const resolved = await Promise.all(ids.map((id) => resolveCanonicalGameId(db, id)));
+  // showcase_games must be an array of game-id strings. A past client-side bug
+  // posted a mix of strings and {id, title, ...} objects, which the old
+  // "filter to strings" path silently dropped — slowly wiping the showcase
+  // after a few edits. Reject the whole write loudly instead so the client
+  // sees a clear error and no partial data corruption lands.
+  if ('showcase_games' in update) {
+    if (!Array.isArray(update.showcase_games)) {
+      return json({ error: 'showcase_games must be an array of game IDs.' }, 400);
+    }
+    const items = update.showcase_games as unknown[];
+    if (!items.every((v) => typeof v === 'string')) {
+      return json({ error: 'showcase_games must contain only game ID strings.' }, 400);
+    }
+    const resolved = await Promise.all((items as string[]).map((id) => resolveCanonicalGameId(db, id)));
     update.showcase_games = [...new Set(resolved)];
   }
 
