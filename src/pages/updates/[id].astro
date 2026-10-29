@@ -2,10 +2,12 @@
 export const prerender = false;
 import Layout from '../../components/Layout.astro';
 import PostComposer from '../../components/updates/PostComposer.astro';
+import CommentThread from '../../components/CommentThread.astro';
 import { getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database';
 import { IMAGE_EMOTE_MAP, IMAGE_EMOTES } from '../../utils/reactions';
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
+import type { CommentData } from '../../utils/comments';
 
 const { id } = Astro.params;
 
@@ -116,6 +118,37 @@ function fmtDate(s: string): string {
 
 const commentCount = allComments.length;
 
+// Shape forum_comments rows into CommentData[] for the shared CommentThread.
+// Forum comments currently have no votes / reactions / edit API — props on
+// the component below gate the UI, and the shared script's routes already
+// return no-op URLs for the actions we don't support here.
+const threadComments: CommentData[] = topLevel.map((c: any) => ({
+  id: c.id,
+  author: {
+    id: c.profiles?.id ?? '',
+    username: c.profiles?.username ?? 'unknown',
+    avatarUrl: c.profiles?.avatar_url ?? null,
+  },
+  body: c.body,
+  createdAt: c.created_at,
+  upvotes: 0,
+  canEdit: false,
+  canDelete: isAdmin || (!!currentProfile && c.profiles?.id === currentProfile.id),
+  canReport: false,
+  replies: (repliesByTop[c.id] ?? []).map((r: any) => ({
+    id: r.id,
+    author: {
+      id: r.profiles?.id ?? '',
+      username: r.profiles?.username ?? 'unknown',
+      avatarUrl: r.profiles?.avatar_url ?? null,
+    },
+    body: r.body,
+    createdAt: r.created_at,
+    upvotes: 0,
+    canDelete: isAdmin || (!!currentProfile && r.profiles?.id === currentProfile.id),
+  })),
+}));
+
 // Only the post's author can edit it, and only while they're a site_admin
 // (the update API enforces the same: requireAdmin + profile_id match).
 const canEdit = isAdmin && !!currentProfile && post.profiles?.id === currentProfile.id;
@@ -189,75 +222,36 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn, 120);
       )}
     </article>
 
-    <section class="comments">
-      <h2 class="comments-title">{commentCount} {commentCount === 1 ? 'comment' : 'comments'}</h2>
+    <section class="comments" id="forum-comments">
+      <h2 class="comments-title">
+        Comments
+        {commentCount > 0 && <span class="comments-count">{commentCount}</span>}
+      </h2>
 
-      {post.is_locked ? (
+      {post.is_locked && (
         <p class="locked-note">🔒 Commenting is closed on this post.</p>
-      ) : isLoggedIn ? (
-        <form id="comment-form" class="comment-composer">
-          <textarea id="comment-body" placeholder="Add a comment…" rows="3" maxlength="2000" required></textarea>
-          <div class="composer-row">
-            <button type="submit" id="comment-submit">Comment</button>
-          </div>
-          <div id="comment-error" class="composer-error"></div>
-        </form>
-      ) : (
-        <p class="signin-note"><a href="/signin">Sign in</a> to join the conversation.</p>
       )}
 
-      <ul id="comment-list" class="comment-list">
-        {topLevel.map((c: any) => (
-          <li class="comment-thread" data-comment-id={c.id}>
-            <div class="comment">
-              <div class="comment-head">
-                <a href={`/reviewers/${c.profiles?.username}`} class="comment-author">{c.profiles?.username ?? 'user'}</a>
-                <span class="comment-date">{fmtDate(c.created_at)}</span>
-              </div>
-              <div class="comment-body" set:html={renderBody(c.body)} />
-              <div class="comment-actions">
-                {isLoggedIn && !post.is_locked && <button data-action="reply" data-parent={c.id}>Reply</button>}
-                {(isAdmin || (currentProfile && c.profiles?.id === currentProfile.id)) && (
-                  <button data-action="delete-comment" data-comment={c.id} class="danger">Delete</button>
-                )}
-              </div>
-            </div>
-            <ul class="reply-list">
-              {(repliesByTop[c.id] ?? []).map((r: any) => (
-                <li class="comment reply" data-comment-id={r.id}>
-                  <div class="comment-head">
-                    <a href={`/reviewers/${r.profiles?.username}`} class="comment-author">{r.profiles?.username ?? 'user'}</a>
-                    <span class="comment-date">{fmtDate(r.created_at)}</span>
-                  </div>
-                  <div class="comment-body" set:html={renderBody(r.body)} />
-                  <div class="comment-actions">
-                    {(isAdmin || (currentProfile && r.profiles?.id === currentProfile.id)) && (
-                      <button data-action="delete-comment" data-comment={r.id} class="danger">Delete</button>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </li>
-        ))}
-      </ul>
+      <CommentThread
+        comments={threadComments}
+        currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
+        target={{ type: 'forum_post_comment', id: post.id }}
+        canCompose={!post.is_locked && isLoggedIn}
+        showVotes={false}
+        showReactions={false}
+        maxLength={2000}
+        isModerator={isAdmin}
+        signinReturnTo={Astro.url.pathname + Astro.url.search}
+      />
     </section>
   </main>
 </Layout>
 
-<script is:inline define:vars={{ postId: post.id, isLoggedIn, isAdmin, currentUsername: currentProfile?.username ?? null }}>
+<script is:inline define:vars={{ postId: post.id }}>
+  // Comments are rendered by the shared CommentThread component and handled by
+  // src/scripts/comment-thread.ts. This small block only covers admin actions
+  // on the post itself (delete, toggle lock, toggle pin).
   (function () {
-    function esc(t) {
-      return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-    function renderBody(t) {
-      return esc(t)
-        .replace(/(^|\s)(@(\w+))/g, '$1<a class="mention" href="/reviewers/$3">$2</a>')
-        .replace(/\n/g, '<br>');
-    }
-    function fmtNow() {
-      return new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    }
     function post(url, payload) {
       return fetch(url, {
         method: 'POST',
@@ -265,92 +259,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn, 120);
         body: JSON.stringify(payload),
       }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); });
     }
-
-    function commentNode(c, isReply) {
-      var li = document.createElement('li');
-      li.className = isReply ? 'comment reply' : 'comment-thread';
-      li.setAttribute('data-comment-id', c.id);
-      var author = (c.profiles && c.profiles.username) || currentUsername || 'user';
-      var inner =
-        '<div class="comment' + (isReply ? ' reply-inner' : '') + '">' +
-          '<div class="comment-head">' +
-            '<a href="/reviewers/' + encodeURIComponent(author) + '" class="comment-author">' + esc(author) + '</a>' +
-            '<span class="comment-date">' + fmtNow() + '</span>' +
-          '</div>' +
-          '<div class="comment-body">' + renderBody(c.body) + '</div>' +
-          '<div class="comment-actions">' +
-            (!isReply && isLoggedIn ? '<button data-action="reply" data-parent="' + c.id + '">Reply</button>' : '') +
-            '<button data-action="delete-comment" data-comment="' + c.id + '" class="danger">Delete</button>' +
-          '</div>' +
-        '</div>';
-      if (isReply) { li.innerHTML = inner; return li; }
-      li.innerHTML = inner + '<ul class="reply-list"></ul>';
-      return li;
-    }
-
-    // Top-level comment submit
-    var form = document.getElementById('comment-form');
-    if (form) {
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var ta = document.getElementById('comment-body');
-        var btn = document.getElementById('comment-submit');
-        var errEl = document.getElementById('comment-error');
-        var body = ta.value.trim();
-        if (!body) return;
-        btn.disabled = true; errEl.textContent = '';
-        post('/api/forum/comments/create', { post_id: postId, body: body }).then(function (res) {
-          if (res.ok && res.d.comment) {
-            document.getElementById('comment-list').insertBefore(commentNode(res.d.comment, false), document.getElementById('comment-list').firstChild);
-            ta.value = '';
-          } else { errEl.textContent = (res.d && res.d.error) || 'Failed to comment.'; }
-          btn.disabled = false;
-        }).catch(function () { errEl.textContent = 'Network error.'; btn.disabled = false; });
-      });
-    }
-
-    // Delegated: reply toggle, reply submit, delete, admin actions
     document.addEventListener('click', function (e) {
       var t = e.target;
       if (!t || t.tagName !== 'BUTTON') return;
       var action = t.getAttribute('data-action');
-
-      if (action === 'reply') {
-        var parentId = t.getAttribute('data-parent');
-        var thread = t.closest('.comment-thread');
-        if (thread.querySelector('.reply-box')) { thread.querySelector('.reply-box').remove(); return; }
-        var box = document.createElement('div');
-        box.className = 'reply-box';
-        box.innerHTML = '<textarea rows="2" maxlength="2000" placeholder="Reply…"></textarea>' +
-          '<div class="composer-row"><button type="button" class="reply-send">Reply</button></div>' +
-          '<div class="composer-error reply-err"></div>';
-        thread.querySelector('.comment').after(box);
-        box.querySelector('.reply-send').addEventListener('click', function () {
-          var val = box.querySelector('textarea').value.trim();
-          var rerr = box.querySelector('.reply-err');
-          if (!val) return;
-          this.disabled = true;
-          post('/api/forum/comments/create', { post_id: postId, body: val, parent_id: parentId }).then(function (res) {
-            if (res.ok && res.d.comment) {
-              thread.querySelector('.reply-list').appendChild(commentNode(res.d.comment, true));
-              box.remove();
-            } else { rerr.textContent = (res.d && res.d.error) || 'Failed to reply.'; }
-          }).catch(function () { rerr.textContent = 'Network error.'; });
-        });
-        return;
-      }
-
-      if (action === 'delete-comment') {
-        if (!confirm('Delete this comment?')) return;
-        var cid = t.getAttribute('data-comment');
-        post('/api/forum/comments/delete', { comment_id: cid }).then(function (res) {
-          if (res.ok) {
-            var el = document.querySelector('[data-comment-id="' + cid + '"]');
-            if (el) el.remove();
-          } else { alert((res.d && res.d.error) || 'Failed to delete.'); }
-        });
-        return;
-      }
 
       if (action === 'delete-post') {
         if (!confirm('Delete this post and all its comments?')) return;
@@ -579,8 +491,7 @@ if (!window.__pvInit) {
   .post-body :global(iframe) { width: 100%; aspect-ratio: 16/9; border-radius: 10px; border: none; display: block; margin: 14px 0; }
   .post-body :global(div[data-youtube-video]) { margin: 14px 0; }
   .post-body :global(div[data-youtube-video] iframe) { width: 100%; aspect-ratio: 16/9; border-radius: 10px; border: none; }
-  .comment-body :global(.mention) { color: var(--accent); }
-  .comment-body :global(.comment-emote), .post-body :global(.comment-emote) { height: 20px; vertical-align: middle; }
+  .post-body :global(.comment-emote) { height: 20px; vertical-align: middle; }
 
   /* ── Vote + reaction bar ── */
   .post-interact { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 18px 0 0; padding-top: 16px; border-top: 1px solid var(--border-subtle, var(--border)); }
@@ -609,33 +520,13 @@ if (!window.__pvInit) {
   .admin-bar button:hover { border-color: var(--accent); color: var(--text-primary); }
   .admin-bar button.danger:hover { border-color: var(--score-low, #e5484d); color: var(--score-low, #e5484d); }
 
-  .comments { margin-top: 28px; }
-  .comments-title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 14px; }
+  /* Comments: match reviews/[id].astro's bordered card so every migrated
+     comment section carries the same shell. The CommentThread component
+     renders the thread itself; its CSS lives in src/styles/comments.css. */
+  .comments { margin-top: 28px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+  .comments-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0 0 20px; display: flex; align-items: center; gap: 8px; }
+  .comments-count { background: var(--tag-bg); color: var(--text-tertiary); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 10px; }
+  .locked-note { color: var(--text-secondary); font-size: 14px; margin: 0 0 16px; }
 
-  .comment-composer, .reply-box { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
-  .reply-box { margin: 10px 0 4px; }
-  textarea { width: 100%; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; color: var(--text-primary); font: inherit; font-size: 14px; resize: vertical; }
-  textarea:focus { outline: none; border-color: var(--accent); }
-  .composer-row { display: flex; justify-content: flex-end; }
-  .composer-row button, .reply-send { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-weight: 600; font-size: 13px; cursor: pointer; }
-  .composer-row button:disabled { opacity: 0.6; }
-  .composer-error { color: var(--score-low, #e5484d); font-size: 13px; }
-  .locked-note, .signin-note { color: var(--text-secondary); font-size: 14px; margin-bottom: 20px; }
-  .signin-note a { color: var(--accent); }
-
-  .comment-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 16px; }
-  .comment-thread { border-top: 1px solid var(--border-subtle, var(--border)); padding-top: 14px; }
-  .comment-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
-  .comment-author { font-weight: 600; font-size: 14px; color: var(--text-primary); text-decoration: none; }
-  .comment-author:hover { text-decoration: underline; }
-  .comment-date { font-size: 12px; color: var(--text-tertiary); }
-  .comment-body { font-size: 14px; color: var(--text-primary); line-height: 1.6; }
-  .comment-actions { display: flex; gap: 12px; margin-top: 6px; }
-  .comment-actions button { background: none; border: none; color: var(--text-tertiary); font-size: 12px; font-weight: 600; cursor: pointer; padding: 0; }
-  .comment-actions button:hover { color: var(--text-primary); }
-  .comment-actions button.danger:hover { color: var(--score-low, #e5484d); }
-  .reply-list { list-style: none; margin: 12px 0 0; padding: 0 0 0 20px; border-left: 2px solid var(--border-subtle, var(--border)); display: flex; flex-direction: column; gap: 14px; }
-  .reply-list:empty { display: none; }
-
-  @media (max-width: 600px) { .feed { padding: 14px; } .post { padding: 18px; } }
+  @media (max-width: 600px) { .feed { padding: 14px; } .post { padding: 18px; } .comments { padding: 16px; } }
 </style>

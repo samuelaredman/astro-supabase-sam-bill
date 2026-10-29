@@ -5,7 +5,7 @@
 
 export {};
 
-type TargetType = "poll_answer";
+type TargetType = "poll_answer" | "forum_post_comment";
 
 interface RoutedCall { url: string; body: Record<string, unknown> }
 
@@ -35,30 +35,40 @@ function routeCompose(target: { type: TargetType; id: string }, body: string): R
   switch (target.type) {
     case "poll_answer":
       return { url: "/api/groups/polls/answer", body: { poll_id: target.id, body } };
+    case "forum_post_comment":
+      return { url: "/api/forum/comments/create", body: { post_id: target.id, body } };
   }
 }
 function routeReply(target: { type: TargetType; id: string }, parentId: string, body: string): RoutedCall {
   switch (target.type) {
     case "poll_answer":
       return { url: "/api/groups/polls/answer-reply", body: { answer_id: parentId, body } };
+    case "forum_post_comment":
+      return { url: "/api/forum/comments/create", body: { post_id: target.id, parent_id: parentId, body } };
   }
 }
 function routeVote(target: { type: TargetType }, commentId: string, vote: 1 | -1): RoutedCall {
   switch (target.type) {
     case "poll_answer":
       return { url: "/api/groups/polls/answer-vote", body: { answer_id: commentId, vote } };
+    case "forum_post_comment":
+      return { url: "", body: {} }; // no vote endpoint yet
   }
 }
 function routeDelete(target: { type: TargetType }, commentId: string): RoutedCall {
   switch (target.type) {
     case "poll_answer":
       return { url: "/api/groups/polls/answer", body: { action: "delete", answer_id: commentId } };
+    case "forum_post_comment":
+      return { url: "/api/forum/comments/delete", body: { comment_id: commentId } };
   }
 }
 function routeDeleteReply(target: { type: TargetType }, replyId: string): RoutedCall {
   switch (target.type) {
     case "poll_answer":
       return { url: "/api/groups/polls/answer-reply", body: { action: "delete", reply_id: replyId } };
+    case "forum_post_comment":
+      return { url: "/api/forum/comments/delete", body: { comment_id: replyId } };
   }
 }
 function routeEdit(target: { type: TargetType }, commentId: string, body: string): RoutedCall {
@@ -67,6 +77,8 @@ function routeEdit(target: { type: TargetType }, commentId: string, body: string
     // picks the right row by (poll_id, profile_id) — commentId isn't used.
     case "poll_answer":
       return { url: "/api/groups/polls/answer", body: { poll_id: (document.querySelector(".ct-thread") as HTMLElement | null)?.dataset.ctTargetId ?? "", body } };
+    case "forum_post_comment":
+      return { url: "", body: {} }; // no edit endpoint yet
     default:
       void commentId;
       return { url: "", body: {} };
@@ -81,6 +93,8 @@ function routeReact(target: { type: TargetType }, commentId: string, reactionTyp
           ? { reply_id: commentId, reaction_type: reactionType }
           : { answer_id: commentId, reaction_type: reactionType },
       };
+    case "forum_post_comment":
+      return { url: "", body: {} }; // no reaction endpoint yet
   }
 }
 
@@ -92,6 +106,7 @@ function isReplyComment(el: Element): boolean {
 function reportKind(target: { type: TargetType }): string {
   switch (target.type) {
     case "poll_answer": return "poll_answer";
+    case "forum_post_comment": return "forum_comment";
   }
 }
 
@@ -265,8 +280,27 @@ document.addEventListener("click", (e) => {
     picker.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 320))}px`;
     picker.dataset.ctForComment = commentId;
     picker.dataset.ctForKind = isReplyComment(commentEl) ? "reply" : "answer";
+    const search = picker.querySelector<HTMLInputElement>("[data-ct-emote-search]");
+    if (search) {
+      search.value = "";
+      picker.querySelectorAll<HTMLElement>(".ct-emote-pick").forEach((p) => { p.hidden = false; });
+      setTimeout(() => search.focus(), 0);
+    }
     return;
   }
+});
+
+// Live filter on the emote picker search input.
+document.addEventListener("input", (e) => {
+  const t = e.target instanceof HTMLInputElement ? e.target : null;
+  if (!t || !t.hasAttribute("data-ct-emote-search")) return;
+  const picker = t.closest<HTMLElement>("[data-ct-emote-picker]");
+  if (!picker) return;
+  const q = t.value.trim().toLowerCase();
+  picker.querySelectorAll<HTMLElement>(".ct-emote-pick").forEach((pick) => {
+    const key = (pick.getAttribute("data-ct-emote-key") ?? "").toLowerCase();
+    pick.hidden = q.length > 0 && !key.includes(q);
+  });
 });
 
 // Picking an emote from the floating grid dispatches a react toggle for the

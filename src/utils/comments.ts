@@ -42,10 +42,11 @@ export interface CommentReaction {
   mine: boolean;
 }
 
-export type CommentTargetType = "poll_answer";
+export type CommentTargetType = "poll_answer" | "forum_post_comment";
 
 export interface CommentTarget {
   type: CommentTargetType;
-  /** For poll_answer: the group_polls.id this thread hangs off. */
+  /** For poll_answer: the group_polls.id this thread hangs off.
+   *  For forum_post_comment: the forum_posts.id. */
   id: string;
 }
