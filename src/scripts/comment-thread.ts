@@ -196,6 +196,16 @@ document.addEventListener("click", (e) => {
     return;
   }
 
+  // Cancel button inside the reply form — close the form AND flip the parent
+  // Reply button's aria-expanded back so clicking it again reopens cleanly.
+  if (action === "reply-cancel") {
+    const form = commentEl.querySelector(":scope > .ct-body > [data-ct-reply-form]") as HTMLElement | null;
+    if (form) form.hidden = true;
+    const replyBtn = commentEl.querySelector(":scope > .ct-body > .ct-actions > .ct-reply-btn") as HTMLElement | null;
+    replyBtn?.setAttribute("aria-expanded", "false");
+    return;
+  }
+
   if (action === "edit") {
     const form = commentEl.querySelector(":scope > .ct-body > [data-ct-edit-form]") as HTMLElement | null;
     const text = commentEl.querySelector(":scope > .ct-body > [data-ct-text]") as HTMLElement | null;
@@ -269,26 +279,66 @@ document.addEventListener("click", (e) => {
     return;
   }
 
-  // "+" button → open the floating emote picker under the clicked toggle
+  // "+" button → open the floating emote picker in react mode
   if (action === "react-picker") {
     const picker = root.querySelector<HTMLElement>("[data-ct-emote-picker]");
     if (!picker) return toSignin();
-    const r = trigger.getBoundingClientRect();
-    picker.hidden = false;
-    picker.style.position = "fixed";
-    picker.style.top = `${r.bottom + 6}px`;
-    picker.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 320))}px`;
-    picker.dataset.ctForComment = commentId;
-    picker.dataset.ctForKind = isReplyComment(commentEl) ? "reply" : "answer";
-    const search = picker.querySelector<HTMLInputElement>("[data-ct-emote-search]");
-    if (search) {
-      search.value = "";
-      picker.querySelectorAll<HTMLElement>(".ct-emote-pick").forEach((p) => { p.hidden = false; });
-      setTimeout(() => search.focus(), 0);
-    }
+    openPicker(picker, trigger, { mode: "react", commentId, isReply: isReplyComment(commentEl) });
     return;
   }
 });
+
+// Composer / reply / edit emote-insert button → open picker in insert mode,
+// bound to the sibling textarea in the same form.
+document.addEventListener("click", (e) => {
+  const btn = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>("[data-ct-action='emote-insert']") : null;
+  if (!btn) return;
+  e.preventDefault();
+  const root = threadRoot(btn);
+  const picker = root?.querySelector<HTMLElement>("[data-ct-emote-picker]");
+  if (!root || !picker) return;
+  const form = btn.closest("form");
+  const ta = form?.querySelector<HTMLTextAreaElement>("textarea[name=body]");
+  if (!ta) return;
+  openPicker(picker, btn, { mode: "insert", textarea: ta });
+});
+
+function openPicker(
+  picker: HTMLElement,
+  anchor: HTMLElement,
+  opts: { mode: "react"; commentId: string; isReply: boolean } | { mode: "insert"; textarea: HTMLTextAreaElement },
+): void {
+  const r = anchor.getBoundingClientRect();
+  picker.hidden = false;
+  picker.style.position = "fixed";
+  // Prefer opening above the anchor (above composer buttons) so the picker
+  // doesn't push the composer around; fall back to below when there's no room.
+  const estHeight = Math.min(300, picker.offsetHeight || 300);
+  let top = r.top - estHeight - 6;
+  if (top < 8) top = r.bottom + 6;
+  picker.style.top = `${top}px`;
+  picker.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 320))}px`;
+  picker.dataset.ctMode = opts.mode;
+  if (opts.mode === "react") {
+    picker.dataset.ctForComment = opts.commentId;
+    picker.dataset.ctForKind = opts.isReply ? "reply" : "answer";
+    pickerTextarea = null;
+  } else {
+    pickerTextarea = opts.textarea;
+    delete picker.dataset.ctForComment;
+    delete picker.dataset.ctForKind;
+  }
+  const search = picker.querySelector<HTMLInputElement>("[data-ct-emote-search]");
+  if (search) {
+    search.value = "";
+    picker.querySelectorAll<HTMLElement>(".ct-emote-pick").forEach((p) => { p.hidden = false; });
+    setTimeout(() => search.focus(), 0);
+  }
+}
+
+// Insert-mode textarea tracked outside dataset (direct DOM reference) so we
+// can refocus the exact element the user was typing in.
+let pickerTextarea: HTMLTextAreaElement | null = null;
 
 // Live filter on the emote picker search input.
 document.addEventListener("input", (e) => {
@@ -303,33 +353,53 @@ document.addEventListener("input", (e) => {
   });
 });
 
-// Picking an emote from the floating grid dispatches a react toggle for the
-// comment the picker was opened against, then closes the grid.
+// Emote pick: either toggles a reaction (react mode) or splices :key: into
+// the composer textarea at the cursor (insert mode).
 document.addEventListener("click", (e) => {
   const pick = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>(".ct-emote-pick") : null;
   if (!pick) return;
   const picker = pick.closest<HTMLElement>("[data-ct-emote-picker]");
   const root = threadRoot(pick);
   if (!picker || !root) return;
+  const key = pick.getAttribute("data-ct-emote-key");
+  if (!key) return;
+
+  if (picker.dataset.ctMode === "insert" && pickerTextarea) {
+    const ta = pickerTextarea;
+    const code = `:${key}:`;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    ta.value = ta.value.slice(0, start) + code + ta.value.slice(end);
+    ta.selectionStart = ta.selectionEnd = start + code.length;
+    picker.hidden = true;
+    ta.focus();
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    return;
+  }
+
+  // React mode (default)
   const commentId = picker.dataset.ctForComment ?? "";
-  const reactionType = pick.getAttribute("data-ct-emote-key");
-  if (!commentId || !reactionType) return;
+  if (!commentId) { picker.hidden = true; return; }
   picker.hidden = true;
   const target = readTarget(root);
-  const call = routeReact(target, commentId, reactionType, picker.dataset.ctForKind === "reply");
+  const call = routeReact(target, commentId, key, picker.dataset.ctForKind === "reply");
   postJson(call.url, call.body).then((res) => {
     if (res.ok) window.location.reload();
     else alert(res.data?.error ?? "Couldn't react.");
   });
 });
 
-// Click-outside / Escape closes the picker without reacting.
+// Click-outside / Escape closes the picker without acting.
 document.addEventListener("click", (e) => {
   const picker = document.querySelector<HTMLElement>("[data-ct-emote-picker]");
   if (!picker || picker.hidden) return;
   const t = e.target instanceof HTMLElement ? e.target : null;
   if (!t) return;
-  if (t.closest("[data-ct-emote-picker]") || t.closest('[data-ct-action="react-picker"]')) return;
+  if (
+    t.closest("[data-ct-emote-picker]") ||
+    t.closest('[data-ct-action="react-picker"]') ||
+    t.closest('[data-ct-action="emote-insert"]')
+  ) return;
   picker.hidden = true;
 });
 document.addEventListener("keydown", (e) => {
