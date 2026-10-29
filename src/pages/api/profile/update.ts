@@ -71,6 +71,10 @@ export const POST: APIRoute = async (context) => {
   // "filter to strings" path silently dropped — slowly wiping the showcase
   // after a few edits. Reject the whole write loudly instead so the client
   // sees a clear error and no partial data corruption lands.
+  //
+  // Unlike reviews/watchlist/etc., we do NOT canonicalize edition IDs here:
+  // if the user picked Sekiro Collector's Edition they want that specific
+  // row's cover art shown. The dedupe below only drops exact duplicates.
   if ('showcase_games' in update) {
     if (!Array.isArray(update.showcase_games)) {
       return json({ error: 'showcase_games must be an array of game IDs.' }, 400);
@@ -79,8 +83,7 @@ export const POST: APIRoute = async (context) => {
     if (!items.every((v) => typeof v === 'string')) {
       return json({ error: 'showcase_games must contain only game ID strings.' }, 400);
     }
-    const resolved = await Promise.all((items as string[]).map((id) => resolveCanonicalGameId(db, id)));
-    update.showcase_games = [...new Set(resolved)];
+    update.showcase_games = [...new Set(items as string[])];
   }
 
   for (const key of urlFields) {
