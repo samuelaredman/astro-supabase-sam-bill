@@ -4,6 +4,7 @@ import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../.
 import Layout from "../../../../components/Layout.astro";
 import ProfileBadge from "../../../../components/ProfileBadge.astro";
 import CommentThread from "../../../../components/CommentThread.astro";
+import ReportModal from "../../../../components/ReportModal.astro";
 import { readBadgeSlugs } from "../../../../utils/badges";
 import { timeAgo, igdbImage as igdbCover } from "../../../../utils/format";
 import { getGroupAuthority } from "../../../../utils/api";
@@ -77,7 +78,7 @@ const [{ data: optionRows }, { data: voteRows }, { data: answerRows }, { data: a
     .select("id, profile_id, body, created_at, updated_at, profiles!profile_id ( username, avatar_url )")
     .eq("poll_id", pollId)
     .order("created_at", { ascending: false }),
-  db.from("group_poll_answer_votes").select("answer_id, profile_id"),
+  db.from("group_poll_answer_votes").select("answer_id, profile_id, vote"),
   db.from("group_poll_answer_replies")
     .select("id, answer_id, profile_id, body, created_at, profiles!profile_id ( username, avatar_url )")
     .order("created_at", { ascending: true }),
@@ -142,7 +143,11 @@ const myAnswerRow = currentProfile ? (answerRows ?? []).find((a: any) => a.profi
 const canManagePoll = isAdminOrOwner || poll.profile_id === currentProfile?.id;
 const comments: CommentData[] = (answerRows ?? [])
   .map((a: any): CommentData => {
-    const ups = relevantAnswerVotes.filter((v: any) => v.answer_id === a.id);
+    const votes = relevantAnswerVotes.filter((v: any) => v.answer_id === a.id);
+    const upvotes = votes.filter((v: any) => (v.vote ?? 1) === 1).length;
+    const downvotes = votes.filter((v: any) => v.vote === -1).length;
+    const mine = currentProfile ? votes.find((v: any) => v.profile_id === currentProfile.id) : null;
+    const myVote: 1 | -1 | 0 = mine ? ((mine as any).vote ?? 1) : 0;
     const isMine = currentProfile?.id === a.profile_id;
     return {
       id: a.id,
@@ -154,9 +159,12 @@ const comments: CommentData[] = (answerRows ?? [])
       body: a.body,
       createdAt: a.created_at,
       updatedAt: a.updated_at,
-      upvotes: ups.length,
-      myVote: !!currentProfile && ups.some((v: any) => v.profile_id === currentProfile.id) ? 1 : 0,
+      upvotes,
+      downvotes,
+      myVote,
+      canEdit: isMine,
       canDelete: isMine || canManagePoll,
+      canReport: !!currentProfile && !isMine,
       replies: relevantReplies
         .filter((r: any) => r.answer_id === a.id)
         .map((r: any): CommentData => ({
@@ -173,7 +181,7 @@ const comments: CommentData[] = (answerRows ?? [])
         })),
     };
   })
-  .sort((a, b) => b.upvotes - a.upvotes || b.createdAt.localeCompare(a.createdAt));
+  .sort((a, b) => (b.upvotes - (b.downvotes ?? 0)) - (a.upvotes - (a.downvotes ?? 0)) || b.createdAt.localeCompare(a.createdAt));
 
 // Author role tag
 const groupRoleRow = poll.profile_id ? await db.from("group_members")
@@ -224,63 +232,74 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
       <h1 class="fp-poll-question">{poll.question}</h1>
 
       <div class="fp-poll-body">
-        <div class="fp-poll-options">
-          {showResults
-            ? options.map((o: any) => {
-                const pct = totalVotes > 0 ? Math.round((o.count / totalVotes) * 100) : 0;
-                const isMine = o.id === myOptionId;
-                const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
-                return (
-                  <div class={`fp-opt-result${isMine ? " voted" : ""}${o.isWinner ? " winner" : ""}`}>
-                    <div class="fp-opt-bar" style={`width:${pct}%;background:${sliceColor}22`}></div>
-                    <span class="fp-opt-label">
-                      <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>
-                      {isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}
-                    </span>
-                    <span class="fp-opt-pct"><strong>{pct}%</strong><span class="fp-opt-count">· {o.count}</span></span>
-                  </div>
-                );
-              })
-            : options.map((o: any) => {
-                const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
-                return (
-                  <button class="fp-opt-vote" onclick={`votePoll('${poll.id}', '${o.id}')`} disabled={poll.closed}>
-                    <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>{o.label}
-                  </button>
-                );
-              })
-          }
-        </div>
-
-        <div class="fp-pie-wrap">
-          <svg class="fp-pie" viewBox="0 0 100 100">
-            {slices.length === 0
-              ? <circle cx="50" cy="50" r="48" fill="none" stroke="var(--border)" stroke-width="2" stroke-dasharray="3 3" />
-              : slices.map((s: any) => (
-                  <path d={s.path} fill={s.color}>
-                    <title>{s.label}: {Math.round(s.pct * 100)}% ({s.count})</title>
-                  </path>
-                ))
-            }
-            <circle cx="50" cy="50" r="22" fill="var(--bg-card)" />
-            <text x="50" y="48" text-anchor="middle" font-size="15" font-weight="700" fill="var(--text-primary)" dominant-baseline="middle">{totalVotes}</text>
-            <text x="50" y="62" text-anchor="middle" font-size="7" fill="var(--text-tertiary)" dominant-baseline="middle" style="text-transform:uppercase;letter-spacing:.08em;font-weight:700">vote{totalVotes !== 1 ? "s" : ""}</text>
-          </svg>
-        </div>
-
-        {game && (
-          <a href={gameHref ?? "#"} class="fp-poll-gamecard" title={game.title}>
-            {igdbCover(game.cover_img_url, "t_cover_big")
-              ? <img src={igdbCover(game.cover_img_url, "t_cover_big")!} alt={game.title} loading="lazy" />
-              : <div class="fp-poll-gamecard-nocover">🎮</div>
-            }
-            <div class="fp-poll-gamecard-overlay">
-              {poll.featured_game_id && <div class="fp-poll-gamecard-kicker">Featured</div>}
-              <div class="fp-poll-gamecard-title">{game.title}</div>
-              {gameYear && <div class="fp-poll-gamecard-year">{gameYear}</div>}
+        <div class="fp-poll-panel">
+          <div class="fp-poll-panel-head">
+            <span class="fp-poll-panel-status">{poll.closed ? "Poll closed" : "Open"}</span>
+            <span class="fp-poll-panel-votes">{totalVotes.toLocaleString()} vote{totalVotes !== 1 ? "s" : ""}</span>
+          </div>
+          <div class="fp-poll-panel-body">
+            <div class="fp-poll-options">
+              {showResults
+                ? options.map((o: any) => {
+                    const pct = totalVotes > 0 ? Math.round((o.count / totalVotes) * 100) : 0;
+                    const isMine = o.id === myOptionId;
+                    const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+                    return (
+                      <div class={`fp-opt-result${isMine ? " voted" : ""}${o.isWinner ? " winner" : ""}`}>
+                        <span class="fp-opt-label">
+                          {isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}
+                        </span>
+                        <div class="fp-opt-row">
+                          <div class="fp-opt-track">
+                            <div class="fp-opt-bar" style={`width:${pct}%;background:${sliceColor}`}></div>
+                          </div>
+                          <span class="fp-opt-count">{o.count.toLocaleString()}<span class="fp-opt-count-pct">· {pct}%</span></span>
+                        </div>
+                      </div>
+                    );
+                  })
+                : options.map((o: any) => {
+                    const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+                    return (
+                      <button class="fp-opt-vote" onclick={`votePoll('${poll.id}', '${o.id}')`} disabled={poll.closed}>
+                        <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>{o.label}
+                      </button>
+                    );
+                  })
+              }
             </div>
-          </a>
-        )}
+
+            <div class="fp-pie-wrap">
+              <svg class="fp-pie" viewBox="0 0 100 100">
+                {slices.length === 0
+                  ? <circle cx="50" cy="50" r="48" fill="none" stroke="var(--border)" stroke-width="2" stroke-dasharray="3 3" />
+                  : slices.map((s: any) => (
+                      <path d={s.path} fill={s.color}>
+                        <title>{s.label}: {Math.round(s.pct * 100)}% ({s.count})</title>
+                      </path>
+                    ))
+                }
+                <circle cx="50" cy="50" r="22" fill="var(--bg-card)" />
+                <text x="50" y="48" text-anchor="middle" font-size="15" font-weight="700" fill="var(--text-primary)" dominant-baseline="middle">{totalVotes}</text>
+                <text x="50" y="62" text-anchor="middle" font-size="7" fill="var(--text-tertiary)" dominant-baseline="middle" style="text-transform:uppercase;letter-spacing:.08em;font-weight:700">vote{totalVotes !== 1 ? "s" : ""}</text>
+              </svg>
+            </div>
+
+            {game && (
+              <a href={gameHref ?? "#"} class="fp-poll-gamecard" title={game.title}>
+                {igdbCover(game.cover_img_url, "t_cover_big")
+                  ? <img src={igdbCover(game.cover_img_url, "t_cover_big")!} alt={game.title} loading="lazy" />
+                  : <div class="fp-poll-gamecard-nocover">🎮</div>
+                }
+                <div class="fp-poll-gamecard-overlay">
+                  {poll.featured_game_id && <div class="fp-poll-gamecard-kicker">Featured</div>}
+                  <div class="fp-poll-gamecard-title">{game.title}</div>
+                  {gameYear && <div class="fp-poll-gamecard-year">{gameYear}</div>}
+                </div>
+              </a>
+            )}
+          </div>
+        </div>
       </div>
 
       {voterStrip.length > 0 && (
@@ -308,12 +327,15 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
         currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
         target={{ type: "poll_answer", id: poll.id }}
         canCompose={!poll.closed && isMember}
+        showDownvote={true}
+        showReport={true}
         myDraftBody={myAnswerRow?.body ?? null}
         isModerator={canManagePoll}
         signinReturnTo={Astro.url.pathname + Astro.url.search}
       />
     </section>
   </div>
+  <ReportModal />
 </Layout>
 
 <style is:global>
@@ -328,13 +350,15 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
      tuned to similar visual weight (~160px tall). */
   .fp-poll-full{padding:20px 22px}
   .fp-poll-full .fp-poll-question{font-size:22px;line-height:1.25;margin:4px 0 16px}
-  .fp-poll-full .fp-poll-body{align-items:center;gap:22px}
-  .fp-poll-full .fp-poll-options{flex:1 1 260px;max-width:none}
+  .fp-poll-full .fp-poll-panel-body{align-items:center;gap:22px;padding:18px 20px}
+  .fp-poll-full .fp-poll-options{flex:1 1 260px;gap:12px}
   .fp-poll-full .fp-pie-wrap{flex:0 0 160px}
   .fp-poll-full .fp-pie{width:160px;height:160px}
   .fp-poll-full .fp-poll-gamecard{width:130px;flex:0 0 130px}
-  .fp-poll-full .fp-opt-vote,
-  .fp-poll-full .fp-opt-result{font-size:14px;padding:9px 14px;min-height:36px}
+  .fp-poll-full .fp-opt-vote{font-size:14px;padding:10px 16px}
+  .fp-poll-full .fp-opt-label{font-size:14px}
+  .fp-poll-full .fp-opt-track{height:16px}
+  .fp-poll-full .fp-opt-count{font-size:13px}
   .poll-full-voters{display:flex;align-items:center;gap:12px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-subtle);flex-wrap:wrap}
   .poll-full-voters-label{font-size:12px;color:var(--text-tertiary);font-weight:600}
 
