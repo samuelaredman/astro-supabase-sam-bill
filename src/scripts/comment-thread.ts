@@ -73,15 +73,10 @@ function routeDeleteReply(target: { type: TargetType }, replyId: string): Routed
 }
 function routeEdit(target: { type: TargetType }, commentId: string, body: string): RoutedCall {
   switch (target.type) {
-    // The poll-answer endpoint upserts the viewer's own answer; the server
-    // picks the right row by (poll_id, profile_id) — commentId isn't used.
     case "poll_answer":
-      return { url: "/api/groups/polls/answer", body: { poll_id: (document.querySelector(".ct-thread") as HTMLElement | null)?.dataset.ctTargetId ?? "", body } };
+      return { url: "/api/groups/polls/answer", body: { action: "update", answer_id: commentId, body } };
     case "forum_post_comment":
       return { url: "", body: {} }; // no edit endpoint yet
-    default:
-      void commentId;
-      return { url: "", body: {} };
   }
 }
 function routeReact(target: { type: TargetType }, commentId: string, reactionType: string, isReply: boolean): RoutedCall {
