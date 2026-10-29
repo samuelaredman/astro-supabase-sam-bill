@@ -2,6 +2,7 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
+import CommentThread from "../../../components/CommentThread.astro";
 import RecommendationFeedCard from "../../../components/RecommendationFeedCard.astro";
 import ReportModal from "../../../components/ReportModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
@@ -52,7 +53,7 @@ const authorIndexable = !!recAuthor?.search_indexable;
 
 const { data: commentsRaw } = await db
   .from("recommendation_comments")
-  .select("id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ), recommendation_comment_votes ( vote, profile_id )")
+  .select("id, body, created_at, updated_at, parent_id, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ), recommendation_comment_votes ( vote, profile_id ), recommendation_comment_reactions ( reaction_type, profile_id )")
   .eq("recommendation_id", id)
   .order("created_at", { ascending: true });
 
@@ -81,6 +82,47 @@ for (const c of commentList) {
   if (c.parent_id) (replyMap[c.parent_id] ||= []).push(c);
 }
 function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
+
+// Shape recommendation_comments into CommentData[] for the shared CommentThread.
+// Recs support 2 levels of nesting today (c → rc).
+function shapeRecComment(c: any, depth: number): import("../../../utils/comments").CommentData {
+  const votesArr = Array.isArray(c.recommendation_comment_votes) ? c.recommendation_comment_votes : [];
+  const up = votesArr.filter((v: any) => v.vote === 1).length;
+  const down = votesArr.filter((v: any) => v.vote === -1).length;
+  const myVote = currentProfile ? (votesArr.find((v: any) => v.profile_id === currentProfile.id)?.vote ?? 0) : 0;
+  const isMine = currentProfile?.id === c.profiles?.id;
+  const rxArr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(c.recommendation_comment_reactions) ? c.recommendation_comment_reactions : [];
+  const rxMap: Record<string, { count: number; mine: boolean }> = {};
+  for (const r of rxArr) {
+    if (!rxMap[r.reaction_type]) rxMap[r.reaction_type] = { count: 0, mine: false };
+    rxMap[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) rxMap[r.reaction_type].mine = true;
+  }
+  const children = depth < 2 ? (replyMap[c.id] ?? []).map((r) => shapeRecComment(r, depth + 1)) : [];
+  return {
+    id: c.id,
+    author: {
+      id: c.profiles?.id ?? '',
+      username: c.profiles?.username ?? 'unknown',
+      avatarUrl: c.profiles?.avatar_url ?? null,
+    },
+    body: c.body,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    upvotes: up,
+    downvotes: down,
+    myVote: myVote as 1 | -1 | 0,
+    canEdit: isMine,
+    canDelete: isMine,
+    canReport: !!currentProfile && !isMine,
+    reactions: Object.entries(rxMap)
+      .map(([type, info]) => ({ type, count: info.count, mine: info.mine }))
+      .sort((a, b) => b.count - a.count),
+    replies: children,
+  };
+}
+const threadComments = topLevelComments.map((c) => shapeRecComment(c, 0));
 const commentCount = commentList.length;
 const isOwner = currentProfile?.id === rec.profileId;
 
@@ -135,10 +177,29 @@ const moreRecs = moreRecsRaw ?? [];
       />
     </div>
 
-    <!-- ── Comments ── -->
+    <!-- ── Comments (shared CommentThread) ── -->
     <div class="list-comments" id="comments">
-      <div class="list-comments-title">{commentCount} {commentCount === 1 ? "Comment" : "Comments"}</div>
+      <div class="list-comments-title">
+        Comments
+        {commentCount > 0 && <span class="comments-count">{commentCount}</span>}
+      </div>
+      <CommentThread
+        comments={threadComments}
+        currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
+        target={{ type: 'recommendation_comment', id: rec.id }}
+        canCompose={isLoggedIn}
+        showDownvote={true}
+        showReport={true}
+        maxLength={2000}
+        maxDepth={2}
+        signinReturnTo={Astro.url.pathname + Astro.url.search}
+      />
+    </div>
 
+    <!-- Legacy bespoke markup — hidden so inline lc-* handlers can keep
+         guarding on getElementById and no-op. Dead code to remove in a
+         follow-up cleanup pass. -->
+    <div class="list-comments" style="display:none" aria-hidden="true">
       <div class="lc-list" id="lc-list">
         {topLevelComments.length === 0 && <div class="lc-empty" id="lc-empty">No comments yet. Start the conversation.</div>}
         {topLevelComments.map((c: any) => {
