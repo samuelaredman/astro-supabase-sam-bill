@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
 
-const VALID_TARGET_TYPES = ['review', 'comment', 'profile', 'recommendation'];
+const VALID_TARGET_TYPES = ['review', 'comment', 'profile', 'recommendation', 'poll_answer', 'list_comment', 'forum_comment'];
 const VALID_REASONS = ['spam', 'harassment', 'spoilers', 'inappropriate', 'other'];
 
 export const POST: APIRoute = async (context) => {

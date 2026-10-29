@@ -5,7 +5,7 @@
 
 export {};
 
-type TargetType = "poll_answer" | "forum_post_comment";
+type TargetType = "poll_answer" | "forum_post_comment" | "list_comment";
 
 interface RoutedCall { url: string; body: Record<string, unknown> }
 
@@ -37,6 +37,8 @@ function routeCompose(target: { type: TargetType; id: string }, body: string): R
       return { url: "/api/groups/polls/answer", body: { poll_id: target.id, body } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/create", body: { post_id: target.id, body } };
+    case "list_comment":
+      return { url: "/api/lists/comments/create", body: { list_id: target.id, body } };
   }
 }
 function routeReply(target: { type: TargetType; id: string }, parentId: string, body: string): RoutedCall {
@@ -45,6 +47,8 @@ function routeReply(target: { type: TargetType; id: string }, parentId: string, 
       return { url: "/api/groups/polls/answer-reply", body: { answer_id: parentId, body } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/create", body: { post_id: target.id, parent_id: parentId, body } };
+    case "list_comment":
+      return { url: "/api/lists/comments/create", body: { list_id: target.id, parent_id: parentId, body } };
   }
 }
 function routeVote(target: { type: TargetType }, commentId: string, vote: 1 | -1): RoutedCall {
@@ -53,6 +57,8 @@ function routeVote(target: { type: TargetType }, commentId: string, vote: 1 | -1
       return { url: "/api/groups/polls/answer-vote", body: { answer_id: commentId, vote } };
     case "forum_post_comment":
       return { url: "", body: {} }; // no vote endpoint yet
+    case "list_comment":
+      return { url: "/api/lists/comments/vote", body: { comment_id: commentId, vote } };
   }
 }
 function routeDelete(target: { type: TargetType }, commentId: string): RoutedCall {
@@ -61,6 +67,8 @@ function routeDelete(target: { type: TargetType }, commentId: string): RoutedCal
       return { url: "/api/groups/polls/answer", body: { action: "delete", answer_id: commentId } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/delete", body: { comment_id: commentId } };
+    case "list_comment":
+      return { url: "/api/lists/comments/delete", body: { comment_id: commentId } };
   }
 }
 function routeDeleteReply(target: { type: TargetType }, replyId: string): RoutedCall {
@@ -69,6 +77,8 @@ function routeDeleteReply(target: { type: TargetType }, replyId: string): Routed
       return { url: "/api/groups/polls/answer-reply", body: { action: "delete", reply_id: replyId } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/delete", body: { comment_id: replyId } };
+    case "list_comment":
+      return { url: "/api/lists/comments/delete", body: { comment_id: replyId } };
   }
 }
 function routeEdit(target: { type: TargetType }, commentId: string, body: string): RoutedCall {
@@ -77,6 +87,8 @@ function routeEdit(target: { type: TargetType }, commentId: string, body: string
       return { url: "/api/groups/polls/answer", body: { action: "update", answer_id: commentId, body } };
     case "forum_post_comment":
       return { url: "", body: {} }; // no edit endpoint yet
+    case "list_comment":
+      return { url: "/api/lists/comments/update", body: { comment_id: commentId, body } };
   }
 }
 function routeReact(target: { type: TargetType }, commentId: string, reactionType: string, isReply: boolean): RoutedCall {
@@ -90,6 +102,8 @@ function routeReact(target: { type: TargetType }, commentId: string, reactionTyp
       };
     case "forum_post_comment":
       return { url: "", body: {} }; // no reaction endpoint yet
+    case "list_comment":
+      return { url: "/api/lists/comments/react", body: { comment_id: commentId, reaction_type: reactionType } };
   }
 }
 
@@ -102,6 +116,7 @@ function reportKind(target: { type: TargetType }): string {
   switch (target.type) {
     case "poll_answer": return "poll_answer";
     case "forum_post_comment": return "forum_comment";
+    case "list_comment": return "list_comment";
   }
 }
 
