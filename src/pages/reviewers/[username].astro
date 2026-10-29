@@ -506,9 +506,26 @@ const statsJson = JSON.stringify({
   perGameData, hotTakes,
 })
 const isOwnProfileJson = JSON.stringify(isOwnProfile)
-const showcaseJson = JSON.stringify(
-  Array.isArray(reviewer.showcase_games) ? reviewer.showcase_games : []
-)
+// showcase_games is stored as an array of game IDs (strings). The client-side
+// render reads title + cover_img_url off each item, so hydrate the IDs into
+// {id, title, slug, cover_img_url} objects before serializing. Preserves the
+// original IDs' order; missing games are dropped (safe — the row couldn't
+// render anyway).
+const showcaseIds: string[] = Array.isArray(reviewer.showcase_games)
+  ? (reviewer.showcase_games as unknown[]).filter((v): v is string => typeof v === 'string')
+  : []
+let showcaseHydrated: Array<{ id: string; title: string; slug: string | null; cover_img_url: string | null }> = []
+if (showcaseIds.length > 0) {
+  const { data: scGames } = await db
+    .from('games')
+    .select('id, title, slug, cover_img_url')
+    .in('id', showcaseIds)
+  const byId = new Map((scGames ?? []).map((g: any) => [g.id as string, g]))
+  showcaseHydrated = showcaseIds
+    .map((id) => byId.get(id))
+    .filter((g): g is { id: string; title: string; slug: string | null; cover_img_url: string | null } => !!g)
+}
+const showcaseJson = JSON.stringify(showcaseHydrated)
 const showcaseAchievementsJson = JSON.stringify(
   Array.isArray((reviewer as any).showcase_achievements) ? (reviewer as any).showcase_achievements : []
 )
