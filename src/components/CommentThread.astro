@@ -10,6 +10,7 @@
 import ProfileBadge from "./ProfileBadge.astro";
 import { timeAgo } from "../utils/format";
 import type { CommentData, CommentTarget } from "../utils/comments";
+import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../utils/reactions";
 
 interface Props {
   comments: CommentData[];
@@ -52,6 +53,17 @@ const roleClass = (tag: string | null | undefined) =>
 const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
 
 const signinHref = `/signin?returnTo=${encodeURIComponent(signinReturnTo ?? "/")}`;
+
+// Mirrors reviews/[id].astro: :key: → <img> when it maps to an image emote,
+// everything else is escaped and mentions become profile links.
+function renderBody(text: string): string {
+  const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const withMentions = esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="ct-mention" href="/reviewers/$3">$2</a>');
+  return withMentions.replace(/:([A-Za-z0-9_]+):/g, (_, key) => {
+    const path = IMAGE_EMOTE_MAP[key];
+    return path ? `<img src="${path}" class="ct-emote" alt=":${key}:" title=":${key}:">` : `:${key}:`;
+  });
+}
 ---
 
 <div
@@ -105,7 +117,18 @@ const signinHref = `/signin?returnTo=${encodeURIComponent(signinReturnTo ?? "/")
               <span class="ct-time">{timeAgo(c.createdAt)}</span>
               {c.updatedAt && c.updatedAt !== c.createdAt && <span class="ct-edited">(edited)</span>}
             </div>
-            <p class="ct-text">{c.body}</p>
+            <p class="ct-text" data-ct-text data-ct-raw-body={c.body} set:html={renderBody(c.body)}></p>
+            <form class="ct-edit-form" data-ct-edit-form hidden>
+              <textarea name="body" rows="3" maxlength={maxLength}>{c.body}</textarea>
+              <div class="ct-composer-foot">
+                <span class="ct-char-count"><span data-ct-char-count>{c.body.length}</span> / {maxLength}</span>
+                <div style="display:flex;gap:6px">
+                  <button type="button" class="ct-icon-btn" data-ct-action="edit-cancel">Cancel</button>
+                  <button type="submit" class="ct-submit">Save</button>
+                </div>
+              </div>
+              <div class="ct-composer-error" data-ct-composer-err></div>
+            </form>
             <div class="ct-actions">
               <button
                 type="button"
@@ -128,6 +151,29 @@ const signinHref = `/signin?returnTo=${encodeURIComponent(signinReturnTo ?? "/")
                   type="button" class="ct-reply-btn"
                   data-ct-action="toggle-reply" aria-expanded="false"
                 >↩ Reply {(c.replies?.length ?? 0) > 0 && `(${c.replies!.length})`}</button>
+              )}
+              {((c.reactions ?? []).length > 0 || currentUser) && (
+                <div class="ct-rx-row" data-ct-rx-for={c.id}>
+                  {(c.reactions ?? []).map((rx) => {
+                    const path = IMAGE_EMOTE_MAP[rx.type];
+                    return (
+                      <button
+                        type="button"
+                        class={`ct-rx-btn${rx.mine ? " ct-rx-active" : ""}`}
+                        data-ct-action="react"
+                        data-ct-reaction={rx.type}
+                        aria-pressed={rx.mine ? "true" : "false"}
+                      >
+                        {path
+                          ? <><img src={path} class="ct-rx-emote-img" alt={rx.type} />{" "}{rx.count}</>
+                          : <>{rx.type} {rx.count}</>}
+                      </button>
+                    );
+                  })}
+                  {currentUser && (
+                    <button type="button" class="ct-rx-toggle" data-ct-action="react-picker" title="React">+</button>
+                  )}
+                </div>
               )}
               {c.canEdit && <button type="button" class="ct-icon-btn" data-ct-action="edit">Edit</button>}
               {c.canDelete && <button type="button" class="ct-icon-btn" data-ct-action="delete">Delete</button>}
@@ -170,10 +216,35 @@ const signinHref = `/signin?returnTo=${encodeURIComponent(signinReturnTo ?? "/")
                         {r.author.roleTag && <span class={`ct-role-chip ${roleClass(r.author.roleTag)}`}>{r.author.roleTag}</span>}
                         <span class="ct-time">{timeAgo(r.createdAt)}</span>
                       </div>
-                      <p class="ct-text">{r.body}</p>
-                      {r.canDelete && (
+                      <p class="ct-text" set:html={renderBody(r.body)}></p>
+                      {((r.reactions ?? []).length > 0 || r.canDelete || currentUser) && (
                         <div class="ct-actions">
-                          <button type="button" class="ct-icon-btn" data-ct-action="delete-reply">Delete</button>
+                          {((r.reactions ?? []).length > 0 || currentUser) && (
+                            <div class="ct-rx-row" data-ct-rx-for={r.id}>
+                              {(r.reactions ?? []).map((rx) => {
+                                const path = IMAGE_EMOTE_MAP[rx.type];
+                                return (
+                                  <button
+                                    type="button"
+                                    class={`ct-rx-btn${rx.mine ? " ct-rx-active" : ""}`}
+                                    data-ct-action="react"
+                                    data-ct-reaction={rx.type}
+                                    aria-pressed={rx.mine ? "true" : "false"}
+                                  >
+                                    {path
+                                      ? <><img src={path} class="ct-rx-emote-img" alt={rx.type} />{" "}{rx.count}</>
+                                      : <>{rx.type} {rx.count}</>}
+                                  </button>
+                                );
+                              })}
+                              {currentUser && (
+                                <button type="button" class="ct-rx-toggle" data-ct-action="react-picker" title="React">+</button>
+                              )}
+                            </div>
+                          )}
+                          {r.canDelete && (
+                            <button type="button" class="ct-icon-btn" data-ct-action="delete-reply">Delete</button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -185,6 +256,25 @@ const signinHref = `/signin?returnTo=${encodeURIComponent(signinReturnTo ?? "/")
         </li>
       ))}
     </ul>
+  )}
+
+  <!-- Floating emote picker — one per thread; the shared script positions it
+       under whichever ct-rx-toggle was clicked. -->
+  {currentUser && (
+    <div class="ct-emote-picker" data-ct-emote-picker hidden>
+      <div class="ct-emote-grid">
+        {IMAGE_EMOTES.map((e) => (
+          <button
+            type="button"
+            class="ct-emote-pick"
+            data-ct-emote-key={e.key}
+            title={e.key}
+          >
+            <img src={e.path} class="ct-emote-picker-img" alt={e.key} loading="lazy" />
+          </button>
+        ))}
+      </div>
+    </div>
   )}
 </div>
 

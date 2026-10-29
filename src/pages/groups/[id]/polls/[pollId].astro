@@ -69,8 +69,10 @@ if (poll.featured_game_id) {
   game = g;
 }
 
-// Options, votes, voters, answers, answer-votes, replies — same batch pattern as the forum list
-const [{ data: optionRows }, { data: voteRows }, { data: answerRows }, { data: answerVoteRows }, { data: replyRows }] = await Promise.all([
+// Options, votes, voters, answers, answer-votes, replies, reactions — same
+// batch pattern as the forum list; reactions keyed by answer_id so both
+// top-level answers and their replies can look up their chips.
+const [{ data: optionRows }, { data: voteRows }, { data: answerRows }, { data: answerVoteRows }, { data: replyRows }, answerReactionsRes] = await Promise.all([
   db.from("group_poll_options").select("id, poll_id, label, position, color")
     .eq("poll_id", pollId).order("position", { ascending: true }),
   db.from("group_poll_votes").select("poll_id, option_id, profile_id").eq("poll_id", pollId),
@@ -82,7 +84,9 @@ const [{ data: optionRows }, { data: voteRows }, { data: answerRows }, { data: a
   db.from("group_poll_answer_replies")
     .select("id, answer_id, profile_id, body, created_at, profiles!profile_id ( username, avatar_url )")
     .order("created_at", { ascending: true }),
+  (db as any).from("group_poll_answer_reactions").select("answer_id, reply_id, profile_id, reaction_type"),
 ]);
+const answerReactionRows: { answer_id: string | null; reply_id: string | null; profile_id: string; reaction_type: string }[] = (answerReactionsRes as any)?.data ?? [];
 
 const voterIds = Array.from(new Set((voteRows ?? []).map((v: any) => v.profile_id).filter(Boolean)));
 const { data: voterRows } = voterIds.length
@@ -141,6 +145,29 @@ const slices = pieSlices(options, totalVotes);
 const myAnswerRow = currentProfile ? (answerRows ?? []).find((a: any) => a.profile_id === currentProfile.id) ?? null : null;
 // Shape poll answers into CommentData for the shared CommentThread component.
 const canManagePoll = isAdminOrOwner || poll.profile_id === currentProfile?.id;
+
+// Aggregate reactions keyed by whichever target column the row references,
+// so top-level answers and replies look up through the same helper.
+const reactionsByTarget = new Map<string, { type: string; count: number; mine: boolean }[]>();
+for (const row of answerReactionRows) {
+  const key = row.answer_id ?? row.reply_id;
+  if (!key) continue;
+  const bucket = reactionsByTarget.get(key) ?? [];
+  const existing = bucket.find((r) => r.type === row.reaction_type);
+  if (existing) {
+    existing.count += 1;
+    if (currentProfile && row.profile_id === currentProfile.id) existing.mine = true;
+  } else {
+    bucket.push({
+      type: row.reaction_type,
+      count: 1,
+      mine: !!currentProfile && row.profile_id === currentProfile.id,
+    });
+  }
+  reactionsByTarget.set(key, bucket);
+}
+const reactionsFor = (targetId: string) =>
+  (reactionsByTarget.get(targetId) ?? []).sort((a, b) => b.count - a.count);
 const comments: CommentData[] = (answerRows ?? [])
   .map((a: any): CommentData => {
     const votes = relevantAnswerVotes.filter((v: any) => v.answer_id === a.id);
@@ -165,6 +192,7 @@ const comments: CommentData[] = (answerRows ?? [])
       canEdit: isMine,
       canDelete: isMine || canManagePoll,
       canReport: !!currentProfile && !isMine,
+      reactions: reactionsFor(a.id),
       replies: relevantReplies
         .filter((r: any) => r.answer_id === a.id)
         .map((r: any): CommentData => ({
@@ -178,6 +206,7 @@ const comments: CommentData[] = (answerRows ?? [])
           createdAt: r.created_at,
           upvotes: 0,
           canDelete: currentProfile?.id === r.profile_id || canManagePoll,
+          reactions: reactionsFor(r.id),
         })),
     };
   })
@@ -328,6 +357,10 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
     </article>
 
     <section class="poll-thread" id="poll-comments">
+      <h2 class="poll-thread-heading">
+        Comments
+        {comments.length > 0 && <span class="poll-thread-count">{comments.length}</span>}
+      </h2>
       <CommentThread
         comments={comments}
         currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
@@ -364,7 +397,10 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
 </script>
 
 <style is:global>
-  .poll-page{max-width:860px;margin:0 auto;padding:24px 16px 48px}
+  /* Match review-detail layout — full width within the two-col shell, same
+     padding and spacing as /reviews/[id] so the two detail pages feel like
+     siblings instead of one centered-narrow and one wide. */
+  .poll-page{min-width:0;padding:24px 20px 60px}
   .poll-breadcrumbs{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-tertiary);margin-bottom:14px}
   .poll-breadcrumbs a{color:inherit;text-decoration:none}
   .poll-breadcrumbs a:hover{color:var(--accent)}
@@ -396,9 +432,12 @@ const gameYear = game?.date_released ? new Date(game.date_released).getFullYear(
   .fp-poll-actions-voters{display:inline-flex;align-items:center;gap:8px;margin-left:auto}
   .fp-poll-actions-voters-label{font-size:12px;color:var(--text-tertiary);font-weight:600}
 
-  /* Comments flow directly below the action bar — no separate "N comments" title
-     (the pill button carries that already) and no bordered container. */
-  .poll-thread{margin-top:18px;padding-top:16px;border-top:1px solid var(--border-subtle)}
+  /* Comments live in the same bordered card wrapper as /reviews/[id] so the
+     two detail pages share identical shape. The heading, composer and list
+     styles come from comments.css (CommentThread's own CSS). */
+  .poll-thread{margin-top:18px;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:24px}
+  .poll-thread-heading{font-size:15px;font-weight:600;color:var(--text-primary);margin:0 0 20px;display:flex;align-items:center;gap:8px}
+  .poll-thread-count{background:var(--tag-bg);color:var(--text-tertiary);font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px}
 
   @media (max-width: 640px){
     .fp-poll-full .fp-poll-question{font-size:20px}

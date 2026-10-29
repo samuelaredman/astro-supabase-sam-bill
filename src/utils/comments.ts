@@ -31,6 +31,15 @@ export interface CommentData {
   canReport?: boolean;
   /** Oldest-first list of direct replies (one level deep for now). */
   replies?: CommentData[];
+  /** Aggregated :emote: reactions (image emotes come from IMAGE_EMOTES). */
+  reactions?: CommentReaction[];
+}
+
+export interface CommentReaction {
+  type: string;
+  count: number;
+  /** True if the viewer has this reaction active. */
+  mine: boolean;
 }
 
 export type CommentTargetType = "poll_answer";
