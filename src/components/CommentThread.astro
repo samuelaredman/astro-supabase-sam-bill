@@ -7,21 +7,9 @@
  * the backing API. The client-side JS in src/scripts/comment-thread.ts
  * dispatches vote/reply/delete to the right endpoint based on target.type.
  */
-import ProfileBadge from "./ProfileBadge.astro";
+import CommentNode from "./CommentNode.astro";
 import type { CommentData, CommentTarget } from "../utils/comments";
-import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../utils/reactions";
-
-// Comment-section timestamp: identical to reviews/[id].astro's inline helper
-// (23h ago → d → absolute date). The compact format.ts timeAgo stays reserved
-// for feed cards where density matters.
-function timeAgo(dateStr: string): string {
-  const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return new Date(dateStr).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
+import { IMAGE_EMOTES } from "../utils/reactions";
 
 interface Props {
   comments: CommentData[];
@@ -42,8 +30,11 @@ interface Props {
   showReactions?: boolean;
   /** Enable the report button on others' comments. Default false. */
   showReport?: boolean;
-  /** Shown next to the character counter — default 500 (matches poll answers). */
+  /** Shown next to the character counter — default 2000 (matches reviews). */
   maxLength?: number;
+  /** Maximum reply nesting depth. Default 3 (matches reviews/lists). Set to 1
+   *  on surfaces that only support flat replies (forum / polls today). */
+  maxDepth?: number;
   /** Returned by the server endpoints as `{ body: "..." }`; shown pre-filled. */
   myDraftBody?: string | null;
   /** Marks the viewer as a moderator (shown delete on everyone's comments). */
@@ -61,32 +52,15 @@ const {
   showDownvote = false,
   showReactions = true,
   showReport = false,
-  maxLength = 500,
+  maxLength = 2000,
+  maxDepth = 3,
   myDraftBody = null,
   isModerator = false,
   signinReturnTo,
 } = Astro.props as Props;
 
-const roleClass = (tag: string | null | undefined) =>
-  tag === "Owner" ? "ct-role-owner"
-    : tag === "Admin" ? "ct-role-admin"
-    : tag === "Staff" ? "ct-role-staff"
-    : "";
-
 const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
-
 const signinHref = `/signin?returnTo=${encodeURIComponent(signinReturnTo ?? "/")}`;
-
-// Mirrors reviews/[id].astro: :key: → <img> when it maps to an image emote,
-// everything else is escaped and mentions become profile links.
-function renderBody(text: string): string {
-  const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  const withMentions = esc.replace(/(^|\s)(@([\w]+))/g, '$1<a class="ct-mention" href="/reviewers/$3">$2</a>');
-  return withMentions.replace(/:([A-Za-z0-9_]+):/g, (_, key) => {
-    const path = IMAGE_EMOTE_MAP[key];
-    return path ? `<img src="${path}" class="ct-emote" alt=":${key}:" title=":${key}:">` : `:${key}:`;
-  });
-}
 ---
 
 <div
@@ -101,176 +75,19 @@ function renderBody(text: string): string {
   ) : (
     <ul class="ct-list">
       {comments.map((c) => (
-        <li class="ct-comment" data-ct-id={c.id}>
-          <a href={`/reviewers/${c.author.username}`} class="ct-avatar">
-            {c.author.avatarUrl
-              ? <img src={c.author.avatarUrl} alt={c.author.username} />
-              : <span>{initials(c.author.username)}</span>}
-          </a>
-          <div class="ct-body">
-            <div class="ct-meta">
-              <a href={`/reviewers/${c.author.username}`} class="ct-username">@{c.author.username}</a>
-              {(c.author.badges ?? []).map((slug: string) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
-              {c.author.roleTag && <span class={`ct-role-chip ${roleClass(c.author.roleTag)}`}>{c.author.roleTag}</span>}
-              <span class="ct-time">{timeAgo(c.createdAt)}</span>
-              {c.updatedAt && c.updatedAt !== c.createdAt && <span class="ct-edited">(edited)</span>}
-            </div>
-            <p class="ct-text" data-ct-text data-ct-raw-body={c.body} set:html={renderBody(c.body)}></p>
-            <form class="ct-edit-form" data-ct-edit-form hidden>
-              <textarea name="body" rows="3" maxlength={maxLength}>{c.body}</textarea>
-              <div class="ct-composer-foot">
-                <span class="ct-char-count"><span data-ct-char-count>{c.body.length}</span> / {maxLength}</span>
-                <div style="display:flex;gap:6px;align-items:center">
-                  <button type="button" class="ct-emote-insert-btn" data-ct-action="emote-insert" title="Insert emote">
-                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M5.5 10c.7.8 4.3.8 5 0"/><circle cx="6" cy="6.5" r=".7" fill="currentColor" stroke="none"/><circle cx="10" cy="6.5" r=".7" fill="currentColor" stroke="none"/></svg>
-                  </button>
-                  <button type="button" class="ct-icon-btn" data-ct-action="edit-cancel">Cancel</button>
-                  <button type="submit" class="ct-submit">Save</button>
-                </div>
-              </div>
-              <div class="ct-composer-error" data-ct-composer-err></div>
-            </form>
-            <div class="ct-actions">
-              {showVotes && (
-                <button
-                  type="button"
-                  class={`ct-vote-btn${c.myVote === 1 ? " active-up" : ""}`}
-                  data-ct-action="vote" data-ct-vote="1"
-                  aria-pressed={c.myVote === 1 ? "true" : "false"}
-                  disabled={!currentUser}
-                >▲ {c.upvotes}</button>
-              )}
-              {showVotes && showDownvote && (
-                <button
-                  type="button"
-                  class={`ct-vote-btn${c.myVote === -1 ? " active-down" : ""}`}
-                  data-ct-action="vote" data-ct-vote="-1"
-                  aria-pressed={c.myVote === -1 ? "true" : "false"}
-                  disabled={!currentUser}
-                >▼ {c.downvotes ?? 0}</button>
-              )}
-              {showReactions && ((c.reactions ?? []).length > 0 || currentUser) && (
-                <div class="ct-rx-row" data-ct-rx-for={c.id}>
-                  {(c.reactions ?? []).map((rx) => {
-                    const path = IMAGE_EMOTE_MAP[rx.type];
-                    return (
-                      <button
-                        type="button"
-                        class={`ct-rx-btn${rx.mine ? " ct-rx-active" : ""}`}
-                        data-ct-action="react"
-                        data-ct-reaction={rx.type}
-                        aria-pressed={rx.mine ? "true" : "false"}
-                      >
-                        {path
-                          ? <><img src={path} class="ct-rx-emote-img" alt={rx.type} />{" "}{rx.count}</>
-                          : <>{rx.type} {rx.count}</>}
-                      </button>
-                    );
-                  })}
-                  {currentUser && (
-                    <button type="button" class="ct-rx-toggle" data-ct-action="react-picker" title="React">+</button>
-                  )}
-                </div>
-              )}
-              {canCompose && (
-                <button
-                  type="button" class="ct-reply-btn"
-                  data-ct-action="toggle-reply" aria-expanded="false"
-                >↩ Reply {(c.replies?.length ?? 0) > 0 && `(${c.replies!.length})`}</button>
-              )}
-              {c.canEdit && (
-                <button type="button" class="ct-icon-btn ct-edit-btn" data-ct-action="edit" title="Edit comment">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                </button>
-              )}
-              {c.canDelete && (
-                <button type="button" class="ct-icon-btn ct-delete-btn" data-ct-action="delete" title="Delete comment">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-                </button>
-              )}
-              {showReport && c.canReport && (
-                <button type="button" class="ct-icon-btn" data-ct-action="report">Report</button>
-              )}
-            </div>
-
-            {canCompose && (
-              <form class="ct-reply-form" data-ct-reply-form data-ct-parent-id={c.id} hidden>
-                <div class="ct-composer-avatar ct-avatar-sm">
-                  {currentUser?.avatarUrl
-                    ? <img src={currentUser.avatarUrl} alt={currentUser.username} />
-                    : <span>{currentUser ? initials(currentUser.username) : "?"}</span>}
-                </div>
-                <div class="ct-composer-wrap">
-                  <textarea name="body" placeholder={`Reply to @${c.author.username}…`} rows="2" maxlength={maxLength}></textarea>
-                  <div class="ct-composer-foot">
-                    <span class="ct-char-count"><span data-ct-char-count>0</span> / {maxLength}</span>
-                    <div style="display:flex;gap:6px;align-items:center">
-                      <button type="button" class="ct-icon-btn" data-ct-action="reply-cancel">Cancel</button>
-                      <button type="button" class="ct-emote-insert-btn" data-ct-action="emote-insert" title="Insert emote">
-                        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M5.5 10c.7.8 4.3.8 5 0"/><circle cx="6" cy="6.5" r=".7" fill="currentColor" stroke="none"/><circle cx="10" cy="6.5" r=".7" fill="currentColor" stroke="none"/></svg>
-                      </button>
-                      <button type="submit" class="ct-submit">Reply</button>
-                    </div>
-                  </div>
-                  <div class="ct-composer-error" data-ct-composer-err></div>
-                </div>
-              </form>
-            )}
-
-            {(c.replies ?? []).length > 0 && (
-              <ul class="ct-replies" data-ct-replies-for={c.id}>
-                {c.replies!.map((r) => (
-                  <li class="ct-comment" data-ct-id={r.id}>
-                    <a href={`/reviewers/${r.author.username}`} class="ct-avatar ct-avatar-sm">
-                      {r.author.avatarUrl
-                        ? <img src={r.author.avatarUrl} alt={r.author.username} />
-                        : <span>{initials(r.author.username)}</span>}
-                    </a>
-                    <div class="ct-body">
-                      <div class="ct-meta">
-                        <a href={`/reviewers/${r.author.username}`} class="ct-username">@{r.author.username}</a>
-                        {(r.author.badges ?? []).map((slug: string) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
-                        {r.author.roleTag && <span class={`ct-role-chip ${roleClass(r.author.roleTag)}`}>{r.author.roleTag}</span>}
-                        <span class="ct-time">{timeAgo(r.createdAt)}</span>
-                      </div>
-                      <p class="ct-text" set:html={renderBody(r.body)}></p>
-                      {((showReactions && ((r.reactions ?? []).length > 0 || currentUser)) || r.canDelete) && (
-                        <div class="ct-actions">
-                          {showReactions && ((r.reactions ?? []).length > 0 || currentUser) && (
-                            <div class="ct-rx-row" data-ct-rx-for={r.id}>
-                              {(r.reactions ?? []).map((rx) => {
-                                const path = IMAGE_EMOTE_MAP[rx.type];
-                                return (
-                                  <button
-                                    type="button"
-                                    class={`ct-rx-btn${rx.mine ? " ct-rx-active" : ""}`}
-                                    data-ct-action="react"
-                                    data-ct-reaction={rx.type}
-                                    aria-pressed={rx.mine ? "true" : "false"}
-                                  >
-                                    {path
-                                      ? <><img src={path} class="ct-rx-emote-img" alt={rx.type} />{" "}{rx.count}</>
-                                      : <>{rx.type} {rx.count}</>}
-                                  </button>
-                                );
-                              })}
-                              {currentUser && (
-                                <button type="button" class="ct-rx-toggle" data-ct-action="react-picker" title="React">+</button>
-                              )}
-                            </div>
-                          )}
-                          {r.canDelete && (
-                            <button type="button" class="ct-icon-btn" data-ct-action="delete-reply">Delete</button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </li>
+        <CommentNode
+          comment={c}
+          currentUser={currentUser}
+          target={target}
+          canCompose={canCompose}
+          showVotes={showVotes}
+          showDownvote={showDownvote}
+          showReactions={showReactions}
+          showReport={showReport}
+          maxLength={maxLength}
+          depth={0}
+          maxDepth={maxDepth}
+        />
       ))}
     </ul>
   )}
