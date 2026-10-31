@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { requireAdmin, json } from "../../../../utils/api";
 
-const VALID_TARGET_TYPES = ['review', 'comment', 'recommendation', 'profile'];
+const VALID_TARGET_TYPES = ['review', 'comment', 'recommendation', 'profile', 'poll_answer'];
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAdmin(context);
