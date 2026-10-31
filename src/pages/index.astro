@@ -70,10 +70,10 @@ async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit:
 
   let listsQuery = adminDb
     .from('lists')
-    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, profiles(id, username, avatar_url)')
+    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, last_posted_to_feed_at, profiles(id, username, avatar_url)')
     .eq('visibility', 'public')
-    .eq('shared_to_feed', true)
-    .order('created_at', { ascending: false })
+    .not('last_posted_to_feed_at', 'is', null)
+    .order('last_posted_to_feed_at', { ascending: false })
     .limit(limit);
   if (profileIdFilter) listsQuery = listsQuery.in('profile_id', profileIdFilter);
 
@@ -206,7 +206,9 @@ const reviews = (rawReviewsRes.data ?? []) as Review[]
 // Infinite scroll (loadMore) continues from the oldest item's date.
 const feedItems: any[] = [
   ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
-  ...recentLists.map((l: any) => ({ ...l, _date: l.created_at })),
+  // Lists ride the feed on their last post-to-feed time (not created_at), so
+  // a repost surfaces the list again instead of leaving it buried.
+  ...recentLists.map((l: any) => ({ ...l, _date: l.last_posted_to_feed_at ?? l.created_at })),
   ...recentRecs,
 ].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
@@ -420,7 +422,7 @@ await attachReviewVideos(db, [
 const followingItems: any[] = [
   ...followingReviews.map((r: any) => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
   ...followingRecs,
-  ...followingLists.map((l: any) => ({ ...l, _date: l.created_at })),
+  ...followingLists.map((l: any) => ({ ...l, _date: l.last_posted_to_feed_at ?? l.created_at })),
 ].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime())
 
 function htFmt(n: number): string { return n.toFixed(1) }
@@ -1041,7 +1043,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         var res = await fetch('/api/lists/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: 'Untitled List', visibility: 'public', shared_to_feed: true }),
+          body: JSON.stringify({ title: 'Untitled List', visibility: 'public' }),
         })
         var data = await res.json()
         if (res.ok && data.list_id) {
@@ -1464,9 +1466,8 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       return slugs.map(function (slug) {
         var def = BADGES[slug];
         if (!def) return '';
-        return '<span class="profile-badge profile-badge--sm" style="--badge-color:' + esc(def.color) + '" title="' + esc(def.description) + '" aria-label="' + esc(def.label) + '">'
+        return '<span class="profile-badge profile-badge--sm profile-badge--icon-only" style="--badge-color:' + esc(def.color) + '" title="' + esc(def.description) + '" aria-label="' + esc(def.label) + '">'
           + '<span class="profile-badge-icon" aria-hidden="true">' + esc(def.icon) + '</span>'
-          + '<span class="profile-badge-label">' + esc(def.label) + '</span>'
           + '</span>';
       }).join('');
     }
@@ -1733,7 +1734,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     function buildListCard(l) {
       var li = isLoggedIn ? 'true' : 'false';
       var isOwn = !!(currentProfileId && l.profile_id === currentProfileId);
-      var ts = l.created_at;
+      var ts = l.last_posted_to_feed_at || l.created_at;
       var username = l.profiles?.username || l.ownerUsername || '';
       var avatar = l.profiles?.avatar_url || l.ownerAvatar || null;
       var inits = (username || '?').slice(0, 2).toUpperCase();
@@ -2646,6 +2647,12 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   #tab-recent.filter-lists [data-feed-type="rec"] { display: none !important; }
   #tab-recent.filter-recs [data-feed-type="review"],
   #tab-recent.filter-recs [data-feed-type="list"] { display: none !important; }
+  /* Each card on the Recent tab is wrapped in <div data-feed-type="..."> so
+     the card components' own :last-child border strip wipes every border.
+     Draw separators between adjacent wrappers instead. */
+  #tab-recent > div[data-feed-type] + div[data-feed-type] {
+    border-top: 1px solid var(--border-subtle);
+  }
   .genre-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .genre-pill { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; border: 1px solid transparent; }
   .genre-pill:hover { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent); opacity: 1; }

@@ -8,20 +8,25 @@ import GroupCard, { type GroupCardSummary } from "../../components/groups/GroupC
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, supabase);
-if (!user) return Astro.redirect("/signin");
-
 const db = getSupabaseAdmin() as any;
 
-const { data: profile } = await db
-  .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
-if (!profile) return Astro.redirect("/signin");
+// Logged-out visitors see Discover only. Everything that keys off profile.id
+// (my groups, invites, pending requests) is skipped when there's no profile.
+let profile: { id: string; username: string; avatar_url: string | null } | null = null;
+if (user) {
+  const { data } = await db
+    .from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).single();
+  profile = data ?? null;
+}
+const isLoggedIn = !!profile;
 
-// My groups
-const { data: myMemberships } = await (supabase as any)
-  .from("group_members")
-  .select(`role, groups ( id, name, description, avatar_url, banner_url, banner_position, visibility, created_at )`)
-  .eq("profile_id", profile.id)
-  .order("joined_at", { ascending: false });
+const myMemberships = profile
+  ? (await (supabase as any)
+      .from("group_members")
+      .select(`role, groups ( id, name, description, avatar_url, banner_url, banner_position, visibility, created_at, created_by )`)
+      .eq("profile_id", profile.id)
+      .order("joined_at", { ascending: false })).data
+  : null;
 
 const myGroups = (myMemberships ?? []).map((m: any) => ({ ...m.groups, role: m.role }));
 
@@ -39,17 +44,19 @@ async function countMembers(ids: string[]): Promise<Record<string, number>> {
 const groupIds = myGroups.map((g: any) => g.id);
 const memberCounts = await countMembers(groupIds);
 
-// Pending invites
-const { data: pendingInvites } = await (supabase as any)
-  .from("group_invites")
-  .select(`id, group_id, groups ( id, name, description, visibility ), invited_by_profile:invited_by ( username, avatar_url )`)
-  .eq("invited_profile_id", profile.id)
-  .eq("status", "pending");
+// Pending invites — only make sense for a signed-in profile
+const pendingInvites = profile
+  ? (await (supabase as any)
+      .from("group_invites")
+      .select(`id, group_id, groups ( id, name, description, visibility ), invited_by_profile:invited_by ( username, avatar_url )`)
+      .eq("invited_profile_id", profile.id)
+      .eq("status", "pending")).data
+  : null;
 
 // Discover all groups the user isn't already a member of (including private — users can apply to join)
 const { data: discoverGroups } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, created_at")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, created_at, created_by")
   .in("visibility", ["public", "private"])
   .not("id", "in", `(${groupIds.length > 0 ? groupIds.join(",") : "00000000-0000-0000-0000-000000000000"})`)
   .order("created_at", { ascending: false })
@@ -69,21 +76,65 @@ async function loadSummaries(ids: string[]): Promise<Record<string, GroupCardSum
 }
 const summaries = await loadSummaries([...groupIds, ...(discoverGroups ?? []).map((g: any) => g.id)]);
 
+// Creator byline + badges for every card
+type GroupCreator = { username: string; avatar_url: string | null; badges: string[] };
+async function loadCreators(ids: string[]): Promise<Record<string, GroupCreator>> {
+  const out: Record<string, GroupCreator> = {};
+  if (ids.length === 0) return out;
+  const { data, error } = await db
+    .from("profiles")
+    .select("id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug )")
+    .in("id", ids);
+  if (error) console.error("[groups] creators error:", JSON.stringify(error));
+  for (const row of data ?? []) {
+    out[row.id] = {
+      username: row.username,
+      avatar_url: row.avatar_url,
+      badges: (row.profile_badges ?? []).map((b: any) => b.badge_slug).filter(Boolean),
+    };
+  }
+  return out;
+}
+const creatorIds = Array.from(new Set([
+  ...myGroups.map((g: any) => g.created_by),
+  ...(discoverGroups ?? []).map((g: any) => g.created_by),
+].filter(Boolean)));
+const creators = await loadCreators(creatorIds);
+
+// Chekpoint Creator groups float to the top of Discover: a group whose owner
+// holds the 'chekpoint-creator' badge is a featured community and should be
+// discoverable before random user-created groups. Everything else keeps its
+// created_at DESC order from the query.
+const _isCreatorGroup = (g: any) => (creators[g.created_by]?.badges ?? []).includes('chekpoint-creator');
+const discoverGroupsSorted = [...(discoverGroups ?? [])].sort((a, b) => {
+  const aIsCreator = _isCreatorGroup(a) ? 1 : 0;
+  const bIsCreator = _isCreatorGroup(b) ? 1 : 0;
+  return bIsCreator - aIsCreator;
+});
+
 // User's pending join requests (so we can show status in discover)
-const { data: pendingRequests } = await (supabase as any)
-  .from("group_join_requests")
-  .select("group_id")
-  .eq("profile_id", profile.id)
-  .eq("status", "pending");
+const pendingRequests = profile
+  ? (await (supabase as any)
+      .from("group_join_requests")
+      .select("group_id")
+      .eq("profile_id", profile.id)
+      .eq("status", "pending")).data
+  : null;
 const pendingRequestGroupIds = new Set((pendingRequests ?? []).map((r: any) => r.group_id));
 
 function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
 ---
 
-<Layout title="Groups — Chekpoint" isLoggedIn={true} currentProfile={profile} activeNav="groups" variant="two-col">
+<Layout title="Groups — Chekpoint" isLoggedIn={isLoggedIn} currentProfile={profile} activeNav="groups" variant="two-col">
 <style is:global>
-  .groups-header { display:flex; align-items:center; justify-content:space-between; padding:24px 28px 0; }
-  .groups-title { font-family:'DM Serif Display',serif; font-size:24px; }
+  .groups-empty-filtered { padding:32px 28px; text-align:center; color:var(--text-tertiary); font-size:13px; display:none; }
+  .lf-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 14px 20px 4px; }
+  .lf-search { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px; font-family: inherit; outline: none; min-width: 160px; flex: 1; max-width: 320px; }
+  .lf-search:focus { border-color: var(--accent); }
+  @media (max-width: 640px) {
+    .lf-bar { padding: 12px 16px 4px; }
+    .lf-search { max-width: none; width: 100%; }
+  }
   .btn-primary { background:var(--accent); color:#fff; border:none; padding:9px 20px; border-radius:22px; font-size:13px; font-weight:500; font-family:inherit; cursor:pointer; transition:opacity .15s; text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
   .btn-primary:hover { opacity:.85; }
   .section-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--text-tertiary); padding:24px 28px 10px; }
@@ -112,11 +163,23 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
   .badge-pending { font-size:11px; padding:2px 10px; border-radius:10px; background:rgba(251,191,36,0.1); color:#fbbf24; font-weight:600; margin-left:auto; white-space:nowrap; border:1px solid rgba(251,191,36,0.25); }
 </style>
 
-<div class="feed">
-  <div class="groups-header">
-    <h1 class="groups-title">Groups</h1>
-    <a href="/groups/create" class="btn-primary">+ New Group</a>
+<main class="feed">
+  <div class="feed-header">
+    <div>
+      <div class="feed-title">Groups</div>
+      <div class="feed-subtitle">
+        {myGroups.length > 0
+          ? `${myGroups.length} group${myGroups.length !== 1 ? "s" : ""} you're in`
+          : "Join your crew's game nights"}
+      </div>
+    </div>
+    <a href={isLoggedIn ? "/groups/create" : "/signin?next=/groups/create"} class="new-review-btn">+ New Group</a>
   </div>
+
+  <div class="lf-bar">
+    <input class="lf-search" type="search" id="groups-search-input" placeholder="Search your groups and discover…" autocomplete="off" />
+  </div>
+  <div class="groups-empty-filtered" id="groups-empty-filtered">No groups match that search.</div>
 
   {/* Pending invites */}
   {(pendingInvites ?? []).length > 0 && (
@@ -146,7 +209,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
       <div class="empty-hero-title">Bring your crew together</div>
       <p class="empty-hero-sub">Create a group to track scores, log game nights, and build a shared watchlist with your friends.</p>
       <div class="empty-hero-actions">
-        <a href="/groups/create" class="btn-primary">+ Create a Group</a>
+        <a href={isLoggedIn ? "/groups/create" : "/signin?next=/groups/create"} class="btn-primary">+ Create a Group</a>
       </div>
     </div>
   )}
@@ -157,7 +220,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
       <div class="section-label">My Groups</div>
       <div class="group-grid">
         {myGroups.map((g: any) => (
-          <GroupCard group={g} memberCount={memberCounts[g.id] ?? 1} summary={summaries[g.id]}>
+          <GroupCard group={g} memberCount={memberCounts[g.id] ?? 1} summary={summaries[g.id]} creator={creators[g.created_by]}>
             <span slot="meta" class="visibility-badge">{g.visibility}</span>
             <span slot="badge" class="group-role">{g.role}</span>
           </GroupCard>
@@ -167,16 +230,16 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
   )}
 
   {/* Discover public groups */}
-  {(discoverGroups ?? []).length > 0 && (
+  {discoverGroupsSorted.length > 0 && (
     <div>
       <div class="section-label">Discover Groups</div>
       <div class="group-grid">
-        {(discoverGroups ?? []).map((g: any) => {
+        {discoverGroupsSorted.map((g: any) => {
           const isPending = pendingRequestGroupIds.has(g.id);
           const isPrivate = g.visibility === "private";
           const needsApproval = isPrivate || !!g.requires_approval;
           return (
-            <GroupCard group={g} memberCount={discoverMemberCounts[g.id] ?? 0} summary={summaries[g.id]} isPrivate={isPrivate}>
+            <GroupCard group={g} memberCount={discoverMemberCounts[g.id] ?? 0} summary={summaries[g.id]} isPrivate={isPrivate} creator={creators[g.created_by]}>
               {isPrivate && <span slot="meta" class="visibility-badge">Private</span>}
               {!isPrivate && g.requires_approval && <span slot="meta" class="visibility-badge">Application required</span>}
               {isPending
@@ -189,7 +252,7 @@ function getInitials(name: string) { return name.slice(0, 2).toUpperCase(); }
       </div>
     </div>
   )}
-</div>
+</main>
 </Layout>
 
 <script>
@@ -213,4 +276,39 @@ async function respondInvite(btn: HTMLButtonElement, action: 'accept' | 'decline
   }
 }
 (window as any).respondInvite = respondInvite;
+
+// Client-side search: filter the My Groups + Discover cards already on the
+// page by name/description. The grid shows only the first 20 discover results,
+// so this doesn't query new groups — it narrows what's visible.
+(function() {
+  const input = document.getElementById('groups-search-input') as HTMLInputElement | null;
+  if (!input) return;
+  const empty = document.getElementById('groups-empty-filtered') as HTMLElement | null;
+  const cards = Array.from(document.querySelectorAll('.gcard')) as HTMLAnchorElement[];
+
+  function apply() {
+    const q = input!.value.trim().toLowerCase();
+    let totalVisible = 0;
+    for (const card of cards) {
+      const name = card.dataset.groupName ?? '';
+      const desc = card.dataset.groupDesc ?? '';
+      const match = q === '' || name.includes(q) || desc.includes(q);
+      card.style.display = match ? '' : 'none';
+      if (match) totalVisible++;
+    }
+    // Hide a section-label + its grid when every card in that grid is filtered out.
+    document.querySelectorAll('.section-label').forEach((label) => {
+      const next = label.nextElementSibling as HTMLElement | null;
+      if (!next) return;
+      const sectionCards = next.querySelectorAll('.gcard');
+      if (sectionCards.length === 0) return;
+      const anyVisible = Array.from(sectionCards).some((c) => (c as HTMLElement).style.display !== 'none');
+      (label as HTMLElement).style.display = anyVisible ? '' : 'none';
+      next.style.display = anyVisible ? '' : 'none';
+    });
+    if (empty) empty.style.display = (q !== '' && totalVisible === 0) ? '' : 'none';
+  }
+
+  input.addEventListener('input', apply);
+})();
 </script>

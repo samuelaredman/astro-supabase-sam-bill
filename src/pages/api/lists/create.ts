@@ -6,12 +6,15 @@ export const POST: APIRoute = async (context) => {
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { title, description, is_ranked, visibility, shared_to_feed } = await context.request.json();
+  const { title, description, is_ranked, visibility } = await context.request.json();
 
   if (!title?.trim()) return json({ error: "Title is required." }, 400);
   if (visibility && !["public", "private"].includes(visibility))
     return json({ error: "visibility must be 'public' or 'private'." }, 400);
 
+  // New lists never auto-post to the home feed — half-finished lists were
+  // spamming it. The owner opts in via the "Post to feed" button on the
+  // list's Edit page (POST /api/lists/post-to-feed) when the list is ready.
   const { data: list, error } = await (db as any)
     .from("lists")
     .insert({
@@ -20,7 +23,7 @@ export const POST: APIRoute = async (context) => {
       description: description?.trim() || null,
       is_ranked: is_ranked ?? false,
       visibility: visibility ?? "public",
-      shared_to_feed: visibility === "private" ? false : (shared_to_feed ?? true),
+      shared_to_feed: false,
     })
     .select("id")
     .single();

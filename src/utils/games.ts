@@ -417,6 +417,15 @@ export type ImportGameResult =
  * "add a game" flow (api/games/import.ts) and the admin unmatched-titles
  * importer (api/admin/unmatched-games/import.ts) — kept in one place so a
  * fix to one doesn't silently miss the other.
+ *
+ * Edition / version rows (GOTY, Definitive, PS4 editions) are preserved in
+ * the DB with their full IGDB metadata and tagged with `canonical_game_id`
+ * pointing at the base game — the canonical-graph read filter hides them
+ * from search / browse while the game page renders them as "Editions". The
+ * old swap-to-parent approach (`resolveCanonicalIgdbId` walking the chain
+ * and swapping igdb_id before insert) was superseded by the canonical
+ * graph; the helpers are kept for the historical `game_aliases` lookup
+ * path but no longer invoked here.
  */
 export async function importGameByIgdbId(db: any, igdbId: number): Promise<ImportGameResult> {
   const { data: existing } = await db
@@ -572,4 +581,20 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
   ]);
 
   return { ok: true, game: inserted };
+}
+
+/** Look up game ids whose aliases match the query. Used by the search flows to
+ *  include canonical games whose variant titles (GOTY/Definitive/etc.) matched. */
+export async function searchGameAliases(db: any, query: string, limit = 8): Promise<string[]> {
+  if (!query || query.length < 2) return [];
+  const { data } = await db
+    .from('game_aliases')
+    .select('game_id')
+    .ilike('title', `%${query}%`)
+    .limit(limit);
+  const seen = new Set<string>();
+  for (const row of data ?? []) {
+    if (row?.game_id) seen.add(String(row.game_id));
+  }
+  return Array.from(seen);
 }

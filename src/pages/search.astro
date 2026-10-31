@@ -2,7 +2,7 @@
 import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../utils/database'
 import { igdbFetch, escapeIgdbString } from '../utils/igdb'
 import { igdbImage } from '../utils/format'
-import { GAME_CATEGORY_OR_FILTER } from '../utils/games'
+import { GAME_CATEGORY_OR_FILTER, searchGameAliases } from '../utils/games'
 import Layout from '../components/Layout.astro'
 import { setPageCacheHeaders } from '../utils/cache';
 import { getPageUser } from '../utils/pageAuth';
@@ -48,8 +48,9 @@ if (tab === 'games') {
     // relevance, which can bury an obscure exact title under more "popular"
     // loose substring matches — the `where name ~ *"..."*;` query guarantees
     // a literal substring match on the name always surfaces regardless.
-    const [rpcRes, profilesRes, companiesRes, igdbSearchRes, igdbNameRes] = await Promise.all([
+    const [rpcRes, aliasIds, profilesRes, companiesRes, igdbSearchRes, igdbNameRes] = await Promise.all([
       supabase.rpc('search_games', rpcParams),
+      searchGameAliases(supabase, query, 20),
       supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
       supabase.from('developers').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
       igdbFetch('games', `fields id, name, slug, cover.url; search "${escapedQuery}"; limit 8;`),
@@ -64,7 +65,15 @@ if (tab === 'games') {
       return true
     })
 
-    const rawGameIds = (rpcRes.data ?? []).map((g: any) => g.id)
+    const rpcGameIds = (rpcRes.data ?? []).map((g: any) => g.id)
+
+    // Merge alias matches behind RPC-ranked ids so canonical rows found via a
+    // variant title (e.g. "Sekiro GOTY" -> Sekiro) still surface in results.
+    const seenGameIds = new Set<string>(rpcGameIds)
+    const rawGameIds: string[] = [...rpcGameIds]
+    for (const id of aliasIds) {
+      if (!seenGameIds.has(id)) { rawGameIds.push(id); seenGameIds.add(id) }
+    }
 
     if (rawGameIds.length > 0) {
       const { data: fullGames } = await supabase

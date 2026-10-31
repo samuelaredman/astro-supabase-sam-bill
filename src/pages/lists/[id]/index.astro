@@ -2,8 +2,11 @@
 export const prerender = false;
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import Layout from "../../../components/Layout.astro";
+import CommentThread from "../../../components/CommentThread.astro";
 import ShareButton from "../../../components/ShareButton.astro";
+import AchievementDetailModal from "../../../components/AchievementDetailModal.astro";
 import { igdbImage, timeAgo, scoreClass } from "../../../utils/format";
+import { shortGenre } from "../../../utils/groupCompare";
 import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../../../utils/reactions";
 import { setPageCacheHeaders } from "../../../utils/cache";
 import { getPageUser } from "../../../utils/pageAuth";
@@ -22,7 +25,7 @@ const db = getSupabaseAdmin() as any;
 
 const { data: list } = await db
   .from("lists")
-  .select("id, title, description, is_ranked, visibility, default_view, cover_image_url, created_at, updated_at, profiles ( id, username, avatar_url, search_indexable )")
+  .select("id, title, description, is_ranked, visibility, default_view, show_hours, show_achievements, cover_image_url, created_at, updated_at, profiles ( id, username, avatar_url, search_indexable )")
   .eq("id", id)
   .maybeSingle();
 
@@ -81,6 +84,94 @@ if (_gameIds.length > 0 && list.profiles?.id) {
   for (const r of _reviewRows ?? []) {
     reviewByGameId[r.game_id] = { id: r.id, score: r.score, play_time_hours: r.play_time_hours, platform_played_on: r.platform_played_on ?? null };
   }
+}
+
+// Owner's per-game achievement completion (shown when list.show_achievements).
+// Mirrors libraryQuery.ts: each source has its own RPC returning pct in 0..1,
+// keyed by that source's external id. We join via user_game_status to map
+// each game_id → steam_appid / psn_np_communication_id / xbox_title_id and
+// keep every source's pct so the renderer can pick the right 100% badge
+// (Steam ribbon / PSN platinum / Xbox mythic) by source — not just the max.
+// Per-source completion + the external id (steam appid / psn npCommId / xbox
+// titleId) so the achievement-detail modal can refetch the full list per source.
+type AchievementSource = { pct: number; sid: string };
+type AchievementStatus = { steam?: AchievementSource; psn?: AchievementSource; xbox?: AchievementSource };
+const achievementByGameId: Record<string, AchievementStatus> = {};
+if (list.show_achievements && _gameIds.length > 0 && list.profiles?.id) {
+  const { data: _ugsRows } = await db
+    .from('user_game_status')
+    .select('game_id, steam_appid, psn_np_communication_id, xbox_title_id')
+    .eq('profile_id', list.profiles.id)
+    .in('game_id', _gameIds);
+  const ugs = (_ugsRows ?? []) as any[];
+  const hasAnySrc = ugs.some((r) => r.steam_appid != null || r.psn_np_communication_id != null || r.xbox_title_id != null);
+  if (hasAnySrc) {
+    const psnNpCommIds = ugs.map((r) => r.psn_np_communication_id).filter((v: any): v is string => typeof v === 'string');
+    const [{ data: _stPct }, { data: _psPct }, { data: _xbPct }, { data: _psPlat }] = await Promise.all([
+      db.rpc('achievement_completion_by_appid',        { p_profile_id: list.profiles.id }),
+      db.rpc('trophy_completion_by_npcommid',          { p_profile_id: list.profiles.id }),
+      db.rpc('xbox_achievement_completion_by_titleid', { p_profile_id: list.profiles.id }),
+      // PSN games award a Platinum once every non-DLC trophy is earned, so a
+      // Platinum = "100% complete" even when DLC trophies drag the pct under 1.
+      // Mirror that: if the owner has the Platinum, treat the PSN side as 1.
+      psnNpCommIds.length > 0
+        ? db.from('user_trophies')
+            .select('np_communication_id')
+            .eq('profile_id', list.profiles.id)
+            .eq('trophy_type', 'platinum')
+            .eq('earned', true)
+            .in('np_communication_id', psnNpCommIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+    const steamPct = new Map<number, number>((_stPct ?? []).map((r: any) => [r.steam_appid, Number(r.pct)]));
+    const psnPct   = new Map<string, number>((_psPct ?? []).map((r: any) => [r.np_communication_id, Number(r.pct)]));
+    const xboxPct  = new Map<string, number>((_xbPct ?? []).map((r: any) => [r.xbox_title_id, Number(r.pct)]));
+    const psnPlat  = new Set<string>((_psPlat ?? []).map((r: any) => r.np_communication_id));
+    for (const r of ugs) {
+      const s: AchievementStatus = {};
+      if (r.steam_appid != null) {
+        const v = steamPct.get(r.steam_appid);
+        if (typeof v === 'number') s.steam = { pct: v, sid: String(r.steam_appid) };
+      }
+      if (r.psn_np_communication_id) {
+        if (psnPlat.has(r.psn_np_communication_id)) {
+          s.psn = { pct: 1, sid: r.psn_np_communication_id };
+        } else {
+          const v = psnPct.get(r.psn_np_communication_id);
+          if (typeof v === 'number') s.psn = { pct: v, sid: r.psn_np_communication_id };
+        }
+      }
+      if (r.xbox_title_id) {
+        const v = xboxPct.get(r.xbox_title_id);
+        if (typeof v === 'number') s.xbox = { pct: v, sid: r.xbox_title_id };
+      }
+      if (s.steam || s.psn || s.xbox) {
+        achievementByGameId[r.game_id] = s;
+      }
+    }
+  }
+}
+
+// Pick the 100% badge for a game: PSN platinum > Xbox mythic > Steam ribbon
+// if the owner has multiple sources all at 100%. For partial completion, show
+// the highest pct across sources as a plain percent chip. The returned source
+// drives both the badge style and the modal's achievement-list fetch.
+type BadgeKind = 'steam' | 'psn' | 'xbox' | 'partial';
+function pickAchievementBadge(gameId: string | null | undefined):
+  { kind: BadgeKind; pct: number; src: 'steam' | 'psn' | 'xbox'; sid: string } | null {
+  if (!gameId) return null;
+  const s = achievementByGameId[gameId];
+  if (!s) return null;
+  if (s.psn   && s.psn.pct   === 1) return { kind: 'psn',   pct: 1, src: 'psn',   sid: s.psn.sid };
+  if (s.xbox  && s.xbox.pct  === 1) return { kind: 'xbox',  pct: 1, src: 'xbox',  sid: s.xbox.sid };
+  if (s.steam && s.steam.pct === 1) return { kind: 'steam', pct: 1, src: 'steam', sid: s.steam.sid };
+  const sources: Array<{ src: 'steam' | 'psn' | 'xbox'; pct: number; sid: string }> = [];
+  if (s.steam) sources.push({ src: 'steam', pct: s.steam.pct, sid: s.steam.sid });
+  if (s.psn)   sources.push({ src: 'psn',   pct: s.psn.pct,   sid: s.psn.sid });
+  if (s.xbox)  sources.push({ src: 'xbox',  pct: s.xbox.pct,  sid: s.xbox.sid });
+  if (sources.length === 0) return null;
+  sources.sort((a, b) => b.pct - a.pct);
+  return { kind: 'partial', pct: sources[0].pct, src: sources[0].src, sid: sources[0].sid };
 }
 
 // Fetch the current viewer's own owned/played status for games in this list
@@ -147,6 +238,25 @@ for (const row of (genreRows ?? []) as any[]) {
 const topGenres = Object.entries(genreCount).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name, count]) => ({ name, count }));
 const allGenreNames = Object.keys(genreCount).sort((a, b) => a.localeCompare(b));
 
+// Genre radar — same visual language as the groups Stats-tab radar, one
+// polygon instead of two sides. Six axes keeps the labels legible; each
+// axis's value is the percent of games in the list tagged with that genre.
+// Scale is pct of the top-genre share (so the busiest genre fills the ring).
+const RADAR_AXES_MAX = 6;
+const radarGenresRaw = Object.entries(genreCount)
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, RADAR_AXES_MAX);
+const radarTotalGames = entryList.length || 1;
+const radarGenres = radarGenresRaw.map(([name, count]) => ({
+  name,
+  short: shortGenre(name),
+  pct: Math.round((count / radarTotalGames) * 100),
+  count,
+}));
+const radarScale = radarGenres.length > 0 ? Math.max(...radarGenres.map((g) => g.pct), 10) : 10;
+// Radar needs at least 3 axes to form a polygon; otherwise fall back to nothing.
+const showRadar = radarGenres.length >= 3;
+
 // Developers & publishers
 const devCount: Record<string, number> = {};
 const pubCount: Record<string, number> = {};
@@ -171,6 +281,22 @@ const allDevNames = Object.keys(devCount).sort((a, b) => a.localeCompare(b));
 const reviewedEntries = Object.values(reviewByGameId);
 const reviewedCount = reviewedEntries.length;
 const totalHours = reviewedEntries.reduce((sum, r) => sum + (r.play_time_hours ?? 0), 0);
+
+// Average achievement completion across the games the owner has synced
+// (unsynced games don't count — otherwise one unsynced row drags the average
+// to 0). PSN Platinums already fold into s.psn.pct = 1 above, so a Platinum
+// game contributes a full 100% here even when DLC trophies hold the raw pct down.
+const _achStatuses = Object.values(achievementByGameId);
+const _achPcts = _achStatuses
+  .map((s) => {
+    const parts = [s.steam?.pct, s.psn?.pct, s.xbox?.pct].filter((v): v is number => typeof v === 'number');
+    return parts.length ? Math.max(...parts) : null;
+  })
+  .filter((v): v is number => v !== null);
+const avgAchievementPct = _achPcts.length > 0
+  ? _achPcts.reduce((sum, v) => sum + v, 0) / _achPcts.length
+  : null;
+const achievementTrackedCount = _achPcts.length;
 const avgScore = reviewedCount > 0
   ? reviewedEntries.reduce((sum, r) => sum + r.score, 0) / reviewedCount
   : null;
@@ -284,6 +410,44 @@ for (const c of commentList) {
   }
 }
 
+// Shape list_comments into CommentData[] for the shared CommentThread. Lists
+// support 3 levels of nesting (c → r → dr), identical to review_comments.
+function shapeListComment(c: any, depth: number): import("../../../utils/comments").CommentData {
+  const votes = getLCVotes(c);
+  const isMine = currentProfile?.id === c.profiles?.id;
+  const rxArr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(c.list_comment_reactions) ? c.list_comment_reactions : [];
+  const rxMap: Record<string, { count: number; mine: boolean }> = {};
+  for (const r of rxArr) {
+    if (!rxMap[r.reaction_type]) rxMap[r.reaction_type] = { count: 0, mine: false };
+    rxMap[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) rxMap[r.reaction_type].mine = true;
+  }
+  const children = depth < 3 ? (directReplyMap[c.id] ?? []).map((r) => shapeListComment(r, depth + 1)) : [];
+  return {
+    id: c.id,
+    author: {
+      id: c.profiles?.id ?? '',
+      username: c.profiles?.username ?? 'unknown',
+      avatarUrl: c.profiles?.avatar_url ?? null,
+    },
+    body: c.body,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    upvotes: votes.up,
+    downvotes: votes.down,
+    myVote: votes.my as 1 | -1 | 0,
+    canEdit: isMine,
+    canDelete: isMine,
+    canReport: !!currentProfile && !isMine,
+    reactions: Object.entries(rxMap)
+      .map(([type, info]) => ({ type, count: info.count, mine: info.mine }))
+      .sort((a, b) => b.count - a.count),
+    replies: children,
+  };
+}
+const threadComments = topLevelComments.map((c) => shapeListComment(c, 0));
+
 // Cover: custom upload takes priority, otherwise a collage of the first 4 game covers
 const collageSrcs = list.cover_image_url
   ? [list.cover_image_url]
@@ -293,6 +457,54 @@ const collageSrcs = list.cover_image_url
       .filter(Boolean) as string[];
 
 function getInitials(name: string) { return (name ?? "?").slice(0, 2).toUpperCase(); }
+
+// Hours readout — plain under 10k, k-suffix after that, M for the 7-figure
+// lists. Keeps the stat tile from blowing out horizontally when a long-time
+// list totals six-digit hours.
+function fmtHours(h: number): string {
+  if (!Number.isFinite(h) || h <= 0) return "0h";
+  if (h < 10000) return `${h.toLocaleString()}h`;
+  if (h < 1000000) return `${(h / 1000).toFixed(h >= 100000 ? 0 : 1)}k h`;
+  return `${(h / 1000000).toFixed(1)}M h`;
+}
+
+// Radar geometry — mirrors src/components/groups/CompareTab.astro so the two
+// charts share a visual language. Scale is a plain number; axes carry name +
+// pct in RADAR_SCALE units. Six axes keeps the labels off each other.
+const RADAR = { w: 260, h: 220, cx: 130, cy: 110, r: 70 };
+const _radarAngle = (i: number, n: number) => -Math.PI / 2 + (2 * Math.PI * i) / n;
+const _radarPoint = (i: number, n: number, value: number, scale: number) => {
+  const a = _radarAngle(i, n);
+  const d = (Math.min(value, scale) / scale) * RADAR.r;
+  return { x: RADAR.cx + Math.cos(a) * d, y: RADAR.cy + Math.sin(a) * d };
+};
+const _pts = (list: { x: number; y: number }[]) => list.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+let radarRings: string[] = [];
+let radarSpokes: { x: number; y: number }[] = [];
+let radarPolygon = "";
+let radarDots: { x: number; y: number }[] = [];
+let radarLabels: { x: number; y: number; anchor: 'start' | 'middle' | 'end'; text: string; full: string; pct: number; count: number }[] = [];
+if (showRadar) {
+  const n = radarGenres.length;
+  radarRings = [1 / 3, 2 / 3, 1].map((f) => _pts(radarGenres.map((_, i) => _radarPoint(i, n, f * radarScale, radarScale))));
+  radarSpokes = radarGenres.map((_, i) => _radarPoint(i, n, radarScale, radarScale));
+  const area = radarGenres.map((g, i) => _radarPoint(i, n, g.pct, radarScale));
+  radarPolygon = _pts(area);
+  radarDots = area;
+  radarLabels = radarGenres.map((g, i) => {
+    const ang = _radarAngle(i, n);
+    const cos = Math.cos(ang), sin = Math.sin(ang);
+    return {
+      x: RADAR.cx + cos * (RADAR.r + 14),
+      y: RADAR.cy + sin * (RADAR.r + 14) + (sin > 0.5 ? 9 : sin < -0.5 ? -3 : 4),
+      anchor: cos > 0.3 ? 'start' : cos < -0.3 ? 'end' : 'middle',
+      text: g.short,
+      full: g.name,
+      pct: g.pct,
+      count: g.count,
+    };
+  });
+}
 
 // Unlike Supabase auth redirects (which must match an exact allowlisted domain,
 // so they use Astro.site), this URL is purely self-referential — it should point
@@ -374,16 +586,50 @@ const ogImage = list.visibility !== "private"
      grid past its container. The 0 floor guarantees it always fits. */
   .entry-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; padding: 4px 0; }
   .entry-item { display: flex; flex-direction: column; }
+  /* overflow:visible so the Steam ribbon / platinum / mythic corner badges can
+     hang off the cover like they do in the Library. The image gets the radius
+     so corners still look rounded without clipping the badges. */
   .entry-cover-wrap {
     position: relative; width: 100%; aspect-ratio: 3/4;
-    border-radius: 8px; overflow: hidden;
+    border-radius: 8px; overflow: visible;
     background: var(--tag-bg); border: 1px solid var(--border);
     box-shadow: 0 2px 8px rgba(0,0,0,.15);
     transition: transform .15s, box-shadow .15s;
     display: flex; align-items: center; justify-content: center; font-size: 24px;
   }
   .entry-item:hover .entry-cover-wrap { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,.3); }
-  .entry-cover { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .entry-cover { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }
+
+  /* 100% completion highlights — mirrored from the Library's lib-cover-* classes
+     so a game that owns the perfect ribbon on a user's profile keeps it in their lists. */
+  .entry-cover-perfect  { border: 2px solid #fbbf24; box-shadow: 0 0 12px 1px rgba(251,191,36,.55); }
+  .entry-item:hover .entry-cover-wrap.entry-cover-perfect { box-shadow: 0 8px 20px rgba(0,0,0,.3), 0 0 14px 2px rgba(251,191,36,.75); }
+  .entry-cover-platinum { border: 2px solid transparent; background: linear-gradient(var(--tag-bg), var(--tag-bg)) padding-box, linear-gradient(135deg, #e8ecf0 0%, #a8b3c0 45%, #e8ecf0 100%) border-box; box-shadow: 0 0 0 1px rgba(183,236,255,.15), 0 0 12px rgba(78,180,240,.45), 0 0 24px rgba(30,96,196,.25); }
+  .entry-item:hover .entry-cover-wrap.entry-cover-platinum { box-shadow: 0 8px 20px rgba(0,0,0,.3), 0 0 16px rgba(78,180,240,.6), 0 0 30px rgba(30,96,196,.3); }
+  .entry-cover-xbox     { border: 2px solid #107c10; box-shadow: 0 0 0 1px rgba(111,230,168,.15), 0 0 12px rgba(16,124,16,.55), 0 0 24px rgba(16,124,16,.25); }
+  .entry-item:hover .entry-cover-wrap.entry-cover-xbox { box-shadow: 0 8px 20px rgba(0,0,0,.3), 0 0 16px rgba(16,124,16,.7), 0 0 30px rgba(16,124,16,.3); }
+
+  /* 100% corner badges — sized ~1.7× the Library's crests because the list
+     grid's cover is roughly that much taller than the Library's thumbnail,
+     so a Library-size badge would look like a sticker on a billboard here. */
+  .entry-perfect-ribbon { position: absolute; left: -20px; bottom: -14px; width: 60px; height: 70px; z-index: 2; filter: drop-shadow(0 2px 3px rgba(0,0,0,.55)); }
+  .entry-perfect-ribbon svg { width: 100%; height: 100%; display: block; }
+  .entry-plat-badge     { position: absolute; left: -20px; bottom: 6px;   width: 54px; height: 68px; z-index: 2; filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
+  .entry-plat-badge .entry-plat-svg { width: 100%; height: 100%; }
+  .entry-xbox-badge     { position: absolute; left: -20px; bottom: 6px;   width: 58px; height: 58px; z-index: 2; filter: drop-shadow(0 2px 4px rgba(0,0,0,.5)) drop-shadow(0 0 6px rgba(16,124,16,.45)); }
+  .entry-xbox-badge svg { width: 100%; height: 100%; display: block; }
+
+  /* Badges double as buttons that open the achievement-detail modal — reset
+     span/button chrome, give them a focus ring, and nudge on hover. */
+  .entry-ach-btn { cursor: pointer; background: transparent; border: none; padding: 0; margin: 0; font: inherit; color: inherit; transition: transform .12s, filter .12s; }
+  .entry-ach-btn:hover { transform: scale(1.06); }
+  .entry-ach-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+  /* list-view (compact row) uses Library-ish dimensions — the row's cover is
+     roughly the Library detailed-view size. */
+  .entry-list.list-view .entry-perfect-ribbon { left: -10px; bottom: -8px; width: 26px; height: 30px; }
+  .entry-list.list-view .entry-plat-badge     { left: -10px; bottom: 3px;  width: 25px; height: 31px; }
+  .entry-list.list-view .entry-xbox-badge     { left: -10px; bottom: 3px;  width: 26px; height: 26px; }
   .entry-cover-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 24px; }
   .entry-rank { position: absolute; bottom: 5px; left: 5px; font-family: 'DM Serif Display', serif; font-size: 13px; font-weight: 700; background: rgba(0,0,0,.72); color: #fff; border-radius: 4px; padding: 1px 6px; line-height: 1.5; z-index: 1; }
   .entry-item:nth-child(1) .entry-rank, .entry-item:nth-child(1) .entry-rank-inline { color: #F5C842; }
@@ -396,15 +642,36 @@ const ogImage = list.visibility !== "private"
   .entry-review-link { font-size: 11px; color: var(--accent); text-decoration: none; font-weight: 500; margin-top: 4px; display: inline-block; opacity: .85; }
   .entry-review-link:hover { opacity: 1; text-decoration: underline; }
   .entry-list.list-view .entry-review-link { font-size: 11px; margin-top: 2px; }
-  .entry-score-badge { position: absolute; bottom: 4px; right: 4px; min-width: 22px; height: 20px; padding: 0 5px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; font-family: 'DM Serif Display', serif; z-index: 1; }
-  .entry-score-badge.score-perfect { background: rgba(255,255,255,.95); color: #09090a; border: 1px solid rgba(255,255,255,.9); }
-  .entry-score-badge.score-great   { background: rgba(11,32,22,.85);   color: #4ade80; border: 1px solid rgba(74,222,128,.4); }
-  .entry-score-badge.score-teal    { background: rgba(11,30,28,.85);   color: #2dd4bf; border: 1px solid rgba(45,212,191,.4); }
-  .entry-score-badge.score-good    { background: rgba(11,24,40,.85);   color: #60a5fa; border: 1px solid rgba(96,165,250,.4); }
-  .entry-score-badge.score-mid     { background: rgba(26,20,0,.85);    color: #fbbf24; border: 1px solid rgba(251,191,36,.4); }
-  .entry-score-badge.score-orange  { background: rgba(31,16,8,.85);    color: #fb923c; border: 1px solid rgba(251,146,60,.4); }
-  .entry-score-badge.score-low     { background: rgba(32,8,8,.85);     color: #f87171; border: 1px solid rgba(248,113,113,.4); }
-  .entry-hours-badge { position: absolute; top: 4px; left: 4px; font-size: 10px; font-weight: 600; background: rgba(0,0,0,.65); color: rgba(255,255,255,.85); border-radius: 3px; padding: 2px 5px; line-height: 1.3; z-index: 1; }
+  /* Score badge — fully opaque dark backgrounds (was .85 alpha, which bled
+     the cover art through on bright covers), heavier border + shadow so the
+     number pops regardless of what it's sitting on top of. */
+  .entry-score-badge { position: absolute; bottom: 6px; right: 6px; min-width: 34px; height: 32px; padding: 0 10px; border-radius: 7px; display: flex; align-items: center; justify-content: center; font-size: 19px; font-weight: 700; font-family: 'DM Serif Display', serif; z-index: 1; box-shadow: 0 4px 12px rgba(0,0,0,.7), 0 0 0 1px rgba(0,0,0,.5); letter-spacing: -.01em; text-shadow: 0 1px 2px rgba(0,0,0,.4); }
+  .entry-score-badge.score-perfect { background: #ffffff;        color: #09090a; border: 1.5px solid rgba(255,255,255,1);   text-shadow: none; }
+  .entry-score-badge.score-great   { background: #0b2016;        color: #4ade80; border: 1.5px solid rgba(74,222,128,.75); }
+  .entry-score-badge.score-teal    { background: #0b1e1c;        color: #2dd4bf; border: 1.5px solid rgba(45,212,191,.75); }
+  .entry-score-badge.score-good    { background: #0b1828;        color: #60a5fa; border: 1.5px solid rgba(96,165,250,.75); }
+  .entry-score-badge.score-mid     { background: #1a1400;        color: #fbbf24; border: 1.5px solid rgba(251,191,36,.75); }
+  .entry-score-badge.score-orange  { background: #1f1008;        color: #fb923c; border: 1.5px solid rgba(251,146,60,.75); }
+  .entry-score-badge.score-low     { background: #200808;        color: #f87171; border: 1.5px solid rgba(248,113,113,.75); }
+  /* Score chip doubles as a link to the owner's review for this game. */
+  .entry-score-link { cursor: pointer; text-decoration: none; transition: transform .12s, filter .12s; }
+  .entry-score-link:hover { transform: scale(1.08); filter: brightness(1.1); }
+  .entry-score-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .entry-hours-badge { position: absolute; top: 6px; left: 6px; font-size: 13px; font-weight: 700; background: rgba(0,0,0,.72); color: #fff; border-radius: 5px; padding: 3px 8px; line-height: 1.25; z-index: 1; }
+  .entry-ach-badge {
+    position: absolute; top: 6px; right: 6px;
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 13px; font-weight: 700;
+    background: rgba(0,0,0,.72); color: #F5C842;
+    border: 1px solid rgba(245,200,66,.4);
+    border-radius: 5px; padding: 3px 8px; line-height: 1.25; z-index: 1;
+  }
+  .entry-ach-badge svg { flex-shrink: 0; width: 13px; height: 13px; }
+
+  /* list-view (compact row) keeps the chips smaller — the thumbnail is small. */
+  .entry-list.list-view .entry-hours-badge { top: 4px; left: 4px; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+  .entry-list.list-view .entry-ach-badge   { top: 4px; right: 4px; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+  .entry-list.list-view .entry-ach-badge svg { width: 11px; height: 11px; }
 
   /* ── List controls: search, sort, view toggle ── */
   .list-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -609,32 +876,84 @@ const ogImage = list.visibility !== "private"
   .list-stats-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
+    border-radius: 14px;
+    padding: 18px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 16px;
   }
+
+  /* Avg Score feature chip — the headline number, with a score-coloured
+     border and a soft tinted background so it reads as the "big" stat and
+     the row below (hours, reviewed, achievements) stays supporting. */
+  .lst-score-feature {
+    --score-color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 20px;
+    border-radius: 12px;
+    border: 1.5px solid color-mix(in srgb, var(--score-color) 55%, transparent);
+    background: linear-gradient(135deg,
+      color-mix(in srgb, var(--score-color) 14%, var(--bg-hover)) 0%,
+      color-mix(in srgb, var(--score-color) 5%, var(--bg-hover)) 100%);
+    box-shadow: 0 1px 2px rgba(0,0,0,.15), inset 0 1px 0 color-mix(in srgb, var(--score-color) 18%, transparent);
+  }
+  .lst-score-feature.score-perfect { --score-color: #F5C842; }
+  .lst-score-feature.score-great   { --score-color: #4ade80; }
+  .lst-score-feature.score-teal    { --score-color: #2dd4bf; }
+  .lst-score-feature.score-good    { --score-color: #60a5fa; }
+  .lst-score-feature.score-mid     { --score-color: #fbbf24; }
+  .lst-score-feature.score-orange  { --score-color: #fb923c; }
+  .lst-score-feature.score-low     { --score-color: #f87171; }
+  .lst-score-val {
+    font-size: 34px;
+    font-weight: 700;
+    font-family: 'DM Serif Display', serif;
+    color: var(--score-color);
+    line-height: 1;
+    letter-spacing: -.01em;
+    text-shadow: 0 2px 10px color-mix(in srgb, var(--score-color) 40%, transparent);
+  }
+  .lst-score-lab {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    text-align: right;
+  }
+
+  /* Stats row — gives each tile real padding + a subtle divider so three stats
+     at wildly different widths (e.g. "5.8k h" vs "32/91" vs "100%") don't look
+     scrunched. flex-wrap handles any future fourth stat gracefully. */
   .lst-numbers {
     display: flex;
     gap: 0;
+    background: var(--bg-hover);
+    border-radius: 10px;
+    padding: 2px 0;
+    flex-wrap: wrap;
   }
-  .lst-num { position: relative; flex: 1; text-align: center; }
+  .lst-num { position: relative; flex: 1 1 0; min-width: 72px; text-align: center; padding: 10px 8px; }
   .lst-num + .lst-num::before {
     content: '';
     position: absolute;
     left: 0;
-    top: 15%;
-    bottom: 15%;
+    top: 20%;
+    bottom: 20%;
     width: 1px;
     background: var(--border-subtle);
   }
   .lst-val {
-    font-size: 22px;
+    font-size: 20px;
     font-weight: 700;
     font-family: 'DM Serif Display', serif;
     color: var(--text-primary);
     line-height: 1.1;
+    letter-spacing: -.01em;
+    white-space: nowrap;
   }
   .lst-val.score-perfect { color: #F5C842; }
   .lst-val.score-great   { color: #4ade80; }
@@ -643,12 +962,27 @@ const ogImage = list.visibility !== "private"
   .lst-val.score-mid     { color: #fbbf24; }
   .lst-val.score-orange  { color: #fb923c; }
   .lst-val.score-low     { color: #f87171; }
+  /* Genre radar — single-polygon version of the groups Stats-tab radar. Same
+     ring/spoke/dot vocabulary; the fill reads as the list's accent instead of
+     the two-side gv-l / gv-r colours. */
+  .lst-radar-wrap { padding: 2px 0; }
+  .lst-radar { width: 100%; height: auto; max-height: 220px; display: block; overflow: visible; }
+  .lst-radar-ring { fill: none; stroke: var(--border); stroke-width: 1; opacity: .7; }
+  .lst-radar-spoke { stroke: var(--border); stroke-width: 1; opacity: .7; }
+  .lst-radar-area { fill: var(--accent); fill-opacity: .18; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .lst-radar-dot { fill: var(--accent); stroke: none; transition: r .15s; filter: drop-shadow(0 0 3px var(--accent)); }
+  .lst-radar-label { font-size: 11px; font-weight: 600; fill: var(--text-secondary); }
+  .lst-radar-count { fill: var(--text-tertiary); font-weight: 500; }
+  .lst-radar-axis:hover .lst-radar-label { fill: var(--text-primary); }
+  .lst-radar-axis:hover .lst-radar-dot { r: 5; }
+  .lst-radar-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
   .lst-lab {
-    font-size: 11px;
+    font-size: 10px;
+    font-weight: 600;
     color: var(--text-tertiary);
     text-transform: uppercase;
-    letter-spacing: .06em;
-    margin-top: 3px;
+    letter-spacing: .08em;
+    margin-top: 5px;
   }
   .lst-divider {
     height: 1px;
@@ -776,229 +1110,15 @@ const ogImage = list.visibility !== "private"
   .list-react-toggle:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
   .list-emote-img { width: 18px; height: 18px; object-fit: contain; vertical-align: middle; }
 
-  /* ── Comments ── */
+  /* ── Comments wrapper (CommentThread owns everything inside) ── */
   .list-comments {
     background: var(--bg-card);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 18px;
+    border-radius: 16px;
+    padding: 24px;
   }
-  .list-comments-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-tertiary); margin-bottom: 16px; }
-  .lc-list { display: flex; flex-direction: column; gap: 0; }
-  .lc-item { display: flex; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
-  .lc-item:last-child { border-bottom: none; }
-  .lc-avatar {
-    width: 28px; height: 28px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
-    background: var(--tag-bg); border: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 10px; font-weight: 700; color: var(--text-tertiary); text-decoration: none;
-  }
-  .lc-avatar img { width: 100%; height: 100%; object-fit: cover; }
-  .lc-body { flex: 1; min-width: 0; }
-  .lc-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
-  .lc-username { font-size: 13px; font-weight: 600; color: var(--text-primary); text-decoration: none; }
-  .lc-username:hover { color: var(--accent); }
-  .lc-ts { font-size: 12px; color: var(--text-tertiary); }
-  .lc-text { font-size: 13px; color: var(--text-primary); line-height: 1.6; opacity: .85; white-space: pre-wrap; word-break: break-word; }
-  .lc-delete { background: none; border: none; cursor: pointer; color: var(--text-tertiary); font-size: 11px; padding: 2px 6px; border-radius: 4px; font-family: inherit; margin-left: auto; transition: color .15s; }
-  .lc-delete:hover { color: #f87171; }
-  .lc-empty { padding: 16px 0; text-align: center; font-size: 13px; color: var(--text-tertiary); }
-
-  /* ── Comment form ── */
-  .lc-form { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
-  .lc-signin-prompt { font-size: 13px; color: var(--text-tertiary); padding: 14px; background: var(--bg-hover); border-radius: 10px; text-align: center; }
-  .lc-signin-prompt a { color: var(--accent); text-decoration: none; }
-  .lc-textarea {
-    width: 100%; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text-primary); font-size: 13px;
-    font-family: inherit; outline: none; resize: vertical; min-height: 64px;
-    transition: border-color .15s; box-sizing: border-box;
-  }
-  .lc-textarea:focus { border-color: var(--accent); }
-  .lc-submit {
-    align-self: flex-end; background: var(--accent); color: #fff; border: none;
-    padding: 7px 18px; border-radius: 20px; font-size: 13px; font-weight: 600;
-    font-family: inherit; cursor: pointer; transition: opacity .15s;
-  }
-  .lc-submit:hover { opacity: .85; }
-  .lc-submit:disabled { opacity: .45; cursor: not-allowed; }
-  .lc-error { font-size: 13px; color: #f87171; display: none; }
-
-  /* ── Threaded comments ── */
-  .lct { display: flex; flex-direction: column; gap: 0; }
-  .lc-replies { margin-left: 20px; border-left: 2px solid var(--border-subtle); padding-left: 10px; }
-  .lc-replies-deep { margin-left: 16px; }
-  .lc-reply { padding: 10px 0 6px; border-bottom: none; }
-  .lc-avatar-sm { width: 22px !important; height: 22px !important; min-width: 22px !important; font-size: 8px !important; }
-  .lc-avatar-sm img { width: 22px !important; height: 22px !important; }
-  .lc-edited { font-size: 11px; color: var(--text-tertiary); font-style: italic; }
-  .lc-mention { color: var(--accent); text-decoration: none; }
-  .lc-mention:hover { text-decoration: underline; }
-  .lc-emote-inline { width: 16px; height: 16px; object-fit: contain; vertical-align: middle; }
-
-  /* ── Comment actions row ── */
-  .lc-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-wrap: wrap;
-    margin-top: 5px;
-  }
-  .lcv-btn {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 7px;
-    border-radius: 14px;
-    border: 1.5px solid var(--border);
-    color: var(--text-tertiary);
-    background: transparent;
-    cursor: pointer;
-    font-family: inherit;
-    transition: all 0.15s;
-    line-height: 1.4;
-  }
-  .lcv-btn:hover:not(.lcv-up):not(.lcv-down) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
-  .lcv-btn:disabled { opacity: 0.5; cursor: default; }
-  .lcv-up   { border-color: #4ade80; color: #4ade80; background: rgba(74,222,128,.08); }
-  .lcv-down { border-color: #f87171; color: #f87171; background: rgba(248,113,113,.08); }
-
-  .lcrx-wrap { display: inline-flex; align-items: center; gap: 3px; flex-wrap: wrap; }
-  .lcrx-btn {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 7px;
-    border-radius: 14px;
-    border: 1.5px solid var(--border);
-    color: var(--text-tertiary);
-    background: transparent;
-    cursor: pointer;
-    font-family: inherit;
-    transition: all 0.15s;
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    white-space: nowrap;
-    line-height: 1.4;
-  }
-  .lcrx-btn:hover:not(.lcrx-active) { border-color: var(--text-tertiary); color: var(--text-secondary); background: var(--bg-hover); }
-  .lcrx-active { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.08); }
-  .lcrx-toggle {
-    background: none;
-    border: 1.5px solid var(--border);
-    cursor: pointer;
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 700;
-    padding: 1px 5px;
-    border-radius: 5px;
-    font-family: inherit;
-    transition: all 0.15s;
-    line-height: 1.5;
-  }
-  .lcrx-toggle:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--text-tertiary); }
-  .lcrx-emote-img { width: 14px; height: 14px; object-fit: contain; vertical-align: middle; }
-
-  .lc-reply-btn, .lc-edit-btn, .lc-delete-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--text-tertiary);
-    font-family: inherit;
-    padding: 2px 5px;
-    border-radius: 4px;
-    transition: color 0.15s;
-    line-height: 1.4;
-  }
-  .lc-reply-btn:hover { color: var(--accent); }
-  .lc-edit-btn:hover  { color: var(--text-secondary); }
-  .lc-delete-btn:hover { color: #f87171; }
-
-  /* ── Reply form ── */
-  .lc-rf {
-    margin: 6px 0 8px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .lc-rf-ta {
-    width: 100%;
-    padding: 7px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text-primary);
-    font-size: 12px;
-    font-family: inherit;
-    outline: none;
-    resize: vertical;
-    min-height: 52px;
-    transition: border-color .15s;
-    box-sizing: border-box;
-  }
-  .lc-rf-ta:focus { border-color: var(--accent); }
-  .lc-rf-foot { display: flex; justify-content: flex-end; gap: 6px; align-items: center; }
-  .lc-rf-cancel {
-    background: none; border: 1px solid var(--border); padding: 4px 10px;
-    border-radius: 14px; font-size: 11px; font-family: inherit; color: var(--text-secondary);
-    cursor: pointer; transition: all .15s;
-  }
-  .lc-rf-cancel:hover { border-color: var(--text-tertiary); }
-  .lc-rf-submit {
-    background: var(--accent); color: #fff; border: none; padding: 4px 12px;
-    border-radius: 14px; font-size: 11px; font-weight: 600; font-family: inherit;
-    cursor: pointer; transition: opacity .15s;
-  }
-  .lc-rf-submit:hover { opacity: .85; }
-  .lc-rf-submit:disabled { opacity: .45; cursor: not-allowed; }
-
-  /* ── Comment edit inline ── */
-  .lc-edit-wrap { margin-top: 6px; }
-  .lc-edit-ta {
-    width: 100%; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text-primary); font-size: 12px;
-    font-family: inherit; outline: none; resize: vertical; min-height: 52px;
-    transition: border-color .15s; box-sizing: border-box;
-  }
-  .lc-edit-ta:focus { border-color: var(--accent); }
-  .lc-edit-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px; }
-  .lc-edit-cancel {
-    background: none; border: 1px solid var(--border); padding: 4px 10px;
-    border-radius: 14px; font-size: 11px; font-family: inherit; color: var(--text-secondary);
-    cursor: pointer; transition: all .15s;
-  }
-  .lc-edit-cancel:hover { border-color: var(--text-tertiary); }
-  .lc-edit-save {
-    background: var(--accent); color: #fff; border: none; padding: 4px 12px;
-    border-radius: 14px; font-size: 11px; font-weight: 600; font-family: inherit;
-    cursor: pointer; transition: opacity .15s;
-  }
-  .lc-edit-save:hover { opacity: .85; }
-  .lc-edit-save:disabled { opacity: .45; cursor: not-allowed; }
-
-  /* ── Comment emoji picker ── */
-  #ldpc-emoji-picker {
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
-    padding: 10px 12px; box-shadow: 0 4px 24px rgba(0,0,0,.2);
-    max-height: 280px; overflow-y: auto; min-width: 220px; max-width: 280px;
-    scrollbar-width: thin; position: fixed; z-index: 1000; display: none;
-  }
-  .ldpc-search {
-    width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 5px 8px;
-    border-radius: 6px; border: 1px solid var(--border); background: var(--bg-hover);
-    color: var(--text-primary); font-size: 12px; outline: none;
-  }
-  .ldpc-search:focus { border-color: var(--accent); }
-  .ldpc-grid { display: flex; flex-wrap: wrap; gap: 2px; }
-  .ldpc-pick {
-    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
-    background: none; border: none; cursor: pointer; border-radius: 6px;
-    transition: background 0.1s, transform 0.1s; padding: 2px;
-  }
-  .ldpc-pick:hover { background: var(--bg-hover); transform: scale(1.2); }
-  .ldpc-pick.ldpc-active { background: rgba(96,80,200,.12); outline: 1.5px solid var(--accent); }
-  .ldpc-pick img { width: 24px; height: 24px; object-fit: contain; display: block; }
+  .list-comments-title { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0 0 20px; display: flex; align-items: center; gap: 8px; }
+  .list-comments-title .comments-count { background: var(--tag-bg); color: var(--text-tertiary); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 10px; }
 
   /* ── Emoji picker for detail page ── */
   #ldp-emoji-picker {
@@ -1041,6 +1161,20 @@ const ogImage = list.visibility !== "private"
     .entry-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   }
 </style>
+
+<!-- Shared gradient defs for the 100%-completion corner badges (platinum trophy
+     + Xbox Mythic). url(#id) resolves to the first element with that id, so these
+     must live outside any display:none container; the entry-* ids are scoped so
+     they don't collide with the profile page's lib-* copies. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <radialGradient id="entryPlatOrb" cx="38%" cy="32%" r="70%"><stop offset="0" stop-color="#7fb4ff"/><stop offset=".45" stop-color="#2556c9"/><stop offset="1" stop-color="#0a1f63"/></radialGradient>
+    <linearGradient id="entryPlatSilver" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f7f9fb"/><stop offset=".45" stop-color="#aab4bf"/><stop offset=".7" stop-color="#e4e8ec"/><stop offset="1" stop-color="#7c8792"/></linearGradient>
+    <radialGradient id="entryXbMythDisc" cx="40%" cy="30%" r="75%"><stop offset="0" stop-color="#6fe6a8"/><stop offset=".55" stop-color="#1f9d5c"/><stop offset="1" stop-color="#0a5a32"/></radialGradient>
+    <linearGradient id="entryXbMythHi" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c4f0d8"/></linearGradient>
+    <linearGradient id="entryXbMythLo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a9dcc0"/><stop offset="1" stop-color="#6fb894"/></linearGradient>
+  </defs>
+</svg>
 
 <main class="list-page">
   <button class="list-back-btn" onclick="history.length > 1 ? history.back() : (window.location.href='/')">
@@ -1148,6 +1282,11 @@ const ogImage = list.visibility !== "private"
                 const entryStatus = entry.games?.id ? statusByGameId[entry.games.id] : null;
                 const isOwned = entryStatus?.owned ?? false;
                 const isPlayed = (entryStatus?.played ?? false) || (entry.games?.id ? viewerReviewedGameIds.has(entry.games.id) : false);
+                const achBadge = list.show_achievements ? pickAchievementBadge(entry.games?.id) : null;
+                const coverPerfectCls = achBadge?.kind === 'steam' ? ' entry-cover-perfect'
+                  : achBadge?.kind === 'psn' ? ' entry-cover-platinum'
+                  : achBadge?.kind === 'xbox' ? ' entry-cover-xbox'
+                  : '';
                 return (
                   <div
                     class="entry-item"
@@ -1163,14 +1302,79 @@ const ogImage = list.visibility !== "private"
                     data-played={isPlayed ? "1" : "0"}
                   >
                     {list.is_ranked && <div class="entry-rank-inline">{entry.position ?? i + 1}</div>}
-                    <a href={`/games/${entry.games?.slug}`} class="entry-cover-wrap">
+                    <a href={`/games/${entry.games?.slug}`} class={`entry-cover-wrap${coverPerfectCls}`}>
                       {cover
                         ? <img class="entry-cover" src={cover} alt={entry.games?.title} loading="lazy" />
                         : <div class="entry-cover-placeholder">🎮</div>
                       }
                       {list.is_ranked && <div class="entry-rank">{entry.position ?? i + 1}</div>}
-                      {gameReview && <div class={`entry-score-badge ${scoreClass(gameReview.score)}`}>{gameReview.score}</div>}
-                      {gameReview?.play_time_hours ? <div class="entry-hours-badge">{gameReview.play_time_hours}h</div> : null}
+                      {gameReview && (
+                        <span
+                          role="button"
+                          tabindex="0"
+                          class={`entry-score-badge entry-score-link ${scoreClass(gameReview.score)}`}
+                          data-review-id={gameReview.id}
+                          aria-label={`Open ${entry.games?.title ?? 'this'} review`}
+                          title="Open review"
+                        >
+                          {gameReview.score}
+                        </span>
+                      )}
+                      {list.show_hours !== false && gameReview?.play_time_hours ? <div class="entry-hours-badge">{gameReview.play_time_hours}h</div> : null}
+                      {achBadge?.kind === 'steam' ? (
+                        <span role="button" tabindex="0" class="entry-perfect-ribbon entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all achievements" title="100% achievements on Steam">
+                          <svg viewBox="0 0 24 28" aria-hidden="true">
+                            <path fill="#2f6fc4" d="M6.4 15l4.6 2-1.4 7.6-2-2.1-3 1.5z"/>
+                            <path fill="#2f6fc4" d="M17.6 15l-4.6 2 1.4 7.6 2-2.1 3 1.5z"/>
+                            <path fill="#4a90e2" d="M12.00 1.00L13.65 2.79L15.90 1.89L16.61 4.21L19.04 4.39L18.67 6.79L20.77 8.00L19.40 10.00L20.77 12.00L18.67 13.21L19.04 15.61L16.61 15.79L15.90 18.11L13.65 17.21L12.00 19.00L10.35 17.21L8.10 18.11L7.39 15.79L4.96 15.61L5.33 13.21L3.23 12.00L4.60 10.00L3.23 8.00L5.33 6.79L4.96 4.39L7.39 4.21L8.10 1.89L10.35 2.79Z"/>
+                            <circle cx="12" cy="10" r="5.6" fill="#fcd462"/>
+                            <circle cx="12" cy="10" r="5.6" fill="none" stroke="#e8b43a" stroke-width=".6"/>
+                          </svg>
+                        </span>
+                      ) : achBadge?.kind === 'psn' ? (
+                        <span role="button" tabindex="0" class="entry-plat-badge entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all trophies" title="100% trophies on PlayStation">
+                          <svg class="entry-plat-svg" viewBox="0 0 24 30" aria-hidden="true">
+                            <circle cx="12" cy="9.5" r="7.5" fill="url(#entryPlatOrb)"/>
+                            <g fill="none" stroke="#fff" stroke-width=".7" stroke-linecap="round" stroke-linejoin="round" opacity=".92">
+                              <rect x="7.6" y="5.6" width="2.6" height="2.6"/>
+                              <path d="M13.9 5.5l1.5 2.7h-3z"/>
+                              <path d="M7.7 10.4l2.4 2.4M10.1 10.4l-2.4 2.4"/>
+                              <circle cx="14.4" cy="11.6" r="1.3"/>
+                            </g>
+                            <g fill="url(#entryPlatSilver)">
+                              <path d="M11.6 23.2C5.6 20.8 2.6 14.2 3.4 6.4 4.9 11.4 7.6 15.6 12 18.6z"/>
+                              <path d="M12.4 23.2c6-2.4 9-9 8.2-16.8-1.5 5-4.2 9.2-8.6 12.2z"/>
+                              <path d="M11.7 23.4C8.2 21.8 6.1 18.4 5.8 13.8 7.6 16.8 9.6 18.8 12 19.9z"/>
+                              <path d="M12.3 23.4c3.5-1.6 5.6-5 5.9-9.6-1.8 3-3.8 5-6.2 6.1z"/>
+                              <path d="M8.6 23.6h6.8l1.2 1.9H7.4z"/>
+                              <rect x="6.2" y="25.3" width="11.6" height="3.4" rx="1.2"/>
+                            </g>
+                            <rect x="6.8" y="25.9" width="10.4" height=".5" rx=".25" fill="#fff" opacity=".55"/>
+                          </svg>
+                        </span>
+                      ) : achBadge?.kind === 'xbox' ? (
+                        <span role="button" tabindex="0" class="entry-xbox-badge entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all achievements" title="100% achievements on Xbox">
+                          <svg viewBox="0 0 28 28" aria-hidden="true">
+                            <circle cx="14" cy="12.5" r="9.4" fill="url(#entryXbMythDisc)"/>
+                            <circle cx="14" cy="12.5" r="9" fill="none" stroke="#9af5c8" stroke-opacity=".5" stroke-width=".5"/>
+                            <path fill="#58c08c" d="M18.53 7.97L16.40 12.50L18.53 17.03L14.00 14.90L9.47 17.03L11.60 12.50L9.47 7.97L14.00 10.10Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M14.00 4.10L11.81 10.31L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M14.00 4.10L16.19 10.31L14 12.5Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M22.40 12.50L16.19 10.31L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M22.40 12.50L16.19 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M14.00 20.90L16.19 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M14.00 20.90L11.81 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythHi)" d="M5.60 12.50L11.81 14.69L14 12.5Z"/>
+                            <path fill="url(#entryXbMythLo)" d="M5.60 12.50L11.81 10.31L14 12.5Z"/>
+                            <path fill="#fff" d="M14 10.4L16.1 12.5 14 14.6 11.9 12.5Z"/>
+                          </svg>
+                        </span>
+                      ) : achBadge?.kind === 'partial' ? (
+                        <span role="button" tabindex="0" class="entry-ach-badge entry-ach-btn" data-ach-src={achBadge.src} data-ach-sid={achBadge.sid} aria-label="View all achievements" title={`${Math.round(achBadge.pct * 100)}% achievement completion`}>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 5h-2V3H7v2H5a2 2 0 0 0-2 2v2a4 4 0 0 0 4 4h.3A5 5 0 0 0 11 15.9V18H7v2h10v-2h-4v-2.1a5 5 0 0 0 3.7-2.9H17a4 4 0 0 0 4-4V7a2 2 0 0 0-2-2zM7 11a2 2 0 0 1-2-2V7h2v4zm12-2a2 2 0 0 1-2 2V7h2v2z"/></svg>
+                          <span>{Math.round(achBadge.pct * 100)}%</span>
+                        </span>
+                      ) : null}
                     </a>
                     <div class="entry-info">
                       <a href={`/games/${entry.games?.slug}`} class="entry-game-link">{entry.games?.title}</a>
@@ -1267,43 +1471,67 @@ const ogImage = list.visibility !== "private"
       <!-- Stats card -->
       {hasStats && (
         <div class="list-stats-card">
-          {reviewedCount > 0 && (
+          {showRadar && (
+            <div class="lst-radar-wrap">
+              <svg class="lst-radar" viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} role="img" aria-label={`Genre mix: ${radarGenres.map((g) => `${g.name} ${g.pct}%`).join(', ')}`}>
+                {radarRings.map((ring) => <polygon class="lst-radar-ring" points={ring} />)}
+                {radarSpokes.map((p) => <line class="lst-radar-spoke" x1={RADAR.cx} y1={RADAR.cy} x2={p.x} y2={p.y} />)}
+                <polygon class="lst-radar-area" points={radarPolygon} />
+                {radarLabels.map((l, i) => (
+                  <g class="lst-radar-axis">
+                    <title>{`${l.full}: ${l.pct}%`}</title>
+                    <circle class="lst-radar-dot" cx={radarDots[i].x} cy={radarDots[i].y} r="3.5" />
+                    <text class="lst-radar-label" x={l.x} y={l.y} text-anchor={l.anchor}>
+                      {l.text}
+                      <tspan class="lst-radar-count"> ({l.count})</tspan>
+                    </text>
+                  </g>
+                ))}
+              </svg>
+              <table class="lst-radar-sr">
+                <caption>Genre breakdown for games in this list</caption>
+                <thead><tr><th>Genre</th><th>Games</th><th>Share</th></tr></thead>
+                <tbody>{radarGenres.map((g) => <tr><td>{g.name}</td><td>{g.count}</td><td>{g.pct}%</td></tr>)}</tbody>
+              </table>
+            </div>
+          )}
+          {avgScore !== null && (
+            <div class={`lst-score-feature ${scoreClass(avgScore)}`}>
+              <div class="lst-score-val">{avgScore.toFixed(1)}</div>
+              <div class="lst-score-lab">Avg Score</div>
+            </div>
+          )}
+          {(reviewedCount > 0 || totalHours > 0 || (list.show_achievements && achievementTrackedCount > 0)) && (
             <div class="lst-numbers">
               {totalHours > 0 && (
                 <div class="lst-num">
-                  <div class="lst-val">{totalHours}h</div>
+                  <div class="lst-val">{fmtHours(totalHours)}</div>
                   <div class="lst-lab">Hours</div>
                 </div>
               )}
-              {avgScore !== null && (
+              {reviewedCount > 0 && (
                 <div class="lst-num">
-                  <div class={`lst-val ${scoreClass(avgScore)}`}>{avgScore.toFixed(1)}</div>
-                  <div class="lst-lab">Avg Score</div>
+                  <div class="lst-val">{reviewedCount}/{entryList.length}</div>
+                  <div class="lst-lab">Reviewed</div>
                 </div>
               )}
-              <div class="lst-num">
-                <div class="lst-val">{reviewedCount}/{entryList.length}</div>
-                <div class="lst-lab">Reviewed</div>
-              </div>
+              {list.show_achievements && avgAchievementPct !== null && (
+                <div class="lst-num">
+                  <div class="lst-val">{Math.round(avgAchievementPct * 100)}%</div>
+                  <div class="lst-lab">Avg Ach.</div>
+                </div>
+              )}
             </div>
           )}
 
-          {reviewedCount > 0 && (topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || minYear !== null) && (
+          {reviewedCount > 0 && (topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0 || minYear !== null) && (
             <div class="lst-divider"></div>
           )}
 
-          {(topGenres.length > 0 || topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0) && (
+          {(topDevs.length > 0 || topPubs.length > 0 || topPlatforms.length > 0) && (
             <details class="lst-detail-collapse">
-              <summary class="lst-detail-summary">Genres &amp; studios</summary>
+              <summary class="lst-detail-summary">Studios &amp; platforms</summary>
               <div class="lst-detail">
-                {topGenres.length > 0 && (
-                  <div class="lst-row">
-                    <span class="lst-row-label">Genres</span>
-                    <div class="lst-genres">
-                      {topGenres.map(g => <span class="lst-genre-chip"><span class="lst-chip-name">{g.name}</span><span class="lst-genre-n">{g.count}</span></span>)}
-                    </div>
-                  </div>
-                )}
                 {topDevs.length > 0 && (
                   <div class="lst-row">
                     <span class="lst-row-label">Dev</span>
@@ -1402,201 +1630,29 @@ const ogImage = list.visibility !== "private"
       )}
     </div>
 
-    <!-- Comments -->
+    <!-- Comments (shared CommentThread) -->
     <div class="list-comments" id="comments">
-        <div class="list-comments-title">Comments ({commentList.length})</div>
-        <div class="lc-list" id="lc-list">
-          {commentList.length === 0 && <div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>}
-          {topLevelComments.map((c: any) => {
-            const level1Replies = directReplyMap[c.id] ?? [];
-            const cv = getLCVotes(c);
-            const cr = getLCReactions(c);
-            const isOwn = currentProfile?.id === c.profiles?.id;
-            return (
-              <div class="lct" data-thread-id={c.id}>
-                <div class="lc-item" data-comment-id={c.id}>
-                  <a href={`/reviewers/${c.profiles?.username}`} class="lc-avatar">
-                    {c.profiles?.avatar_url
-                      ? <img src={c.profiles.avatar_url} alt={c.profiles.username} />
-                      : <span>{(c.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
-                    }
-                  </a>
-                  <div class="lc-body">
-                    <div class="lc-meta">
-                      <a href={`/reviewers/${c.profiles?.username}`} class="lc-username">@{c.profiles?.username}</a>
-                      <span class="lc-ts">{timeAgo(c.created_at)}</span>
-                      {c.updated_at && <span class="lc-edited">(edited)</span>}
-                    </div>
-                    <div class="lc-text" data-raw-body={c.body} set:html={renderBody(c.body)}></div>
-                    <div class="lc-actions">
-                      <button class={`lcv-btn${cv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={c.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {cv.up}</button>
-                      <button class={`lcv-btn${cv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={c.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {cv.down}</button>
-                      {(cr.length > 0 || isLoggedIn) && (
-                        <div class="lcrx-wrap" data-comment-id={c.id}>
-                          {cr.map((rx: any) => (
-                            <button
-                              class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
-                              data-comment-id={c.id}
-                              data-reaction={rx.type}
-                              data-reacted={rx.active ? 'true' : 'false'}
-                              data-count={rx.count}
-                              data-logged-in={isLoggedIn ? 'true' : 'false'}
-                              data-is-image={rx.isImage ? 'true' : 'false'}
-                            >
-                              {rx.isImage
-                                ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
-                                : <>{rx.type} {rx.count}</>}
-                            </button>
-                          ))}
-                          {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={c.id} title="React">+</button>}
-                        </div>
-                      )}
-                      {isLoggedIn && <button class="lc-reply-btn" data-parent-id={c.id} data-thread-id={c.id} data-reply-to={c.profiles?.username} type="button">↩ Reply</button>}
-                      {isOwn && <button class="lc-edit-btn" data-comment-id={c.id} type="button">Edit</button>}
-                      {isOwn && <button class="lc-delete-btn" data-comment-id={c.id} type="button">Delete</button>}
-                    </div>
-                  </div>
-                </div>
-
-                <div class="lc-replies" data-replies-for={c.id}>
-                  {level1Replies.map((r: any) => {
-                    const level2Replies = directReplyMap[r.id] ?? [];
-                    const rv = getLCVotes(r);
-                    const rr = getLCReactions(r);
-                    const isOwnR = currentProfile?.id === r.profiles?.id;
-                    return (
-                      <Fragment>
-                        <div class="lc-item lc-reply" data-comment-id={r.id}>
-                          <a href={`/reviewers/${r.profiles?.username}`} class="lc-avatar lc-avatar-sm">
-                            {r.profiles?.avatar_url
-                              ? <img src={r.profiles.avatar_url} alt={r.profiles.username} />
-                              : <span>{(r.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
-                            }
-                          </a>
-                          <div class="lc-body">
-                            <div class="lc-meta">
-                              <a href={`/reviewers/${r.profiles?.username}`} class="lc-username">@{r.profiles?.username}</a>
-                              <span class="lc-ts">{timeAgo(r.created_at)}</span>
-                              {r.updated_at && <span class="lc-edited">(edited)</span>}
-                            </div>
-                            <div class="lc-text" data-raw-body={r.body} set:html={renderBody(r.body)}></div>
-                            <div class="lc-actions">
-                              <button class={`lcv-btn${rv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={r.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {rv.up}</button>
-                              <button class={`lcv-btn${rv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={r.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {rv.down}</button>
-                              {(rr.length > 0 || isLoggedIn) && (
-                                <div class="lcrx-wrap" data-comment-id={r.id}>
-                                  {rr.map((rx: any) => (
-                                    <button
-                                      class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
-                                      data-comment-id={r.id}
-                                      data-reaction={rx.type}
-                                      data-reacted={rx.active ? 'true' : 'false'}
-                                      data-count={rx.count}
-                                      data-logged-in={isLoggedIn ? 'true' : 'false'}
-                                      data-is-image={rx.isImage ? 'true' : 'false'}
-                                    >
-                                      {rx.isImage
-                                        ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
-                                        : <>{rx.type} {rx.count}</>}
-                                    </button>
-                                  ))}
-                                  {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={r.id} title="React">+</button>}
-                                </div>
-                              )}
-                              {isLoggedIn && <button class="lc-reply-btn" data-parent-id={r.id} data-thread-id={c.id} data-reply-to={r.profiles?.username} type="button">↩ Reply</button>}
-                              {isOwnR && <button class="lc-edit-btn" data-comment-id={r.id} type="button">Edit</button>}
-                              {isOwnR && <button class="lc-delete-btn" data-comment-id={r.id} type="button">Delete</button>}
-                            </div>
-                          </div>
-                        </div>
-                        {level2Replies.length > 0 && (
-                          <div class="lc-replies lc-replies-deep" data-replies-for={r.id}>
-                            {level2Replies.map((dr: any) => {
-                              const dv = getLCVotes(dr);
-                              const drr = getLCReactions(dr);
-                              const isOwnDr = currentProfile?.id === dr.profiles?.id;
-                              return (
-                                <div class="lc-item lc-reply" data-comment-id={dr.id}>
-                                  <a href={`/reviewers/${dr.profiles?.username}`} class="lc-avatar lc-avatar-sm">
-                                    {dr.profiles?.avatar_url
-                                      ? <img src={dr.profiles.avatar_url} alt={dr.profiles.username} />
-                                      : <span>{(dr.profiles?.username ?? '?').slice(0, 2).toUpperCase()}</span>
-                                    }
-                                  </a>
-                                  <div class="lc-body">
-                                    <div class="lc-meta">
-                                      <a href={`/reviewers/${dr.profiles?.username}`} class="lc-username">@{dr.profiles?.username}</a>
-                                      <span class="lc-ts">{timeAgo(dr.created_at)}</span>
-                                      {dr.updated_at && <span class="lc-edited">(edited)</span>}
-                                    </div>
-                                    <div class="lc-text" data-raw-body={dr.body} set:html={renderBody(dr.body)}></div>
-                                    <div class="lc-actions">
-                                      <button class={`lcv-btn${dv.my === 1 ? ' lcv-up' : ''}`} data-comment-id={dr.id} data-vote="1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▲ {dv.up}</button>
-                                      <button class={`lcv-btn${dv.my === -1 ? ' lcv-down' : ''}`} data-comment-id={dr.id} data-vote="-1" data-logged-in={isLoggedIn ? 'true' : 'false'}>▼ {dv.down}</button>
-                                      {(drr.length > 0 || isLoggedIn) && (
-                                        <div class="lcrx-wrap" data-comment-id={dr.id}>
-                                          {drr.map((rx: any) => (
-                                            <button
-                                              class={`lcrx-btn${rx.active ? ' lcrx-active' : ''}`}
-                                              data-comment-id={dr.id}
-                                              data-reaction={rx.type}
-                                              data-reacted={rx.active ? 'true' : 'false'}
-                                              data-count={rx.count}
-                                              data-logged-in={isLoggedIn ? 'true' : 'false'}
-                                              data-is-image={rx.isImage ? 'true' : 'false'}
-                                            >
-                                              {rx.isImage
-                                                ? <><img src={rx.path!} class="lcrx-emote-img" alt={rx.type} />{' '}{rx.count}</>
-                                                : <>{rx.type} {rx.count}</>}
-                                            </button>
-                                          ))}
-                                          {isLoggedIn && <button class="lcrx-toggle" data-toggle-comment-id={dr.id} title="React">+</button>}
-                                        </div>
-                                      )}
-                                      {isLoggedIn && <button class="lc-reply-btn" data-parent-id={dr.id} data-thread-id={c.id} data-reply-to={dr.profiles?.username} type="button">↩ Reply</button>}
-                                      {isOwnDr && <button class="lc-edit-btn" data-comment-id={dr.id} type="button">Edit</button>}
-                                      {isOwnDr && <button class="lc-delete-btn" data-comment-id={dr.id} type="button">Delete</button>}
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                </div>
-
-                {isLoggedIn && (
-                  <div class="lc-rf" id={`lc-rf-${c.id}`} style="display:none">
-                    <textarea class="lc-rf-ta" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>
-                    <div class="lc-rf-foot">
-                      <button class="lc-rf-cancel" type="button">Cancel</button>
-                      <button class="lc-rf-submit" type="button" data-parent-id={c.id} data-list-id={id}>Reply</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        <div class="lc-form">
-          {isLoggedIn
-            ? <>
-                <textarea class="lc-textarea" id="lc-textarea" placeholder="Write a comment…" maxlength="2000" rows="3"></textarea>
-                <p class="lc-error" id="lc-error"></p>
-                <button class="lc-submit" id="lc-submit">Post comment</button>
-              </>
-            : <div class="lc-signin-prompt">
-                <a href="/signin">Sign in</a> to leave a comment.
-              </div>
-          }
-        </div>
+      <div class="list-comments-title">
+        Comments
+        {commentList.length > 0 && <span class="comments-count">{commentList.length}</span>}
+      </div>
+      <CommentThread
+        comments={threadComments}
+        currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
+        target={{ type: 'list_comment', id: list.id }}
+        canCompose={isLoggedIn}
+        showDownvote={true}
+        showReport={true}
+        maxLength={2000}
+        maxDepth={3}
+        signinReturnTo={Astro.url.pathname + Astro.url.search}
+      />
     </div>
+
   </div>
 </main>
+
+{list.show_achievements && <AchievementDetailModal username={list.profiles?.username ?? ''} />}
 </Layout>
 
 <script is:inline define:vars={{ listId: list.id, imageEmotes: IMAGE_EMOTES, imageEmoteMap: IMAGE_EMOTE_MAP, currentProfileId: currentProfile?.id ?? null }}>
@@ -1744,83 +1800,6 @@ function applyDetailReaction(reactionType, reacted, count) {
   }
 }
 
-// ── Comment-level emoji picker ─────────────────────────────────────────────────
-var ldpcPicker = document.createElement('div');
-ldpcPicker.id = 'ldpc-emoji-picker';
-var ldpcHtml = '<input type="text" class="ldpc-search" placeholder="Search emotes..." autocomplete="off">';
-ldpcHtml += '<div class="ldpc-grid">';
-imageEmotes.forEach(function(emote) {
-  // src withheld as data-src so emotes aren't fetched on load — hydrated on
-  // first picker open. See ReviewCard.astro for the why.
-  ldpcHtml += '<button class="ldpc-pick" data-emoji="' + emote.key + '" title="' + emote.key + '"><img data-src="' + emote.path + '" alt="' + emote.key + '"></button>';
-});
-ldpcHtml += '</div>';
-ldpcPicker.innerHTML = ldpcHtml;
-document.body.appendChild(ldpcPicker);
-
-var ldpcEmoteObserver = new IntersectionObserver(function(entries) {
-  entries.forEach(function(entry) {
-    if (entry.isIntersecting) {
-      var img = entry.target;
-      if (img.dataset.src) { img.src = img.dataset.src; img.removeAttribute('data-src'); }
-      ldpcEmoteObserver.unobserve(img);
-    }
-  });
-}, { root: ldpcPicker, rootMargin: '80px 0px', threshold: 0 });
-ldpcPicker.querySelectorAll('img[data-src]').forEach(function(im) { ldpcEmoteObserver.observe(im); });
-
-ldpcPicker.querySelector('.ldpc-search').addEventListener('input', function() {
-  var q = this.value.toLowerCase();
-  ldpcPicker.querySelectorAll('.ldpc-pick').forEach(function(btn) {
-    btn.style.display = btn.dataset.emoji.toLowerCase().indexOf(q) !== -1 ? '' : 'none';
-  });
-});
-
-function lcrxApply(commentId, reactionType, reacted, count) {
-  var isImage = !!imageEmoteMap[reactionType];
-  var wrap = document.querySelector('.lcrx-wrap[data-comment-id="' + commentId + '"]');
-  if (!wrap) return;
-  var existing = wrap.querySelector('.lcrx-btn[data-reaction="' + reactionType + '"]');
-  if (existing) {
-    existing.dataset.reacted = reacted ? 'true' : 'false';
-    existing.dataset.count = String(count);
-    if (isImage) {
-      existing.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="lcrx-emote-img" alt="' + reactionType + '"> ' + count;
-    } else {
-      existing.textContent = reactionType + ' ' + count;
-    }
-    existing.classList.toggle('lcrx-active', reacted);
-    if (count === 0) existing.remove();
-  } else if (count > 0) {
-    var toggle = wrap.querySelector('.lcrx-toggle');
-    var newBtn = document.createElement('button');
-    newBtn.className = 'lcrx-btn' + (reacted ? ' lcrx-active' : '');
-    newBtn.dataset.commentId = commentId;
-    newBtn.dataset.reaction = reactionType;
-    newBtn.dataset.reacted = reacted ? 'true' : 'false';
-    newBtn.dataset.count = String(count);
-    newBtn.dataset.loggedIn = 'true';
-    newBtn.dataset.isImage = isImage ? 'true' : 'false';
-    if (isImage) {
-      newBtn.innerHTML = '<img src="' + imageEmoteMap[reactionType] + '" class="lcrx-emote-img" alt="' + reactionType + '"> ' + count;
-    } else {
-      newBtn.textContent = reactionType + ' ' + count;
-    }
-    if (toggle) { wrap.insertBefore(newBtn, toggle); } else { wrap.appendChild(newBtn); }
-  }
-}
-
-function renderBody(text) {
-  var esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  var withMentions = esc.replace(/(^|\s)(@([\w]+))/g, function(m, pre, mention, username) {
-    return pre + '<a class="lc-mention" href="/reviewers/' + username + '">' + mention + '</a>';
-  });
-  return withMentions.replace(/:([A-Za-z0-9_]+):/g, function(match, key) {
-    var path = imageEmoteMap[key];
-    return path ? '<img src="' + path + '" class="lc-emote-inline" alt=":' + key + ':" title=":' + key + ':">' : match;
-  });
-}
-
 // ── Delegated click handler ───────────────────────────────────────────────────
 document.addEventListener('click', function(e) {
 
@@ -1888,403 +1867,14 @@ document.addEventListener('click', function(e) {
     return;
   }
 
-  // ── Comment vote
-  var cvBtn = e.target.closest('.lcv-btn');
-  if (cvBtn) {
-    if (cvBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
-    if (cvBtn.disabled) return;
-    cvBtn.disabled = true;
-    var commentId = cvBtn.dataset.commentId;
-    var vote = parseInt(cvBtn.dataset.vote);
-    fetch('/api/lists/comments/vote', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comment_id: commentId, vote }),
-    }).then(function(r) {
-      if (r.status === 401) { window.location.href = '/signin'; return r.json(); }
-      return r.json();
-    }).then(function(data) {
-      if (!data) return;
-      document.querySelectorAll('.lcv-btn[data-comment-id="' + commentId + '"]').forEach(function(b) {
-        var bv = parseInt(b.dataset.vote);
-        b.textContent = (bv === 1 ? '▲ ' : '▼ ') + (bv === 1 ? data.up : data.down);
-        b.classList.toggle('lcv-up',   bv === 1  && data.vote === 1);
-        b.classList.toggle('lcv-down', bv === -1 && data.vote === -1);
-      });
-    }).finally(function() { cvBtn.disabled = false; });
-    return;
-  }
-
-  // ── Comment inline reaction
-  var crxBtn = e.target.closest('.lcrx-btn');
-  if (crxBtn) {
-    if (crxBtn.dataset.loggedIn !== 'true') { window.location.href = '/signin'; return; }
-    var commentId = crxBtn.dataset.commentId;
-    var reaction = crxBtn.dataset.reaction;
-    var reacted = crxBtn.dataset.reacted === 'true';
-    var count = parseInt(crxBtn.dataset.count) || 0;
-    lcrxApply(commentId, reaction, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
-    fetch('/api/lists/comments/react', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comment_id: commentId, reaction_type: reaction }),
-    }).then(function(r) { return r.json(); })
-      .then(function(d) { if (d) lcrxApply(commentId, reaction, d.reacted, d.count); })
-      .catch(function() { lcrxApply(commentId, reaction, reacted, count); });
-    return;
-  }
-
-  // ── Comment reaction toggle (+)
-  var crxToggle = e.target.closest('.lcrx-toggle');
-  if (crxToggle) {
-    var commentId = crxToggle.dataset.toggleCommentId;
-    var picker = document.getElementById('ldpc-emoji-picker');
-    var isOpen = picker.style.display !== 'none' && picker.dataset.activeCommentId === commentId;
-    picker.style.display = 'none';
-    if (!isOpen) {
-      picker.dataset.activeCommentId = commentId;
-      picker.style.display = 'block';
-      requestAnimationFrame(function() {
-        var rect = crxToggle.getBoundingClientRect();
-        var pRect = picker.getBoundingClientRect();
-        var top = rect.top - pRect.height - 8;
-        if (top < 8) top = rect.bottom + 8;
-        var left = rect.left;
-        if (left + pRect.width > window.innerWidth - 8) left = window.innerWidth - pRect.width - 8;
-        picker.style.top = top + 'px';
-        picker.style.left = left + 'px';
-        picker.querySelectorAll('.ldpc-pick').forEach(function(btn) {
-          var inlineBtn = document.querySelector('.lcrx-btn[data-comment-id="' + commentId + '"][data-reaction="' + btn.dataset.emoji + '"]');
-          btn.classList.toggle('ldpc-active', !!(inlineBtn && inlineBtn.dataset.reacted === 'true'));
-        });
-      });
-    }
-    return;
-  }
-
-  // ── Comment emoji picker pick
-  var ldpcBtn = e.target.closest('.ldpc-pick');
-  if (ldpcBtn) {
-    var picker = document.getElementById('ldpc-emoji-picker');
-    var commentId = picker && picker.dataset.activeCommentId;
-    if (!commentId) return;
-    picker.style.display = 'none';
-    var emoji = ldpcBtn.dataset.emoji;
-    var existing = document.querySelector('.lcrx-btn[data-comment-id="' + commentId + '"][data-reaction="' + emoji + '"]');
-    var reacted = existing ? existing.dataset.reacted === 'true' : false;
-    var count = existing ? (parseInt(existing.dataset.count) || 0) : 0;
-    lcrxApply(commentId, emoji, !reacted, reacted ? Math.max(0, count - 1) : count + 1);
-    fetch('/api/lists/comments/react', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comment_id: commentId, reaction_type: emoji }),
-    }).then(function(r) { return r.json(); })
-      .then(function(d) { if (d) lcrxApply(commentId, emoji, d.reacted, d.count); })
-      .catch(function() { lcrxApply(commentId, emoji, reacted, count); });
-    return;
-  }
-
-  // ── Reply btn: open reply form
-  var replyBtn = e.target.closest('.lc-reply-btn');
-  if (replyBtn) {
-    var parentId = replyBtn.dataset.parentId;
-    var threadId = replyBtn.dataset.threadId || parentId;
-    var replyTo = replyBtn.dataset.replyTo;
-    var form = document.getElementById('lc-rf-' + threadId);
-    if (!form) return;
-    var isOpen = form.style.display !== 'none';
-    document.querySelectorAll('.lc-rf').forEach(function(f) { f.style.display = 'none'; });
-    if (!isOpen) {
-      var sb = form.querySelector('.lc-rf-submit');
-      if (sb) sb.dataset.parentId = parentId;
-      form.style.display = 'flex';
-      form.style.flexDirection = 'column';
-      var ta = form.querySelector('.lc-rf-ta');
-      if (ta) {
-        ta.value = replyTo ? '@' + replyTo + ' ' : '';
-        ta.focus();
-        ta.setSelectionRange(ta.value.length, ta.value.length);
-      }
-    }
-    return;
-  }
-
-  // ── Reply form cancel
-  var rfCancel = e.target.closest('.lc-rf-cancel');
-  if (rfCancel) {
-    var form = rfCancel.closest('.lc-rf');
-    form.style.display = 'none';
-    var ta = form.querySelector('.lc-rf-ta');
-    if (ta) ta.value = '';
-    return;
-  }
-
-  // ── Reply form submit
-  var rfSubmit = e.target.closest('.lc-rf-submit');
-  if (rfSubmit) {
-    var parentId = rfSubmit.dataset.parentId;
-    var rfListId = rfSubmit.dataset.listId;
-    var form = rfSubmit.closest('.lc-rf');
-    var threadId = form.id.replace('lc-rf-', '');
-    var ta = form.querySelector('.lc-rf-ta');
-    var body = ta.value.trim();
-    if (!body) return;
-    rfSubmit.disabled = true;
-    rfSubmit.textContent = 'Posting…';
-    fetch('/api/lists/comments/create', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ list_id: rfListId, body, parent_id: parentId }),
-    }).then(function(r) {
-      if (r.status === 401) { window.location.href = '/signin'; throw new Error('unauth'); }
-      return r.json();
-    }).then(function(data) {
-      if (!data || data.error) { alert(data?.error || 'Failed to post reply.'); return; }
-      var c = data.comment;
-      var p = c.profiles;
-      var initials = p?.username ? p.username.slice(0,2).toUpperCase() : '?';
-      var avatarHtml = p?.avatar_url
-        ? '<img src="' + p.avatar_url + '" alt="" style="width:100%;height:100%;object-fit:cover">'
-        : '<span>' + initials + '</span>';
-      var isOwn = currentProfileId === p?.id;
-      var replyEl = document.createElement('div');
-      replyEl.className = 'lc-item lc-reply';
-      replyEl.dataset.commentId = c.id;
-      replyEl.innerHTML =
-        '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-avatar lc-avatar-sm">' + avatarHtml + '</a>' +
-        '<div class="lc-body">' +
-          '<div class="lc-meta">' +
-            '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-username">@' + (p?.username ?? '') + '</a>' +
-            '<span class="lc-ts">just now</span>' +
-          '</div>' +
-          '<div class="lc-text" data-raw-body="' + (c.body ?? '').replace(/"/g,'&quot;') + '">' + renderBody(c.body ?? '') + '</div>' +
-          '<div class="lc-actions">' +
-            '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
-            '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
-            '<div class="lcrx-wrap" data-comment-id="' + c.id + '">' +
-              '<button class="lcrx-toggle" data-toggle-comment-id="' + c.id + '" title="React">+</button>' +
-            '</div>' +
-            '<button class="lc-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + threadId + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
-            (isOwn ? '<button class="lc-edit-btn" data-comment-id="' + c.id + '" type="button">Edit</button><button class="lc-delete-btn" data-comment-id="' + c.id + '" type="button">Delete</button>' : '') +
-          '</div>' +
-        '</div>';
-
-      var container;
-      if (parentId === threadId) {
-        container = document.querySelector('.lc-replies[data-replies-for="' + threadId + '"]:not(.lc-replies-deep)');
-      } else {
-        container = document.querySelector('.lc-replies-deep[data-replies-for="' + parentId + '"]');
-        if (!container) {
-          container = document.createElement('div');
-          container.className = 'lc-replies lc-replies-deep';
-          container.dataset.repliesFor = parentId;
-          var parentEl = document.querySelector('.lc-item[data-comment-id="' + parentId + '"]');
-          if (parentEl) { parentEl.after(container); }
-          else { container = document.querySelector('.lc-replies[data-replies-for="' + threadId + '"]:not(.lc-replies-deep)'); }
-        }
-      }
-      if (container) container.appendChild(replyEl);
-      form.style.display = 'none';
-      ta.value = '';
-      updateCommentCount(1);
-    }).catch(function(err) {
-      if (err.message !== 'unauth') alert('Something went wrong. Please try again.');
-    }).finally(function() {
-      rfSubmit.disabled = false;
-      rfSubmit.textContent = 'Reply';
-    });
-    return;
-  }
-
-  // ── Edit btn
-  var editBtn = e.target.closest('.lc-edit-btn');
-  if (editBtn) {
-    var commentId = editBtn.dataset.commentId;
-    var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
-    if (!commentEl) return;
-    var textEl = commentEl.querySelector('.lc-text');
-    var existing = commentEl.querySelector('.lc-edit-wrap');
-    if (existing) { existing.remove(); textEl.style.display = ''; return; }
-    var rawBody = textEl.dataset.rawBody || textEl.textContent;
-    textEl.style.display = 'none';
-    var editWrap = document.createElement('div');
-    editWrap.className = 'lc-edit-wrap';
-    editWrap.innerHTML =
-      '<textarea class="lc-edit-ta" maxlength="2000" rows="3">' + rawBody.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea>' +
-      '<div class="lc-edit-foot">' +
-        '<button class="lc-edit-cancel" type="button">Cancel</button>' +
-        '<button class="lc-edit-save" type="button" data-comment-id="' + commentId + '">Save</button>' +
-      '</div>';
-    textEl.after(editWrap);
-    editWrap.querySelector('textarea').focus();
-    return;
-  }
-
-  // ── Edit cancel
-  var editCancel = e.target.closest('.lc-edit-cancel');
-  if (editCancel) {
-    var wrap = editCancel.closest('.lc-edit-wrap');
-    var commentEl = wrap.closest('.lc-item');
-    commentEl.querySelector('.lc-text').style.display = '';
-    wrap.remove();
-    return;
-  }
-
-  // ── Edit save
-  var editSave = e.target.closest('.lc-edit-save');
-  if (editSave) {
-    var commentId = editSave.dataset.commentId;
-    var wrap = editSave.closest('.lc-edit-wrap');
-    var ta = wrap.querySelector('textarea');
-    var body = ta.value.trim();
-    if (!body) return;
-    editSave.disabled = true;
-    editSave.textContent = 'Saving…';
-    fetch('/api/lists/comments/update', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comment_id: commentId, body }),
-    }).then(function(r) {
-      if (r.status === 401) { window.location.href = '/signin'; throw new Error('unauth'); }
-      return r.json();
-    }).then(function(data) {
-      if (!data || data.error) { alert(data?.error || 'Failed to update comment.'); return; }
-      var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
-      var textEl = commentEl.querySelector('.lc-text');
-      textEl.innerHTML = renderBody(body);
-      textEl.dataset.rawBody = body;
-      textEl.style.display = '';
-      wrap.remove();
-      var meta = commentEl.querySelector('.lc-meta');
-      if (!meta.querySelector('.lc-edited')) {
-        var span = document.createElement('span');
-        span.className = 'lc-edited';
-        span.textContent = '(edited)';
-        meta.appendChild(span);
-      }
-    }).catch(function(err) {
-      if (err.message !== 'unauth') alert('Something went wrong.');
-    }).finally(function() {
-      if (editSave.isConnected) { editSave.disabled = false; editSave.textContent = 'Save'; }
-    });
-    return;
-  }
-
-  // ── Delete btn
-  var deleteBtn = e.target.closest('.lc-delete-btn');
-  if (deleteBtn) {
-    if (!confirm('Delete this comment?')) return;
-    var commentId = deleteBtn.dataset.commentId;
-    deleteBtn.disabled = true;
-    fetch('/api/lists/comments/delete', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ comment_id: commentId }),
-    }).then(function(r) { return r.json(); })
-      .then(function(data) {
-        if (data.error) { alert(data.error); return; }
-        var commentEl = document.querySelector('.lc-item[data-comment-id="' + commentId + '"]');
-        if (commentEl) {
-          var deepReplies = commentEl.parentElement && commentEl.parentElement.querySelector('.lc-replies-deep[data-replies-for="' + commentId + '"]');
-          if (deepReplies) deepReplies.remove();
-          commentEl.remove();
-        }
-        updateCommentCount(-1);
-        if (!document.querySelector('.lc-item')) {
-          document.getElementById('lc-list').innerHTML = '<div class="lc-empty" id="lc-empty">No comments yet. Be the first!</div>';
-        }
-      })
-      .catch(function() { alert('Failed to delete comment.'); })
-      .finally(function() { if (deleteBtn.isConnected) deleteBtn.disabled = false; });
-    return;
-  }
 
   // ── Outside click: close pickers
   if (!e.target.closest('.list-reaction-wrap') && !e.target.closest('#ldp-emoji-picker')) {
     var p = document.getElementById('ldp-emoji-picker');
     if (p) p.style.display = 'none';
   }
-  if (!e.target.closest('.lcrx-wrap') && !e.target.closest('#ldpc-emoji-picker')) {
-    var p = document.getElementById('ldpc-emoji-picker');
-    if (p) { p.style.display = 'none'; }
-  }
 });
 
-function updateCommentCount(delta) {
-  var heading = document.querySelector('.list-comments-title');
-  if (!heading) return;
-  var match = heading.textContent.match(/\d+/);
-  var newCount = match ? Math.max(0, parseInt(match[0]) + delta) : Math.max(0, delta);
-  heading.textContent = 'Comments (' + newCount + ')';
-}
-
-// ── Top-level comment submit ──────────────────────────────────────────────────
-var lcSubmit = document.getElementById('lc-submit');
-if (lcSubmit) {
-  lcSubmit.addEventListener('click', async function() {
-    var ta = document.getElementById('lc-textarea');
-    var errEl = document.getElementById('lc-error');
-    var body = ta.value.trim();
-    if (!body) return;
-    errEl.style.display = 'none';
-    lcSubmit.disabled = true;
-    lcSubmit.textContent = 'Posting…';
-    try {
-      var res = await fetch('/api/lists/comments/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ list_id: listId, body }),
-      });
-      if (res.status === 401) { window.location.href = '/signin'; return; }
-      var data = await res.json();
-      if (!res.ok) {
-        errEl.textContent = data.error || 'Failed to post comment.';
-        errEl.style.display = 'block';
-        return;
-      }
-      ta.value = '';
-      var emptyEl = document.getElementById('lc-empty');
-      if (emptyEl) emptyEl.remove();
-      var c = data.comment;
-      var p = c.profiles;
-      var initials = (p?.username ?? '?').slice(0, 2).toUpperCase();
-      var avatarHtml = p?.avatar_url
-        ? '<img src="' + p.avatar_url + '" alt="' + (p.username ?? '') + '" style="width:100%;height:100%;object-fit:cover">'
-        : '<span>' + initials + '</span>';
-      var isOwn = currentProfileId === p?.id;
-      var thread = document.createElement('div');
-      thread.className = 'lct';
-      thread.dataset.threadId = c.id;
-      thread.innerHTML =
-        '<div class="lc-item" data-comment-id="' + c.id + '">' +
-          '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-avatar">' + avatarHtml + '</a>' +
-          '<div class="lc-body">' +
-            '<div class="lc-meta">' +
-              '<a href="/reviewers/' + (p?.username ?? '') + '" class="lc-username">@' + (p?.username ?? '') + '</a>' +
-              '<span class="lc-ts">just now</span>' +
-            '</div>' +
-            '<div class="lc-text" data-raw-body="' + (c.body ?? '').replace(/"/g,'&quot;') + '">' + renderBody(c.body ?? '') + '</div>' +
-            '<div class="lc-actions">' +
-              '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="1" data-logged-in="true">▲ 0</button>' +
-              '<button class="lcv-btn" data-comment-id="' + c.id + '" data-vote="-1" data-logged-in="true">▼ 0</button>' +
-              '<div class="lcrx-wrap" data-comment-id="' + c.id + '">' +
-                '<button class="lcrx-toggle" data-toggle-comment-id="' + c.id + '" title="React">+</button>' +
-              '</div>' +
-              '<button class="lc-reply-btn" data-parent-id="' + c.id + '" data-thread-id="' + c.id + '" data-reply-to="' + (p?.username ?? '') + '" type="button">↩ Reply</button>' +
-              (isOwn ? '<button class="lc-edit-btn" data-comment-id="' + c.id + '" type="button">Edit</button><button class="lc-delete-btn" data-comment-id="' + c.id + '" type="button">Delete</button>' : '') +
-            '</div>' +
-          '</div>' +
-        '</div>' +
-        '<div class="lc-replies" data-replies-for="' + c.id + '"></div>' +
-        '<div class="lc-rf" id="lc-rf-' + c.id + '" style="display:none">' +
-          '<textarea class="lc-rf-ta" placeholder="Write a reply…" maxlength="2000" rows="2"></textarea>' +
-          '<div class="lc-rf-foot">' +
-            '<button class="lc-rf-cancel" type="button">Cancel</button>' +
-            '<button class="lc-rf-submit" type="button" data-parent-id="' + c.id + '" data-list-id="' + listId + '">Reply</button>' +
-          '</div>' +
-        '</div>';
-      document.getElementById('lc-list').appendChild(thread);
-      updateCommentCount(1);
-    } finally {
-      lcSubmit.disabled = false;
-      lcSubmit.textContent = 'Post comment';
-    }
-  });
-}
 </script>
 
 <script is:inline define:vars={{ _listId: list.id, _defaultView: list.default_view ?? 'grid' }}>
@@ -2563,5 +2153,41 @@ if (lcSubmit) {
   }
 
   if (searchInput) searchInput.addEventListener('input', applyFilterSort);
+})();
+</script>
+
+<script is:inline>
+// Cover-overlay click handlers: achievement badge opens the modal, score chip
+// navigates to the owner's review. Both live inside the cover's <a>, so each
+// path preventDefault + stopPropagation so the browser doesn't also follow the
+// game link.
+(function() {
+  var listEl = document.getElementById('entry-list');
+  if (!listEl) return;
+  function activate(e, isKey) {
+    var ach = e.target && e.target.closest && e.target.closest('.entry-ach-btn');
+    if (ach) {
+      var src = ach.getAttribute('data-ach-src');
+      var sid = ach.getAttribute('data-ach-sid');
+      if (!src || !sid) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof window.openAchDetail === 'function') window.openAchDetail(src, sid);
+      return;
+    }
+    var score = e.target && e.target.closest && e.target.closest('.entry-score-link');
+    if (score) {
+      var reviewId = score.getAttribute('data-review-id');
+      if (!reviewId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      window.location.href = '/reviews/' + reviewId;
+    }
+  }
+  listEl.addEventListener('click', function(e) { activate(e, false); });
+  listEl.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    activate(e, true);
+  });
 })();
 </script>

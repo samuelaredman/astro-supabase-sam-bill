@@ -6,7 +6,7 @@ export const POST: APIRoute = async (context) => {
   if (!auth) return response;
   const { profile, db } = auth;
 
-  const { list_id, title, description, is_ranked, visibility, shared_to_feed, default_view } = await context.request.json();
+  const { list_id, title, description, is_ranked, visibility, default_view, show_hours, show_achievements } = await context.request.json();
 
   if (!list_id) return json({ error: "list_id is required." }, 400);
   if (title !== undefined && !title?.trim()) return json({ error: "Title cannot be empty." }, 400);
@@ -28,14 +28,20 @@ export const POST: APIRoute = async (context) => {
   if (is_ranked !== undefined) updates.is_ranked = is_ranked;
   if (visibility !== undefined) {
     updates.visibility = visibility;
-    // Force-unshare if switching to private
-    if (visibility === "private") updates.shared_to_feed = false;
+    // Flipping to private also pulls the list off the home feed — a private
+    // list has no business being discoverable there. Clear the cooldown too
+    // so flipping back to public and reposting isn't gated.
+    if (visibility === "private") {
+      updates.shared_to_feed = false;
+      updates.last_posted_to_feed_at = null;
+    }
   }
-  if (shared_to_feed !== undefined) updates.shared_to_feed = shared_to_feed;
   if (default_view !== undefined) {
     if (!["grid", "list"].includes(default_view)) return json({ error: "default_view must be 'grid' or 'list'." }, 400);
     updates.default_view = default_view;
   }
+  if (show_hours !== undefined) updates.show_hours = !!show_hours;
+  if (show_achievements !== undefined) updates.show_achievements = !!show_achievements;
 
   const { error } = await (db as any).from("lists").update(updates).eq("id", list_id);
 
