@@ -41,11 +41,12 @@ const REVIEW_FIELDS = `
   review_comments( id )
 `
 const db = supabase as any
+const adminDb = getSupabaseAdmin() as any;
 const [
   profileRes,
   platformsRes,
   rawReviewsRes,
-  weekReviewsRes,
+  trendingRes,
   siteStats,
   genresRes,
 ] = await Promise.all([
@@ -54,7 +55,8 @@ const [
     : Promise.resolve({ data: null }),
   db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
   db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(30),
-  db.from('reviews').select('game_id, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
+  // Service-role: home_trending_games is REVOKEd from anon/authenticated.
+  (adminDb as any).rpc('home_trending_games', { p_since: oneWeekAgo, p_limit: 5 }),
   getSiteStats(),
   db.from('genres').select('id, name, slug').order('name'),
 ])
@@ -63,8 +65,6 @@ const currentProfile = profileRes.data ?? null
 const { data: platforms } = platformsRes
 
 // ── Lists shared to feed ──
-const adminDb = getSupabaseAdmin() as any;
-
 async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit: number) {
   if (profileIdFilter && profileIdFilter.length === 0) return [];
 
@@ -180,12 +180,12 @@ const [
   currentProfile
     ? db.from('follows').select('following_id').eq('follower_id', currentProfile.id)
     : Promise.resolve({ data: [] }),
+  // Hot-takes ranking: 30 newest reviews deviating ≥ 2.5 from the game's
+  // community average. Returns review IDs + each game's avg/count so the
+  // hot-take card ("avg X across Y reviews") renders without a second lookup.
+  // Service-role: home_hot_takes is REVOKEd from anon/authenticated.
   isLoggedIn
-    ? db.from('reviews')
-        .select('id, game_id, score, published_at, created_at')
-        .eq('status', 'published')
-        .order('published_at', { ascending: false })
-        .limit(500)
+    ? (adminDb as any).rpc('home_hot_takes', { p_limit: 30, p_min_deviation: 2.5, p_min_reviews: 2 })
     : Promise.resolve({ data: [] }),
 ]);
 if (recsError) console.error('[index] recommendations query error:', JSON.stringify(recsError));
@@ -212,14 +212,14 @@ const feedItems: any[] = [
   ...recentRecs,
 ].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
-const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
-for (const r of weekReviewsRes.data ?? []) {
-  const g = (r as any).games
-  if (!g) continue
-  if (!trendingMap[g.id]) trendingMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
-  trendingMap[g.id].count++
-}
-const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
+if (trendingRes.error) console.error('[index] home_trending_games rpc error:', JSON.stringify(trendingRes.error))
+const trending: { title: string; slug: string; cover: string | null; count: number }[] =
+  ((trendingRes.data ?? []) as any[]).map((r) => ({
+    title: r.title,
+    slug: r.slug,
+    cover: r.cover_img_url,
+    count: r.review_count,
+  }))
 
 // Chekpoint Creators strip — the newest upload from each badged creator's
 // linked YouTube channel. Fetched in parallel; the strip only renders for
@@ -336,26 +336,10 @@ const lastReview: any = lastReviewData ?? null
 const followingIds = (followRows ?? []).map((r: any) => r.following_id)
 
 // ── Hot Takes ranking: published reviews scoring ≥2.5 away from their game's
-// consensus average, most-recent-first. Ranked from the light projection above;
-// only the 30 that survive get hydrated for rendering. ──
-const HT_MIN_DEVIATION = 2.5
-const htScores: Record<string, number[]> = {}
-for (const r of (htRanking ?? []) as any[]) {
-  if (r.game_id == null || r.score == null) continue
-  ;(htScores[r.game_id] ||= []).push(r.score)
-}
-const htAvg: Record<string, number> = {}
-for (const [id, s] of Object.entries(htScores)) {
-  if (s.length >= 2) htAvg[id] = s.reduce((a, b) => a + b, 0) / s.length
-}
-const htWinners = ((htRanking ?? []) as any[])
-  .filter((r) => r.game_id != null && htAvg[r.game_id] !== undefined
-    && Math.abs(r.score - htAvg[r.game_id]) >= HT_MIN_DEVIATION)
-  .sort((a, b) =>
-    new Date(b.published_at || b.created_at).getTime() -
-    new Date(a.published_at || a.created_at).getTime()
-  )
-  .slice(0, 30)
+// consensus average, most-recent-first. The ranking + per-game avg/count come
+// from the `home_hot_takes` RPC (migration 20261031000002); only the 30 that
+// survive get hydrated for rendering. ──
+const htWinners = (htRanking ?? []) as Array<{ id: string; game_avg_score: number; game_review_count: number }>
 const htWinnerIds = htWinners.map((r) => r.id)
 
 // ── Third wave: the followed-reviewer feed and the hot-take hydration ──
@@ -409,19 +393,19 @@ await attachReviewVideos(db, [
   ...(htFull ?? []),
 ])
 {
-  // Re-apply the ranking order the light pass produced, and attach the numbers
-  // the card renders.
-  const byId = new Map((htFull ?? []).map((r: any) => [r.id, r]))
+  // Preserve the RPC's newest-first order and attach the numbers the card renders.
+  const byId = new Map<string, any>((htFull ?? []).map((r: any) => [r.id, r]))
   hotTakes = htWinners
     .map((w) => {
       const full = byId.get(w.id)
       if (!full) return null
+      const avg = w.game_avg_score
       return {
         ...full,
-        _htAvg: htAvg[w.game_id],
-        _htDeviation: w.score - htAvg[w.game_id],
-        _htAbs: Math.abs(w.score - htAvg[w.game_id]),
-        _htCount: htScores[w.game_id].length,
+        _htAvg: avg,
+        _htDeviation: full.score - avg,
+        _htAbs: Math.abs(full.score - avg),
+        _htCount: w.game_review_count,
       }
     })
     .filter(Boolean)
