@@ -4,16 +4,21 @@
 // giveaway ends.
 export const prerender = false;
 import Layout from '../components/Layout.astro';
-import { getSupabase, getSupabaseAdmin } from '../utils/database';
+import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../utils/database';
 import { fetchCreatorContent } from '../utils/youtubeChannel';
 import { groupPath } from '../utils/groupSlug';
 import { setPageCacheHeaders } from '../utils/cache';
+import { getPageUser } from '../utils/pageAuth';
 
 const YOUTUBE_API_KEY = import.meta.env.YOUTUBE_API_KEY || (globalThis as any).process?.env?.YOUTUBE_API_KEY;
 
-// Page has no per-user content and hits the YouTube API — cache at the edge
-// so repeat visits don't re-fetch channel data.
-setPageCacheHeaders(Astro.response.headers, false);
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, serverClient);
+const isLoggedIn = !!user;
+
+// Only the anonymous render is edge-cached — the signed-in variant is per-user
+// (hides the Sign up pill) so it must not be shared-cached.
+setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 
 const supabase = getSupabase();
 const adminDb = getSupabaseAdmin();
@@ -22,18 +27,19 @@ const adminDb = getSupabaseAdmin();
 // page uses, so the cards here line up with the strip there. The home query is
 // ordered by assigned_at ASC; keeping it means the roster shown on the home
 // page and the giveaway page always matches.
+// Fetched sorted by username ASC so the three cards land in alphabetical order
+// (home-page strip keeps its assigned_at ordering).
 const { data: creatorRows } = await supabase
   .from('profile_badges')
   .select('profiles!profile_badges_profile_id_fkey ( id, username, avatar_url, youtube_url, featured_group_id )')
-  .eq('badge_slug', 'chekpoint-creator')
-  .order('assigned_at', { ascending: true });
+  .eq('badge_slug', 'chekpoint-creator');
 
-const creatorProfiles = ((creatorRows as any[]) ?? [])
+const creatorProfiles = (((creatorRows as any[]) ?? [])
   .map((r) => r.profiles)
   .filter((p: any) => p && p.youtube_url) as Array<{
     id: string; username: string; avatar_url: string | null;
     youtube_url: string; featured_group_id: string | null;
-  }>;
+  }>).sort((a, b) => a.username.localeCompare(b.username, undefined, { sensitivity: 'base' }));
 
 const featuredGroupIds = Array.from(new Set(
   creatorProfiles.map((p) => p.featured_group_id).filter((x): x is string => !!x)
@@ -66,7 +72,11 @@ function formatCompactNumber(n: number | null | undefined): string | null {
 
 const creators = creatorProfiles.map((p, i) => {
   const channel = bundles[i]?.channel ?? null;
+  const video = bundles[i]?.video ?? null;
   const featured = p.featured_group_id ? featuredGroupById.get(p.featured_group_id) ?? null : null;
+  // Prefer the latest video URL for the primary CTA so clicks give the creator
+  // a view. Fall back to the channel URL when the YouTube lookup failed.
+  const watchUrl = video ? `https://www.youtube.com/watch?v=${video.id}` : p.youtube_url;
   return {
     username: p.username,
     name: channel?.name ?? p.username,
@@ -74,6 +84,8 @@ const creators = creatorProfiles.map((p, i) => {
     avatarUrl: channel?.avatarUrl ?? p.avatar_url ?? null,
     subsLabel: formatCompactNumber(channel?.subscriberCount ?? null),
     youtubeUrl: p.youtube_url,
+    watchUrl,
+    hasVideo: !!video,
     community: featured ? { name: featured.name, path: groupPath(featured) } : null,
   };
 });
@@ -88,6 +100,7 @@ const creators = creatorProfiles.map((p, i) => {
     <a href="/" class="back-link">← Back to home</a>
 
     <header class="giveaway-hero">
+      <img src="/chekpoint-logo.webp" alt="Chekpoint" class="giveaway-logo" width="689" height="96" />
       <div class="giveaway-tag">GIVEAWAY</div>
       <h1>We're giving away 3 copies of Phantom Blade Zero</h1>
       <p class="giveaway-lead">
@@ -98,7 +111,12 @@ const creators = creatorProfiles.map((p, i) => {
     <section class="giveaway-body">
       <h2>How to enter</h2>
       <ol>
-        <li>Make an account. Review some games you love.</li>
+        <li>
+          Make an account. Review some games you love.
+          {!isLoggedIn && (
+            <a href="/signup" class="giveaway-signup-pill">Sign up →</a>
+          )}
+        </li>
         <li>Sub to each creator and join their group. Each group is giving away their own copy of the game, so join all 3 channels for 3 entries.</li>
       </ol>
 
@@ -125,8 +143,8 @@ const creators = creatorProfiles.map((p, i) => {
                 {c.subsLabel && <span>{c.subsLabel} subs</span>}
               </div>
               <div class="giveaway-creator-actions">
-                <a href={c.youtubeUrl} target="_blank" rel="noopener" class="giveaway-creator-btn giveaway-creator-btn--yt">
-                  Subscribe
+                <a href={c.watchUrl} target="_blank" rel="noopener" class="giveaway-creator-btn giveaway-creator-btn--yt">
+                  {c.hasVideo ? 'Watch latest' : 'Subscribe'}
                 </a>
                 {c.community && (
                   <a href={c.community.path} class="giveaway-creator-btn giveaway-creator-btn--join">
@@ -168,6 +186,12 @@ const creators = creatorProfiles.map((p, i) => {
     color: #fff;
     box-shadow: 0 10px 30px rgba(96, 80, 200, 0.3);
     margin-bottom: 28px;
+  }
+  .giveaway-logo {
+    display: block;
+    height: 32px;
+    width: auto;
+    margin-bottom: 18px;
   }
   .giveaway-tag {
     display: inline-block;
@@ -217,6 +241,29 @@ const creators = creatorProfiles.map((p, i) => {
   }
   .giveaway-body li { margin-bottom: 8px; }
   .giveaway-body li:last-child { margin-bottom: 0; }
+
+  .giveaway-signup-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 8px;
+    padding: 3px 12px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 600;
+    text-decoration: none;
+    color: #fff;
+    background: linear-gradient(135deg, #6050c8 0%, #a855f7 100%);
+    box-shadow: 0 2px 6px rgba(96, 80, 200, 0.3);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    vertical-align: baseline;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .giveaway-signup-pill:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(96, 80, 200, 0.42);
+  }
 
   .giveaway-creators {
     display: grid;
