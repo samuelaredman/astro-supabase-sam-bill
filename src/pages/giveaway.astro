@@ -1,0 +1,377 @@
+---
+// Temporary one-off page for the Phantom Blade Zero giveaway.
+// Delete this file (and the entry widget in src/pages/index.astro) once the
+// giveaway ends.
+export const prerender = false;
+import Layout from '../components/Layout.astro';
+import { getSupabase, getSupabaseAdmin, createSupabaseServerClientFromContext } from '../utils/database';
+import { fetchCreatorContent } from '../utils/youtubeChannel';
+import { groupPath } from '../utils/groupSlug';
+import { setPageCacheHeaders } from '../utils/cache';
+import { getPageUser } from '../utils/pageAuth';
+
+const YOUTUBE_API_KEY = import.meta.env.YOUTUBE_API_KEY || (globalThis as any).process?.env?.YOUTUBE_API_KEY;
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, serverClient);
+const isLoggedIn = !!user;
+
+// Only the anonymous render is edge-cached — the signed-in variant is per-user
+// (hides the Sign up pill) so it must not be shared-cached.
+setPageCacheHeaders(Astro.response.headers, isLoggedIn);
+
+const supabase = getSupabase();
+const adminDb = getSupabaseAdmin();
+
+// Chekpoint Creators + their featured community groups — same shape the home
+// page uses, so the cards here line up with the strip there. The home query is
+// ordered by assigned_at ASC; keeping it means the roster shown on the home
+// page and the giveaway page always matches.
+// Fetched sorted by username ASC so the three cards land in alphabetical order
+// (home-page strip keeps its assigned_at ordering).
+const { data: creatorRows } = await supabase
+  .from('profile_badges')
+  .select('profiles!profile_badges_profile_id_fkey ( id, username, avatar_url, youtube_url, featured_group_id )')
+  .eq('badge_slug', 'chekpoint-creator');
+
+const creatorProfiles = (((creatorRows as any[]) ?? [])
+  .map((r) => r.profiles)
+  .filter((p: any) => p && p.youtube_url) as Array<{
+    id: string; username: string; avatar_url: string | null;
+    youtube_url: string; featured_group_id: string | null;
+  }>).sort((a, b) => a.username.localeCompare(b.username, undefined, { sensitivity: 'base' }));
+
+const featuredGroupIds = Array.from(new Set(
+  creatorProfiles.map((p) => p.featured_group_id).filter((x): x is string => !!x)
+));
+const featuredGroupById = new Map<string, { id: string; name: string; slug: string | null; visibility: string }>();
+if (featuredGroupIds.length) {
+  const { data: groupRows } = await (adminDb as any)
+    .from('groups')
+    .select('id, name, slug, visibility')
+    .in('id', featuredGroupIds)
+    .eq('visibility', 'public');
+  for (const g of (groupRows ?? []) as any[]) featuredGroupById.set(g.id, g);
+}
+
+// Fail-soft YouTube lookup — the page still renders if the API is slow/down.
+const bundles = await Promise.all(
+  creatorProfiles.map((p) =>
+    fetchCreatorContent(p.youtube_url, YOUTUBE_API_KEY).catch(() => ({ video: null, channel: null }))
+  )
+);
+
+function formatCompactNumber(n: number | null | undefined): string | null {
+  if (n == null || isNaN(n)) return null;
+  if (n < 1_000) return String(n);
+  if (n < 10_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+  if (n < 1_000_000) return Math.round(n / 1_000) + 'K';
+  if (n < 10_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  return Math.round(n / 1_000_000) + 'M';
+}
+
+const creators = creatorProfiles.map((p, i) => {
+  const channel = bundles[i]?.channel ?? null;
+  const video = bundles[i]?.video ?? null;
+  const featured = p.featured_group_id ? featuredGroupById.get(p.featured_group_id) ?? null : null;
+  // Prefer the latest video URL for the primary CTA so clicks give the creator
+  // a view. Fall back to the channel URL when the YouTube lookup failed.
+  const watchUrl = video ? `https://www.youtube.com/watch?v=${video.id}` : p.youtube_url;
+  return {
+    username: p.username,
+    name: channel?.name ?? p.username,
+    handle: channel?.handle ?? null,
+    avatarUrl: channel?.avatarUrl ?? p.avatar_url ?? null,
+    subsLabel: formatCompactNumber(channel?.subscriberCount ?? null),
+    youtubeUrl: p.youtube_url,
+    watchUrl,
+    hasVideo: !!video,
+    community: featured ? { name: featured.name, path: groupPath(featured) } : null,
+  };
+});
+---
+
+<Layout
+  title="Giveaway: Phantom Blade Zero (3 copies) — Chekpoint.gg"
+  description="We're giving away 3 copies of Phantom Blade Zero to the Chekpoint community."
+  variant="centered"
+>
+  <div class="giveaway-page">
+    <a href="/" class="back-link">← Back to home</a>
+
+    <header class="giveaway-hero">
+      <img src="/chekpoint-logo.webp" alt="Chekpoint" class="giveaway-logo" width="689" height="96" />
+      <h1>We're giving away 3 copies of Phantom Blade Zero</h1>
+      <p class="giveaway-lead">
+        A thank you to our Creators and their communities.
+      </p>
+    </header>
+
+    <section class="giveaway-body">
+      <h2>How to enter</h2>
+      <ol>
+        <li>
+          Make an account. Review some games you love.
+          {!isLoggedIn && (
+            <a href="/signup" class="giveaway-signup-pill">Sign up →</a>
+          )}
+        </li>
+        <li>Sub to each creator and join their group. Each group is giving away their own copy of the game, so join all 3 channels for 3 entries.</li>
+      </ol>
+
+      {creators.length > 0 && (
+        <div class="giveaway-creators">
+          {creators.map((c) => (
+            <article class="giveaway-creator">
+              <a
+                href={c.youtubeUrl}
+                target="_blank"
+                rel="noopener"
+                class="giveaway-creator-avatar"
+                aria-label={`${c.name} on YouTube`}
+              >
+                {c.avatarUrl
+                  ? <img src={c.avatarUrl} alt="" loading="lazy" />
+                  : <span>{c.name.slice(0, 2).toUpperCase()}</span>
+                }
+              </a>
+              <div class="giveaway-creator-text">
+                <div class="giveaway-creator-name">{c.name}</div>
+                <div class="giveaway-creator-sub">
+                  {c.handle && <span>{c.handle}</span>}
+                  {c.handle && c.subsLabel && <span aria-hidden="true">·</span>}
+                  {c.subsLabel && <span>{c.subsLabel} subs</span>}
+                </div>
+              </div>
+              <div class="giveaway-creator-actions">
+                <a href={c.watchUrl} target="_blank" rel="noopener" class="giveaway-creator-btn giveaway-creator-btn--yt">
+                  Subscribe
+                </a>
+                {c.community && (
+                  <a href={c.community.path} class="giveaway-creator-btn giveaway-creator-btn--join">
+                    Join group
+                  </a>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+
+      <p>That's it! Each creator will pick a winner from their group.</p>
+      <p>Good Luck!</p>
+    </section>
+  </div>
+</Layout>
+
+<style>
+  .giveaway-page {
+    width: 100%;
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+  }
+  .back-link {
+    display: inline-block;
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    margin-bottom: 20px;
+  }
+  .back-link:hover { color: var(--accent); }
+
+  .giveaway-hero {
+    background: linear-gradient(135deg, #6050c8 0%, #a855f7 60%, #ec4899 100%);
+    border-radius: 18px;
+    padding: 28px 24px;
+    color: #fff;
+    box-shadow: 0 10px 30px rgba(96, 80, 200, 0.3);
+    margin-bottom: 28px;
+  }
+  .giveaway-logo {
+    display: block;
+    height: 32px;
+    width: auto;
+    margin-bottom: 18px;
+  }
+  .giveaway-hero h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 32px;
+    font-weight: 400;
+    line-height: 1.15;
+    margin: 0 0 10px;
+  }
+  .giveaway-lead {
+    font-size: 15px;
+    line-height: 1.5;
+    opacity: 0.92;
+    margin: 0;
+  }
+
+  .giveaway-body h2 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 20px;
+    font-weight: 400;
+    margin: 24px 0 8px;
+    color: var(--text-primary);
+  }
+  .giveaway-body h2:first-child { margin-top: 0; }
+  .giveaway-body p {
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    margin: 0 0 12px;
+  }
+  .giveaway-body ol {
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    padding-left: 22px;
+    margin: 0 0 16px;
+  }
+  .giveaway-body li { margin-bottom: 8px; }
+  .giveaway-body li:last-child { margin-bottom: 0; }
+
+  .giveaway-signup-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 8px;
+    padding: 3px 12px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 600;
+    text-decoration: none;
+    color: #fff;
+    background: linear-gradient(135deg, #6050c8 0%, #a855f7 100%);
+    box-shadow: 0 2px 6px rgba(96, 80, 200, 0.3);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    vertical-align: baseline;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .giveaway-signup-pill:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(96, 80, 200, 0.42);
+  }
+
+  .giveaway-creators {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin: 18px 0 22px;
+  }
+  .giveaway-creator {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 12px;
+    box-shadow: var(--shadow);
+  }
+  .giveaway-creator-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: var(--tag-bg);
+    border: 2px solid var(--border);
+    margin-bottom: 10px;
+    font-family: 'DM Serif Display', serif;
+    font-size: 20px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    flex-shrink: 0;
+  }
+  .giveaway-creator-avatar img {
+    width: 100%; height: 100%; object-fit: cover;
+  }
+  .giveaway-creator-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.2;
+    margin-bottom: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .giveaway-creator-sub {
+    font-size: 11.5px;
+    color: var(--text-tertiary);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 10px;
+    min-height: 1em;
+  }
+  .giveaway-creator-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    margin-top: auto;
+  }
+  .giveaway-creator-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 10px;
+    border-radius: 8px;
+    text-decoration: none;
+    line-height: 1;
+    transition: filter 0.15s ease, transform 0.15s ease;
+  }
+  .giveaway-creator-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
+  .giveaway-creator-btn--yt {
+    background: #ff0000;
+    color: #fff;
+  }
+  .giveaway-creator-btn--join {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  @media (max-width: 520px) {
+    .giveaway-creators { grid-template-columns: 1fr; gap: 10px; }
+    /* 3-column row: avatar | text (name + sub) | stacked CTAs. text takes the
+       middle flex space, actions stack vertically and sit right-aligned. */
+    .giveaway-creator {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      text-align: left;
+    }
+    .giveaway-creator-avatar { width: 56px; height: 56px; margin-bottom: 0; }
+    .giveaway-creator-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .giveaway-creator-name {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      font-size: 14px;
+    }
+    .giveaway-creator-sub { justify-content: flex-start; margin-bottom: 0; font-size: 11px; }
+    .giveaway-creator-actions {
+      width: auto;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 0;
+      align-items: stretch;
+    }
+    .giveaway-creator-btn { padding: 6px 10px; font-size: 11.5px; }
+  }
+</style>
