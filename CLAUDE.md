@@ -970,17 +970,29 @@ npm run build        # astro check (TypeScript) + astro build
 npm run preview      # Preview production build locally
 npm test             # Vitest unit tests
 npm run test:watch   # Vitest in watch mode
+npm run test:smoke   # Playwright smoke tests (logged-out site; SMOKE_BASE_URL to target a deploy)
+npm run check:all    # astro check + unit tests + smoke tests
 ```
 
 ---
 
 ## Testing
 
-Vitest is used for unit tests. It reuses the Vite config with zero extra TypeScript
-setup. Test files live at `src/**/*.test.ts`.
+Full guide: `tests/README.md`.
 
-**What we test:** Pure utility functions and input validation logic.
-**What we don't test:** Supabase queries, API routes, or UI (integration tests are future scope).
+- **Unit tests (Vitest)** — pure utility functions and input validation, `src/**/*.test.ts`.
+- **Smoke tests (Playwright)** — `tests/smoke/`. Every page a logged-out visitor can reach
+  must answer 200 with no JS exceptions, console errors or failed same-site requests; gated
+  pages redirect to `/signin`; tabs, lazy loads, search and feeds work. Read-only, so safe
+  against production. Sample pages are found from live links, never hardcoded ids.
+- **CI** — `.github/workflows/checks.yml` runs `astro check` + unit tests on every PR;
+  `smoke.yml` runs the smoke suite against a URL on demand.
+
+**Before calling any significant change done, run `npm run check:all` and report the result.**
+A smoke failure is a regression unless the change meant to alter that page — then update the
+test in the same change and say why. New page → add it to `tests/smoke/pages.spec.ts`.
+
+**Not yet covered:** signed-in flows (posting, voting, commenting, following, groups admin).
 
 ### Utilities to extract into `src/utils/format.ts`
 
