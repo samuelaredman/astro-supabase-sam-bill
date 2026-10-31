@@ -472,6 +472,8 @@ make it read from the views, not from `reviews`, so the scaling swap below still
 | `reviewer_volume_percentile(profile_id)` | `/reviewers/[username]` |
 | `profile_game_community_stats(profile_id)` | `/reviewers/[username]` community averages |
 | `hub_game_review_stats(genre_id? \| platform_id? \| company_id?)` | genre / platform / studio hubs |
+| `home_trending_games(since, limit)` | `/` trending-games sidebar (reads `reviews` with a time filter — view is cumulative) |
+| `home_hot_takes(limit, min_deviation, min_reviews)` | `/` Hot Takes feed |
 
 - **Server-only.** Only `service_role` can read the views or execute the functions (migration
   `20260911000005`), so call them with `getSupabaseAdmin()`. Anon and authenticated clients get
