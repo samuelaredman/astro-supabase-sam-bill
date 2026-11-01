@@ -61,6 +61,8 @@ export const POST: APIRoute = async (context) => {
   // ── Published path ──
   if (!score || !title || !reviewBody)
     return json({ error: "Missing required fields." }, 400);
+  if (reviewBody.length > 10000)
+    return json({ error: "Review must be at most 10000 characters." }, 400);
 
   const { data: existing } = await db
     .from('reviews')
