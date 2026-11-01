@@ -2,7 +2,7 @@
 export const prerender = false;
 import { getSupabase, getSupabaseAdmin } from '../../utils/database'
 import { igdbFetch } from '../../utils/igdb'
-import { igdbImage } from '../../utils/format'
+import { igdbImage, timeAgo, formatScore } from '../../utils/format'
 import { isAllowedGameCategory } from '../../utils/games'
 import DetailNav from '../../components/DetailNav.astro'
 import { setPageCacheHeaders } from '../../utils/cache';
@@ -128,6 +128,29 @@ const totalGames = new Set([
   ...publishedOnly.map((g: any) => g.id)
 ]).size
 
+// Recent reviews of this studio's games, so the page leads somewhere. Only the
+// reviewed games the page lists, most-reviewed first, capped so the `.in()`
+// stays well inside PostgREST's URL limit.
+const reviewedGameIds = [...developedGames, ...publishedOnly]
+  .filter((g: any) => gameReviewCount(g.id) > 0)
+  .sort((a: any, b: any) => gameReviewCount(b.id) - gameReviewCount(a.id))
+  .slice(0, 150)
+  .map((g: any) => g.id as string)
+
+const REVIEWS_SHOWN = 6
+let recentReviews: any[] = []
+if (reviewedGameIds.length > 0) {
+  const { data: recentReviewRows, error: recentReviewsError } = await supabase
+    .from('reviews')
+    .select('id, score, title, body, contains_spoilers, published_at, created_at, games(title, slug, cover_img_url), profiles(username, avatar_url)')
+    .in('game_id', reviewedGameIds)
+    .eq('status', 'published')
+    .order('published_at', { ascending: false, nullsFirst: false })
+    .limit(30)
+  if (recentReviewsError) console.error('[studios/slug] recent reviews error:', JSON.stringify(recentReviewsError))
+  recentReviews = recentReviewRows ?? []
+}
+
 // fetch IGDB company details
 let igdbData: any = null
 if (studio.igdb_id) {
@@ -154,6 +177,10 @@ function releaseYear(dateStr: string | null): string | null {
 }
 
 const studioCountry = countryName(studio.country)
+
+// IGDB fills website_url with its own company page (every studio, as of
+// 2026-10-31), not the studio's site. Show only a real website.
+const studioWebsite = studio.website_url && !/(^|[./])igdb\.com\b/i.test(studio.website_url) ? studio.website_url : null
 
 // Search snippet. Studio-name searches ("bloober team", "bloober team country",
 // "what is cognosphere") want facts, so the title and description lead with the
@@ -188,6 +215,79 @@ const seoDescription = clampDescription([
 const canonicalUrl = new URL(`/studios/${studio.slug}`, Astro.site ?? Astro.url.origin).toString()
 
 const overallScoreClass = overallAvg ? scoreClass(parseFloat(overallAvg)) : null
+
+// Game sections, laid out like the genre page: Top Rated and Most Reviewed rows,
+// then Developed / Published by release year. Every card is rendered here (the
+// script only pages them) so all of the studio's game links stay in the HTML.
+const PAGE_SIZE = 5
+const SCORE_BORDER: Record<string, string> = {
+  perfect: '#ffffff', great: '#4ade80', teal: '#2dd4bf', good: '#60a5fa',
+  mid: '#fbbf24', orange: '#fb923c', low: '#f87171',
+}
+type GameCard = { slug: string; title: string; cover: string | null; avg: string | null; sc: string | null; count: number; year: string | null }
+type GameGroup = { key: string; label: string; cards: GameCard[]; dot: string }
+type GameSection = { id: string; title: string; count: number; byYear: boolean; ranked: boolean; groups: GameGroup[] }
+
+function toCard(g: any): GameCard {
+  const avg = gameAvgScore(g.id)
+  return {
+    slug: g.slug, title: g.title, cover: igdbImage(g.cover_img_url),
+    avg, sc: avg ? scoreClass(parseFloat(avg)) : null,
+    count: gameReviewCount(g.id), year: releaseYear(g.date_released),
+  }
+}
+
+const byScore = (a: any, b: any) =>
+  parseFloat(gameAvgScore(b.id) ?? '-1') - parseFloat(gameAvgScore(a.id) ?? '-1')
+const byReviews = (a: any, b: any) => gameReviewCount(b.id) - gameReviewCount(a.id)
+const listedGames = [...developedGames, ...publishedOnly]
+
+const topRated = listedGames
+  .filter((g: any) => gameReviewCount(g.id) >= 3)
+  .sort((a: any, b: any) => byScore(a, b) || byReviews(a, b))
+  .slice(0, 25)
+const mostReviewed = listedGames
+  .filter((g: any) => gameReviewCount(g.id) > 0)
+  .sort((a: any, b: any) => byReviews(a, b) || byScore(a, b))
+  .slice(0, 25)
+
+// Same pill colours as the genre page's year strip.
+function yearDot(avg: number | null): string {
+  if (avg == null) return '#71717a'
+  return avg >= 8 ? '#22c55e' : avg >= 6 ? '#3b82f6' : avg >= 4 ? '#f59e0b' : '#ef4444'
+}
+
+// Newest year first; games with no release date last. Every game is kept —
+// these sections replace the full Developed / Published grids.
+function groupByYear(games: any[]): GameGroup[] {
+  const groups = new Map<string, any[]>()
+  for (const g of games) {
+    const key = releaseYear(g.date_released) ?? 'none'
+    groups.set(key, [...(groups.get(key) ?? []), g])
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === 'none' ? 1 : b === 'none' ? -1 : Number(b) - Number(a)))
+    .map(([key, list]) => {
+      const totals = pooled(reviewStats, list.map((g: any) => g.id))
+      return {
+        key,
+        label: key === 'none' ? 'No date' : key,
+        cards: list.sort((a: any, b: any) => byScore(a, b) || a.title.localeCompare(b.title)).map(toCard),
+        dot: yearDot(totals.count > 0 ? totals.sum / totals.count : null),
+      }
+    })
+}
+
+const gameSections: GameSection[] = ([
+  { id: 'top-rated', title: 'Top Rated', count: topRated.length, byYear: false, ranked: true,
+    groups: [{ key: 'all', label: '', cards: topRated.map(toCard), dot: '' }] },
+  { id: 'most-reviewed', title: 'Most Reviewed', count: mostReviewed.length, byYear: false, ranked: false,
+    groups: [{ key: 'all', label: '', cards: mostReviewed.map(toCard), dot: '' }] },
+  { id: 'developed', title: 'Developed', count: developedGames.length, byYear: true, ranked: false,
+    groups: groupByYear(developedGames) },
+  { id: 'published', title: 'Published', count: publishedOnly.length, byYear: true, ranked: false,
+    groups: groupByYear(publishedOnly) },
+] as GameSection[]).filter((sec) => sec.count > 0)
 const coverUrls = developedGames
   .slice(0, 12)
   .map((g: any) => igdbImage(g.cover_img_url))
@@ -317,7 +417,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .detail-row { display: flex; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border-subtle); font-size: 12px; }
     .detail-row:last-child { border-bottom: none; }
     .detail-label { flex-shrink: 0; width: 80px; color: var(--text-tertiary); padding-top: 2px; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; font-weight: 500; }
-    .detail-value { color: var(--text-secondary); line-height: 1.5; }
+    .detail-value { color: var(--text-secondary); line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }
     .detail-link { color: var(--game-accent); transition: opacity 0.15s; }
     .detail-link:hover { opacity: 0.7; }
 
@@ -326,7 +426,28 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-tertiary); }
     .section-count { font-size: 12px; color: var(--text-tertiary); }
 
-    .games-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
+    .game-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+    @media (max-width: 700px) { .game-row { grid-template-columns: repeat(3, 1fr); gap: 12px; } }
+    .game-card[hidden], .year-panel[hidden] { display: none; }
+    .rank-badge { position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; line-height: 1.4; backdrop-filter: blur(4px); }
+    .row-nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+    .row-nav-info { font-size: 12px; color: var(--text-tertiary); }
+    .row-arrow, .strip-arrow { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s; color: var(--text-secondary); flex-shrink: 0; }
+    .strip-arrow { width: 28px; height: 28px; }
+    .row-arrow:hover, .strip-arrow:hover { border-color: var(--game-accent); color: var(--game-accent); }
+    .row-arrow:disabled, .strip-arrow:disabled { opacity: 0.25; cursor: default; pointer-events: none; }
+    .pill-strip-wrap { display: flex; align-items: center; gap: 6px; margin-bottom: 14px; }
+    .year-pill-strip { position: relative; display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; scroll-snap-type: x mandatory; scrollbar-width: none; flex: 1; min-width: 0; }
+    .year-pill-strip::-webkit-scrollbar { display: none; }
+    .year-pill { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg-card); cursor: pointer; white-space: nowrap; scroll-snap-align: start; transition: border-color 0.15s, background 0.15s; font-family: inherit; flex-shrink: 0; }
+    .year-pill:hover { border-color: rgba(96,80,200,0.4); }
+    .year-pill.active { border-color: var(--game-accent); background: rgba(96,80,200,0.08); }
+    .year-pill-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .year-pill-label { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+    .year-pill-count { font-size: 11px; color: var(--text-tertiary); }
+    .year-panel-header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+    .year-panel-label { font-family: 'DM Serif Display', serif; font-size: 22px; letter-spacing: -0.3px; }
+    .year-panel-count { font-size: 12px; color: var(--text-tertiary); }
     .game-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s; display: block; position: relative; }
     .game-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-md); border-color: rgba(96,80,200,0.3); }
     .game-cover { aspect-ratio: 3/4; background: var(--tag-bg); overflow: hidden; position: relative; }
@@ -346,6 +467,33 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .game-year { font-size: 11px; color: var(--text-tertiary); }
     .game-review-count { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; }
 
+    a.stat-card { display: block; transition: border-color 0.15s; }
+    a.stat-card:hover { border-color: rgba(96,80,200,0.4); }
+    .stat-link { font-size: 11px; color: var(--game-accent); margin-top: 3px; }
+
+    .review-list { display: flex; flex-direction: column; gap: 12px; }
+    .review-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; display: flex; gap: 14px; transition: border-color 0.15s; }
+    .review-item:hover { border-color: rgba(96,80,200,0.3); }
+    .review-item[hidden] { display: none; }
+    .review-cover { flex-shrink: 0; width: 46px; height: 61px; border-radius: 6px; overflow: hidden; background: var(--tag-bg); display: flex; align-items: center; justify-content: center; font-size: 18px; }
+    .review-cover img { width: 100%; height: 100%; object-fit: cover; }
+    .review-main { flex: 1; min-width: 0; }
+    .review-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+    .review-head-text { flex: 1; min-width: 0; }
+    .review-game { font-size: 13px; font-weight: 500; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .review-game:hover { color: var(--text-secondary); }
+    .review-byline { font-size: 11px; color: var(--text-tertiary); display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+    .review-avatar { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; }
+    .review-byline a:hover { color: var(--text-secondary); }
+    .review-score { position: static; flex-shrink: 0; width: 34px; height: 34px; font-size: 13px; }
+    .review-title { font-family: 'DM Serif Display', serif; font-size: 16px; line-height: 1.3; margin-bottom: 4px; }
+    .review-body { font-size: 13px; line-height: 1.65; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+    .review-spoiler { font-size: 12px; color: var(--text-tertiary); font-style: italic; }
+    .review-read { display: inline-block; font-size: 12px; color: var(--game-accent); margin-top: 8px; font-weight: 500; }
+    .review-read:hover { opacity: 0.7; }
+    .show-more-btn { display: block; margin: 14px auto 0; background: var(--tag-bg); color: var(--text-secondary); border: 1px solid var(--border); border-radius: 20px; padding: 7px 18px; font-family: inherit; font-size: 12px; font-weight: 500; cursor: pointer; transition: border-color 0.15s; }
+    .show-more-btn:hover { border-color: rgba(96,80,200,0.4); }
+
     .empty-state { padding: 40px 0; text-align: center; color: var(--text-tertiary); }
     .empty-title { font-family: 'DM Serif Display', serif; font-size: 18px; color: var(--text-secondary); margin-bottom: 6px; }
 
@@ -355,7 +503,6 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       .hero { height: 220px; }
       .stats-row { gap: 8px; }
       .stat-num { font-size: 30px; }
-      .games-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
       .jump-nav { display: none; }
     }
     /* ── Mobile bottom nav ── */
@@ -370,8 +517,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 
   <nav class="jump-nav">
     <a href="#overview" class="jump-link active">Overview</a>
-    {developedGames.length > 0 && <a href="#developed" class="jump-link">Developed</a>}
-    {publishedOnly.length > 0 && <a href="#published" class="jump-link">Published</a>}
+    {recentReviews.length > 0 && <a href="#reviews" class="jump-link">Reviews</a>}
+    {gameSections.map((sec) => <a href={`#${sec.id}`} class="jump-link">{sec.title}</a>)}
   </nav>
 
   <div class="hero">
@@ -394,12 +541,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           {studio.founded_year && <span class="studio-meta-item">Est. {studio.founded_year}</span>}
           {studio.founded_year && studioCountry && <span class="studio-meta-sep">•</span>}
           {studioCountry && <span class="studio-meta-item">{studioCountry}</span>}
-          {studio.website_url && (
+          {studioWebsite && (
             <>
               <span class="studio-meta-sep">•</span>
-              <a href={studio.website_url} target="_blank" rel="noopener" class="studio-website">
+              <a href={studioWebsite} target="_blank" rel="noopener" class="studio-website">
                 <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6"/><path d="M8 2c0 0-3 2-3 6s3 6 3 6M8 2c0 0 3 2 3 6s-3 6-3 6M2 8h12"/></svg>
-                {studio.website_url.replace(/^https?:\/\//, '').replace(/\/$/, '')}
+                {studioWebsite.replace(/^https?:\/\//, '').replace(/\/$/, '')}
               </a>
             </>
           )}
@@ -412,11 +559,19 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         <div class="stat-num">{totalGames}</div>
         <div class="stat-label">Games</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-num">{totalReviews.toLocaleString()}</div>
-        <div class="stat-label">Reviews</div>
-        <div class="stat-sub">across all games</div>
-      </div>
+      {recentReviews.length > 0 ? (
+        <a href="#reviews" class="stat-card">
+          <div class="stat-num">{totalReviews.toLocaleString()}</div>
+          <div class="stat-label">Reviews</div>
+          <div class="stat-link">Read them ↓</div>
+        </a>
+      ) : (
+        <div class="stat-card">
+          <div class="stat-num">{totalReviews.toLocaleString()}</div>
+          <div class="stat-label">Reviews</div>
+          <div class="stat-sub">across all games</div>
+        </div>
+      )}
       <div class={`stat-card ${overallScoreClass ? `score-card-${overallScoreClass}` : ''}`}>
         {overallAvg
           ? <div class={`stat-num ${overallScoreClass}`}>{overallAvg}</div>
@@ -426,7 +581,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
     </div>
 
-    {(studio.description || studio.founded_year || studioCountry || studio.website_url || alsoKnownAs.length > 0) && (
+    {(studio.description || studio.founded_year || studioCountry || studioWebsite || alsoKnownAs.length > 0) && (
       <div class="about-grid">
         <div>
           {studio.description && (
@@ -455,11 +610,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
               <span class="detail-value">{studioCountry}</span>
             </div>
           )}
-          {studio.website_url && (
+          {studioWebsite && (
             <div class="detail-row">
               <span class="detail-label">Website</span>
-              <a href={studio.website_url} target="_blank" rel="noopener" class="detail-value detail-link">
-                {studio.website_url.replace(/^https?:\/\//, '').replace(/\/$/, '')}
+              <a href={studioWebsite} target="_blank" rel="noopener" class="detail-value detail-link">
+                {studioWebsite.replace(/^https?:\/\//, '').replace(/\/$/, '')}
               </a>
             </div>
           )}
@@ -477,69 +632,114 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
     )}
 
-    {developedGames.length > 0 && (
-      <div class="section" id="developed">
+    {recentReviews.length > 0 && (
+      <div class="section" id="reviews">
         <div class="section-header">
-          <span class="section-title">Developed</span>
-          <span class="section-count">{developedGames.length} {developedGames.length === 1 ? 'game' : 'games'}</span>
+          <span class="section-title">Recent reviews</span>
+          <span class="section-count">{totalReviews.toLocaleString()} {totalReviews === 1 ? 'review' : 'reviews'} of {studio.name} games</span>
         </div>
-        <div class="games-grid">
-          {developedGames.map((g: any) => {
-            const avg = gameAvgScore(g.id)
-            const count = gameReviewCount(g.id)
-            const sc = avg ? scoreClass(parseFloat(avg)) : null
+        <div class="review-list" id="reviewList">
+          {recentReviews.map((r: any, i: number) => {
+            const score = r.score == null ? null : parseFloat(r.score)
+            const sc = score == null ? null : scoreClass(score)
             return (
-              <a href={`/games/${g.slug}`} class="game-card">
-                <div class="game-cover">
-                  {g.cover_img_url
-                    ? <img src={igdbImage(g.cover_img_url) ?? ''} alt={g.title} loading="lazy" />
-                    : <div class="game-cover-placeholder">🎮</div>
-                  }
+              <div class="review-item" hidden={i >= REVIEWS_SHOWN}>
+                <a href={`/games/${r.games?.slug}`} class="review-cover" aria-hidden="true" tabindex="-1">
+                  {r.games?.cover_img_url
+                    ? <img src={igdbImage(r.games.cover_img_url, 't_cover_small') ?? ''} alt="" loading="lazy" />
+                    : '🎮'}
+                </a>
+                <div class="review-main">
+                  <div class="review-head">
+                    <div class="review-head-text">
+                      <a href={`/games/${r.games?.slug}`} class="review-game">{r.games?.title}</a>
+                      <div class="review-byline">
+                        {r.profiles?.avatar_url && <img class="review-avatar" src={r.profiles.avatar_url} alt="" loading="lazy" />}
+                        <a href={`/reviewers/${r.profiles?.username}`}>@{r.profiles?.username ?? 'unknown'}</a>
+                        <span>·</span>
+                        <span>{timeAgo(r.published_at ?? r.created_at)}</span>
+                      </div>
+                    </div>
+                    {sc && <div class={`game-score-badge review-score badge-${sc}`}>{formatScore(score)}</div>}
+                  </div>
+                  {r.title && <div class="review-title">{r.title}</div>}
+                  {r.contains_spoilers
+                    ? <div class="review-spoiler">Contains spoilers — open the review to read it.</div>
+                    : r.body && <div class="review-body">{r.body}</div>}
+                  <a href={`/reviews/${r.id}`} class="review-read">Read full review →</a>
                 </div>
-                {avg && <div class={`game-score-badge badge-${sc}`}>{avg}</div>}
-                <div class="game-info">
-                  <div class="game-title-text">{g.title}</div>
-                  {releaseYear(g.date_released) && <div class="game-year">{releaseYear(g.date_released)}</div>}
-                  {count > 0 && <div class="game-review-count">{count} {count === 1 ? 'review' : 'reviews'}</div>}
-                </div>
-              </a>
+              </div>
             )
           })}
         </div>
+        {recentReviews.length > REVIEWS_SHOWN && (
+          <button class="show-more-btn" id="showMoreReviews" type="button">Show more reviews</button>
+        )}
       </div>
     )}
 
-    {publishedOnly.length > 0 && (
-      <div class="section" id="published">
+    {gameSections.map((sec) => (
+      <div class="section year-section" id={sec.id}>
         <div class="section-header">
-          <span class="section-title">Published</span>
-          <span class="section-count">{publishedOnly.length} {publishedOnly.length === 1 ? 'game' : 'games'}</span>
+          <span class="section-title">{sec.title}</span>
+          <span class="section-count">{sec.count} {sec.count === 1 ? 'game' : 'games'}</span>
         </div>
-        <div class="games-grid">
-          {publishedOnly.map((g: any) => {
-            const avg = gameAvgScore(g.id)
-            const count = gameReviewCount(g.id)
-            const sc = avg ? scoreClass(parseFloat(avg)) : null
-            return (
-              <a href={`/games/${g.slug}`} class="game-card">
-                <div class="game-cover">
-                  {g.cover_img_url
-                    ? <img src={igdbImage(g.cover_img_url) ?? ''} alt={g.title} loading="lazy" />
-                    : <div class="game-cover-placeholder">🎮</div>
-                  }
+        {sec.byYear && sec.groups.length > 1 && (
+          <div class="pill-strip-wrap">
+            <button type="button" class="strip-arrow" data-strip="-1" aria-label="Earlier in the list" disabled><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg></button>
+            <div class="year-pill-strip">
+              {sec.groups.map((grp, i) => (
+                <button type="button" class={`year-pill${i === 0 ? ' active' : ''}`} data-year={grp.key}>
+                  <span class="year-pill-dot" style={`background:${grp.dot}`}></span>
+                  <span class="year-pill-label">{grp.label}</span>
+                  <span class="year-pill-count">{grp.cards.length}</span>
+                </button>
+              ))}
+            </div>
+            <button type="button" class="strip-arrow" data-strip="1" aria-label="Later in the list"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg></button>
+          </div>
+        )}
+        {sec.groups.map((grp, gi) => (
+          <div class="year-panel" data-year={grp.key} hidden={gi > 0}>
+            {sec.byYear && (
+              <div class="year-panel-header">
+                <span class="year-panel-label">{grp.label}</span>
+                <span class="year-panel-count">{grp.cards.length} {grp.cards.length === 1 ? 'game' : 'games'}</span>
+              </div>
+            )}
+            <div class="paged" data-size={PAGE_SIZE}>
+              <div class="game-row">
+                {grp.cards.map((g, i) => (
+                  <a href={`/games/${g.slug}`} class="game-card" hidden={i >= PAGE_SIZE}
+                     style={g.sc ? `border-bottom:2px solid ${SCORE_BORDER[g.sc]}` : undefined}>
+                    <div class="game-cover">
+                      {g.cover
+                        ? <img src={g.cover} alt={g.title} loading="lazy" />
+                        : <div class="game-cover-placeholder">🎮</div>
+                      }
+                      {sec.ranked && <div class="rank-badge">#{i + 1}</div>}
+                    </div>
+                    {g.avg && <div class={`game-score-badge badge-${g.sc}`}>{g.avg}</div>}
+                    <div class="game-info">
+                      <div class="game-title-text">{g.title}</div>
+                      {!sec.byYear && g.year && <div class="game-year">{g.year}</div>}
+                      {g.count > 0 && <div class="game-review-count">{g.count} {g.count === 1 ? 'review' : 'reviews'}</div>}
+                    </div>
+                  </a>
+                ))}
+              </div>
+              {grp.cards.length > PAGE_SIZE && (
+                <div class="row-nav">
+                  <button type="button" class="row-arrow" data-dir="-1" aria-label="Previous games" disabled><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12L6 8l4-4"/></svg></button>
+                  <button type="button" class="row-arrow" data-dir="1" aria-label="More games"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12l4-4-4-4"/></svg></button>
+                  <span class="row-nav-info">1 / {Math.ceil(grp.cards.length / PAGE_SIZE)}</span>
                 </div>
-                {avg && <div class={`game-score-badge badge-${sc}`}>{avg}</div>}
-                <div class="game-info">
-                  <div class="game-title-text">{g.title}</div>
-                  {releaseYear(g.date_released) && <div class="game-year">{releaseYear(g.date_released)}</div>}
-                  {count > 0 && <div class="game-review-count">{count} {count === 1 ? 'review' : 'reviews'}</div>}
-                </div>
-              </a>
-            )
-          })}
-        </div>
+              )}
+            </div>
+          </div>
+        ))}
       </div>
-    )}
+    ))}
 
     {totalGames === 0 && (
       <div class="empty-state">
@@ -573,7 +773,54 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     }
     window.toggleDesc = toggleDesc
 
-    const sections = ['overview', 'developed', 'published']
+    const showMoreReviews = document.getElementById('showMoreReviews')
+    showMoreReviews?.addEventListener('click', () => {
+      document.querySelectorAll('#reviewList .review-item[hidden]').forEach(el => el.removeAttribute('hidden'))
+      showMoreReviews.remove()
+    })
+
+    // Paged game rows: show PAGE_SIZE cards at a time.
+    document.querySelectorAll('.paged').forEach(paged => {
+      const prev = paged.querySelector('[data-dir="-1"]')
+      const next = paged.querySelector('[data-dir="1"]')
+      const info = paged.querySelector('.row-nav-info')
+      if (!prev || !next) return
+      const cards = [...paged.querySelectorAll('.game-card')]
+      const size = Number(paged.dataset.size)
+      const pages = Math.ceil(cards.length / size)
+      let page = 0
+      const show = () => {
+        cards.forEach((c, i) => { c.hidden = Math.floor(i / size) !== page })
+        prev.disabled = page === 0
+        next.disabled = page >= pages - 1
+        if (info) info.textContent = `${page + 1} / ${pages}`
+      }
+      prev.addEventListener('click', () => { page = Math.max(0, page - 1); show() })
+      next.addEventListener('click', () => { page = Math.min(pages - 1, page + 1); show() })
+    })
+
+    // Year strips: a pill shows that year's panel.
+    document.querySelectorAll('.year-section').forEach(section => {
+      const strip = section.querySelector('.year-pill-strip')
+      if (!strip) return
+      const [stripPrev, stripNext] = section.querySelectorAll('.strip-arrow')
+      const updateArrows = () => {
+        stripPrev.disabled = strip.scrollLeft <= 0
+        stripNext.disabled = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 1
+      }
+      stripPrev.addEventListener('click', () => strip.scrollBy({ left: -200, behavior: 'smooth' }))
+      stripNext.addEventListener('click', () => strip.scrollBy({ left: 200, behavior: 'smooth' }))
+      strip.addEventListener('scroll', updateArrows)
+      updateArrows()
+      const pills = strip.querySelectorAll('.year-pill')
+      pills.forEach(pill => pill.addEventListener('click', () => {
+        pills.forEach(p => p.classList.toggle('active', p === pill))
+        section.querySelectorAll('.year-panel').forEach(panel => { panel.hidden = panel.dataset.year !== pill.dataset.year })
+        strip.scrollTo({ left: Math.max(0, pill.offsetLeft - strip.clientWidth / 2 + pill.offsetWidth / 2), behavior: 'smooth' })
+      }))
+    })
+
+    const sections = ['overview', 'reviews', 'top-rated', 'most-reviewed', 'developed', 'published']
     const jumpLinks = document.querySelectorAll('.jump-link')
     window.addEventListener('scroll', () => {
       let current = 'overview'
