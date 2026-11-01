@@ -153,6 +153,7 @@ export type Database = {
       }
       developers: {
         Row: {
+          canonical_developer_id: string | null
           country: string | null
           description: string | null
           founded_year: number | null
@@ -164,6 +165,7 @@ export type Database = {
           website_url: string | null
         }
         Insert: {
+          canonical_developer_id?: string | null
           country?: string | null
           description?: string | null
           founded_year?: number | null
@@ -175,6 +177,7 @@ export type Database = {
           website_url?: string | null
         }
         Update: {
+          canonical_developer_id?: string | null
           country?: string | null
           description?: string | null
           founded_year?: number | null
@@ -185,7 +188,15 @@ export type Database = {
           slug?: string
           website_url?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "developers_canonical_developer_id_fkey"
+            columns: ["canonical_developer_id"]
+            isOneToOne: false
+            referencedRelation: "developers"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       follows: {
         Row: {

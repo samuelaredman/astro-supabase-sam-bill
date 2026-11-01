@@ -9,6 +9,7 @@ import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
 import { hubStatsFor, avgScore, reviewCount, pooled, type HubStatRow } from '../../utils/hubStats'
 import { fetchAll } from '../../utils/fetchAll'
+import { countryName } from '../../utils/country'
 
 const supabase = getSupabase()
 const _studioUser = await getPageUser(Astro);
@@ -27,12 +28,20 @@ const { data: studio } = await supabase
   .from('developers')
   .select(`
     id, name, slug, country, description,
-    website_url, logo_url, founded_year, igdb_id
+    website_url, logo_url, founded_year, igdb_id, canonical_developer_id
   `)
   .eq('slug', slug)
   .single()
 
 if (!studio) return Astro.redirect('/404')
+
+// A duplicate IGDB entry merged into its main studio (merge_developer()) owns no
+// games of its own. Permanent-redirect so old links and Google land on the main page.
+if (studio.canonical_developer_id) {
+  const { data: canon } = await supabase
+    .from('developers').select('slug').eq('id', studio.canonical_developer_id).maybeSingle()
+  if (canon?.slug) return Astro.redirect(`/studios/${canon.slug}`, 301)
+}
 
 // Authoritative indexability gate: does ANY of this studio's games have a
 // published review? Runs against the full company↔game↔review relationship (not
@@ -49,7 +58,7 @@ const hasReviewedGame = (reviewedInStudio?.length ?? 0) > 0
 // This studio's games (any role) and, in parallel, the review count + score sum
 // of the reviewed ones — aggregated in Postgres (hub_game_review_stats) rather
 // than an `.in()` of every game id followed by every review row.
-const [developedRaw, hubStatRows] = await Promise.all([
+const [developedRaw, hubStatRows, aliasRows] = await Promise.all([
   // Paged: a prolific studio (EA, Konami, Nintendo) can hold several thousand
   // games, and PostgREST truncates a single response at 1000 rows regardless of
   // `.limit()`. Truncation here used to make recent-year counts look near-empty.
@@ -65,7 +74,11 @@ const [developedRaw, hubStatRows] = await Promise.all([
   // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
   fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
     .rpc('hub_game_review_stats', { p_company_id: studio.id }).order('game_id').range(from, to)),
+  // Names of duplicates merged into this studio, shown as "Also known as".
+  supabase.from('developers').select('name').eq('canonical_developer_id', studio.id).order('name'),
 ])
+
+const alsoKnownAs = (aliasRows.data ?? []).map((r) => r.name).filter((n) => n !== studio.name)
 
 const allEntries = developedRaw
 
@@ -140,12 +153,39 @@ function releaseYear(dateStr: string | null): string | null {
   return String(new Date(dateStr).getFullYear())
 }
 
-function countryName(code: string | null): string | null {
-  if (!code) return null
-  try {
-    return new Intl.DisplayNames(['en'], { type: 'region' }).of(code) ?? null
-  } catch { return null }
+const studioCountry = countryName(studio.country)
+
+// Search snippet. Studio-name searches ("bloober team", "bloober team country",
+// "what is cognosphere") want facts, so the title and description lead with the
+// game count, origin and community scores instead of IGDB's blurb, which
+// Wikipedia already shows.
+const reviewedGames = [...developedGames, ...publishedOnly]
+  .map((g: any) => ({ title: g.title as string, avg: gameAvgScore(g.id), count: gameReviewCount(g.id) }))
+  .filter((g) => g.avg != null)
+  .sort((a, b) => parseFloat(b.avg!) - parseFloat(a.avg!) || b.count - a.count)
+const topGame = reviewedGames[0] ?? null
+
+const seoTitle = totalGames > 0
+  ? `${studio.name}: ${totalGames} Game${totalGames === 1 ? '' : 's'} & Player Scores | Chekpoint`
+  : `${studio.name} | Chekpoint`
+
+function clampDescription(text: string, max = 160): string {
+  if (text.length <= max) return text
+  const cut = text.slice(0, max - 1)
+  return cut.slice(0, cut.lastIndexOf(' ')).replace(/[\s,.;:]+$/, '') + '…'
 }
+
+const seoDescription = clampDescription([
+  studioCountry || studio.founded_year
+    ? `Game company${studioCountry ? ` from ${/^(United|Netherlands|Philippines|Cayman)/.test(studioCountry) ? 'the ' : ''}${studioCountry}` : ''}${studio.founded_year ? `, founded ${studio.founded_year}` : ''}.`
+    : null,
+  totalGames > 0 ? `${totalGames} game${totalGames === 1 ? '' : 's'} on Chekpoint.` : null,
+  topGame ? `Top rated: ${topGame.title} (${topGame.avg}/10).` : null,
+  overallAvg ? `Community average ${overallAvg} from ${totalReviews} review${totalReviews === 1 ? '' : 's'}.` : null,
+  studio.description,
+].filter(Boolean).join(' '))
+
+const canonicalUrl = new URL(`/studios/${studio.slug}`, Astro.site ?? Astro.url.origin).toString()
 
 const overallScoreClass = overallAvg ? scoreClass(parseFloat(overallAvg)) : null
 const coverUrls = developedGames
@@ -174,10 +214,18 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" id="meta-theme-color" content="#f9f8f6" />
-  <title>{studio.name} — Chekpoint</title>
-  <meta name="description" content={studio.description?.slice(0, 160) ?? `${studio.name} games and reviews on Chekpoint.`} />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png?v=2" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2" />
+  <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png?v=2" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
+  <title>{seoTitle}</title>
+  <meta name="description" content={seoDescription} />
   {!hasReviewedGame && <meta name="robots" content="noindex, nofollow" />}
-  <meta property="og:title" content={`${studio.name} — Chekpoint`} />
+  <link rel="canonical" href={canonicalUrl} />
+  <meta property="og:site_name" content="Chekpoint" />
+  <meta property="og:title" content={seoTitle} />
+  <meta property="og:description" content={seoDescription} />
+  <meta property="og:url" content={canonicalUrl} />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
@@ -344,8 +392,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         <h1 class="studio-name">{studio.name}</h1>
         <div class="studio-meta">
           {studio.founded_year && <span class="studio-meta-item">Est. {studio.founded_year}</span>}
-          {studio.founded_year && studio.country && <span class="studio-meta-sep">•</span>}
-          {studio.country && <span class="studio-meta-item">{countryName(studio.country) ?? String(studio.country)}</span>}
+          {studio.founded_year && studioCountry && <span class="studio-meta-sep">•</span>}
+          {studioCountry && <span class="studio-meta-item">{studioCountry}</span>}
           {studio.website_url && (
             <>
               <span class="studio-meta-sep">•</span>
@@ -378,7 +426,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
     </div>
 
-    {(studio.description || studio.founded_year || studio.country || studio.website_url) && (
+    {(studio.description || studio.founded_year || studioCountry || studio.website_url || alsoKnownAs.length > 0) && (
       <div class="about-grid">
         <div>
           {studio.description && (
@@ -389,16 +437,22 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           )}
         </div>
         <div class="details-card">
+          {alsoKnownAs.length > 0 && (
+            <div class="detail-row">
+              <span class="detail-label">Also known as</span>
+              <span class="detail-value">{alsoKnownAs.join(', ')}</span>
+            </div>
+          )}
           {studio.founded_year && (
             <div class="detail-row">
               <span class="detail-label">Founded</span>
               <span class="detail-value">{studio.founded_year}</span>
             </div>
           )}
-          {studio.country && (
+          {studioCountry && (
             <div class="detail-row">
               <span class="detail-label">Country</span>
-              <span class="detail-value">{countryName(studio.country) ?? String(studio.country)}</span>
+              <span class="detail-value">{studioCountry}</span>
             </div>
           )}
           {studio.website_url && (
