@@ -4,10 +4,11 @@ import { authRedirectUrl } from "../../../utils/api";
 import { validateName } from "../../../utils/moderation/nameRules";
 import { likeEscape } from "../../../utils/usernameHistory";
 import { toPendingGroup } from "../../../utils/groupJoin";
+import { isValidLinkCode } from "../../../utils/trackedLinks";
 
 export const POST: APIRoute = async (context) => {
   const supabase = createSupabaseServerClientFromContext(context);
-  const { email, password, username, group_id, invite_code } = await context.request.json();
+  const { email, password, username, group_id, invite_code, ref } = await context.request.json();
 
   if (!email || !password || !username) {
     return new Response(JSON.stringify({ error: "All fields are required." }), {
@@ -122,6 +123,24 @@ export const POST: APIRoute = async (context) => {
       }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
+  }
+
+  // Signed up through a tracked link (/r/<code>, ?ref=<code>): record the link
+  // on the profile handle_new_user just created. Best-effort and after the
+  // account exists — it must never fail or delay the signup itself.
+  if (data.user && isValidLinkCode(ref)) {
+    try {
+      const { data: link } = await (db as any)
+        .from("tracked_links").select("id").eq("code", ref).maybeSingle();
+      if (link) {
+        const { error: refError } = await (db as any)
+          .from("profiles").update({ signup_link_id: link.id })
+          .eq("auth_user_id", data.user.id).is("signup_link_id", null);
+        if (refError) console.error("[auth/signup] signup link error (non-fatal):", JSON.stringify(refError));
+      }
+    } catch (e) {
+      console.error("[auth/signup] signup link error (non-fatal):", e);
+    }
   }
 
   return new Response(JSON.stringify({ success: true }), {

@@ -1,0 +1,372 @@
+---
+export const prerender = false;
+import Layout from "../../components/Layout.astro";
+import { resolveSiteAdminProfile } from "../../utils/api";
+import { getSupabaseAdmin } from "../../utils/database";
+import "../../styles/admin.css";
+
+const profile = await resolveSiteAdminProfile(Astro);
+if (!profile) return Astro.redirect('/404');
+
+const db = getSupabaseAdmin() as any;
+
+const [statsRes, campaignsRes, creatorsRes] = await Promise.all([
+  db.rpc('admin_tracked_link_stats'),
+  db.from('marketing_campaigns').select('id, name, starts_on').order('starts_on', { ascending: false }),
+  db.from('profile_badges')
+    .select('profiles!profile_badges_profile_id_fkey ( id, username )')
+    .eq('badge_slug', 'chekpoint-creator'),
+]);
+if (statsRes.error) console.error('[admin/links] stats rpc error:', JSON.stringify(statsRes.error));
+
+type LinkRow = {
+  id: string;
+  code: string;
+  label: string;
+  destination: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  owner_profile_id: string | null;
+  owner_username: string | null;
+  clicks: number;
+  created_at: string;
+  signups: number;
+  returned_1d: number;
+  matured: number;
+  retained_14d: number;
+};
+const links: LinkRow[] = ((statsRes.data as any[]) ?? []).map((r) => ({
+  ...r,
+  clicks: Number(r.clicks ?? 0),
+  signups: Number(r.signups ?? 0),
+  returned_1d: Number(r.returned_1d ?? 0),
+  matured: Number(r.matured ?? 0),
+  retained_14d: Number(r.retained_14d ?? 0),
+}));
+
+const campaigns: { id: string; name: string }[] = (campaignsRes.data as any[]) ?? [];
+const creators: { id: string; username: string }[] = ((creatorsRes.data as any[]) ?? [])
+  .map((r) => r.profiles)
+  .filter(Boolean)
+  .sort((a: any, b: any) => a.username.localeCompare(b.username));
+
+const totals = links.reduce(
+  (t, l) => ({ clicks: t.clicks + l.clicks, signups: t.signups + l.signups, returned: t.returned + l.returned_1d }),
+  { clicks: 0, signups: 0, returned: 0 },
+);
+
+const SITE = 'https://chekpoint.gg';
+function pct(part: number, whole: number): string {
+  return whole === 0 ? '—' : `${Math.round((1000 * part) / whole) / 10}%`;
+}
+---
+
+<Layout title="Links — Admin" isLoggedIn={true} currentProfile={profile} activeNav="admin" variant="two-col">
+  <main class="feed admin-main">
+    <div class="admin-content">
+      <a href="/admin" class="admin-back-link">← Admin</a>
+
+      <header class="admin-page-header">
+        <div>
+          <h1 class="admin-page-title">Tracked links</h1>
+          <p class="admin-page-subtitle">Short links for promotions and creators — chekpoint.gg/r/&lt;code&gt;. See which ones bring in people who stick around.</p>
+        </div>
+      </header>
+
+      {statsRes.error && <p class="admin-empty">Couldn't load links — have the tracked_links migrations been applied?</p>}
+
+      <section class="admin-stat-row">
+        <div class="admin-stat">
+          <div class="admin-stat-label">Links</div>
+          <div class="admin-stat-num">{links.length}</div>
+        </div>
+        <div class="admin-stat">
+          <div class="admin-stat-label">Clicks</div>
+          <div class="admin-stat-num">{totals.clicks}</div>
+          <div class="admin-stat-sub"><span class="admin-stat-sub-main">people, not preview bots</span></div>
+        </div>
+        <div class="admin-stat">
+          <div class="admin-stat-label">Signups</div>
+          <div class="admin-stat-num">{totals.signups}</div>
+          <div class="admin-stat-sub"><span class="admin-stat-sub-main">{pct(totals.signups, totals.clicks)} of clicks</span></div>
+        </div>
+        <div class="admin-stat">
+          <div class="admin-stat-label">Came back</div>
+          <div class="admin-stat-num">{totals.returned}</div>
+          <div class="admin-stat-sub"><span class="admin-stat-sub-main">{pct(totals.returned, totals.signups)} of signups</span></div>
+        </div>
+      </section>
+
+      <section class="admin-section" id="links">
+        <p class="admin-section-note">
+          A signup counts for a link when the person clicked it and signed up in the same visit — the code travels in the page address, never a cookie, so someone who leaves and comes back later shows up as unattributed.
+          "Came back" = posted a review, comment, or rec at least a day after signing up. Clicks skip known link-preview bots (Discord, X, Slack…), so they're approximate; signups are exact.
+        </p>
+
+        {links.length === 0 ? (
+          <p class="admin-empty">No links yet — make the first one below.</p>
+        ) : (
+          <div class="admin-table-wrap">
+            <table class="admin-table links-table">
+              <thead>
+                <tr>
+                  <th>Link</th>
+                  <th>Goes to</th>
+                  <th class="num">Clicks</th>
+                  <th class="num">Signups</th>
+                  <th class="num">Came back</th>
+                  <th class="num">14-day</th>
+                  <th>&nbsp;</th>
+                </tr>
+              </thead>
+              <tbody>
+                {links.map((l) => (
+                  <tr>
+                    <td>
+                      <div class="link-label">{l.label}</div>
+                      <button type="button" class="link-copy" data-copy={`${SITE}/r/${l.code}`} title="Copy link">
+                        chekpoint.gg/r/{l.code} <span class="link-copy-hint">copy</span>
+                      </button>
+                      <div class="link-tags">
+                        {l.campaign_name && <span class="admin-chip admin-chip-neutral">{l.campaign_name}</span>}
+                        {l.owner_username && <span class="admin-chip admin-chip-accent">@{l.owner_username}</span>}
+                      </div>
+                    </td>
+                    <td class="link-dest">{l.destination}</td>
+                    <td class={`num${l.clicks === 0 ? ' zero' : ''}`}>{l.clicks}</td>
+                    <td class="num">
+                      {l.signups} <span class="link-pct">{pct(l.signups, l.clicks)}</span>
+                    </td>
+                    <td class="num">
+                      {l.returned_1d} <span class="link-pct">{pct(l.returned_1d, l.signups)}</span>
+                    </td>
+                    <td class="num">
+                      {l.matured === 0
+                        ? <span class="link-pct">—</span>
+                        : <>{l.retained_14d}/{l.matured} <span class="link-pct">{pct(l.retained_14d, l.matured)}</span></>}
+                    </td>
+                    <td class="num">
+                      <div class="link-actions">
+                        <button
+                          type="button"
+                          class="admin-btn admin-btn-ghost admin-btn-sm"
+                          data-link-edit={l.id}
+                          data-code={l.code}
+                          data-label={l.label}
+                          data-destination={l.destination}
+                          data-campaign={l.campaign_id ?? ''}
+                          data-owner={l.owner_profile_id ?? ''}
+                        >Edit</button>
+                        <button type="button" class="admin-btn admin-btn-ghost admin-btn-sm" data-link-delete={l.id} data-code={l.code} data-signups={l.signups}>Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <details class="link-add" open={links.length === 0}>
+          <summary class="admin-btn admin-btn-sm">+ New link</summary>
+          <form id="linkForm" class="link-form">
+            <label>Label<input class="admin-input" name="label" maxlength="80" required placeholder="FuriousDuck — PBZ giveaway video" /></label>
+            <label><span>Code <span class="link-optional">· chekpoint.gg/r/…</span></span><input class="admin-input" name="code" maxlength="40" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="furiousduck" /></label>
+            <label><span>Goes to <span class="link-optional">· a page on our site</span></span><input class="admin-input" name="destination" value="/" maxlength="300" placeholder="/giveaway" /></label>
+            <label>Campaign
+              <select class="admin-input" name="campaign_id">
+                <option value="">None</option>
+                {campaigns.map((c) => <option value={c.id}>{c.name}</option>)}
+              </select>
+            </label>
+            <label>Creator
+              <select class="admin-input" name="owner_profile_id">
+                <option value="">None (ours)</option>
+                {creators.map((c) => <option value={c.id}>@{c.username}</option>)}
+              </select>
+            </label>
+            <div class="link-form-actions">
+              <button type="submit" class="admin-btn admin-btn-primary admin-btn-sm">Create link</button>
+              <button type="button" class="admin-btn admin-btn-ghost admin-btn-sm" data-link-cancel hidden>Cancel edit</button>
+              <span class="link-form-error" role="alert"></span>
+            </div>
+            <p class="link-form-note">The code can't be changed later — it'll already be in videos and posts. Everything else can be edited.</p>
+          </form>
+        </details>
+      </section>
+    </div>
+  </main>
+</Layout>
+
+<script>
+import { suggestLinkCode } from '../../utils/trackedLinks';
+
+async function post(url: string, body: unknown) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? 'Something went wrong.');
+  return data;
+}
+
+function reloadToLinks() {
+  window.location.hash = 'links';
+  window.location.reload();
+}
+
+const form = document.getElementById('linkForm') as HTMLFormElement | null;
+const details = form?.closest('details') as HTMLDetailsElement | null;
+const summary = details?.querySelector('summary') as HTMLElement | null;
+const submitBtn = form?.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+const cancelBtn = form?.querySelector('[data-link-cancel]') as HTMLButtonElement | null;
+const field = (n: string) => form!.elements.namedItem(n) as HTMLInputElement | HTMLSelectElement;
+
+// Suggest a code from the label until the code is typed in directly.
+let codeTouched = false;
+field('code')?.addEventListener('input', () => { codeTouched = true; });
+field('label')?.addEventListener('input', () => {
+  if (!codeTouched && !form?.dataset.editId) field('code').value = suggestLinkCode(field('label').value);
+});
+
+function setEditing(btn: HTMLElement | null) {
+  if (!form || !submitBtn || !cancelBtn || !summary || !details) return;
+  const code = field('code') as HTMLInputElement;
+  if (btn) {
+    form.dataset.editId = btn.dataset.linkEdit;
+    field('label').value = btn.dataset.label ?? '';
+    code.value = btn.dataset.code ?? '';
+    code.disabled = true;
+    field('destination').value = btn.dataset.destination ?? '/';
+    field('campaign_id').value = btn.dataset.campaign ?? '';
+    field('owner_profile_id').value = btn.dataset.owner ?? '';
+    summary.textContent = `Editing /r/${btn.dataset.code}`;
+    submitBtn.textContent = 'Save changes';
+    cancelBtn.hidden = false;
+    details.open = true;
+    details.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } else {
+    delete form.dataset.editId;
+    form.reset();
+    code.disabled = false;
+    codeTouched = false;
+    summary.textContent = '+ New link';
+    submitBtn.textContent = 'Create link';
+    cancelBtn.hidden = true;
+  }
+}
+cancelBtn?.addEventListener('click', () => setEditing(null));
+
+form?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errEl = form.querySelector('.link-form-error') as HTMLElement;
+  const editId = form.dataset.editId;
+  const body = {
+    label: field('label').value,
+    destination: field('destination').value,
+    campaign_id: field('campaign_id').value || null,
+    owner_profile_id: field('owner_profile_id').value || null,
+  };
+  errEl.textContent = '';
+  submitBtn!.disabled = true;
+  try {
+    if (editId) await post('/api/admin/links/update', { id: editId, ...body });
+    else await post('/api/admin/links/create', { code: field('code').value.trim().toLowerCase(), ...body });
+    reloadToLinks();
+  } catch (err: any) {
+    errEl.textContent = err.message;
+    submitBtn!.disabled = false;
+  }
+});
+
+document.getElementById('links')?.addEventListener('click', async (e) => {
+  const target = e.target as HTMLElement;
+
+  const copyBtn = target.closest<HTMLButtonElement>('button[data-copy]');
+  if (copyBtn) {
+    const hint = copyBtn.querySelector('.link-copy-hint') as HTMLElement;
+    try {
+      await navigator.clipboard.writeText(copyBtn.dataset.copy!);
+      hint.textContent = 'copied ✓';
+    } catch {
+      hint.textContent = 'copy failed';
+    }
+    setTimeout(() => { hint.textContent = 'copy'; }, 1500);
+    return;
+  }
+
+  const editBtn = target.closest<HTMLButtonElement>('button[data-link-edit]');
+  if (editBtn) return setEditing(editBtn);
+
+  const delBtn = target.closest<HTMLButtonElement>('button[data-link-delete]');
+  if (!delBtn) return;
+  const signups = Number(delBtn.dataset.signups ?? 0);
+  const warning = signups > 0
+    ? `Delete /r/${delBtn.dataset.code}? Its ${signups} signup${signups === 1 ? '' : 's'} will lose their attribution, and the link will send people to the homepage.`
+    : `Delete /r/${delBtn.dataset.code}? The link will send people to the homepage.`;
+  if (!window.confirm(warning)) return;
+  delBtn.disabled = true;
+  try {
+    await post('/api/admin/links/delete', { id: delBtn.dataset.linkDelete });
+    reloadToLinks();
+  } catch (err: any) {
+    delBtn.disabled = false;
+    alert(err.message);
+  }
+});
+</script>
+
+<style>
+  .link-label { font-weight: 600; color: var(--text-primary); }
+  .link-copy {
+    margin-top: 2px;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--accent);
+    cursor: pointer;
+    text-align: left;
+  }
+  .link-copy:hover .link-copy-hint { text-decoration: underline; }
+  .link-copy-hint { color: var(--text-tertiary); margin-left: 4px; }
+  .link-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .link-tags:empty { display: none; }
+  .link-dest { color: var(--text-secondary); font-size: 13px; word-break: break-all; }
+  .link-pct { color: var(--text-tertiary); font-size: 12px; margin-left: 4px; }
+  .link-actions { display: inline-flex; gap: 6px; justify-content: flex-end; }
+
+  .link-add { margin-top: 12px; }
+  .link-add > summary { list-style: none; cursor: pointer; width: fit-content; }
+  .link-add > summary::-webkit-details-marker { display: none; }
+  .link-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-card);
+  }
+  .link-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .link-form input:disabled { opacity: 0.6; cursor: not-allowed; }
+  .link-optional { color: var(--text-tertiary); font-weight: 400; }
+  .link-form-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .link-form-actions [hidden] { display: none; }
+  .link-form-error { color: var(--score-low, #c0392b); font-size: 13px; }
+  .link-form-note { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--text-tertiary); }
+
+  @media (max-width: 720px) {
+    .links-table th:nth-child(2), .links-table td:nth-child(2) { display: none; }
+  }
+</style>
