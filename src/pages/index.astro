@@ -427,8 +427,18 @@ function formatCount(n: number): string {
 
 const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
 const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
-const lastFeedItem = feedItems.length > 0 ? feedItems[feedItems.length - 1] : null
-const initialRecentCursor = lastFeedItem?._date ?? null
+// Per-stream cursors for /api/feed/recent — using a single overall "oldest
+// item" cursor silently skipped reviews between the oldest shown review and
+// the oldest shown list/rec. Each stream now continues from its own tail.
+const oldestRecDate = recentRecs.length > 0 ? recentRecs[recentRecs.length - 1].createdAt : null
+const oldestListDate = recentLists.length > 0
+  ? (recentLists[recentLists.length - 1].last_posted_to_feed_at ?? recentLists[recentLists.length - 1].created_at)
+  : null
+const initialRecentCursors = {
+  reviews: lastRecentReview?.published_at ?? lastRecentReview?.created_at ?? null,
+  recs:    oldestRecDate,
+  lists:   oldestListDate,
+}
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
 const initialRecentDone = reviews.length < 30 && recentRecs.length < 30 && recentLists.length < 10
 const initialFollowingDone = followingReviews.length < 20
@@ -1418,7 +1428,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     })
   </script>
 
-  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursor, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
+  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursors, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
   (function () {
     // ── Image emote map — keep in sync with src/data/reactions.ts ─────────────
     // Add new emote keys here whenever you add them to IMAGE_EMOTES in reactions.ts
@@ -1867,7 +1877,10 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
 
     // ── Per-tab state ──────────────────────────────────────────────────────────
     var state = {
-      recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
+      // Recent tab tracks a cursor per stream (reviews / recs / lists). A
+      // shared cursor set to "oldest overall" silently skips reviews between
+      // the oldest shown review and the oldest shown list/rec on the next page.
+      recent:    { cursors: initialRecentCursors, loading: false, done: initialRecentDone },
       following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone },
       videos:    { cursor: null,                   loading: false, done: false, count: 0 }
     };
@@ -1881,13 +1894,23 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       var endEl    = document.getElementById('end-' + tab);
       if (loader) loader.style.display = 'block';
       try {
-        var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
-        var feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
-                    : tab === 'videos'    ? '/api/reviews/feed?tab=videos&limit=20' + cursorParam
-                    : '/api/feed/recent?limit=20' + cursorParam;
+        var feedUrl;
+        if (tab === 'recent') {
+          var cs = s.cursors || {};
+          var qp = [];
+          if (cs.reviews) qp.push('r_cursor='  + encodeURIComponent(cs.reviews));
+          if (cs.recs)    qp.push('rc_cursor=' + encodeURIComponent(cs.recs));
+          if (cs.lists)   qp.push('l_cursor='  + encodeURIComponent(cs.lists));
+          feedUrl = '/api/feed/recent?limit=20' + (qp.length ? '&' + qp.join('&') : '');
+        } else {
+          var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
+          feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
+                                        : '/api/reviews/feed?tab=videos&limit=20' + cursorParam;
+        }
         var res = await fetch(feedUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        var items = await res.json();
+        var payload = await res.json();
+        var items = tab === 'recent' ? (payload && payload.items) : payload;
         if (!Array.isArray(items) || items.length === 0) {
           s.done = true;
           // A tab with nothing at all gets its empty state instead of "all caught up".
@@ -1907,12 +1930,22 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
             sentinel.parentNode.insertBefore(tmp.firstChild, sentinel);
           }
         });
-        var last = items[items.length - 1];
-        s.cursor = last._date || last.published_at || last.created_at;
-        if (items.length < 20) {
-          s.done = true;
-          if (endEl) endEl.style.display = 'block';
-          if (sentinel) sentinel.remove();
+        if (tab === 'recent') {
+          var nc = (payload && payload.cursors) || {};
+          s.cursors = { reviews: nc.reviews, recs: nc.recs, lists: nc.lists };
+          if (!nc.reviews && !nc.recs && !nc.lists) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
+        } else {
+          var last = items[items.length - 1];
+          s.cursor = last._date || last.published_at || last.created_at;
+          if (items.length < 20) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
         }
       } catch (e) {
         console.error('[feed] loadMore error:', e);
