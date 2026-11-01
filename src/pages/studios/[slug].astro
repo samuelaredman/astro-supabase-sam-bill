@@ -28,12 +28,20 @@ const { data: studio } = await supabase
   .from('developers')
   .select(`
     id, name, slug, country, description,
-    website_url, logo_url, founded_year, igdb_id
+    website_url, logo_url, founded_year, igdb_id, canonical_developer_id
   `)
   .eq('slug', slug)
   .single()
 
 if (!studio) return Astro.redirect('/404')
+
+// A duplicate IGDB entry merged into its main studio (merge_developer()) owns no
+// games of its own. Permanent-redirect so old links and Google land on the main page.
+if (studio.canonical_developer_id) {
+  const { data: canon } = await supabase
+    .from('developers').select('slug').eq('id', studio.canonical_developer_id).maybeSingle()
+  if (canon?.slug) return Astro.redirect(`/studios/${canon.slug}`, 301)
+}
 
 // Authoritative indexability gate: does ANY of this studio's games have a
 // published review? Runs against the full company↔game↔review relationship (not
@@ -50,7 +58,7 @@ const hasReviewedGame = (reviewedInStudio?.length ?? 0) > 0
 // This studio's games (any role) and, in parallel, the review count + score sum
 // of the reviewed ones — aggregated in Postgres (hub_game_review_stats) rather
 // than an `.in()` of every game id followed by every review row.
-const [developedRaw, hubStatRows] = await Promise.all([
+const [developedRaw, hubStatRows, aliasRows] = await Promise.all([
   // Paged: a prolific studio (EA, Konami, Nintendo) can hold several thousand
   // games, and PostgREST truncates a single response at 1000 rows regardless of
   // `.limit()`. Truncation here used to make recent-year counts look near-empty.
@@ -66,7 +74,11 @@ const [developedRaw, hubStatRows] = await Promise.all([
   // Server-only RPC (service role). Paged: a big hub can pass 1000 reviewed games.
   fetchAll<HubStatRow>((from, to) => (getSupabaseAdmin() as any)
     .rpc('hub_game_review_stats', { p_company_id: studio.id }).order('game_id').range(from, to)),
+  // Names of duplicates merged into this studio, shown as "Also known as".
+  supabase.from('developers').select('name').eq('canonical_developer_id', studio.id).order('name'),
 ])
+
+const alsoKnownAs = (aliasRows.data ?? []).map((r) => r.name).filter((n) => n !== studio.name)
 
 const allEntries = developedRaw
 
@@ -202,6 +214,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" id="meta-theme-color" content="#f9f8f6" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png?v=2" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2" />
+  <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png?v=2" />
+  <link rel="apple-touch-icon" href="/favicon.svg" />
   <title>{seoTitle}</title>
   <meta name="description" content={seoDescription} />
   {!hasReviewedGame && <meta name="robots" content="noindex, nofollow" />}
@@ -410,7 +426,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
     </div>
 
-    {(studio.description || studio.founded_year || studioCountry || studio.website_url) && (
+    {(studio.description || studio.founded_year || studioCountry || studio.website_url || alsoKnownAs.length > 0) && (
       <div class="about-grid">
         <div>
           {studio.description && (
@@ -421,6 +437,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           )}
         </div>
         <div class="details-card">
+          {alsoKnownAs.length > 0 && (
+            <div class="detail-row">
+              <span class="detail-label">Also known as</span>
+              <span class="detail-value">{alsoKnownAs.join(', ')}</span>
+            </div>
+          )}
           {studio.founded_year && (
             <div class="detail-row">
               <span class="detail-label">Founded</span>
