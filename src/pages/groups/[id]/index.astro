@@ -24,7 +24,7 @@ import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 import ProfileBadge from "../../../components/ProfileBadge.astro";
 import PostComposer from "../../../components/forum/PostComposer.astro";
-import { renderPostBody } from "../../../utils/richPost";
+import { renderPostBody, postExcerpt } from "../../../utils/richPost";
 import { readBadgeSlugs } from "../../../utils/badges";
 import { getPageUser } from "../../../utils/pageAuth";
 import "../../../styles/forum-poll.css";
@@ -272,12 +272,21 @@ if (canSeeMemberContent) {
   // Admin client: site admins moderating a group they haven't joined can't read these through RLS
   const { data: ann } = await db
     .from("group_announcements")
-    .select("id, body, pinned, created_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+    .select("id, title, body, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
     .eq("group_id", id)
     .order("pinned", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(10);
   announcements = ann ?? [];
+}
+
+// Comment counts for every announcement listed on either Overview or Forums.
+let annCommentCounts: Record<string, number> = {};
+if (announcements.length > 0) {
+  const annIds = announcements.map((a: any) => a.id);
+  const { data: cc } = await db.from("group_announcement_comments")
+    .select("announcement_id").in("announcement_id", annIds);
+  for (const row of cc ?? []) annCommentCounts[row.announcement_id] = (annCommentCounts[row.announcement_id] ?? 0) + 1;
 }
 
 // ── Polls (Overview showcase: ONE poll chosen by the owner) ──
@@ -352,7 +361,7 @@ if (canViewContent && activeTab === "forums") {
   const [annRes, pollRowsRes] = await Promise.all([
     fetchAll((from, to) => db
       .from("group_announcements")
-      .select("id, body, pinned, created_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .select("id, title, body, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
       .eq("group_id", id)
       .order("pinned", { ascending: false })
       .order("created_at", { ascending: false })
@@ -365,6 +374,13 @@ if (canViewContent && activeTab === "forums") {
       .limit(200),
   ]);
   forumAnnouncements = annRes ?? [];
+  // Comment counts: one row per announcement_id = one comment.
+  if (forumAnnouncements.length > 0) {
+    const annIds = forumAnnouncements.map((a: any) => a.id);
+    const { data: cc } = await db.from("group_announcement_comments")
+      .select("announcement_id").in("announcement_id", annIds);
+    for (const row of cc ?? []) annCommentCounts[row.announcement_id] = (annCommentCounts[row.announcement_id] ?? 0) + 1;
+  }
   if (pollRowsRes.error) {
     console.error("[groups/forum-polls] query error:", JSON.stringify(pollRowsRes.error));
   }
@@ -1135,7 +1151,26 @@ const groupOgDescription = group.description
   .wl-remove{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:16px;padding:2px;transition:color .15s}
   .wl-remove:hover{color:#f87171}
 
-  /* ── Announcements ── */
+  /* ── Announcements (list cards — mirrors /updates list) ── */
+  .ann-card-list{list-style:none;padding:0;margin:4px 0 0;display:flex;flex-direction:column;gap:12px}
+  .ann-card-list-compact{gap:10px}
+  .ann-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;transition:border-color .15s}
+  .ann-card:hover{border-color:var(--accent)}
+  .ann-card-link{display:block;padding:12px 14px;text-decoration:none;color:inherit}
+  .ann-card-meta{display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap}
+  .ann-card-meta .badge{font-size:10px;font-weight:600;padding:2px 7px;border-radius:999px;text-transform:capitalize}
+  .ann-card-meta .badge.category{background:var(--bg-hover);color:var(--text-secondary)}
+  .ann-card-meta .badge.pinned{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
+  .ann-card-meta .badge.locked{background:var(--bg-hover);color:var(--text-tertiary)}
+  .ann-card-title{font-size:15px;font-weight:600;color:var(--text-primary);margin:0 0 4px;line-height:1.35}
+  .ann-card-excerpt{font-size:13px;color:var(--text-secondary);line-height:1.55;margin:0 0 8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .ann-card-footer{display:flex;gap:6px;font-size:11px;color:var(--text-tertiary);flex-wrap:wrap}
+  .ann-card-list-compact .ann-card-title{font-size:14px}
+  .ann-card-list-compact .ann-card-excerpt{-webkit-line-clamp:1}
+
+  /* ── Legacy inline announcement renderer (still used by the comment body
+     renderer in CommentThread; kept because .announcement-body is also the
+     render target used by the shared renderPostBody util elsewhere). ── */
   .announcement-item{padding:12px 0;border-bottom:1px solid var(--border-subtle)}
   .announcement-item:last-child{border-bottom:none}
   .announcement-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
@@ -2345,7 +2380,7 @@ const groupOgDescription = group.description
                   createUrl="/api/groups/announcements/create"
                   extraFields={{ group_id: group.id }}
                   responseIdKey="id"
-                  showTitle={false}
+                  showTitle={true}
                   startHidden
                   openTriggerSelector='[data-ann-new="overview"]'
                   placeholder="Share an update with the group…"
@@ -2356,28 +2391,27 @@ const groupOgDescription = group.description
 
               {announcements.length === 0
                 ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
-                : announcements.map((a: any) => (
-                  <div class="announcement-item" data-announcement-id={a.id}>
-                    <div class="announcement-head">
-                      <div class="announcement-avatar">
-                        {a.profiles?.avatar_url
-                          ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
-                          : getInitials(a.profiles?.username ?? "?")}
-                      </div>
-                      <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
-                      {readBadgeSlugs(a.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" />)}
-                      <span class="announcement-time">· {timeAgo(a.created_at)}</span>
-                      {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
-                    </div>
-                    <div class="announcement-body" set:html={renderPostBody(a.body)} />
-                    {isAdminOrOwner && (
-                      <div class="announcement-actions">
-                        <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
-                        <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
-                      </div>
-                    )}
-                  </div>
-                ))
+                : <ul class="ann-card-list ann-card-list-compact">
+                    {announcements.slice(0, 3).map((a: any) => (
+                      <li class="ann-card">
+                        <a class="ann-card-link" href={`/groups/${group.id}/announcements/${a.id}`}>
+                          <div class="ann-card-meta">
+                            {a.pinned && <span class="badge pinned">📌 Pinned</span>}
+                            {a.is_locked && <span class="badge locked">🔒 Locked</span>}
+                          </div>
+                          <div class="ann-card-title">{a.title?.trim() || "Announcement"}</div>
+                          <div class="ann-card-excerpt">{postExcerpt(a.body, 140)}</div>
+                          <div class="ann-card-footer">
+                            <span>{a.profiles?.username ?? "unknown"}</span>
+                            <span>·</span>
+                            <span>{timeAgo(a.created_at)}</span>
+                            <span>·</span>
+                            <span>{annCommentCounts[a.id] ?? 0} {(annCommentCounts[a.id] ?? 0) === 1 ? "comment" : "comments"}</span>
+                          </div>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
               }
             </div>
           )}
@@ -2883,7 +2917,7 @@ const groupOgDescription = group.description
             createUrl="/api/groups/announcements/create"
             extraFields={{ group_id: group.id }}
             responseIdKey="id"
-            showTitle={false}
+            showTitle={true}
             startHidden
             openTriggerSelector='[data-ann-new="forums"]'
             placeholder="Share an update with the group…"
@@ -2894,28 +2928,28 @@ const groupOgDescription = group.description
 
         {forumAnnouncements.length === 0
           ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
-          : forumAnnouncements.map((a: any) => (
-            <div class="announcement-item" data-announcement-id={a.id}>
-              <div class="announcement-head">
-                <div class="announcement-avatar">
-                  {a.profiles?.avatar_url
-                    ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
-                    : getInitials(a.profiles?.username ?? "?")}
-                </div>
-                <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
-                {readBadgeSlugs(a.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" />)}
-                <span class="announcement-time">· {timeAgo(a.created_at)}</span>
-                {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
-              </div>
-              <div class="announcement-body">{a.body}</div>
-              {isAdminOrOwner && (
-                <div class="announcement-actions">
-                  <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
-                  <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
-                </div>
-              )}
-            </div>
-          ))
+          : <ul class="ann-card-list">
+              {forumAnnouncements.map((a: any) => (
+                <li class="ann-card">
+                  <a class="ann-card-link" href={`/groups/${group.id}/announcements/${a.id}`}>
+                    <div class="ann-card-meta">
+                      {a.pinned && <span class="badge pinned">📌 Pinned</span>}
+                      <span class="badge category">announcement</span>
+                      {a.is_locked && <span class="badge locked">🔒 Locked</span>}
+                    </div>
+                    <div class="ann-card-title">{a.title?.trim() || "Announcement"}</div>
+                    <div class="ann-card-excerpt">{postExcerpt(a.body)}</div>
+                    <div class="ann-card-footer">
+                      <span>{a.profiles?.username ?? "unknown"}</span>
+                      <span>·</span>
+                      <span>{timeAgo(a.created_at)}</span>
+                      <span>·</span>
+                      <span>{annCommentCounts[a.id] ?? 0} {(annCommentCounts[a.id] ?? 0) === 1 ? "comment" : "comments"}</span>
+                    </div>
+                  </a>
+                </li>
+              ))}
+            </ul>
         }
       </div>
     </div>

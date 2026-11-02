@@ -1,0 +1,292 @@
+---
+export const prerender = false;
+import Layout from "../../../../components/Layout.astro";
+import PostComposer from "../../../../components/forum/PostComposer.astro";
+import CommentThread from "../../../../components/CommentThread.astro";
+import ProfileBadge from "../../../../components/ProfileBadge.astro";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../../utils/database";
+import { getPageUser } from "../../../../utils/pageAuth";
+import { getGroupAuthority } from "../../../../utils/api";
+import { renderPostBody } from "../../../../utils/richPost";
+import { timeAgo } from "../../../../utils/format";
+import { readBadgeSlugs } from "../../../../utils/badges";
+import { setPageCacheHeaders } from "../../../../utils/cache";
+import type { CommentData } from "../../../../utils/comments";
+
+const { id, annId } = Astro.params;
+if (!id || !annId) return Astro.redirect("/groups");
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, serverClient);
+const isLoggedIn = !!user;
+const db = getSupabaseAdmin() as any;
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await db.from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).maybeSingle();
+  currentProfile = cp ?? null;
+}
+
+const { data: group } = await db.from("groups").select("id, name, slug").eq("id", id).maybeSingle();
+if (!group) return new Response("Group not found", { status: 404 });
+
+const { data: announcement } = await db
+  .from("group_announcements")
+  .select("id, group_id, profile_id, title, body, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+  .eq("id", annId)
+  .eq("group_id", id)
+  .maybeSingle();
+if (!announcement) return new Response("Announcement not found", { status: 404 });
+
+const membership = currentProfile ? await getGroupAuthority(db, id, currentProfile.id) : null;
+const isMember = !!membership;
+let canModerate = !!membership && ["owner", "admin"].includes(membership.role);
+if (!canModerate && membership?.custom_role_id) {
+  const { data: cr } = await db.from("group_roles")
+    .select("can_edit_group").eq("id", membership.custom_role_id).maybeSingle();
+  canModerate = !!cr?.can_edit_group;
+}
+const isAuthor = !!currentProfile && announcement.profile_id === currentProfile.id;
+const canEdit = isAuthor || canModerate;
+const canSeeAdminBar = canModerate || isAuthor;
+
+const { data: commentRows } = await db
+  .from("group_announcement_comments")
+  .select("id, body, created_at, parent_id, profile_id, profiles ( id, username, avatar_url )")
+  .eq("announcement_id", annId)
+  .order("created_at", { ascending: true });
+const allComments: any[] = commentRows ?? [];
+
+function topAncestor(c: any): any {
+  if (!c.parent_id) return c;
+  const parent = allComments.find((x) => x.id === c.parent_id);
+  return parent ? topAncestor(parent) : c;
+}
+const topLevel = allComments.filter((c: any) => !c.parent_id);
+const repliesByTop: Record<string, any[]> = {};
+for (const c of allComments) {
+  if (!c.parent_id) continue;
+  const anc = topAncestor(c);
+  if (anc.id === c.id) continue;
+  (repliesByTop[anc.id] ||= []).push(c);
+}
+
+const threadComments: CommentData[] = topLevel.map((c: any) => ({
+  id: c.id,
+  author: {
+    id: c.profiles?.id ?? "",
+    username: c.profiles?.username ?? "unknown",
+    avatarUrl: c.profiles?.avatar_url ?? null,
+  },
+  body: c.body,
+  createdAt: c.created_at,
+  upvotes: 0,
+  canEdit: false,
+  canDelete: canModerate || (!!currentProfile && c.profiles?.id === currentProfile.id),
+  canReport: false,
+  replies: (repliesByTop[c.id] ?? []).map((r: any) => ({
+    id: r.id,
+    author: {
+      id: r.profiles?.id ?? "",
+      username: r.profiles?.username ?? "unknown",
+      avatarUrl: r.profiles?.avatar_url ?? null,
+    },
+    body: r.body,
+    createdAt: r.created_at,
+    upvotes: 0,
+    canDelete: canModerate || (!!currentProfile && r.profiles?.id === currentProfile.id),
+  })),
+}));
+
+function fmtDate(s: string): string {
+  return new Date(s).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+const groupHref = `/groups/${group.id}`;
+const forumsHref = `${groupHref}?tab=forums&section=announcements`;
+const commentCount = allComments.length;
+const titleText = announcement.title?.trim() || "Announcement";
+
+setPageCacheHeaders(Astro.response.headers, isLoggedIn, 60);
+---
+
+<Layout
+  title={`${titleText} — ${group.name} — Chekpoint`}
+  description={announcement.body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160)}
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+  variant="two-col"
+>
+  <main class="ann-page">
+    <a class="back" href={forumsHref}>← {group.name} announcements</a>
+
+    <article class="ann-post" data-announcement-id={announcement.id}>
+      <div class="ann-meta">
+        {announcement.pinned && <span class="badge pinned">📌 Pinned</span>}
+        <span class="badge category">announcement</span>
+        {announcement.is_locked && <span class="badge locked" id="lock-badge">🔒 Locked</span>}
+      </div>
+      <h1 class="ann-title" data-edit-hide>{titleText}</h1>
+      <div class="ann-byline">
+        <a href={`/reviewers/${announcement.profiles?.username}`} class="ann-author">
+          {announcement.profiles?.username ?? "unknown"}
+        </a>
+        {readBadgeSlugs(announcement.profiles).map((slug: string) => <ProfileBadge slug={slug} size="sm" />)}
+        <span>·</span>
+        <span>{fmtDate(announcement.created_at)}</span>
+        {announcement.updated_at && <span class="edited">(edited)</span>}
+      </div>
+      <div class="ann-body" data-edit-hide set:html={renderPostBody(announcement.body)} />
+
+      {canEdit && (
+        <PostComposer
+          composerId="ann-edit"
+          mode="edit"
+          postId={announcement.id}
+          title={announcement.title ?? ""}
+          body={announcement.body}
+          createUrl="/api/groups/announcements/update"
+          updateUrl="/api/groups/announcements/update"
+          extraFields={{ announcement_id: announcement.id }}
+          bodyField="body"
+          titleField="title"
+          submitLabel="Save changes"
+          editSubmitLabel="Save changes"
+        />
+      )}
+
+      {canSeeAdminBar && (
+        <div class="ann-admin-bar">
+          {canEdit && <button id="post-edit-open">Edit</button>}
+          {canModerate && <button data-action="toggle-lock">{announcement.is_locked ? "Unlock comments" : "Lock comments"}</button>}
+          {canModerate && <button data-action="toggle-pin">{announcement.pinned ? "Unpin" : "Pin"}</button>}
+          <button data-action="delete-announcement" class="danger">Delete</button>
+        </div>
+      )}
+    </article>
+
+    <section class="ann-comments">
+      <h2 class="comments-title">
+        Comments
+        {commentCount > 0 && <span class="comments-count">{commentCount}</span>}
+      </h2>
+
+      {!isMember && isLoggedIn && (
+        <p class="locked-note">Only group members can comment.</p>
+      )}
+      {announcement.is_locked && (
+        <p class="locked-note">🔒 Commenting is closed on this announcement.</p>
+      )}
+
+      <CommentThread
+        comments={threadComments}
+        currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
+        target={{ type: "announcement_comment", id: announcement.id }}
+        canCompose={!announcement.is_locked && isLoggedIn && isMember}
+        showVotes={false}
+        showReactions={false}
+        maxLength={2000}
+        maxDepth={1}
+        isModerator={canModerate}
+        signinReturnTo={Astro.url.pathname}
+      />
+    </section>
+  </main>
+</Layout>
+
+<script is:inline define:vars={{ annId: announcement.id, groupId: group.id, forumsHref }}>
+  (function () {
+    function post(url, payload) {
+      return fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); });
+    }
+    document.addEventListener("click", function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== "BUTTON") return;
+      var action = t.getAttribute("data-action");
+      if (action === "delete-announcement") {
+        if (!confirm("Delete this announcement and all its comments?")) return;
+        post("/api/groups/announcements/delete", { announcement_id: annId }).then(function (res) {
+          if (res.ok) window.location.href = forumsHref;
+          else alert((res.d && res.d.error) || "Failed to delete.");
+        });
+        return;
+      }
+      if (action === "toggle-lock") {
+        var makeLocked = t.textContent.indexOf("Lock ") === 0;
+        t.disabled = true;
+        post("/api/groups/announcements/lock", { announcement_id: annId, is_locked: makeLocked }).then(function (res) {
+          if (res.ok) window.location.reload();
+          else { alert((res.d && res.d.error) || "Failed."); t.disabled = false; }
+        });
+        return;
+      }
+      if (action === "toggle-pin") {
+        var makePinned = t.textContent === "Pin";
+        t.disabled = true;
+        post("/api/groups/announcements/pin", { announcement_id: annId, pinned: makePinned }).then(function (res) {
+          if (res.ok) window.location.reload();
+          else { alert((res.d && res.d.error) || "Failed."); t.disabled = false; }
+        });
+        return;
+      }
+    });
+  })();
+</script>
+
+<style>
+  .ann-page { padding: 20px 20px 40px; max-width: 760px; }
+  .back { display: inline-block; margin-bottom: 10px; font-size: 13px; color: var(--text-secondary); text-decoration: none; }
+  .back:hover { color: var(--accent); }
+
+  .ann-post { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 22px 22px 18px; margin-bottom: 20px; }
+  .ann-meta { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: capitalize; }
+  .badge.category { background: var(--bg-hover); color: var(--text-secondary); }
+  .badge.pinned { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .badge.locked { background: var(--bg-hover); color: var(--text-tertiary); }
+
+  .ann-title { font-size: 24px; font-weight: 700; margin: 0 0 6px; color: var(--text-primary); line-height: 1.3; }
+  .ann-byline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-tertiary); margin-bottom: 14px; flex-wrap: wrap; }
+  .ann-author { color: var(--text-secondary); font-weight: 600; text-decoration: none; }
+  .ann-author:hover { color: var(--accent); }
+  .edited { font-size: 11px; color: var(--text-tertiary); }
+
+  .ann-body { font-size: 15px; color: var(--text-primary); line-height: 1.75; }
+  .ann-body :global(h2) { font-size: 20px; font-weight: 700; margin: 20px 0 8px; }
+  .ann-body :global(h3) { font-size: 17px; font-weight: 600; margin: 16px 0 6px; }
+  .ann-body :global(p) { margin: 0 0 12px; }
+  .ann-body :global(ul), .ann-body :global(ol) { padding-left: 22px; margin: 0 0 12px; }
+  .ann-body :global(li) { margin-bottom: 4px; }
+  .ann-body :global(blockquote) { border-left: 3px solid var(--accent); margin: 0 0 12px; padding: 4px 12px; color: var(--text-secondary); font-style: italic; }
+  .ann-body :global(img) { max-width: 100%; border-radius: 10px; display: block; margin: 12px 0; }
+  .ann-body :global(iframe) { width: 100%; aspect-ratio: 16/9; border-radius: 10px; border: none; display: block; margin: 12px 0; }
+  .ann-body :global(div[data-youtube-video]) { margin: 12px 0; }
+  .ann-body :global(div[data-youtube-video] iframe) { width: 100%; aspect-ratio: 16/9; border-radius: 10px; border: none; }
+  .ann-body :global(.mention) { color: var(--accent); }
+  .ann-body :global(.comment-emote) { height: 20px; vertical-align: middle; }
+
+  .ann-admin-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+  .ann-admin-bar button {
+    background: var(--bg-hover); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 12px; font: inherit; font-size: 12px; font-weight: 600;
+    color: var(--text-secondary); cursor: pointer;
+  }
+  .ann-admin-bar button:hover { color: var(--text-primary); border-color: var(--accent); }
+  .ann-admin-bar button.danger { color: var(--score-low, #e5484d); }
+  .ann-admin-bar button.danger:hover { border-color: var(--score-low, #e5484d); }
+
+  .ann-comments { padding: 0 2px; }
+  .comments-title { font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 16px 0 12px; display: flex; align-items: center; gap: 8px; }
+  .comments-count { font-size: 13px; color: var(--text-tertiary); font-weight: 500; }
+  .locked-note { font-size: 13px; color: var(--text-tertiary); margin: 8px 0 16px; padding: 10px 12px; background: var(--bg-hover); border-radius: 8px; }
+
+  @media (max-width: 600px) {
+    .ann-page { padding: 12px 12px 32px; }
+    .ann-post { padding: 16px; }
+    .ann-title { font-size: 20px; }
+  }
+</style>

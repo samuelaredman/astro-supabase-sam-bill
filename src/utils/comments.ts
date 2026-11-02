@@ -45,6 +45,7 @@ export interface CommentReaction {
 export type CommentTargetType =
   | "poll_answer"
   | "forum_post_comment"
+  | "announcement_comment"
   | "list_comment"
   | "recommendation_comment"
   | "review_comment";
@@ -53,6 +54,7 @@ export interface CommentTarget {
   type: CommentTargetType;
   /** For poll_answer: the group_polls.id this thread hangs off.
    *  For forum_post_comment: the forum_posts.id.
+   *  For announcement_comment: the group_announcements.id.
    *  For list_comment: the lists.id.
    *  For recommendation_comment: the recommendations.id.
    *  For review_comment: the reviews.id. */
