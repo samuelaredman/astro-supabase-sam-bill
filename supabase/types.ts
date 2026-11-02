@@ -922,24 +922,33 @@ export type Database = {
           created_at: string
           group_id: string
           id: string
+          is_locked: boolean
           pinned: boolean
           profile_id: string
+          title: string | null
+          updated_at: string | null
         }
         Insert: {
           body: string
           created_at?: string
           group_id: string
           id?: string
+          is_locked?: boolean
           pinned?: boolean
           profile_id: string
+          title?: string | null
+          updated_at?: string | null
         }
         Update: {
           body?: string
           created_at?: string
           group_id?: string
           id?: string
+          is_locked?: boolean
           pinned?: boolean
           profile_id?: string
+          title?: string | null
+          updated_at?: string | null
         }
         Relationships: [
           {
@@ -951,6 +960,58 @@ export type Database = {
           },
           {
             foreignKeyName: "group_announcements_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_announcement_comments: {
+        Row: {
+          announcement_id: string
+          body: string
+          created_at: string
+          id: string
+          parent_id: string | null
+          profile_id: string
+          updated_at: string | null
+        }
+        Insert: {
+          announcement_id: string
+          body: string
+          created_at?: string
+          id?: string
+          parent_id?: string | null
+          profile_id: string
+          updated_at?: string | null
+        }
+        Update: {
+          announcement_id?: string
+          body?: string
+          created_at?: string
+          id?: string
+          parent_id?: string | null
+          profile_id?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_announcement_comments_announcement_id_fkey"
+            columns: ["announcement_id"]
+            isOneToOne: false
+            referencedRelation: "group_announcements"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_announcement_comments_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "group_announcement_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_announcement_comments_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
