@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { getSupabase } from "../../../utils/database";
 import { igdbFetch, escapeIgdbString } from "../../../utils/igdb";
-import { ALLOWED_GAME_CATEGORIES, GAME_CATEGORY_OR_FILTER, foldDiacritics } from "../../../utils/games";
+import { ALLOWED_GAME_CATEGORIES, GAME_CATEGORY_OR_FILTER, foldDiacritics, searchGameAliases } from "../../../utils/games";
 
 export const GET: APIRoute = async ({ request }) => {
   const url = new URL(request.url);
@@ -30,8 +30,9 @@ export const GET: APIRoute = async ({ request }) => {
   // text (accents intact) on IGDB's own server, so "ooo" would never
   // literal-match a stored name of "Öoo" there no matter how we post-filter
   // the response client-side.
-  const [rpcRes, igdbSearchRes, igdbNameRes] = await Promise.all([
+  const [rpcRes, aliasIds, igdbSearchRes, igdbNameRes] = await Promise.all([
     supabase.rpc('search_games', { search_query: q, result_limit: 8 }),
+    searchGameAliases(supabase, q, 8),
     igdbFetch("games", `
       fields name, slug, cover.url, first_release_date;
       search "${escapedQ}";
@@ -55,15 +56,23 @@ export const GET: APIRoute = async ({ request }) => {
 
   const rpcIds: string[] = (rpcRes.data ?? []).map((g: any) => g.id);
 
+  // Merge alias matches after RPC results (RPC gives ranked ids; aliases are
+  // "we found this via a variant title" matches that get appended behind rpc).
+  const seen = new Set(rpcIds);
+  const mergedIds: string[] = [...rpcIds];
+  for (const id of aliasIds) {
+    if (!seen.has(id)) { mergedIds.push(id); seen.add(id); }
+  }
+
   let dbGames: any[] = [];
-  if (rpcIds.length > 0) {
+  if (mergedIds.length > 0) {
     const { data } = await supabase
       .from("games")
       .select("id, title, slug, cover_img_url, date_released")
-      .in("id", rpcIds)
+      .in("id", mergedIds)
       .is("canonical_game_id", null)   // only canonical main games — collapsed editions reroute
       .or(GAME_CATEGORY_OR_FILTER);
-    const orderMap = new Map(rpcIds.map((id, i) => [id, i]));
+    const orderMap = new Map(mergedIds.map((id, i) => [id, i]));
     dbGames = (data ?? []).sort(
       (a: any, b: any) => (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99)
     );

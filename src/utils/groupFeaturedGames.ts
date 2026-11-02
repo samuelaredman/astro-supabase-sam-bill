@@ -35,8 +35,8 @@ export const POLL_QUESTION_MAX = 300;
 export const POLL_OPTION_MAX = 80;
 export const POLL_OPTIONS_MIN = 2;
 export const POLL_OPTIONS_MAX = 6;
-export const POLL_ANSWER_MAX = 500;
-export const POLL_REPLY_MAX = 500;
+export const POLL_ANSWER_MAX = 2000;
+export const POLL_REPLY_MAX = 2000;
 
 export interface FeaturedPollInput {
   question: string;

@@ -1,20 +1,28 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { createServerClient, parseCookieHeader, serializeCookieHeader } from '@supabase/ssr';
 import type { Database } from '../../supabase/types';
+
+let adminClient: SupabaseClient<Database> | null = null;
 
 /**
  * Admin client — uses the service role key to bypass RLS.
  * Only call this from server-side API routes, never expose to the client.
+ *
+ * Memoized at module scope: the service-role key never rotates per request,
+ * and @supabase/supabase-js clients are stateless under `persistSession: false`.
+ * Reusing the client avoids per-call fetch/auth setup across ~36 call sites.
  */
 export function getSupabaseAdmin() {
+  if (adminClient) return adminClient;
   const supabaseUrl = import.meta.env.SUPABASE_DATABASE_URL;
   const serviceRoleKey = import.meta.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceRoleKey) {
     throw new Error('Missing SUPABASE_DATABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars');
   }
-  return createClient<Database>(supabaseUrl, serviceRoleKey, {
+  adminClient = createClient<Database>(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false },
   });
+  return adminClient;
 }
 
 export function getSupabase() {

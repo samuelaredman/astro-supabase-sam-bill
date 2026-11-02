@@ -54,6 +54,10 @@ export const POST: APIRoute = async (context) => {
     update.showcase_order = order;
   }
 
+  if ('bio' in update && typeof update.bio === 'string' && update.bio.length > 500) {
+    return json({ error: 'Bio must be 500 characters or less.' }, 400);
+  }
+
   if (Object.keys(update).length === 0)
     return json({ error: 'Nothing to update.' }, 400);
 

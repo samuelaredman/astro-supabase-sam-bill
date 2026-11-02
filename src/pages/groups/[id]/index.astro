@@ -22,7 +22,10 @@ import { groupOwnerYouTube, groupShowcaseLabel, readGroupShowcaseHidden, readGro
 import ShowcaseSection from '../../../components/profile/ShowcaseSection.astro';
 import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
+import ProfileBadge from "../../../components/ProfileBadge.astro";
+import { readBadgeSlugs } from "../../../utils/badges";
 import { getPageUser } from "../../../utils/pageAuth";
+import "../../../styles/forum-poll.css";
 
 const supabase = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, supabase);
@@ -46,7 +49,7 @@ const db = getSupabaseAdmin();
 
 let { data: group, error: groupError } = await db
   .from("groups")
-  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt, is_site_group, overview_order, overview_hidden, showcase_video_mode, showcase_video_id")
+  .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt, is_site_group, overview_order, overview_hidden, showcase_video_mode, showcase_video_id, accent_color, polls_everyone, polls_showcase_mode, polls_showcase_poll_id")
   .eq("id", id)
   .single();
 
@@ -60,6 +63,7 @@ if (!group && groupError) {
   if (fallback) group = {
     ...fallback, banner_url: null, banner_position: 'center', is_site_group: false,
     overview_order: [], overview_hidden: null, showcase_video_mode: null, showcase_video_id: null,
+    accent_color: null, polls_everyone: false, polls_showcase_mode: 'latest', polls_showcase_poll_id: null,
   };
 }
 
@@ -142,7 +146,7 @@ const canViewContent = group.visibility !== "private" || !!canViewPrivate;
 const members: any[] = canViewContent
   ? await fetchAll((from, to) => db
       .from("group_members")
-      .select("role, joined_at, custom_role_id, profiles ( id, username, avatar_url )")
+      .select("role, joined_at, custom_role_id, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
       .eq("group_id", id)
       .order("joined_at", { ascending: true })
       .order("profile_id")
@@ -184,6 +188,41 @@ if (!canEditOverview && authority?.custom_role_id) {
   const { data: cr } = await db.from("group_roles")
     .select("can_edit_group").eq("id", authority.custom_role_id).maybeSingle();
   canEditOverview = !!cr?.can_edit_group;
+}
+// Who can create forum polls: everyone who can already edit the group, plus any
+// member if the owner has flipped the polls_everyone switch in group settings.
+const canPostPoll = canEditOverview || (!!(group as any).polls_everyone && isMember);
+
+// Pie chart colors — fallback palette used when the poll creator didn't pick a
+// color for an option. Also lives in the inline JS so the create form can offer
+// matching defaults.
+const POLL_SLICE_COLORS = ['#6050c8', '#22c55e', '#f0b429', '#ef4444', '#06b6d4', '#ec4899'];
+function pieSlices(options: any[], total: number) {
+  if (total === 0) return [] as { path: string; color: string; pct: number; label: string; count: number }[];
+  const r = 48, cx = 50, cy = 50;
+  const withVotes = options.filter((o: any) => o.count > 0);
+  // A single 100% slice can't be drawn as a wedge (the arc degenerates); use two
+  // semicircles glued into a full circle instead.
+  if (withVotes.length === 1) {
+    const o = withVotes[0];
+    const color = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+    return [{
+      path: `M ${cx - r} ${cy} A ${r} ${r} 0 1 1 ${cx + r} ${cy} A ${r} ${r} 0 1 1 ${cx - r} ${cy} Z`,
+      color, pct: 1, label: o.label, count: o.count,
+    }];
+  }
+  let a = -Math.PI / 2;
+  return withVotes.map((o: any) => {
+    const pct = o.count / total;
+    const b = a + pct * 2 * Math.PI;
+    const sx = cx + r * Math.cos(a), sy = cy + r * Math.sin(a);
+    const ex = cx + r * Math.cos(b), ey = cy + r * Math.sin(b);
+    const largeArc = pct > 0.5 ? 1 : 0;
+    const path = `M ${cx} ${cy} L ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey} Z`;
+    const color = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+    a = b;
+    return { path, color, pct, label: o.label, count: o.count };
+  });
 }
 const overviewOrder = readGroupShowcaseOrder(group.overview_order);
 const overviewHidden = readGroupShowcaseHidden(group.overview_hidden, group.stats_config as any);
@@ -231,7 +270,7 @@ if (canSeeMemberContent) {
   // Admin client: site admins moderating a group they haven't joined can't read these through RLS
   const { data: ann } = await db
     .from("group_announcements")
-    .select("id, body, pinned, created_at, profiles ( id, username, avatar_url )")
+    .select("id, body, pinned, created_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
     .eq("group_id", id)
     .order("pinned", { ascending: false })
     .order("created_at", { ascending: false })
@@ -239,39 +278,233 @@ if (canSeeMemberContent) {
   announcements = ann ?? [];
 }
 
-// ── Polls ──
+// ── Polls (Overview showcase: ONE poll chosen by the owner) ──
+// Modes:
+//   'latest'   — newest non-featured poll
+//   'pinned'   — newest pinned poll (fallback to latest if nothing is pinned)
+//   'featured' — a specific poll chosen in polls_showcase_poll_id
 let polls: any[] = [];
+let overviewPollChoices: any[] = []; // the picker list, only built when the owner can edit
 if (canSeeMemberContent) {
-  const { data: pollRows } = await db
-    .from("group_polls")
-    .select("id, question, closed, created_at, profile_id")
-    .eq("group_id", id)
-    // A featured game's poll is shown on its card on the Games tab
-    .is("featured_game_id", null)
-    .order("created_at", { ascending: false })
-    .limit(5);
+  const mode = ((group as any).polls_showcase_mode ?? "latest") as "latest" | "pinned" | "featured";
+  const featuredPollId = (group as any).polls_showcase_poll_id ?? null;
+  const COLS = "id, question, closed, created_at, profile_id, pinned, featured_game_id";
 
-  if (pollRows?.length) {
+  let pollRow: any = null;
+  if (mode === "featured" && featuredPollId) {
+    const { data } = await db.from("group_polls").select(COLS).eq("id", featuredPollId).maybeSingle();
+    pollRow = data;
+  }
+  if (!pollRow && mode === "pinned") {
+    const { data } = await db.from("group_polls").select(COLS)
+      .eq("group_id", id).eq("pinned", true)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    pollRow = data;
+  }
+  if (!pollRow) {
+    const { data } = await db.from("group_polls").select(COLS)
+      .eq("group_id", id).is("featured_game_id", null)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    pollRow = data;
+  }
+
+  if (pollRow) {
+    const [{ data: optionRows }, { data: voteRows }] = await Promise.all([
+      db.from("group_poll_options").select("id, poll_id, label, position")
+        .eq("poll_id", pollRow.id).order("position", { ascending: true }),
+      db.from("group_poll_votes").select("poll_id, option_id, profile_id")
+        .eq("poll_id", pollRow.id),
+    ]);
+    const myVote = currentProfile ? (voteRows ?? []).find((v: any) => v.profile_id === currentProfile.id) : null;
+    polls = [{
+      ...pollRow,
+      options: (optionRows ?? []).map((o: any) => ({
+        ...o, count: (voteRows ?? []).filter((v: any) => v.option_id === o.id).length,
+      })),
+      totalVotes: (voteRows ?? []).length,
+      myOptionId: myVote?.option_id ?? null,
+    }];
+  }
+
+  // Picker list for the owner's "Change" modal — latest 50 polls, pinned on top.
+  if (canEditOverview) {
+    const { data } = await db.from("group_polls")
+      .select("id, question, pinned, created_at")
+      .eq("group_id", id)
+      .order("pinned", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(50);
+    overviewPollChoices = data ?? [];
+  }
+}
+const pollsShowcaseMode = ((group as any).polls_showcase_mode ?? "latest") as "latest" | "pinned" | "featured";
+const pollsShowcasePollId = (group as any).polls_showcase_poll_id ?? null;
+
+// ── Forums tab (full-list announcements + polls, including featured-game polls) ──
+// Overview's showcases render the latest few; Forums is the full view behind "See all →".
+const forumSection: "announcements" | "polls" =
+  Astro.url.searchParams.get("section") === "polls" ? "polls" : "announcements";
+let forumAnnouncements: any[] = [];
+let forumPolls: any[] = [];
+if (canViewContent && activeTab === "forums") {
+  const [annRes, pollRowsRes] = await Promise.all([
+    fetchAll((from, to) => db
+      .from("group_announcements")
+      .select("id, body, pinned, created_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .eq("group_id", id)
+      .order("pinned", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(from, to)),
+    db.from("group_polls")
+      .select("id, question, closed, created_at, profile_id, featured_game_id, game_id, pinned, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .eq("group_id", id)
+      .order("pinned", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(200),
+  ]);
+  forumAnnouncements = annRes ?? [];
+  if (pollRowsRes.error) {
+    console.error("[groups/forum-polls] query error:", JSON.stringify(pollRowsRes.error));
+  }
+  const basePollRows = pollRowsRes.data ?? [];
+  // Resolve a game for every poll in two parallel lookups:
+  //   featured_game_id → group_featured_games → games   (featured-game polls)
+  //   game_id → games                                   (ordinary polls that picked a game)
+  const featuredIds = basePollRows.map((p: any) => p.featured_game_id).filter(Boolean);
+  const directGameIds = basePollRows.map((p: any) => p.game_id).filter(Boolean);
+  const [featRes, directRes] = await Promise.all([
+    featuredIds.length
+      ? db.from("group_featured_games").select("id, games ( id, title, slug, cover_img_url, date_released )").in("id", featuredIds)
+      : Promise.resolve({ data: [] as any[] }),
+    directGameIds.length
+      ? db.from("games").select("id, title, slug, cover_img_url, date_released").in("id", directGameIds)
+      : Promise.resolve({ data: [] as any[] }),
+  ]);
+  const featuredMap = new Map<string, any>();
+  for (const f of (featRes as any).data ?? []) featuredMap.set(f.id, f.games ?? null);
+  const directMap = new Map<string, any>();
+  for (const g of (directRes as any).data ?? []) directMap.set(g.id, g);
+  // Author role tag: look up the poll author's role in THIS group, plus whether
+  // they're a site admin ("Staff"). Keeps the badge render cheap at render time.
+  const authorIds = Array.from(new Set(basePollRows.map((p: any) => p.profile_id).filter(Boolean)));
+  const [memberRoleRes, siteAdminRes] = await Promise.all([
+    authorIds.length
+      ? db.from("group_members").select("profile_id, role").eq("group_id", id).in("profile_id", authorIds)
+      : Promise.resolve({ data: [] as any[] }),
+    authorIds.length
+      ? db.from("site_admins").select("profile_id").in("profile_id", authorIds)
+      : Promise.resolve({ data: [] as any[] }),
+  ]);
+  const memberRoleMap = new Map<string, string>();
+  for (const m of (memberRoleRes as any).data ?? []) memberRoleMap.set(m.profile_id, m.role);
+  const staffSet = new Set<string>();
+  for (const s of (siteAdminRes as any).data ?? []) staffSet.add(s.profile_id);
+  const pollRows = basePollRows.map((p: any) => {
+    const featuredGame = p.featured_game_id ? featuredMap.get(p.featured_game_id) ?? null : null;
+    const directGame = p.game_id ? directMap.get(p.game_id) ?? null : null;
+    const groupRole = p.profile_id ? memberRoleMap.get(p.profile_id) ?? null : null;
+    const isStaff = p.profile_id ? staffSet.has(p.profile_id) : false;
+    // "Owner" and "Admin" win over "Staff"; "Staff" only shows for site admins
+    // who aren't already role-tagged in this group.
+    const authorRole = groupRole === "owner" ? "Owner"
+      : groupRole === "admin" ? "Admin"
+      : isStaff ? "Staff"
+      : null;
+    return { ...p, games: featuredGame ?? directGame, authorRole };
+  });
+  if (pollRows.length) {
     const pollIds = pollRows.map((p: any) => p.id);
-    // Votes are paged: five polls in a 250-member group can pass the 1000-row cap
-    const [{ data: optionRows }, voteRows] = await Promise.all([
-      db.from("group_poll_options").select("id, poll_id, label, position").in("poll_id", pollIds).order("position", { ascending: true }),
+    // Options, votes, and the full comment thread (answers + answer-votes + replies)
+    // for every poll — all reused from the featured-game poll endpoints.
+    const [optionsRes, voteRows, answersRes, answerVotesRes, repliesRes] = await Promise.all([
+      db.from("group_poll_options").select("id, poll_id, label, position, color")
+        .in("poll_id", pollIds).order("position", { ascending: true }),
       fetchAll((from, to) => db.from("group_poll_votes").select("poll_id, option_id, profile_id")
         .in("poll_id", pollIds).order("id").range(from, to)),
+      db.from("group_poll_answers")
+        .select("id, poll_id, profile_id, body, created_at, updated_at, profiles!profile_id ( username, avatar_url )")
+        .in("poll_id", pollIds)
+        .order("created_at", { ascending: false }),
+      db.from("group_poll_answer_votes").select("answer_id, profile_id"),
+      // Index only shows the top answers in a preview card; replies are just a count,
+      // their full content is loaded on the dedicated poll page instead.
+      db.from("group_poll_answer_replies").select("id, answer_id"),
     ]);
-    polls = pollRows.map((p: any) => {
+    // Log any query errors so a bad embed/filter doesn't silently hide comments
+    for (const [name, res] of [["options", optionsRes], ["answers", answersRes], ["answer-votes", answerVotesRes], ["replies", repliesRes]] as const) {
+      if ((res as any)?.error) console.error(`[groups/forum-polls] ${name} error:`, JSON.stringify((res as any).error));
+    }
+    const optionRows = (optionsRes as any).data;
+    const answerRows = (answersRes as any).data;
+    const answerVoteRows = (answerVotesRes as any).data;
+    const replyRows = (repliesRes as any).data;
+    // Only answer_votes/replies for THIS batch of polls (we read all; filter in JS)
+    const pollIdSet = new Set(pollIds);
+    const answerIdByPoll = new Map<string, Set<string>>();
+    for (const a of (answerRows ?? []) as any[]) {
+      if (!pollIdSet.has(a.poll_id)) continue;
+      let s = answerIdByPoll.get(a.poll_id);
+      if (!s) { s = new Set(); answerIdByPoll.set(a.poll_id, s); }
+      s.add(a.id);
+    }
+    const allAnswerIds = new Set<string>();
+    for (const s of answerIdByPoll.values()) for (const id of s) allAnswerIds.add(id);
+    const relevantVotes = (answerVoteRows ?? []).filter((v: any) => allAnswerIds.has(v.answer_id));
+    const relevantReplies = (replyRows ?? []).filter((r: any) => allAnswerIds.has(r.answer_id));
+
+    // Voter avatars for the Voted-by cluster under each poll — one batched fetch,
+    // sorted so the newest voters bubble to the front of the strip.
+    const voterIds = Array.from(new Set((voteRows ?? []).map((v: any) => v.profile_id).filter(Boolean)));
+    const { data: voterRows } = voterIds.length
+      ? await db.from("profiles").select("id, username, avatar_url").in("id", voterIds)
+      : { data: [] as any[] };
+    const voterById = new Map<string, any>();
+    for (const vp of voterRows ?? []) voterById.set(vp.id, vp);
+
+    forumPolls = pollRows.map((p: any) => {
       const options = (optionRows ?? []).filter((o: any) => o.poll_id === p.id);
       const votes = (voteRows ?? []).filter((v: any) => v.poll_id === p.id);
+      const voters = votes.map((v: any) => voterById.get(v.profile_id)).filter(Boolean);
       const myVote = currentProfile ? votes.find((v: any) => v.profile_id === currentProfile.id) : null;
-      const totalVotes = votes.length;
+      // Build comment list: sort by upvotes desc, then newest first.
+      // Don't drop answers whose profile join came back null — a deleted author
+      // or an unresolved embed shouldn't silently hide a real poll answer.
+      const pollAnswers = (answerRows ?? [])
+        .filter((a: any) => a.poll_id === p.id)
+        .map((a: any) => {
+          const ups = relevantVotes.filter((v: any) => v.answer_id === a.id);
+          return {
+            id: a.id,
+            profileId: a.profile_id,
+            username: a.profiles?.username ?? "unknown",
+            avatarUrl: a.profiles?.avatar_url ?? null,
+            body: a.body,
+            createdAt: a.created_at,
+            edited: a.updated_at !== a.created_at,
+            upvotes: ups.length,
+            myUpvote: !!currentProfile && ups.some((v: any) => v.profile_id === currentProfile.id),
+            replies: relevantReplies.filter((r: any) => r.answer_id === a.id),
+          };
+        })
+        .sort((a: any, b: any) => b.upvotes - a.upvotes || b.createdAt.localeCompare(a.createdAt));
+      // Winner is the single top-count option — ties don't highlight one over the other
+      const sortedByCount = options.map((o: any) => votes.filter((v: any) => v.option_id === o.id).length);
+      const topCount = Math.max(0, ...sortedByCount);
+      const winnersWithTopCount = sortedByCount.filter((c: number) => c === topCount).length;
       return {
         ...p,
-        options: options.map((o: any) => ({
-          ...o,
-          count: votes.filter((v: any) => v.option_id === o.id).length,
-        })),
-        totalVotes,
+        options: options.map((o: any) => {
+          const count = votes.filter((v: any) => v.option_id === o.id).length;
+          return {
+            ...o,
+            count,
+            isWinner: topCount > 0 && count === topCount && winnersWithTopCount === 1,
+          };
+        }),
+        totalVotes: votes.length,
         myOptionId: myVote?.option_id ?? null,
+        voters,
+        answers: pollAnswers,
       };
     });
   }
@@ -331,8 +564,13 @@ const OVERVIEW_LIST_LIMIT = 5;
 
 if (canViewContent && memberProfileIds.length > 0) {
   const gameStats = () => db.rpc("group_game_review_stats", statArgs);
+  // Score distribution: read scores straight out of group_reviews() and tally in
+  // JS so the histogram's totals always add up to the summary's review_count.
+  // group_score_distribution had a drift bug — the function body wasn't counting
+  // every published review back from the same group_reviews() source the summary
+  // reads from, which left the per-score bars reading absurdly low (e.g. 1 ten).
   const [summaryRes, memberStatsRows, topGamesRes, topRatedRes, hotTakeRes, activityRes,
-         consensusRes, divergentRes, hiddenGemsRes, scoreDistRes] = await Promise.all([
+         consensusRes, divergentRes, hiddenGemsRes, scoreRows] = await Promise.all([
     db.rpc("group_review_summary", statArgs).maybeSingle(),
     fetchAll((from, to) => db.rpc("group_member_review_stats", statArgs).order("profile_id").range(from, to)),
     gameStats().order("review_count", { ascending: false }).order("avg_score", { ascending: false }).order("game_id").limit(7),
@@ -340,7 +578,7 @@ if (canViewContent && memberProfileIds.length > 0) {
       .order("avg_score", { ascending: false }).order("review_count", { ascending: false }).order("game_id").limit(3),
     db.rpc("group_hot_take", statArgs).maybeSingle(),
     db.rpc("group_reviews", statArgs)
-      .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url )")
+      .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
       .order("published_at", { ascending: false })
       .limit(50),
     db.rpc("group_consensus_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
@@ -350,8 +588,8 @@ if (canViewContent && memberProfileIds.length > 0) {
       p_genre_id: statArgs.p_genre_id, p_platform_id: statArgs.p_platform_id }),
   ]);
   for (const res of [summaryRes, topGamesRes, topRatedRes, hotTakeRes, activityRes,
-                     consensusRes, divergentRes, hiddenGemsRes, scoreDistRes]) {
-    if (res.error) console.error("[groups/[id]] stats error:", JSON.stringify(res.error));
+                     consensusRes, divergentRes, hiddenGemsRes, scoreRows]) {
+    if ((res as any).error) console.error("[groups/[id]] stats error:", JSON.stringify((res as any).error));
   }
   summary = summaryRes.data ?? null;
   memberStats = memberStatsRows;
@@ -362,12 +600,14 @@ if (canViewContent && memberProfileIds.length > 0) {
   consensusRows = consensusRes.data ?? [];
   divergentRows = divergentRes.data ?? [];
   hiddenGemRows = hiddenGemsRes.data ?? [];
-  // group_score_distribution returns one row per (profile_id, score); the
-  // group-wide row has profile_id = NULL. Sum by score across the null rows.
+  // group_score_distribution returns one row per (profile_id, score). The
+  // group-wide totals are the rows where profile_id IS NULL.
   const distByScore: Record<number, number> = {};
-  for (const row of scoreDistRes.data ?? []) {
-    if ((row as any).profile_id != null) continue;
-    distByScore[(row as any).score] = ((row as any).review_count as number) ?? 0;
+  for (const row of (scoreRows.data ?? []) as any[]) {
+    if (row.profile_id != null) continue;
+    const s = Number(row.score);
+    if (!Number.isInteger(s) || s < 1 || s > 10) continue;
+    distByScore[s] = row.review_count ?? 0;
   }
   scoreDistRows = Array.from({ length: 10 }, (_, i) => ({ score: i + 1, review_count: distByScore[i + 1] ?? 0 }));
 }
@@ -437,6 +677,66 @@ const hotTake = hotTakeRow && extraGameById[hotTakeRow.game_id]
       return { game: extraGameById[hotTakeRow.game_id], groupAvg, commAvg, delta: +(groupAvg - commAvg).toFixed(1) };
     })()
   : null;
+
+// ── Verdict board ──
+// Hot take + Consensus/Divisive + Hidden gems folded into one strip:
+// each game as a small tile tagged with its verdict kind, so first-time
+// visitors read the whole shape of the group's taste in one row.
+type VerdictItem = {
+  kind: 'hot_take' | 'consensus' | 'divisive' | 'gem';
+  kindLabel: string;
+  game: { id: string; title: string; slug: string | null; cover_img_url: string | null };
+  score: number;
+  delta?: number;
+  meta: string;
+};
+const verdictItems: VerdictItem[] = [];
+const seenVerdictGameIds = new Set<string>();
+function pushVerdict(it: VerdictItem) {
+  if (!it.game?.id || seenVerdictGameIds.has(it.game.id)) return;
+  seenVerdictGameIds.add(it.game.id);
+  verdictItems.push(it);
+}
+if (hotTake) {
+  pushVerdict({
+    kind: 'hot_take',
+    kindLabel: 'Hot take',
+    game: hotTake.game,
+    score: hotTake.groupAvg,
+    delta: hotTake.delta,
+    meta: `${hotTake.commAvg} elsewhere`,
+  });
+}
+for (const r of consensusRows.slice(0, 2)) {
+  const avg = +r.avg_score.toFixed(1);
+  pushVerdict({
+    kind: 'consensus',
+    kindLabel: 'Consensus',
+    game: { id: r.game_id, title: r.title, slug: r.slug, cover_img_url: r.cover_img_url },
+    score: avg,
+    meta: `${r.review_count} agree`,
+  });
+}
+for (const r of divergentRows.slice(0, 2)) {
+  const avg = +r.avg_score.toFixed(1);
+  pushVerdict({
+    kind: 'divisive',
+    kindLabel: 'Divisive',
+    game: { id: r.game_id, title: r.title, slug: r.slug, cover_img_url: r.cover_img_url },
+    score: avg,
+    meta: `scores ${r.min_score}–${r.max_score}`,
+  });
+}
+for (const r of hiddenGemRows.slice(0, 2)) {
+  const avg = +r.group_avg.toFixed(1);
+  pushVerdict({
+    kind: 'gem',
+    kindLabel: 'Hidden gem',
+    game: { id: r.game_id, title: r.title, slug: r.slug, cover_img_url: r.cover_img_url },
+    score: avg,
+    meta: `${r.group_count} love${r.group_count === 1 ? 's' : ''} it`,
+  });
+}
 
 // ── Feed tab ──
 // Like the Stats tab, built only when it's the tab in the URL. Filter changes
@@ -522,6 +822,14 @@ const bannerStyle = group.banner_url
   ? `background-image:url('${group.banner_url}');background-size:cover;background-position:${group.banner_position ?? 'center'}`
   : "";
 
+// Accent color (parallel to the reviewer profile page) — scoped to #accentScope
+// below the topnav, so a visitor's own site chrome never recolors.
+const accentStyle = group.accent_color && /^#[0-9a-f]{6}$/i.test(group.accent_color)
+  ? `--accent:${group.accent_color}`
+  : undefined;
+const hasAccentColor = !!accentStyle;
+const initialAccentColorValue = hasAccentColor ? (group.accent_color as string) : '#6050c8';
+
 const groupDataJson = JSON.stringify({ id: group.id, memberProfileIds, isMember, isAdminOrOwner, isOwner });
 const memberListJson = JSON.stringify(memberList);
 
@@ -562,7 +870,7 @@ const groupOgDescription = group.description
   .banner-glow2{position:absolute;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,#60a5fa 0%,transparent 70%);opacity:.1;top:-60px;left:20%}
   .banner-edit-btn{position:absolute;bottom:12px;right:16px;display:none;align-items:center;gap:7px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.2);color:white;font-size:12px;font-weight:500;font-family:'DM Sans',sans-serif;padding:7px 14px;border-radius:20px;cursor:pointer;transition:background .15s;z-index:2}
   .banner-edit-btn:hover{background:rgba(0,0,0,.75)}
-  body.group-admin .banner-edit-btn{display:flex}
+  body.editing-group .banner-edit-btn{display:flex}
 
   /* ── Avatar ── */
   .group-header{max-width:980px;margin:0 auto;padding:0 28px;position:relative}
@@ -571,7 +879,7 @@ const groupOgDescription = group.description
   .group-avatar-sq{width:104px;height:104px;border-radius:20px;background:var(--bg-card);border:4px solid var(--bg);display:flex;align-items:center;justify-content:center;font-family:'DM Serif Display',serif;font-size:36px;color:var(--accent);overflow:hidden;box-shadow:0 0 0 2px var(--accent)}
   .group-avatar-sq img{width:100%;height:100%;object-fit:cover}
   .group-avatar-edit{position:absolute;inset:0;border-radius:20px;background:rgba(0,0,0,.55);display:none;flex-direction:column;align-items:center;justify-content:center;gap:4px;cursor:pointer;border:4px solid transparent}
-  body.group-admin .group-avatar-container:hover .group-avatar-edit{display:flex}
+  body.editing-group .group-avatar-container:hover .group-avatar-edit{display:flex}
   .group-avatar-edit span{font-size:10px;font-weight:600;color:white;text-transform:uppercase;letter-spacing:.08em}
   .spinner{width:24px;height:24px;border:2px solid rgba(255,255,255,.3);border-top-color:white;border-radius:50%;animation:spin .7s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
@@ -596,6 +904,37 @@ const groupOgDescription = group.description
   .btn-primary:hover{opacity:.85}
   .btn-ghost{background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border);padding:9px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
   .btn-ghost:hover{border-color:var(--text-tertiary)}
+  /* Edit button (next to Settings) — matches the profile's "Edit profile" button */
+  .edit-group-btn{padding:9px 18px;border-radius:22px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);transition:all .15s;display:inline-flex;align-items:center;gap:7px}
+  .edit-group-btn:hover{border-color:var(--accent);color:var(--accent)}
+  /* Compact gear button sitting next to Edit — mirrors the profile Settings affordance */
+  .edit-settings-row{display:inline-flex;align-items:center;gap:8px}
+  .gear-btn{width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);cursor:pointer;transition:all .15s;text-decoration:none}
+  .gear-btn:hover{border-color:var(--accent);color:var(--accent)}
+  /* Sticky "editing group" bar at the top of the page (matches reviewer profile) */
+  .edit-mode-bar{display:none;position:sticky;top:54px;z-index:25;background:var(--bg-card);border-bottom:1px solid var(--border);padding:10px 28px;align-items:center;justify-content:space-between;gap:12px;backdrop-filter:blur(12px)}
+  body.editing-group .edit-mode-bar.edit-mode-bar--group{display:flex}
+  .edit-mode-label{font-size:13px;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:8px}
+  .edit-mode-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse2 1.5s infinite}
+  @keyframes pulse2{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}
+  .edit-save-btn{padding:7px 18px;border-radius:20px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;border:none;background:var(--accent);color:white;transition:opacity .15s}
+  .edit-save-btn:hover{opacity:.88}
+  .edit-save-btn:disabled{opacity:.5;cursor:not-allowed}
+  .edit-cancel-btn{padding:7px 14px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text-secondary);transition:all .15s}
+  .edit-cancel-btn:hover{border-color:var(--text-tertiary)}
+  /* In-edit controls — hidden by default, revealed when body.editing-group is set */
+  .group-desc-textarea{display:none;width:100%;font-family:'DM Sans',sans-serif;font-size:14px;line-height:1.6;color:var(--text-primary);background:var(--bg-hover);border:1px solid var(--accent);border-radius:8px;padding:8px 10px;resize:vertical;outline:none;min-height:60px;max-width:480px;box-sizing:border-box;margin-bottom:10px}
+  body.editing-group .group-desc{display:none}
+  body.editing-group .group-desc-textarea{display:block}
+  .accent-edit-row{display:none;align-items:center;gap:10px;margin-top:10px}
+  body.editing-group .accent-edit-row{display:flex}
+  .accent-edit-label{font-size:11px;font-weight:600;color:var(--text-tertiary)}
+  .accent-color-input{appearance:none;-webkit-appearance:none;width:34px;height:28px;border:1px solid var(--border);border-radius:8px;background:none;cursor:pointer;padding:0;overflow:hidden}
+  .accent-color-input::-webkit-color-swatch-wrapper{padding:0}
+  .accent-color-input::-webkit-color-swatch{border:none;border-radius:7px}
+  .accent-color-input::-moz-color-swatch{border:none;border-radius:7px}
+  .accent-reset-btn{background:none;border:none;color:var(--text-tertiary);font-size:11px;font-family:inherit;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px}
+  .accent-reset-btn:hover{color:var(--text-secondary)}
   .btn-danger{background:#300e0e;color:#f87171;border:none;padding:8px 16px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer}
   .signin-link{font-size:12px;color:var(--text-secondary);text-decoration:none}
   .signin-link:hover{color:var(--accent)}
@@ -621,7 +960,42 @@ const groupOgDescription = group.description
   .tab-panel{display:none}
   .tab-panel.active{display:block}
 
-  /* ── Hot Take ── */
+  /* ── Forums sub-nav ── */
+  .forums-subnav{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:0}
+  .forums-sub-link{padding:8px 14px;font-size:13px;font-weight:600;color:var(--text-secondary);text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px;display:inline-flex;align-items:center;gap:6px;transition:color .15s,border-color .15s}
+  .forums-sub-link:hover{color:var(--text-primary)}
+  .forums-sub-link.active{color:var(--accent);border-bottom-color:var(--accent)}
+  .forums-section{display:none}
+  .forums-section.active{display:block}
+  .poll-game-tag{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:600;color:var(--text-tertiary);text-decoration:none;background:var(--tag-bg);border-radius:999px;padding:4px 10px 4px 4px;margin-bottom:8px}
+  .poll-game-tag:hover{color:var(--accent)}
+  .poll-game-tag img{width:20px;height:20px;border-radius:50%;object-fit:cover}
+
+  /* ── Verdict board (unified hot take / consensus / divisive / hidden gems) ── */
+  .vb-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:12px}
+  .vb-sub{font-size:11px;color:var(--text-tertiary)}
+  .vb-strip{display:flex;gap:12px;overflow-x:auto;scroll-snap-type:x proximity;padding-bottom:4px;margin:0 -4px;scrollbar-width:thin}
+  .vb-strip::-webkit-scrollbar{height:6px}
+  .vb-strip::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+  .vb-tile{flex:0 0 128px;scroll-snap-align:start;display:flex;flex-direction:column;gap:6px;padding:4px;border-radius:10px;text-decoration:none;color:inherit;transition:background .12s,transform .12s}
+  .vb-tile:hover{background:var(--bg-hover)}
+  .vb-tile:hover .vb-cover{transform:translateY(-2px)}
+  .vb-tile:hover .vb-title{color:var(--accent)}
+  .vb-cover-wrap{position:relative;width:100%;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:var(--tag-bg);box-shadow:0 4px 12px rgba(0,0,0,.25)}
+  .vb-cover{width:100%;height:100%;object-fit:cover;display:block;transition:transform .15s}
+  .vb-cover-placeholder{display:block}
+  .vb-chip{position:absolute;top:6px;left:6px;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;padding:3px 7px;border-radius:999px;background:rgba(0,0,0,.72);color:#fff;backdrop-filter:blur(4px);line-height:1}
+  .vb-chip-hot_take{background:rgba(248,113,113,.9)}
+  .vb-chip-consensus{background:rgba(74,222,128,.9)}
+  .vb-chip-divisive{background:rgba(251,191,36,.9);color:#1a1200}
+  .vb-chip-gem{background:rgba(167,139,250,.9)}
+  .vb-score{position:absolute;bottom:6px;right:6px;width:30px;height:30px;font-size:12px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+  .vb-title{font-size:12px;font-weight:600;color:var(--text-primary);line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;transition:color .12s}
+  .vb-meta{font-size:10px;color:var(--text-tertiary);display:flex;align-items:center;gap:5px;flex-wrap:wrap;line-height:1.3}
+  .vb-delta{font-weight:700;font-variant-numeric:tabular-nums}
+  @media(max-width:560px){.vb-tile{flex-basis:110px}.vb-score{width:26px;height:26px;font-size:11px}}
+
+  /* ── Hot Take (legacy, kept for now) ── */
   .hot-take-inner{display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit}
   .hot-take-cover{width:52px;height:70px;border-radius:8px;object-fit:cover;flex-shrink:0;background:var(--tag-bg)}
   .hot-take-body{flex:1;min-width:0}
@@ -674,7 +1048,16 @@ const groupOgDescription = group.description
   .hist-wrap{display:flex;align-items:flex-end;justify-content:space-between;gap:6px;height:96px;padding-bottom:18px;position:relative}
   .hist-col{flex:1;display:flex;flex-direction:column;align-items:stretch;height:100%;position:relative}
   .hist-col-fill{flex:1;display:flex;align-items:flex-end}
-  .hist-bar{width:100%;min-height:0;border-radius:3px 3px 0 0;background:currentColor;transition:filter .15s,transform .15s;transform-origin:bottom}
+  .hist-bar{width:100%;min-height:0;border-radius:3px 3px 0 0;transition:filter .15s,transform .15s;transform-origin:bottom}
+  /* Score-class pills use the muted `-bg` variant on a dark background; the
+     histogram wants the vivid foreground color so the bars actually read. */
+  .hist-bar.score-perfect{background:var(--score-perfect)}
+  .hist-bar.score-great{background:var(--score-great)}
+  .hist-bar.score-teal{background:var(--score-teal)}
+  .hist-bar.score-good{background:var(--score-good)}
+  .hist-bar.score-mid{background:var(--score-mid)}
+  .hist-bar.score-orange{background:var(--score-orange)}
+  .hist-bar.score-low{background:var(--score-low)}
   .hist-col:hover .hist-bar{filter:brightness(1.25);transform:scaleY(1.03)}
   .hist-lbl{position:absolute;bottom:-16px;left:0;right:0;text-align:center;font-size:10px;color:var(--text-tertiary);font-weight:600}
 
@@ -768,6 +1151,32 @@ const groupOgDescription = group.description
   .compose-input:focus{border-color:var(--accent)}
   .compose-row{display:flex;align-items:center;gap:10px;margin-top:8px}
   .compose-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer}
+
+  /* ── Forum poll card styles live in src/styles/forum-poll.css (shared with the
+     dedicated poll page). Only the create-form widgets stay inline below. ── */
+
+  /* Color + text input pair in the create form */
+  .fp-opt-input-row{display:flex;align-items:center;gap:8px}
+  .fp-opt-color{width:34px;height:34px;padding:0;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);cursor:pointer;flex-shrink:0}
+  .fp-opt-color::-webkit-color-swatch-wrapper{padding:3px;border-radius:6px}
+  .fp-opt-color::-webkit-color-swatch{border:none;border-radius:5px}
+  .fp-opt-color::-moz-color-swatch{border:none;border-radius:5px}
+  .fp-opt-input-row .forum-poll-option-input{flex:1}
+
+  /* Game picker inside the create-poll form */
+  .fp-game-picker{position:relative}
+  .fp-game-chip{display:inline-flex;align-items:center;gap:8px;background:var(--accent-subtle);border:1px solid var(--accent);border-radius:999px;padding:4px 10px 4px 4px;margin-bottom:6px;font-size:12px;font-weight:600;color:var(--text-primary)}
+  .fp-game-chip img{width:24px;height:24px;border-radius:50%;object-fit:cover}
+  .fp-game-chip-clear{background:none;border:none;color:var(--text-tertiary);cursor:pointer;font-size:16px;line-height:1;padding:0 2px}
+  .fp-game-chip-clear:hover{color:var(--text-primary)}
+  .fp-game-results{position:absolute;top:100%;left:0;right:0;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;margin-top:4px;max-height:260px;overflow-y:auto;z-index:10;display:none;box-shadow:0 4px 16px rgba(0,0,0,.2)}
+  .fp-game-results.open{display:block}
+  .fp-game-result{display:flex;align-items:center;gap:10px;padding:8px 10px;cursor:pointer;transition:background .1s}
+  .fp-game-result:hover{background:var(--bg-hover)}
+  .fp-game-result img{width:32px;height:42px;object-fit:cover;border-radius:4px;background:var(--tag-bg);flex-shrink:0}
+  .fp-game-result-title{font-size:13px;font-weight:600;color:var(--text-primary)}
+  .fp-game-result-meta{font-size:11px;color:var(--text-tertiary)}
+  .fp-game-result-empty{padding:10px;font-size:12px;color:var(--text-tertiary);text-align:center}
 
   /* ── Polls ── */
   .poll-item{padding:12px 0;border-bottom:1px solid var(--border-subtle)}
@@ -1406,28 +1815,14 @@ const groupOgDescription = group.description
     .gg-head{flex-direction:column}
   }
 
-  /* ── Overview showcases (like a profile's): Customize to reorder / hide ── */
-  .ov-customize-row{display:flex;justify-content:flex-end;margin:-4px 0 10px}
-  .ov-customize-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:border-color .15s,color .15s}
-  .ov-customize-btn:hover{border-color:var(--accent);color:var(--accent)}
-  body.editing-overview .ov-customize-row{display:none}
-  .edit-mode-bar{display:none;position:sticky;top:54px;z-index:25;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;margin-bottom:14px;padding:10px 16px;align-items:center;justify-content:space-between;gap:12px;backdrop-filter:blur(12px)}
-  body.editing-overview .edit-mode-bar{display:flex}
-  .edit-mode-label{font-size:13px;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:8px}
-  .edit-mode-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse2 1.5s infinite}
-  @keyframes pulse2{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}
-  .edit-save-btn{padding:7px 18px;border-radius:20px;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;border:none;background:var(--accent);color:white;transition:opacity .15s}
-  .edit-save-btn:hover{opacity:.88}
-  .edit-save-btn:disabled{opacity:.5;cursor:not-allowed}
-  .edit-cancel-btn{padding:7px 14px;border-radius:20px;font-size:13px;font-weight:500;font-family:inherit;cursor:pointer;border:1px solid var(--border);background:none;color:var(--text-secondary);transition:all .15s}
-  .edit-cancel-btn:hover{border-color:var(--text-tertiary)}
+  /* ── Overview showcases (like a profile's): reorder / hide inside group Edit mode ── */
   .sc-stack{display:flex;flex-direction:column;gap:14px;margin-bottom:14px}
   .sc-stack .card{margin-bottom:0}
-  /* A section with nothing to show (no data yet) takes no space outside Customize */
-  body:not(.editing-overview) .sc-section:not(:has(> :not(.sc-edit-bar))){display:none}
-  body.editing-overview .sc-section:not(:has(> :not(.sc-edit-bar)))::after{content:"Nothing to show yet";display:block;padding:10px 12px;border:1px dashed var(--border);border-radius:10px;font-size:12px;color:var(--text-tertiary)}
+  /* A section with nothing to show (no data yet) takes no space outside Edit mode */
+  body:not(.editing-group) .sc-section:not(:has(> :not(.sc-edit-bar))){display:none}
+  body.editing-group .sc-section:not(:has(> :not(.sc-edit-bar)))::after{content:"Nothing to show yet";display:block;padding:10px 12px;border:1px dashed var(--border);border-radius:10px;font-size:12px;color:var(--text-tertiary)}
   .sc-edit-bar{display:none;align-items:center;gap:10px;padding:6px 6px 6px 12px;margin-bottom:8px;border:1px dashed color-mix(in srgb,var(--accent) 45%,var(--border));border-radius:10px;background:var(--accent-subtle)}
-  body.editing-overview .sc-edit-bar{display:flex}
+  body.editing-group .sc-edit-bar{display:flex}
   .sc-edit-label{flex:1;min-width:0;display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-secondary)}
   .sc-hidden-badge{display:none;font-size:10px;letter-spacing:.04em;padding:2px 7px;border-radius:999px;background:var(--tag-bg);color:var(--text-tertiary)}
   .sc-edit-actions{display:flex;align-items:center;gap:4px}
@@ -1444,8 +1839,8 @@ const groupOgDescription = group.description
   .sc-is-hidden .sc-toggle-btn:hover{filter:brightness(1.1)}
   .sc-is-hidden .sc-hidden-badge{display:inline-block}
   .sc-section.sc-is-hidden{display:none}
-  body.editing-overview .sc-section.sc-is-hidden{display:block}
-  body.editing-overview .sc-is-hidden > :not(.sc-edit-bar){opacity:.4;filter:grayscale(.7);pointer-events:none;user-select:none}
+  body.editing-group .sc-section.sc-is-hidden{display:block}
+  body.editing-group .sc-is-hidden > :not(.sc-edit-bar){opacity:.4;filter:grayscale(.7);pointer-events:none;user-select:none}
   .fav-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px;text-align:center;gap:10px;cursor:pointer;transition:background .15s;border-radius:14px;text-decoration:none;color:inherit}
   .fav-empty:hover{background:var(--bg-hover)}
   .fav-empty-icon{width:44px;height:44px;border-radius:12px;background:var(--tag-bg);border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;transition:border-color .15s}
@@ -1526,6 +1921,8 @@ const groupOgDescription = group.description
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet" />
 
 <DetailNav isLoggedIn={!!user} currentProfile={currentProfile} />
+
+<div id="accentScope" style={accentStyle}>
 
 <!-- Logged-out mobile invite hero (Rung 3 landing) — hidden on desktop + for members -->
 {!user && (
@@ -1620,7 +2017,22 @@ const groupOgDescription = group.description
   <div class="group-info-row">
     <div class="group-left">
       <h1 class="group-name">{group.name}</h1>
-      {group.description && <p class="group-desc">{group.description}</p>}
+      {canEditOverview ? (
+        <>
+          <p class="group-desc" id="groupDescDisplay">
+            {group.description || <span style="color:var(--text-tertiary);font-style:italic">Add a description…</span>}
+          </p>
+          <textarea
+            class="group-desc-textarea"
+            id="groupDescTextarea"
+            rows={3}
+            maxlength={300}
+            placeholder="Describe this group…"
+          >{group.description ?? ''}</textarea>
+        </>
+      ) : (
+        group.description && <p class="group-desc">{group.description}</p>
+      )}
       <div class="group-meta-badges">
         <span class="badge">{group.visibility}</span>
         {group.visibility === "public" && group.requires_approval && <span class="badge">Application required</span>}
@@ -1628,6 +2040,18 @@ const groupOgDescription = group.description
         {isSiteAdminGuest && <span class="badge badge-accent">site admin</span>}
         {focusLabel && <span class="badge" style="background:rgba(96,80,200,.12);color:var(--accent)">🎯 {focusLabel}</span>}
       </div>
+      {canEditOverview && (
+        <div class="accent-edit-row">
+          <label class="accent-edit-label" for="accentColorInput">Accent color</label>
+          <input
+            type="color"
+            class="accent-color-input"
+            id="accentColorInput"
+            value={initialAccentColorValue}
+          />
+          <button type="button" class="accent-reset-btn" id="accentResetBtn" onclick="resetAccentColor()">Reset to default</button>
+        </div>
+      )}
     </div>
 
     <div class="group-actions">
@@ -1664,8 +2088,20 @@ const groupOgDescription = group.description
       )}
 
       {/* Members */}
-      {isAdminOrOwner && (
-        <a href={`/groups/${group.id}/settings`} class="btn-ghost">Settings</a>
+      {(canEditOverview || isAdminOrOwner) && (
+        <div class="edit-settings-row">
+          {canEditOverview && (
+            <button type="button" class="edit-group-btn" id="editGroupBtn" onclick="enterGroupEdit()">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 2.5a2.121 2.121 0 013 3L5 15l-4 1 1-4 9.5-9.5z"/></svg>
+              Edit
+            </button>
+          )}
+          {isAdminOrOwner && (
+            <a href={`/groups/${group.id}/settings`} class="gear-btn" aria-label="Group settings" title="Settings">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </a>
+          )}
+        </div>
       )}
       {/* Nobody leaves the site group (src/utils/siteGroup.ts) */}
       {isMember && !isOwner && !group.is_site_group && (
@@ -1693,6 +2129,19 @@ const groupOgDescription = group.description
     )}
   </div>
 </div>
+
+{canEditOverview && (
+  <div class="edit-mode-bar edit-mode-bar--group" id="groupEditBar">
+    <div class="edit-mode-label">
+      <div class="edit-mode-dot"></div>
+      Editing group
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="edit-cancel-btn" onclick="cancelGroupEdit()">Cancel</button>
+      <button class="edit-save-btn" id="saveGroupBtn" onclick="saveGroupEdit()">Save changes</button>
+    </div>
+  </div>
+)}
 
 <!-- Mobile-only sticky join CTA for logged-out visitors (Rung 3 landing) -->
 {!user && (
@@ -1739,6 +2188,9 @@ const groupOgDescription = group.description
     </a>
     )}
     <a href={`/groups/${group.id}?tab=feed#tab-nav`} class={`tab-link${activeTab === "feed" ? " active" : ""}`}>Feed</a>
+    {canViewContent && (
+    <a href={`/groups/${group.id}?tab=forums#tab-nav`} class={`tab-link${activeTab === "forums" ? " active" : ""}`}>Forums</a>
+    )}
     {showSessions && (
     <a href={`/groups/${group.id}?tab=sessions#tab-nav`} class={`tab-link${activeTab === "sessions" ? " active" : ""}`}>
       Sessions {(sessionsData ?? []).length > 0 && <span class="tab-count">{(sessionsData ?? []).length}</span>}
@@ -1761,26 +2213,6 @@ const groupOgDescription = group.description
 
   <!-- Overview tab -->
   <div class={`tab-panel${activeTab === "overview" ? " active" : ""}`} id="tab-overview">
-    {canEditOverview && (
-      <>
-        <div class="ov-customize-row">
-          <button type="button" class="ov-customize-btn" onclick="enterOverviewEdit()">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
-            Customize
-          </button>
-        </div>
-        <div class="edit-mode-bar" id="overviewEditBar">
-          <div class="edit-mode-label">
-            <div class="edit-mode-dot"></div>
-            Customizing overview — move or hide sections
-          </div>
-          <div style="display:flex;gap:8px">
-            <button class="edit-cancel-btn" onclick="cancelOverviewEdit()">Cancel</button>
-            <button class="edit-save-btn" id="saveOverviewBtn" onclick="saveOverview()">Save changes</button>
-          </div>
-        </div>
-      </>
-    )}
     <div class="two-col">
       <!-- Left: top games + podium -->
       <div>
@@ -1883,9 +2315,12 @@ const groupOgDescription = group.description
             <div class="card">
               <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
                 <span>Announcements</span>
-                {isAdminOrOwner && (
-                  <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
-                )}
+                <span style="display:flex;align-items:center;gap:10px">
+                  <a href={`/groups/${group.id}?tab=forums&section=announcements`} class="see-all-link">See all →</a>
+                  {isAdminOrOwner && (
+                    <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+                  )}
+                </span>
               </div>
 
               {isAdminOrOwner && (
@@ -1913,6 +2348,7 @@ const groupOgDescription = group.description
                           : getInitials(a.profiles?.username ?? "?")}
                       </div>
                       <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
+                      {readBadgeSlugs(a.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" />)}
                       <span class="announcement-time">· {timeAgo(a.created_at)}</span>
                       {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
                     </div>
@@ -2001,128 +2437,36 @@ const groupOgDescription = group.description
           )}
             </ShowcaseSection>
           ) :
-          key === "hot_take" ? (
-            <ShowcaseSection section="hot_take" label={groupShowcaseLabel("hot_take")} hidden={overviewHidden.has("hot_take")} isOwner={canEditOverview}>
-          {hotTake && (
+          key === "verdict_board" ? (
+            <ShowcaseSection section="verdict_board" label={groupShowcaseLabel("verdict_board")} hidden={overviewHidden.has("verdict_board")} isOwner={canEditOverview}>
+          {verdictItems.length > 0 && (
             <div class="card">
-              <div class="card-title">Group's Hot Take</div>
-              <a class="hot-take-inner" href={`/games/${hotTake.game.slug}`}>
-                {igdbCover(hotTake.game.cover_img_url, "t_cover_small")
-                  ? <img class="hot-take-cover" src={igdbCover(hotTake.game.cover_img_url, "t_cover_small")!} alt={hotTake.game.title} loading="lazy" />
-                  : <div class="hot-take-cover" />
-                }
-                <div class="hot-take-body">
-                  <div class="hot-take-title">{hotTake.game.title}</div>
-                  <div class="hot-take-scores">
-                    <div>
-                      <div class={`score-badge ${scoreClass(hotTake.groupAvg)}`}>{formatScore(hotTake.groupAvg)}</div>
-                      <div class="hot-take-lbl">Group</div>
-                    </div>
-                    <div class="hot-take-vs">vs</div>
-                    <div>
-                      <div class={`score-badge ${scoreClass(hotTake.commAvg)}`}>{formatScore(hotTake.commAvg)}</div>
-                      <div class="hot-take-lbl">World</div>
-                    </div>
-                  </div>
-                  <div class={`hot-take-delta ${hotTake.delta > 0 ? "delta-up" : "delta-down"}`}>
-                    {hotTake.delta > 0 ? "+" : ""}{formatScore(hotTake.delta)} vs the world
-                  </div>
-                </div>
-              </a>
-            </div>
-          )}
-            </ShowcaseSection>
-          ) :
-          key === "agreement" ? (
-            <ShowcaseSection section="agreement" label={groupShowcaseLabel("agreement")} hidden={overviewHidden.has("agreement")} isOwner={canEditOverview}>
-          {((consensusRows.length > 0) || (divergentRows.length > 0)) && (
-            <div class="card">
-              <div class="agreement-grid">
-                {consensusRows.length > 0 && (
-                  <div class="agreement-col">
-                    <div class="mini-card-header">
-                      <div class="card-title" style="margin-bottom:0">Consensus Picks</div>
-                      <a class="see-all-link" href={`/groups/${group.id}/consensus`}>See all →</a>
-                    </div>
-                    <div class="mini-rank-list">
-                      {consensusRows.map((r: any, i: number) => {
-                        const avg = +r.avg_score.toFixed(1);
-                        return (
-                          <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                            <div class="mini-rank-num">{i + 1}</div>
-                            {igdbCover(r.cover_img_url, "t_thumb")
-                              ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                              : <div class="mini-rank-cover mini-rank-cover-placeholder" />
-                            }
-                            <div class="mini-rank-info">
-                              <div class="mini-rank-title">{r.title}</div>
-                              <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
-                            </div>
-                            <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                          </a>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-                {divergentRows.length > 0 && (
-                  <div class="agreement-col">
-                    <div class="mini-card-header">
-                      <div class="card-title" style="margin-bottom:0">Most Divisive</div>
-                      <a class="see-all-link" href={`/groups/${group.id}/divergent`}>See all →</a>
-                    </div>
-                    <div class="mini-rank-list">
-                      {divergentRows.map((r: any, i: number) => {
-                        const avg = +r.avg_score.toFixed(1);
-                        return (
-                          <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                            <div class="mini-rank-num">{i + 1}</div>
-                            {igdbCover(r.cover_img_url, "t_thumb")
-                              ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                              : <div class="mini-rank-cover mini-rank-cover-placeholder" />
-                            }
-                            <div class="mini-rank-info">
-                              <div class="mini-rank-title">{r.title}</div>
-                              <div class="mini-rank-meta">{r.review_count} reviews · scores {r.min_score}–{r.max_score}</div>
-                            </div>
-                            <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                          </a>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+              <div class="vb-head">
+                <div class="card-title" style="margin-bottom:0">Verdict board</div>
+                <div class="vb-sub">What the group plays differently</div>
               </div>
-            </div>
-          )}
-            </ShowcaseSection>
-          ) :
-          key === "hidden_gems" ? (
-            <ShowcaseSection section="hidden_gems" label={groupShowcaseLabel("hidden_gems")} hidden={overviewHidden.has("hidden_gems")} isOwner={canEditOverview}>
-          {hiddenGemRows.length > 0 && (
-            <div class="card">
-              <div class="mini-card-header">
-                <div class="card-title" style="margin-bottom:0">Hidden Gems</div>
-                <a class="see-all-link" href={`/groups/${group.id}/hidden-gems`}>See all →</a>
-              </div>
-              <div class="mini-rank-list">
-                {hiddenGemRows.map((r: any, i: number) => {
-                  const avg = +r.group_avg.toFixed(1);
-                  return (
-                    <a class="mini-rank-item" href={`/games/${r.slug}`}>
-                      <div class="mini-rank-num">{i + 1}</div>
-                      {igdbCover(r.cover_img_url, "t_thumb")
-                        ? <img class="mini-rank-cover" src={igdbCover(r.cover_img_url, "t_thumb")!} alt={r.title} loading="lazy" />
-                        : <div class="mini-rank-cover mini-rank-cover-placeholder" />
+              <div class="vb-strip" role="list">
+                {verdictItems.map((it) => (
+                  <a class={`vb-tile vb-tile-${it.kind}`} href={it.game.slug ? `/games/${it.game.slug}` : '#'} role="listitem" aria-label={`${it.kindLabel}: ${it.game.title}`}>
+                    <div class="vb-cover-wrap">
+                      {igdbCover(it.game.cover_img_url, "t_cover_small")
+                        ? <img class="vb-cover" src={igdbCover(it.game.cover_img_url, "t_cover_small")!} alt="" loading="lazy" />
+                        : <div class="vb-cover vb-cover-placeholder" />
                       }
-                      <div class="mini-rank-info">
-                        <div class="mini-rank-title">{r.title}</div>
-                        <div class="mini-rank-meta">{r.group_count} group review{r.group_count !== 1 ? 's' : ''} · {r.community_count} elsewhere</div>
-                      </div>
-                      <div class={`score-badge ${scoreClass(avg)}`}>{formatScore(avg)}</div>
-                    </a>
-                  );
-                })}
+                      <span class={`vb-chip vb-chip-${it.kind}`}>{it.kindLabel}</span>
+                      <div class={`vb-score score-badge ${scoreClass(it.score)}`}>{formatScore(it.score)}</div>
+                    </div>
+                    <div class="vb-title">{it.game.title}</div>
+                    <div class="vb-meta">
+                      {it.delta !== undefined && (
+                        <span class={`vb-delta ${it.delta > 0 ? 'delta-up' : 'delta-down'}`}>
+                          {it.delta > 0 ? '+' : ''}{formatScore(it.delta)}
+                        </span>
+                      )}
+                      <span>{it.meta}</span>
+                    </div>
+                  </a>
+                ))}
               </div>
             </div>
           )}
@@ -2247,7 +2591,7 @@ const groupOgDescription = group.description
                     }
                   </a>
                   <div style="flex:1;min-width:0">
-                    <a href={`/reviewers/${r.profiles?.username}`} style="font-size:12px;font-weight:600;color:inherit">@{r.profiles?.username}</a>
+                    <span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap"><a href={`/reviewers/${r.profiles?.username}`} style="font-size:12px;font-weight:600;color:inherit">@{r.profiles?.username}</a>{readBadgeSlugs(r.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}</span>
                     <div style="font-size:12px;color:var(--text-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
                       <a href={`/games/${r.games?.slug}`} style="color:inherit">{r.games?.title}</a>
                     </div>
@@ -2329,29 +2673,17 @@ const groupOgDescription = group.description
                   {canSeeMemberContent && (
             <div class="card">
               <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-                <span>Polls</span>
-                {isAdminOrOwner && (
-                  <button onclick="togglePollForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
-                )}
+                <span>Polls <span style="font-weight:400;font-size:11px;color:var(--text-tertiary);text-transform:none;letter-spacing:0">· {pollsShowcaseMode === "featured" ? "featured" : pollsShowcaseMode === "pinned" ? "pinned" : "latest"}</span></span>
+                <span style="display:flex;align-items:center;gap:10px">
+                  <a href={`/groups/${group.id}?tab=forums&section=polls`} class="see-all-link">See all →</a>
+                  {canEditOverview && (
+                    <button onclick="openPollsShowcasePicker()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">Change</button>
+                  )}
+                </span>
               </div>
 
-              {isAdminOrOwner && (
-                <div id="poll-form" class="compose-form" style="display:none">
-                  <input id="poll-question" class="compose-input" style="min-height:auto" type="text" placeholder="Ask the group something…" maxlength="300" />
-                  <div id="poll-options" style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
-                    <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
-                    <input class="compose-input poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
-                  </div>
-                  <div class="compose-row">
-                    <button class="btn-copy" style="font-size:11px;padding:5px 10px" onclick="addPollOption()">+ Option</button>
-                    <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="createPoll()">Create Poll</button>
-                  </div>
-                  <div id="poll-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
-                </div>
-              )}
-
               {polls.length === 0
-                ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No polls yet.</div>
+                ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">{pollsShowcaseMode === "featured" ? "The featured poll was removed. Pick another via Change." : "No polls yet."}</div>
                 : polls.map((p: any) => {
                   const hasVoted = !!p.myOptionId;
                   const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
@@ -2458,6 +2790,7 @@ const groupOgDescription = group.description
                 }
               </div>
               <a class="member-name" href={`/reviewers/${m.username}`} style="color:inherit;text-decoration:none">@{m.username}</a>
+          {readBadgeSlugs(m).map((slug) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
               {memberCustomRoles[m.id] && roleMap[memberCustomRoles[m.id]!]
                 ? <span class="member-role-tag" style={`background:${roleMap[memberCustomRoles[m.id]!].color}22;color:${roleMap[memberCustomRoles[m.id]!].color};border:1px solid ${roleMap[memberCustomRoles[m.id]!].color}44`}>{roleMap[memberCustomRoles[m.id]!].name}</span>
                 : <span class={`member-role-tag${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
@@ -2498,6 +2831,300 @@ const groupOgDescription = group.description
         isAdminOrOwner={isAdminOrOwner}
       />
     )}
+  </div>
+  )}
+
+  <!-- Forums tab -->
+  {canViewContent && (
+  <div class={`tab-panel${activeTab === "forums" ? " active" : ""}`} id="tab-forums">
+    <nav class="forums-subnav" role="tablist">
+      <a href={`/groups/${group.id}?tab=forums&section=announcements`}
+        class={`forums-sub-link${forumSection === "announcements" ? " active" : ""}`}
+        data-section="announcements">
+        Announcements {forumAnnouncements.length > 0 && <span class="tab-count">{forumAnnouncements.length}</span>}
+      </a>
+      <a href={`/groups/${group.id}?tab=forums&section=polls`}
+        class={`forums-sub-link${forumSection === "polls" ? " active" : ""}`}
+        data-section="polls">
+        Polls {forumPolls.length > 0 && <span class="tab-count">{forumPolls.length}</span>}
+      </a>
+    </nav>
+
+    <!-- Announcements section -->
+    <div class={`forums-section${forumSection === "announcements" ? " active" : ""}`} data-section="announcements">
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          <span>Announcements</span>
+          {isAdminOrOwner && (
+            <button onclick="toggleAnnouncementForm('forum-')" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+          )}
+        </div>
+
+        {isAdminOrOwner && (
+          <div id="forum-announcement-form" class="compose-form" style="display:none">
+            <textarea id="forum-announcement-body" class="compose-input" placeholder="Share an update with the group…" maxlength="2000"></textarea>
+            <div class="compose-row">
+              <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="postAnnouncement('forum-')">Post</button>
+              <label class="compose-check">
+                <input type="checkbox" id="forum-announcement-pinned" style="accent-color:var(--accent)" />
+                Pin to top
+              </label>
+            </div>
+            <div id="forum-announcement-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+          </div>
+        )}
+
+        {forumAnnouncements.length === 0
+          ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
+          : forumAnnouncements.map((a: any) => (
+            <div class="announcement-item" data-announcement-id={a.id}>
+              <div class="announcement-head">
+                <div class="announcement-avatar">
+                  {a.profiles?.avatar_url
+                    ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
+                    : getInitials(a.profiles?.username ?? "?")}
+                </div>
+                <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
+                {readBadgeSlugs(a.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" />)}
+                <span class="announcement-time">· {timeAgo(a.created_at)}</span>
+                {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
+              </div>
+              <div class="announcement-body">{a.body}</div>
+              {isAdminOrOwner && (
+                <div class="announcement-actions">
+                  <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
+                  <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
+                </div>
+              )}
+            </div>
+          ))
+        }
+      </div>
+    </div>
+
+    <!-- Polls section -->
+    <div class={`forums-section${forumSection === "polls" ? " active" : ""}`} data-section="polls">
+      <div class="forum-polls-head">
+        <span class="forum-polls-head-label">Polls</span>
+        {canPostPoll && (
+          <button onclick="togglePollForm('forum-')" class="forum-polls-new-btn">+ New</button>
+        )}
+      </div>
+
+      {canPostPoll && (
+        <div id="forum-poll-form" class="compose-form" style="display:none">
+          <input id="forum-poll-question" class="compose-input" style="min-height:auto" type="text" placeholder="Ask the group something…" maxlength="300" />
+          <div style="margin-top:8px">
+            <div style="font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Reference a game <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-tertiary)">(optional)</span></div>
+            <div class="fp-game-picker" id="forum-poll-game-picker">
+              <div id="forum-poll-game-chip" class="fp-game-chip" hidden>
+                <img id="forum-poll-game-chip-cover" alt="" />
+                <span id="forum-poll-game-chip-title"></span>
+                <button type="button" class="fp-game-chip-clear" onclick="clearForumPollGame()" aria-label="Remove game">×</button>
+              </div>
+              <input id="forum-poll-game-input" class="compose-input" style="min-height:auto" type="text" placeholder="Search for a game…" autocomplete="off" oninput="searchForumPollGames(this.value)" onfocus="searchForumPollGames(this.value)" />
+              <div id="forum-poll-game-results" class="fp-game-results"></div>
+            </div>
+          </div>
+          <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Options <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-tertiary)">· pick a color for each slice of the pie</span></div>
+          <div id="forum-poll-options" style="display:flex;flex-direction:column;gap:6px">
+            <div class="fp-opt-input-row">
+              <input class="fp-opt-color" type="color" value="#6050c8" title="Slice color" />
+              <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 1" maxlength="80" />
+            </div>
+            <div class="fp-opt-input-row">
+              <input class="fp-opt-color" type="color" value="#22c55e" title="Slice color" />
+              <input class="compose-input forum-poll-option-input" style="min-height:auto" type="text" placeholder="Option 2" maxlength="80" />
+            </div>
+          </div>
+          <div class="compose-row">
+            <button class="btn-copy" style="font-size:11px;padding:5px 10px" onclick="addPollOption('forum-')">+ Option</button>
+            <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="createPoll('forum-')">Create Poll</button>
+          </div>
+          <div id="forum-poll-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
+        </div>
+      )}
+
+      {forumPolls.length === 0
+        ? <div class="card" style="font-size:13px;color:var(--text-tertiary)">No polls yet.</div>
+        : forumPolls.map((p: any) => {
+          const hasVoted = !!p.myOptionId;
+          const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+          const showResults = hasVoted || p.closed;
+          const game = p.games;
+          const gameHref = p.featured_game_id
+            ? `/groups/${group.id}?tab=games`
+            : (game?.slug ? `/games/${game.slug}` : null);
+          const author = p.profiles;
+          const roleTagClass = p.authorRole === "Owner" ? "fp-poll-role-owner"
+            : p.authorRole === "Admin" ? "fp-poll-role-admin"
+            : p.authorRole === "Staff" ? "fp-poll-role-staff"
+            : "";
+          const commentCount = (p.answers?.length ?? 0) + (p.answers?.reduce((n: number, a: any) => n + a.replies.length, 0) ?? 0);
+          const gameYear = game?.date_released ? new Date(game.date_released).getFullYear() : null;
+          const voters = (p.voters ?? []) as any[];
+          const voterStrip = voters.slice(0, 6);
+          const extraVoters = Math.max(0, voters.length - voterStrip.length);
+          const previewComments = (p.answers ?? []).slice(0, 1);
+          const pollPageHref = `/groups/${group.id}/polls/${p.id}`;
+          const slices = pieSlices(p.options, p.totalVotes);
+          const bodyCols = game && previewComments.length ? "both"
+            : game ? "game"
+            : previewComments.length ? "comments"
+            : "solo";
+          return (
+            <article class={`fp-poll${p.pinned ? " fp-poll-pinned" : ""}${p.closed ? " fp-poll-closed" : ""}`} data-poll-id={p.id} data-cols={bodyCols}>
+              <header class="fp-poll-head">
+                <a href={author?.username ? `/reviewers/${author.username}` : "#"} class="fp-poll-avatar">
+                  {author?.avatar_url
+                    ? <img src={author.avatar_url} alt="" />
+                    : (author?.username ? author.username.slice(0, 2).toUpperCase() : "?")}
+                </a>
+                <a href={author?.username ? `/reviewers/${author.username}` : "#"} class="fp-poll-author">@{author?.username ?? "unknown"}</a>
+                {readBadgeSlugs(author).map((slug) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
+                {p.authorRole && <span class={`fp-poll-role ${roleTagClass}`}>{p.authorRole}</span>}
+                <span class="fp-poll-time">· {timeAgo(p.created_at)}</span>
+                {p.pinned && <span class="fp-poll-chip fp-poll-chip-pin">📌 Pinned</span>}
+                {p.closed && <span class="fp-poll-chip fp-poll-chip-closed">🔒 Closed</span>}
+                {p.featured_game_id && <span class="fp-poll-chip fp-poll-chip-featured">★ Featured</span>}
+                {canManagePoll && (
+                  <span class="fp-poll-admin-actions">
+                    {canEditOverview && (
+                      <button class="announcement-action" onclick={`togglePollPinned('${p.id}', ${!p.pinned})`}>{p.pinned ? "Unpin" : "Pin"}</button>
+                    )}
+                    {!p.featured_game_id && (
+                      <>
+                        <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
+                        <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
+                      </>
+                    )}
+                  </span>
+                )}
+              </header>
+
+              <h3 class="fp-poll-question">{p.question}</h3>
+
+              <div class="fp-poll-body">
+                <div class="fp-poll-panel">
+                  <div class="fp-poll-panel-head">
+                    <span class="fp-poll-panel-status">{p.closed ? "Poll closed" : "Open"}</span>
+                    <span class="fp-poll-panel-votes">{p.totalVotes.toLocaleString()} vote{p.totalVotes !== 1 ? "s" : ""}</span>
+                  </div>
+                  <div class="fp-poll-panel-body">
+                    <div class="fp-poll-options">
+                      {showResults
+                        ? p.options.map((o: any) => {
+                            const pct = p.totalVotes > 0 ? Math.round((o.count / p.totalVotes) * 100) : 0;
+                            const isMine = o.id === p.myOptionId;
+                            const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+                            return (
+                              <div class={`fp-opt-result${isMine ? " voted" : ""}${o.isWinner ? " winner" : ""}`}>
+                                <span class="fp-opt-label">
+                                  {isMine && <span class="fp-opt-check">✓</span>}{o.label}{o.isWinner && <span class="fp-opt-crown" title="Leading option">👑</span>}
+                                </span>
+                                <div class="fp-opt-row">
+                                  <div class="fp-opt-track">
+                                    <div class="fp-opt-bar" style={`width:${pct}%;background:${sliceColor}`}></div>
+                                  </div>
+                                  <span class="fp-opt-count">{o.count.toLocaleString()}<span class="fp-opt-count-pct">· {pct}%</span></span>
+                                </div>
+                              </div>
+                            );
+                          })
+                        : p.options.map((o: any) => {
+                            const sliceColor = o.color || POLL_SLICE_COLORS[(o.position ?? 0) % POLL_SLICE_COLORS.length];
+                            return (
+                              <button class="fp-opt-vote" onclick={`votePoll('${p.id}', '${o.id}')`} disabled={p.closed}>
+                                <span class="fp-opt-dot" style={`background:${sliceColor}`}></span>{o.label}
+                              </button>
+                            );
+                          })
+                      }
+                    </div>
+
+                    <div class="fp-pie-wrap" aria-label={`Poll results: ${p.totalVotes} vote${p.totalVotes !== 1 ? "s" : ""}`}>
+                      <svg class="fp-pie" viewBox="0 0 100 100">
+                        {slices.length === 0
+                          ? <circle cx="50" cy="50" r="48" fill="none" stroke="var(--border)" stroke-width="2" stroke-dasharray="3 3" />
+                          : slices.map((s: any) => (
+                              <path d={s.path} fill={s.color}>
+                                <title>{s.label}: {Math.round(s.pct * 100)}% ({s.count})</title>
+                              </path>
+                            ))
+                        }
+                        <circle cx="50" cy="50" r="22" fill="var(--bg-card)" />
+                        <text x="50" y="48" text-anchor="middle" font-size="15" font-weight="700" fill="var(--text-primary)" dominant-baseline="middle">{p.totalVotes}</text>
+                        <text x="50" y="62" text-anchor="middle" font-size="7" fill="var(--text-tertiary)" dominant-baseline="middle" style="text-transform:uppercase;letter-spacing:.08em;font-weight:700">vote{p.totalVotes !== 1 ? "s" : ""}</text>
+                      </svg>
+                    </div>
+
+                    {game && (
+                      <a href={gameHref ?? "#"} class="fp-poll-gamecard" title={game.title}>
+                        {igdbCover(game.cover_img_url, "t_cover_big")
+                          ? <img src={igdbCover(game.cover_img_url, "t_cover_big")!} alt={game.title} loading="lazy" />
+                          : <div class="fp-poll-gamecard-nocover">🎮</div>
+                        }
+                        <div class="fp-poll-gamecard-overlay">
+                          {p.featured_game_id && <div class="fp-poll-gamecard-kicker">Featured</div>}
+                          <div class="fp-poll-gamecard-title">{game.title}</div>
+                          {gameYear && <div class="fp-poll-gamecard-year">{gameYear}</div>}
+                        </div>
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                <a href={pollPageHref} class="fp-comments-preview" aria-label="Open full discussion">
+                  <div class="fp-comments-preview-head">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+                    <span>{commentCount > 0 ? `${commentCount} comment${commentCount !== 1 ? "s" : ""}` : "Discussion"}</span>
+                  </div>
+                  {previewComments.length > 0
+                    ? (
+                      <ul class="fp-comments-preview-list">
+                        {previewComments.map((a: any) => (
+                          <li class="fp-comments-preview-item">
+                            <div class="fp-comments-preview-avatar">
+                              {a.avatarUrl ? <img src={a.avatarUrl} alt="" loading="lazy" /> : (a.username ? a.username.slice(0, 2).toUpperCase() : "?")}
+                            </div>
+                            <span class="fp-comments-preview-name">@{a.username}</span>
+                            <span class="fp-comments-preview-body">{a.body}</span>
+                            {a.upvotes > 0 && <span class="fp-comments-preview-ups">↑ {a.upvotes}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    )
+                    : <div class="fp-comments-preview-empty">Be the first to reply</div>
+                  }
+                  <div class="fp-comments-preview-foot">
+                    {commentCount > 0 ? `View all ${commentCount} →` : "Open discussion →"}
+                  </div>
+                </a>
+              </div>
+
+              <footer class="fp-poll-foot">
+                {voterStrip.length > 0
+                  ? (
+                    <div class="fp-voter-strip">
+                      {voterStrip.map((v: any) => (
+                        <a href={`/reviewers/${v.username}`} class="fp-voter" title={`@${v.username}`}>
+                          {v.avatar_url
+                            ? <img src={v.avatar_url} alt="" loading="lazy" />
+                            : (v.username ? v.username.slice(0, 2).toUpperCase() : "?")}
+                        </a>
+                      ))}
+                      {extraVoters > 0 && <span class="fp-voter fp-voter-more">+{extraVoters}</span>}
+                    </div>
+                  )
+                  : <span class="fp-no-votes">Be the first to vote</span>
+                }
+                <a href={pollPageHref} class="fp-poll-foot-btn">Open →</a>
+              </footer>
+            </article>
+          );
+        })
+      }
+    </div>
   </div>
   )}
 
@@ -2572,6 +3199,7 @@ const groupOgDescription = group.description
             }
           </div>
           <a class="member-name" href={`/reviewers/${m.username}`} style="color:inherit;text-decoration:none">@{m.username}</a>
+          {readBadgeSlugs(m).map((slug) => <ProfileBadge slug={slug} size="sm" iconOnly={true} />)}
           {memberCustomRoles[m.id] && roleMap[memberCustomRoles[m.id]!]
             ? <span class="member-role-tag" style={`background:${roleMap[memberCustomRoles[m.id]!].color}22;color:${roleMap[memberCustomRoles[m.id]!].color};border:1px solid ${roleMap[memberCustomRoles[m.id]!].color}44`}>{roleMap[memberCustomRoles[m.id]!].name}</span>
             : <span class={`member-role-tag${m.role === "owner" ? " owner" : ""}`}>{m.role}</span>
@@ -2630,12 +3258,53 @@ const groupOgDescription = group.description
   updateIcon(document.documentElement.getAttribute('data-theme') || 'dark')
 </script>
 
+<script is:inline define:vars={{ isSignedIn: !!currentProfile }}>
+  // Non-members (incl. signed-out visitors) see the same poll view as members
+  // — any attempt to vote, upvote, reply or comment redirects them to sign in
+  // instead of silently failing against the server's auth check.
+  if (!isSignedIn) {
+    const toSignin = () => {
+      const returnTo = window.location.pathname + window.location.search + window.location.hash;
+      window.location.href = '/signin?returnTo=' + encodeURIComponent(returnTo);
+    };
+    // Enable any upvote buttons PollAnswer rendered as disabled for the signed-out case
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.gg-upvote[disabled]').forEach((b) => { b.disabled = false; });
+    });
+    // Click intercept — capture phase so we beat delegated handlers (group-games.ts)
+    document.addEventListener('click', (e) => {
+      const t = e.target instanceof HTMLElement ? e.target : null;
+      if (!t) return;
+      const trigger = t.closest(
+        '.fp-opt-vote, .gg-upvote, [data-gg-action="upvote"], [data-poll-answer-delete], ' +
+        '.fp-poll-reply-form button[type="submit"], .gg-reply-form button[type="submit"]'
+      );
+      if (!trigger) return;
+      // Don't block pure link navigation inside a poll card
+      if (trigger.tagName === 'A') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      toSignin();
+    }, true);
+    // Form submit intercept — same deal
+    document.addEventListener('submit', (e) => {
+      const f = e.target instanceof HTMLFormElement ? e.target : null;
+      if (!f) return;
+      if (f.classList.contains('fp-poll-reply-form') || f.hasAttribute('data-gg-reply')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        toSignin();
+      }
+    }, true);
+  }
+</script>
+
 <script define:vars={{ groupDataJson, memberListJson, inviteUrl: isAdminOrOwner ? inviteUrl : null, isAdminOrOwner, groupId: group.id }}>
 const groupData = JSON.parse(groupDataJson);
 const memberList = JSON.parse(memberListJson);
 
-// Mark body for admin-only CSS (banner/avatar edit buttons)
-if (isAdminOrOwner) document.body.classList.add('group-admin');
+// Avatar/banner edit overlays are now gated to .editing-group (set by enterGroupEdit),
+// so admin status alone no longer unlocks them — the Edit button next to Settings does.
 
 // ── Avatar upload ──
 document.getElementById('avatarInput')?.addEventListener('change', async (e) => {
@@ -3019,16 +3688,18 @@ async function deleteSession(sessionId) {
 window.deleteSession = deleteSession;
 
 // ── Announcements ──
-function toggleAnnouncementForm() {
-  const form = document.getElementById('announcement-form');
+function toggleAnnouncementForm(prefix) {
+  prefix = prefix || '';
+  const form = document.getElementById(prefix + 'announcement-form');
   if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
 }
 window.toggleAnnouncementForm = toggleAnnouncementForm;
 
-async function postAnnouncement() {
-  const bodyEl = document.getElementById('announcement-body');
-  const pinnedEl = document.getElementById('announcement-pinned');
-  const errEl = document.getElementById('announcement-err');
+async function postAnnouncement(prefix) {
+  prefix = prefix || '';
+  const bodyEl = document.getElementById(prefix + 'announcement-body');
+  const pinnedEl = document.getElementById(prefix + 'announcement-pinned');
+  const errEl = document.getElementById(prefix + 'announcement-err');
   const body = bodyEl?.value?.trim();
   if (errEl) errEl.style.display = 'none';
   if (!body) { if (errEl) { errEl.textContent = 'Write something first'; errEl.style.display = 'block'; } return; }
@@ -3066,38 +3737,65 @@ async function deleteAnnouncement(announcementId) {
 window.deleteAnnouncement = deleteAnnouncement;
 
 // ── Polls ──
-function togglePollForm() {
-  const form = document.getElementById('poll-form');
+function togglePollForm(prefix) {
+  prefix = prefix || '';
+  const form = document.getElementById(prefix + 'poll-form');
   if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
 }
 window.togglePollForm = togglePollForm;
 
-function addPollOption() {
-  const container = document.getElementById('poll-options');
+const POLL_SLICE_COLORS = ['#6050c8', '#22c55e', '#f0b429', '#ef4444', '#06b6d4', '#ec4899'];
+function addPollOption(prefix) {
+  prefix = prefix || '';
+  const container = document.getElementById(prefix + 'poll-options');
   if (!container) return;
-  const inputs = container.querySelectorAll('.poll-option-input');
+  const optClass = prefix + 'poll-option-input';
+  const inputs = container.querySelectorAll('.' + optClass);
   if (inputs.length >= 6) return;
+  const row = document.createElement('div');
+  row.className = 'fp-opt-input-row';
+  const color = document.createElement('input');
+  color.type = 'color';
+  color.className = 'fp-opt-color';
+  color.title = 'Slice color';
+  color.value = POLL_SLICE_COLORS[inputs.length % POLL_SLICE_COLORS.length];
   const input = document.createElement('input');
-  input.className = 'compose-input poll-option-input';
+  input.className = 'compose-input ' + optClass;
   input.style.minHeight = 'auto';
   input.type = 'text';
   input.maxLength = 80;
   input.placeholder = `Option ${inputs.length + 1}`;
-  container.appendChild(input);
+  row.appendChild(color);
+  row.appendChild(input);
+  container.appendChild(row);
 }
 window.addPollOption = addPollOption;
 
-async function createPoll() {
-  const questionEl = document.getElementById('poll-question');
-  const errEl = document.getElementById('poll-err');
+async function createPoll(prefix) {
+  prefix = prefix || '';
+  const questionEl = document.getElementById(prefix + 'poll-question');
+  const errEl = document.getElementById(prefix + 'poll-err');
   const question = questionEl?.value?.trim();
-  const options = Array.from(document.querySelectorAll('.poll-option-input')).map(i => i.value.trim()).filter(Boolean);
+  const optClass = prefix + 'poll-option-input';
+  const optionInputs = Array.from(document.querySelectorAll('.' + optClass));
+  const options = [];
+  const colors = [];
+  for (const input of optionInputs) {
+    const label = input.value.trim();
+    if (!label) continue;
+    options.push(label);
+    // Each option-input lives inside .fp-opt-input-row with a sibling .fp-opt-color
+    const colorInput = input.closest('.fp-opt-input-row')?.querySelector('.fp-opt-color');
+    colors.push(colorInput?.value || null);
+  }
   if (errEl) errEl.style.display = 'none';
   if (!question) { if (errEl) { errEl.textContent = 'Add a question'; errEl.style.display = 'block'; } return; }
   if (options.length < 2) { if (errEl) { errEl.textContent = 'Add at least 2 options'; errEl.style.display = 'block'; } return; }
+  // Forum poll form carries a game_id in window.__forumPollGameId when the picker has a chip
+  const game_id = prefix === 'forum-' ? (window.__forumPollGameId || null) : null;
   const res = await fetch('/api/groups/polls/create', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, question, options }),
+    body: JSON.stringify({ group_id: groupData.id, question, options, colors, game_id }),
   });
   if (res.ok) window.location.reload();
   else {
@@ -3106,6 +3804,81 @@ async function createPoll() {
   }
 }
 window.createPoll = createPoll;
+
+// ── Forum poll: game picker ──
+let fpGameSeq = 0;
+let fpGameTimer = null;
+window.__forumPollGameId = null;
+
+function showForumPollChip(game) {
+  window.__forumPollGameId = game.id;
+  const chip = document.getElementById('forum-poll-game-chip');
+  const cover = document.getElementById('forum-poll-game-chip-cover');
+  const title = document.getElementById('forum-poll-game-chip-title');
+  const input = document.getElementById('forum-poll-game-input');
+  const results = document.getElementById('forum-poll-game-results');
+  if (chip) chip.hidden = false;
+  if (cover) {
+    const src = (game.cover_img_url || '').replace(/t_[a-z0-9_]+/, 't_thumb');
+    cover.src = src.startsWith('//') ? 'https:' + src : src;
+  }
+  if (title) title.textContent = game.title;
+  if (input) { input.value = ''; input.style.display = 'none'; }
+  if (results) results.classList.remove('open');
+}
+
+function clearForumPollGame() {
+  window.__forumPollGameId = null;
+  const chip = document.getElementById('forum-poll-game-chip');
+  const input = document.getElementById('forum-poll-game-input');
+  if (chip) chip.hidden = true;
+  if (input) { input.style.display = ''; input.value = ''; input.focus(); }
+}
+window.clearForumPollGame = clearForumPollGame;
+
+async function searchForumPollGames(q) {
+  const results = document.getElementById('forum-poll-game-results');
+  if (!results) return;
+  q = (q || '').trim();
+  if (q.length < 2) { results.classList.remove('open'); results.innerHTML = ''; return; }
+  if (fpGameTimer) clearTimeout(fpGameTimer);
+  fpGameTimer = setTimeout(async () => {
+    const seq = ++fpGameSeq;
+    let games = [];
+    try {
+      const res = await fetch('/api/games/search?q=' + encodeURIComponent(q));
+      if (res.ok) games = await res.json();
+    } catch {}
+    if (seq !== fpGameSeq) return;
+    // Only local games (have an id); skip IGDB-only picks since game_id must exist in our DB
+    const local = (games || []).filter(g => g.source !== 'igdb' && g.id);
+    if (!local.length) {
+      results.innerHTML = '<div class="fp-game-result-empty">No games found</div>';
+    } else {
+      results.innerHTML = '';
+      for (const g of local.slice(0, 8)) {
+        const row = document.createElement('div');
+        row.className = 'fp-game-result';
+        const cover = (g.cover_img_url || '').replace(/t_[a-z0-9_]+/, 't_thumb');
+        const coverSrc = cover.startsWith('//') ? 'https:' + cover : cover;
+        row.innerHTML = `${coverSrc ? `<img src="${coverSrc}" alt="" />` : '<div style="width:32px;height:42px;border-radius:4px;background:var(--tag-bg)"></div>'}
+          <div><div class="fp-game-result-title"></div>${g.year ? `<div class="fp-game-result-meta">${g.year}</div>` : ''}</div>`;
+        row.querySelector('.fp-game-result-title').textContent = g.title;
+        row.addEventListener('click', () => showForumPollChip(g));
+        results.appendChild(row);
+      }
+    }
+    results.classList.add('open');
+  }, 150);
+}
+window.searchForumPollGames = searchForumPollGames;
+
+document.addEventListener('click', (e) => {
+  const picker = document.getElementById('forum-poll-game-picker');
+  const results = document.getElementById('forum-poll-game-results');
+  if (!picker || !results) return;
+  if (!picker.contains(e.target)) results.classList.remove('open');
+});
 
 async function votePoll(pollId, optionId) {
   const res = await fetch('/api/groups/polls/vote', {
@@ -3116,6 +3889,16 @@ async function votePoll(pollId, optionId) {
   else { const d = await res.json(); alert(d.error ?? 'Error voting'); }
 }
 window.votePoll = votePoll;
+
+async function togglePollPinned(pollId, pinned) {
+  const res = await fetch('/api/groups/polls/pin', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ poll_id: pollId, pinned }),
+  });
+  if (res.ok) window.location.reload();
+  else { const d = await res.json(); alert(d.error ?? 'Error'); }
+}
+window.togglePollPinned = togglePollPinned;
 
 async function togglePollClosed(pollId, closed) {
   const res = await fetch('/api/groups/polls/close', {
@@ -3185,6 +3968,54 @@ window.deletePoll = deletePoll;
   </div>
 )}
 
+{canEditOverview && (
+  <div class="modal-backdrop" id="pollsShowcaseModal" onclick="closePollsShowcasePickerOnBackdrop(event)">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <div class="modal-title">Showcase a poll</div>
+        <button class="modal-close" onclick="closePollsShowcasePicker()">×</button>
+      </div>
+      <div class="vsm-body">
+        <label class="vsm-option">
+          <input type="radio" name="psmMode" value="latest" checked={pollsShowcaseMode === "latest"} />
+          <span class="vsm-option-text">
+            <span class="vsm-option-title">Latest poll</span>
+            <span class="vsm-option-desc">Always show the newest poll in this group.</span>
+          </span>
+        </label>
+        <label class="vsm-option">
+          <input type="radio" name="psmMode" value="pinned" checked={pollsShowcaseMode === "pinned"} />
+          <span class="vsm-option-text">
+            <span class="vsm-option-title">Pinned poll</span>
+            <span class="vsm-option-desc">Show the newest pinned poll. Falls back to the latest poll if nothing is pinned.</span>
+          </span>
+        </label>
+        <label class={`vsm-option${overviewPollChoices.length === 0 ? " vsm-option--disabled" : ""}`}>
+          <input type="radio" name="psmMode" value="featured" checked={pollsShowcaseMode === "featured"} disabled={overviewPollChoices.length === 0} />
+          <span class="vsm-option-text">
+            <span class="vsm-option-title">Featured poll</span>
+            <span class="vsm-option-desc">{overviewPollChoices.length === 0 ? "Create a poll first on the Forums tab." : "Pick a specific poll to showcase."}</span>
+            {overviewPollChoices.length > 0 && (
+              <select id="psmPollId" class="modal-search-input">
+                {overviewPollChoices.map((p: any) => (
+                  <option value={p.id} selected={p.id === pollsShowcasePollId}>
+                    {p.pinned ? "📌 " : ""}{p.question.length > 60 ? p.question.slice(0, 60) + "…" : p.question}
+                  </option>
+                ))}
+              </select>
+            )}
+          </span>
+        </label>
+        <div class="vsm-error" id="psmError" hidden></div>
+      </div>
+      <div class="vsm-footer">
+        <button type="button" class="vsm-btn" onclick="closePollsShowcasePicker()">Cancel</button>
+        <button type="button" class="vsm-btn vsm-btn--primary" onclick="savePollsShowcase()">Save</button>
+      </div>
+    </div>
+  </div>
+)}
+
 <script is:inline define:vars={{ overviewHiddenJson, overviewOrderJson, overviewGroupId: group.id, canEditOverview }}>
   // ── OVERVIEW SHOWCASES: Customize (order + hiding) ──
   // Like Edit profile (see ShowcaseSection.astro): moving reorders a section
@@ -3241,31 +4072,111 @@ window.deletePoll = deletePoll;
     })
     refreshShowcaseMoveButtons()
   }
-  function enterOverviewEdit() {
-    document.body.classList.add('editing-overview')
+  // ── GROUP EDIT MODE ──
+  // Mirrors "Edit profile" on the reviewer page: one Edit button next to Settings
+  // enters edit mode, revealing avatar/banner overlays, the description textarea,
+  // the accent-color picker and the showcase reorder/hide bars. One Save pushes
+  // description + accent + showcase order/hidden together through /api/groups/update.
+  // Avatar and banner uploads still happen inline (same as before).
+  var _origGroupDesc = ''
+  var _origAccentValue = '#6050c8'
+  var _origAccentCleared = true
+  var _hasCustomAccent = false
+  var _accentInput = null
+  var _descTextarea = null
+  var _descDisplay = null
+
+  function defaultAccentColor() {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? '#4a3a8a' : '#6050c8'
+  }
+  function initAccentState() {
+    _accentInput = document.getElementById('accentColorInput')
+    _descTextarea = document.getElementById('groupDescTextarea')
+    _descDisplay = document.getElementById('groupDescDisplay')
+    if (_accentInput) {
+      _hasCustomAccent = _accentInput.value && _accentInput.value !== defaultAccentColor()
+      if (!_hasCustomAccent) _accentInput.dataset.cleared = 'true'
+      _accentInput.addEventListener('input', function() { delete _accentInput.dataset.cleared })
+    }
+  }
+  initAccentState()
+  function resetAccentColor() {
+    if (_accentInput) { _accentInput.value = defaultAccentColor(); _accentInput.dataset.cleared = 'true' }
+  }
+  window.resetAccentColor = resetAccentColor
+
+  function enterGroupEdit() {
+    if (!canEditOverview) return
+    document.body.classList.add('editing-group')
     refreshShowcaseMoveButtons()
+    if (_descTextarea) {
+      _origGroupDesc = _descTextarea.value
+      _descTextarea.focus()
+    }
+    if (_accentInput) {
+      _origAccentValue = _accentInput.value
+      _origAccentCleared = _accentInput.dataset.cleared === 'true'
+      if (!_hasCustomAccent) { _accentInput.value = defaultAccentColor(); _accentInput.dataset.cleared = 'true' }
+    }
   }
-  function cancelOverviewEdit() {
+  function cancelGroupEdit() {
     restoreOverview()
-    document.body.classList.remove('editing-overview')
+    document.body.classList.remove('editing-group')
+    if (_descTextarea) _descTextarea.value = _origGroupDesc
+    if (_accentInput) {
+      _accentInput.value = _origAccentValue
+      if (_origAccentCleared) _accentInput.dataset.cleared = 'true'; else delete _accentInput.dataset.cleared
+    }
   }
-  async function saveOverview() {
-    var btn = document.getElementById('saveOverviewBtn')
+  async function saveGroupEdit() {
+    var btn = document.getElementById('saveGroupBtn')
     var order = allOverviewSections().map(function(el) { return el.dataset.showcase })
     var hidden = allOverviewSections().filter(function(el) { return el.classList.contains('sc-is-hidden') }).map(function(el) { return el.dataset.showcase })
+    var payload = { group_id: overviewGroupId, overview_order: order, overview_hidden: hidden }
+    if (_descTextarea && _descTextarea.value !== _origGroupDesc) {
+      payload.description = _descTextarea.value.trim()
+    }
+    if (_accentInput) {
+      var accentCleared = _accentInput.dataset.cleared === 'true'
+      payload.accent_color = accentCleared ? '' : _accentInput.value
+    }
     btn.disabled = true
     btn.textContent = 'Saving…'
     try {
       var res = await fetch('/api/groups/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ group_id: overviewGroupId, overview_order: order, overview_hidden: hidden })
+        body: JSON.stringify(payload)
       })
       var data = await res.json().catch(function() { return {} })
       if (!res.ok) throw new Error(data.error || 'Failed to save')
       savedOverviewOrder = order
       savedOverviewHidden = hidden
-      document.body.classList.remove('editing-overview')
+      // Reflect description inline so the save round-trip isn't needed to see it
+      if (_descTextarea && _descDisplay && 'description' in payload) {
+        _origGroupDesc = _descTextarea.value
+        if (payload.description) {
+          _descDisplay.textContent = payload.description
+        } else {
+          _descDisplay.innerHTML = '<span style="color:var(--text-tertiary);font-style:italic">Add a description…</span>'
+        }
+      }
+      // Live accent color update, scoped to #accentScope so the topnav never recolors
+      var scope = document.getElementById('accentScope')
+      if (_accentInput) {
+        var cleared = _accentInput.dataset.cleared === 'true'
+        if (cleared) {
+          if (scope) scope.style.removeProperty('--accent')
+          _hasCustomAccent = false
+        } else {
+          if (scope) scope.style.setProperty('--accent', _accentInput.value)
+          _hasCustomAccent = true
+          delete _accentInput.dataset.cleared
+        }
+        _origAccentValue = _accentInput.value
+        _origAccentCleared = cleared
+      }
+      document.body.classList.remove('editing-group')
     } catch (e) {
       alert(e && e.message ? e.message : 'Failed to save')
     } finally {
@@ -3275,9 +4186,9 @@ window.deletePoll = deletePoll;
   }
   window.moveShowcase = moveShowcase
   window.toggleShowcaseHidden = toggleShowcaseHidden
-  window.enterOverviewEdit = enterOverviewEdit
-  window.cancelOverviewEdit = cancelOverviewEdit
-  window.saveOverview = saveOverview
+  window.enterGroupEdit = enterGroupEdit
+  window.cancelGroupEdit = cancelGroupEdit
+  window.saveGroupEdit = saveGroupEdit
 
   // ── VIDEO SHOWCASE ── (the same as a profile's)
   // Featured: the id is server-rendered. Latest: ask /api/groups/latest-video
@@ -3403,6 +4314,51 @@ window.deletePoll = deletePoll;
   window.closeVideoShowcasePicker = closeVideoShowcasePicker
   window.closeVideoShowcasePickerOnBackdrop = closeVideoShowcasePickerOnBackdrop
   window.saveVideoShowcase = saveVideoShowcase
+
+  // ── Polls showcase picker ──
+  function openPollsShowcasePicker() {
+    var err = document.getElementById('psmError')
+    if (err) err.hidden = true
+    var modal = document.getElementById('pollsShowcaseModal')
+    if (modal) modal.classList.add('open')
+  }
+  function closePollsShowcasePicker() {
+    var modal = document.getElementById('pollsShowcaseModal')
+    if (modal) modal.classList.remove('open')
+  }
+  function closePollsShowcasePickerOnBackdrop(e) {
+    if (e.target === document.getElementById('pollsShowcaseModal')) closePollsShowcasePicker()
+  }
+  async function savePollsShowcase() {
+    var picked = document.querySelector('input[name="psmMode"]:checked')
+    var err = document.getElementById('psmError')
+    if (!picked) { err.textContent = 'Choose a mode.'; err.hidden = false; return }
+    var mode = picked.value
+    var body = { group_id: overviewGroupId, polls_showcase_mode: mode }
+    if (mode === 'featured') {
+      var sel = document.getElementById('psmPollId')
+      var pollId = sel && sel.value
+      if (!pollId) { err.textContent = 'Pick a poll to feature.'; err.hidden = false; return }
+      body.polls_showcase_poll_id = pollId
+    }
+    try {
+      var res = await fetch('/api/groups/update', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      var data = await res.json().catch(function() { return {} })
+      if (!res.ok) throw new Error(data.error || 'Failed to save')
+      location.reload()
+    } catch (e) {
+      err.textContent = (e && e.message) || 'Failed to save'
+      err.hidden = false
+    }
+  }
+  window.openPollsShowcasePicker = openPollsShowcasePicker
+  window.closePollsShowcasePicker = closePollsShowcasePicker
+  window.closePollsShowcasePickerOnBackdrop = closePollsShowcasePickerOnBackdrop
+  window.savePollsShowcase = savePollsShowcase
 </script>
 <CropModal />
+</div><!-- /#accentScope -->
 </Layout>

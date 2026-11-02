@@ -1,0 +1,149 @@
+---
+/**
+ * Shared comment thread used wherever discussion happens on the site.
+ *
+ * Pages adapt their own rows (review_comments, forum_post_comments,
+ * group_poll_answers) into CommentData[] and pass a `target` identifying
+ * the backing API. The client-side JS in src/scripts/comment-thread.ts
+ * dispatches vote/reply/delete to the right endpoint based on target.type.
+ */
+import CommentNode from "./CommentNode.astro";
+import type { CommentData, CommentTarget } from "../utils/comments";
+import { IMAGE_EMOTES } from "../utils/reactions";
+// Make the component style-complete — any page rendering <CommentThread>
+// gets the ct-* / rx-* / emote-picker CSS without needing its own import.
+import "../styles/comments.css";
+
+interface Props {
+  comments: CommentData[];
+  currentUser: { id: string; username: string; avatarUrl: string | null } | null;
+  target: CommentTarget;
+  /** Can anyone post new comments / replies? (false if the thread is locked.) */
+  canCompose: boolean;
+  /** Render the top-level composer. Default true. Set false when the parent
+   *  wants to hide it independently of canCompose — e.g. poll_answer, where
+   *  each user has one answer and the composer hides once they've posted it,
+   *  but Reply on other comments should still work. */
+  showMainComposer?: boolean;
+  /** Show the upvote (and, when showDownvote, downvote) buttons. Default true. */
+  showVotes?: boolean;
+  /** Enable the downvote button alongside upvote. Default false. */
+  showDownvote?: boolean;
+  /** Show the :emote: reaction row + picker. Default true. */
+  showReactions?: boolean;
+  /** Enable the report button on others' comments. Default false. */
+  showReport?: boolean;
+  /** Shown next to the character counter — default 2000 (matches reviews). */
+  maxLength?: number;
+  /** Maximum reply nesting depth. Default 3 (matches reviews/lists). Set to 1
+   *  on surfaces that only support flat replies (forum / polls today). */
+  maxDepth?: number;
+  /** Returned by the server endpoints as `{ body: "..." }`; shown pre-filled. */
+  myDraftBody?: string | null;
+  /** Marks the viewer as a moderator (shown delete on everyone's comments). */
+  isModerator?: boolean;
+  signinReturnTo?: string;
+}
+
+const {
+  comments,
+  currentUser,
+  target,
+  canCompose,
+  showMainComposer = true,
+  showVotes = true,
+  showDownvote = false,
+  showReactions = true,
+  showReport = false,
+  maxLength = 2000,
+  maxDepth = 3,
+  myDraftBody = null,
+  isModerator = false,
+  signinReturnTo,
+} = Astro.props as Props;
+
+const initials = (name: string) => (name ?? "?").slice(0, 2).toUpperCase();
+const signinHref = `/signin?returnTo=${encodeURIComponent(signinReturnTo ?? "/")}`;
+---
+
+<div
+  class="ct-thread"
+  data-ct-target-type={target.type}
+  data-ct-target-id={target.id}
+  data-ct-max-length={maxLength}
+  data-ct-show-downvote={showDownvote ? "1" : "0"}
+>
+  {comments.length === 0 ? (
+    <div class="ct-empty">No comments yet. Be the first.</div>
+  ) : (
+    <ul class="ct-list">
+      {comments.map((c) => (
+        <CommentNode
+          comment={c}
+          currentUser={currentUser}
+          target={target}
+          canCompose={canCompose}
+          showVotes={showVotes}
+          showDownvote={showDownvote}
+          showReactions={showReactions}
+          showReport={showReport}
+          maxLength={maxLength}
+          depth={0}
+          maxDepth={maxDepth}
+        />
+      ))}
+    </ul>
+  )}
+
+  {showMainComposer && canCompose && currentUser && (
+    <form class="ct-composer" data-ct-composer>
+      <div class="ct-composer-row">
+        <div class="ct-composer-avatar">
+          {currentUser.avatarUrl
+            ? <img src={currentUser.avatarUrl} alt={currentUser.username} />
+            : <span>{initials(currentUser.username)}</span>}
+        </div>
+        <div class="ct-composer-wrap">
+          <textarea name="body" placeholder="Write a comment…" rows="3" maxlength={maxLength}>{myDraftBody ?? ""}</textarea>
+          <div class="ct-composer-foot">
+            <span class="ct-char-count"><span data-ct-char-count>{(myDraftBody ?? "").length}</span> / {maxLength}</span>
+            <button type="button" class="ct-emote-insert-btn" data-ct-action="emote-insert" title="Insert emote">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M5.5 10c.7.8 4.3.8 5 0"/><circle cx="6" cy="6.5" r=".7" fill="currentColor" stroke="none"/><circle cx="10" cy="6.5" r=".7" fill="currentColor" stroke="none"/></svg>
+            </button>
+            <button type="submit" class="ct-submit">{myDraftBody ? "Update" : "Post comment"}</button>
+          </div>
+        </div>
+      </div>
+      <div class="ct-composer-error" data-ct-composer-err></div>
+    </form>
+  )}
+  {showMainComposer && canCompose && !currentUser && (
+    <div class="ct-signin-prompt">
+      <a href={signinHref}>Sign in</a> to leave a comment.
+    </div>
+  )}
+
+  <!-- Floating emote picker — one per thread; comment-thread.ts positions it
+       under whichever ct-rx-toggle was clicked. Mirrors review's picker. -->
+  {currentUser && (
+    <div class="ct-emote-picker" data-ct-emote-picker hidden>
+      <input type="text" class="ct-emote-search" data-ct-emote-search placeholder="Search emotes…" />
+      <div class="ct-emote-grid">
+        {IMAGE_EMOTES.map((e) => (
+          <button
+            type="button"
+            class="ct-emote-pick"
+            data-ct-emote-key={e.key}
+            title={e.key}
+          >
+            <img src={e.path} class="ct-emote-picker-img" alt={e.key} loading="lazy" />
+          </button>
+        ))}
+      </div>
+    </div>
+  )}
+</div>
+
+<script>
+  import "../scripts/comment-thread";
+</script>
