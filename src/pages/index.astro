@@ -471,13 +471,23 @@ const initialRecentCursors = {
 // Per-stream done at the point SSR finishes. A short initial batch means the
 // stream is already exhausted; the client passes `r_done=1` etc. so the
 // server doesn't silently re-fetch the newest rows for that stream.
+// Exception: if feedCutoff bumped the stream's cursor forward (its SSR tail is
+// older than the cutoff), the trimmed rows between tail and cutoff are still
+// waiting to be fetched — the stream is NOT done even if the SSR fetch was
+// short. Without this guard a site with <10 lists total and any list older
+// than the review tail would permanently hide that list.
+function initialStreamDone(fetched: number, limit: number, rawTail: string | null, cursor: string | null): boolean {
+  if (fetched >= limit) return false;
+  if (cursor !== rawTail) return false; // cursor was bumped by feedCutoff — more to fetch
+  return true;
+}
 const initialRecentStreamDone = {
-  reviews: reviews.length < 30,
-  recs:    recentRecs.length < 30,
-  lists:   recentLists.length < 10,
+  reviews: initialStreamDone(reviews.length,     30, rawReviewTail, initialRecentCursors.reviews),
+  recs:    initialStreamDone(recentRecs.length,  30, rawRecTail,    initialRecentCursors.recs),
+  lists:   initialStreamDone(recentLists.length, 10, rawListTail,   initialRecentCursors.lists),
 }
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
-const initialRecentDone = reviews.length < 30 && recentRecs.length < 30 && recentLists.length < 10
+const initialRecentDone = initialRecentStreamDone.reviews && initialRecentStreamDone.recs && initialRecentStreamDone.lists
 const initialFollowingDone = followingReviews.length < 20
 
 const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
