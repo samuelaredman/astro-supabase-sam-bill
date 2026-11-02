@@ -205,15 +205,38 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// Merge all types, sort by date. Shows all SSR-fetched items in one chronological feed.
-// Infinite scroll (loadMore) continues from the oldest item's date.
+// Merge all types, sort by date. The initial per-stream fetches cover
+// mismatched date ranges (30 reviews may only reach ~24h back while 30 recs
+// stretch to months ago), so rendering every row would put old recs/lists
+// below reviews that are still younger than the next page of reviews that
+// loadMore will insert — the feed looks like it jumps from a recent review
+// to months-old posts, then a batch of day-old reviews appears below them.
+// Trim the SSR feed at the youngest stream tail (the max of each stream's
+// oldest fetched row). The trimmed items aren't lost: each stream's initial
+// cursor is set to the trim point so loadMore picks them up in order.
+const rawReviewTail = reviews.length > 0
+  ? (reviews[reviews.length - 1].published_at ?? reviews[reviews.length - 1].created_at)
+  : null;
+const rawRecTail = recentRecs.length > 0 ? recentRecs[recentRecs.length - 1].createdAt : null;
+const rawListTail = recentLists.length > 0
+  ? (recentLists[recentLists.length - 1].last_posted_to_feed_at ?? recentLists[recentLists.length - 1].created_at)
+  : null;
+const streamTails: string[] = [rawReviewTail, rawRecTail, rawListTail].filter((d): d is string => !!d);
+// Only trim when every stream contributed rows — otherwise there's no
+// mismatch to equalize, and the oldest-of-N streams would discard the lot.
+const feedCutoff: string | null = streamTails.length === 3
+  ? streamTails.reduce((a, b) => (a > b ? a : b))
+  : null;
+
 const feedItems: any[] = [
   ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
   // Lists ride the feed on their last post-to-feed time (not created_at), so
   // a repost surfaces the list again instead of leaving it buried.
   ...recentLists.map((l: any) => ({ ...l, _date: l.last_posted_to_feed_at ?? l.created_at })),
   ...recentRecs,
-].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
+]
+  .filter((item: any) => !feedCutoff || item._date >= feedCutoff)
+  .sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 if (trendingRes.error) console.error('[index] home_trending_games rpc error:', JSON.stringify(trendingRes.error))
 const trending: { title: string; slug: string; cover: string | null; count: number }[] =
@@ -428,19 +451,22 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
 const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
 // Per-stream cursors for /api/feed/recent — using a single overall "oldest
 // item" cursor silently skipped reviews between the oldest shown review and
 // the oldest shown list/rec. Each stream now continues from its own tail.
-const oldestRecDate = recentRecs.length > 0 ? recentRecs[recentRecs.length - 1].createdAt : null
-const oldestListDate = recentLists.length > 0
-  ? (recentLists[recentLists.length - 1].last_posted_to_feed_at ?? recentLists[recentLists.length - 1].created_at)
-  : null
+// If a stream was trimmed by the SSR cutoff above (its tail < feedCutoff),
+// its cursor starts at the cutoff so loadMore picks up the trimmed rows in
+// chronological order rather than skipping past them.
+function initialCursorFor(rawTail: string | null): string | null {
+  if (!rawTail) return null;
+  if (feedCutoff && rawTail < feedCutoff) return feedCutoff;
+  return rawTail;
+}
 const initialRecentCursors = {
-  reviews: lastRecentReview?.published_at ?? lastRecentReview?.created_at ?? null,
-  recs:    oldestRecDate,
-  lists:   oldestListDate,
+  reviews: initialCursorFor(rawReviewTail),
+  recs:    initialCursorFor(rawRecTail),
+  lists:   initialCursorFor(rawListTail),
 }
 // Per-stream done at the point SSR finishes. A short initial batch means the
 // stream is already exhausted; the client passes `r_done=1` etc. so the
