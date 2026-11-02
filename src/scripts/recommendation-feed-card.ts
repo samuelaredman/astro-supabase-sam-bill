@@ -184,7 +184,7 @@ if (!window.__rfcInit) {
       var wrap = document.createElement('div');
       wrap.className = 'rfc-edit-wrap';
       wrap.innerHTML =
-        '<textarea class="rfc-edit-ta" maxlength="5000"></textarea>' +
+        '<textarea class="rfc-edit-ta" maxlength="10000"></textarea>' +
         '<label class="rfc-edit-spoiler"><input type="checkbox" class="rfc-edit-spoiler-cb"' + (spoiler ? ' checked' : '') + '> Contains spoilers</label>' +
         '<div class="rfc-edit-foot"><button class="rfc-edit-cancel">Cancel</button><button class="rfc-edit-save" data-rec-id="' + rid + '">Save</button></div>';
       bodyEl.style.display = 'none';

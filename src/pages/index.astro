@@ -70,7 +70,7 @@ async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit:
 
   let listsQuery = adminDb
     .from('lists')
-    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, last_posted_to_feed_at, profiles(id, username, avatar_url)')
+    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, last_posted_to_feed_at, profiles(id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey(badge_slug))')
     .eq('visibility', 'public')
     .not('last_posted_to_feed_at', 'is', null)
     .order('last_posted_to_feed_at', { ascending: false })
@@ -135,6 +135,9 @@ async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit:
     ownerId: l.profiles?.id ?? null,
     ownerUsername: l.profiles?.username,
     ownerAvatar: l.profiles?.avatar_url,
+    ownerBadgeSlugs: Array.isArray(l.profiles?.profile_badges)
+      ? l.profiles.profile_badges.map((b: any) => b?.badge_slug).filter((s: any) => typeof s === 'string')
+      : [],
     coverUrls: listCoversByListId[l.id] ?? [],
     entryCount: listCountByListId[l.id] ?? 0,
     upVotes: listUpByListId[l.id] ?? 0,
@@ -202,15 +205,38 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// Merge all types, sort by date. Shows all SSR-fetched items in one chronological feed.
-// Infinite scroll (loadMore) continues from the oldest item's date.
+// Merge all types, sort by date. The initial per-stream fetches cover
+// mismatched date ranges (30 reviews may only reach ~24h back while 30 recs
+// stretch to months ago), so rendering every row would put old recs/lists
+// below reviews that are still younger than the next page of reviews that
+// loadMore will insert — the feed looks like it jumps from a recent review
+// to months-old posts, then a batch of day-old reviews appears below them.
+// Trim the SSR feed at the youngest stream tail (the max of each stream's
+// oldest fetched row). The trimmed items aren't lost: each stream's initial
+// cursor is set to the trim point so loadMore picks them up in order.
+const rawReviewTail = reviews.length > 0
+  ? (reviews[reviews.length - 1].published_at ?? reviews[reviews.length - 1].created_at)
+  : null;
+const rawRecTail = recentRecs.length > 0 ? recentRecs[recentRecs.length - 1].createdAt : null;
+const rawListTail = recentLists.length > 0
+  ? (recentLists[recentLists.length - 1].last_posted_to_feed_at ?? recentLists[recentLists.length - 1].created_at)
+  : null;
+const streamTails: string[] = [rawReviewTail, rawRecTail, rawListTail].filter((d): d is string => !!d);
+// Only trim when every stream contributed rows — otherwise there's no
+// mismatch to equalize, and the oldest-of-N streams would discard the lot.
+const feedCutoff: string | null = streamTails.length === 3
+  ? streamTails.reduce((a, b) => (a > b ? a : b))
+  : null;
+
 const feedItems: any[] = [
   ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
   // Lists ride the feed on their last post-to-feed time (not created_at), so
   // a repost surfaces the list again instead of leaving it buried.
   ...recentLists.map((l: any) => ({ ...l, _date: l.last_posted_to_feed_at ?? l.created_at })),
   ...recentRecs,
-].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
+]
+  .filter((item: any) => !feedCutoff || item._date >= feedCutoff)
+  .sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 if (trendingRes.error) console.error('[index] home_trending_games rpc error:', JSON.stringify(trendingRes.error))
 const trending: { title: string; slug: string; cover: string | null; count: number }[] =
@@ -425,10 +451,31 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
 const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
-const lastFeedItem = feedItems.length > 0 ? feedItems[feedItems.length - 1] : null
-const initialRecentCursor = lastFeedItem?._date ?? null
+// Per-stream cursors for /api/feed/recent — using a single overall "oldest
+// item" cursor silently skipped reviews between the oldest shown review and
+// the oldest shown list/rec. Each stream now continues from its own tail.
+// If a stream was trimmed by the SSR cutoff above (its tail < feedCutoff),
+// its cursor starts at the cutoff so loadMore picks up the trimmed rows in
+// chronological order rather than skipping past them.
+function initialCursorFor(rawTail: string | null): string | null {
+  if (!rawTail) return null;
+  if (feedCutoff && rawTail < feedCutoff) return feedCutoff;
+  return rawTail;
+}
+const initialRecentCursors = {
+  reviews: initialCursorFor(rawReviewTail),
+  recs:    initialCursorFor(rawRecTail),
+  lists:   initialCursorFor(rawListTail),
+}
+// Per-stream done at the point SSR finishes. A short initial batch means the
+// stream is already exhausted; the client passes `r_done=1` etc. so the
+// server doesn't silently re-fetch the newest rows for that stream.
+const initialRecentStreamDone = {
+  reviews: reviews.length < 30,
+  recs:    recentRecs.length < 30,
+  lists:   recentLists.length < 10,
+}
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
 const initialRecentDone = reviews.length < 30 && recentRecs.length < 30 && recentLists.length < 10
 const initialFollowingDone = followingReviews.length < 20
@@ -718,6 +765,7 @@ const siteJsonLd = {
                 ownerId={item.ownerId}
                 ownerUsername={item.ownerUsername}
                 ownerAvatar={item.ownerAvatar ?? null}
+                ownerBadgeSlugs={item.ownerBadgeSlugs ?? []}
                 createdAt={item.created_at}
                 upVotes={item.upVotes}
                 downVotes={item.downVotes}
@@ -799,6 +847,7 @@ const siteJsonLd = {
                 ownerId={item.ownerId}
                 ownerUsername={item.ownerUsername}
                 ownerAvatar={item.ownerAvatar ?? null}
+                ownerBadgeSlugs={item.ownerBadgeSlugs ?? []}
                 createdAt={item.created_at}
                 upVotes={item.upVotes}
                 downVotes={item.downVotes}
@@ -919,8 +968,8 @@ const siteJsonLd = {
     </div>
     <div class="composer-field" style="margin-top:12px">
       <label class="composer-label">Review</label>
-      <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="5000"></textarea>
-      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 5000</div>
+      <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="10000"></textarea>
+      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 10000</div>
     </div>
     <div class="composer-row" style="margin-top:12px">
       <div class="composer-field" style="flex:1">
@@ -1056,7 +1105,7 @@ const siteJsonLd = {
       document.getElementById('spoilerCheck').checked = false
       document.getElementById('youtubeUrl').value = ''
       document.getElementById('composerError').textContent = ''
-      document.getElementById('charCount').textContent = '0 / 5000'
+      document.getElementById('charCount').textContent = '0 / 10000'
       document.getElementById('charCount').style.color = 'var(--text-tertiary)'
       document.getElementById('gameResults').classList.remove('open')
     }
@@ -1198,8 +1247,8 @@ const siteJsonLd = {
     document.getElementById('reviewBody').addEventListener('input', function() {
       const count = this.value.length
       const el = document.getElementById('charCount')
-      el.textContent = count + ' / 5000'
-      el.style.color = count > 4500 ? (count >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
+      el.textContent = count + ' / 10000'
+      el.style.color = count > 9000 ? (count >= 10000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
     })
     document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(el => {
       el.addEventListener('click', () => el.classList.remove('spoiler-hidden'))
@@ -1348,7 +1397,7 @@ const siteJsonLd = {
       if (!score || parseFloat(score) < 0.1 || parseFloat(score) > 10) { errorEl.textContent = 'Please enter a score between 0.1 and 10.'; return; }
       if (!title) { errorEl.textContent = 'Please add a title.'; return; }
       if (!body) { errorEl.textContent = 'Please write a review.'; return; }
-      if (body.length > 5000) { errorEl.textContent = 'Review must be at most 5000 characters.'; return; }
+      if (body.length > 10000) { errorEl.textContent = 'Review must be at most 10000 characters.'; return; }
       if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) { errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return; }
       const btn = document.getElementById('submitReview')
       btn.disabled = true
@@ -1447,7 +1496,7 @@ const siteJsonLd = {
     })
   </script>
 
-  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursor, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
+  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursors, initialRecentStreamDone, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
   (function () {
     // ── Image emote map — keep in sync with src/data/reactions.ts ─────────────
     // Add new emote keys here whenever you add them to IMAGE_EMOTES in reactions.ts
@@ -1831,6 +1880,7 @@ const siteJsonLd = {
          + (avatar ? '<img src="' + esc(avatar) + '" alt="' + esc(username) + '" />' : '<span>' + esc(inits) + '</span>')
          + '</a>'
          + '<a href="/reviewers/' + esc(username) + '" class="lfc-reviewer-name">@' + esc(username) + '</a>'
+         + renderBadges(l.profiles?.profile_badges || l.ownerBadgeSlugs)
          + '<span class="lfc-action">shared a list</span>'
          + '<span class="lfc-dot">·</span>'
          + '<span class="lfc-ts">' + esc(timeAgo(ts)) + '</span>'
@@ -1896,7 +1946,10 @@ const siteJsonLd = {
 
     // ── Per-tab state ──────────────────────────────────────────────────────────
     var state = {
-      recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
+      // Recent tab tracks a cursor per stream (reviews / recs / lists). A
+      // shared cursor set to "oldest overall" silently skips reviews between
+      // the oldest shown review and the oldest shown list/rec on the next page.
+      recent:    { cursors: initialRecentCursors, streamDone: initialRecentStreamDone, loading: false, done: initialRecentDone },
       following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone },
       videos:    { cursor: null,                   loading: false, done: false, count: 0 }
     };
@@ -1910,13 +1963,30 @@ const siteJsonLd = {
       var endEl    = document.getElementById('end-' + tab);
       if (loader) loader.style.display = 'block';
       try {
-        var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
-        var feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
-                    : tab === 'videos'    ? '/api/reviews/feed?tab=videos&limit=20' + cursorParam
-                    : '/api/feed/recent?limit=20' + cursorParam;
+        var feedUrl;
+        if (tab === 'recent') {
+          var cs = s.cursors || {};
+          var sd = s.streamDone || {};
+          var qp = [];
+          // For each stream: send either its cursor (active) or r_done=1
+          // (exhausted). Omitting both would make the server default to
+          // `now` and silently re-fetch the newest rows on every page.
+          if (sd.reviews) qp.push('r_done=1');
+          else if (cs.reviews) qp.push('r_cursor=' + encodeURIComponent(cs.reviews));
+          if (sd.recs)    qp.push('rc_done=1');
+          else if (cs.recs)    qp.push('rc_cursor=' + encodeURIComponent(cs.recs));
+          if (sd.lists)   qp.push('l_done=1');
+          else if (cs.lists)   qp.push('l_cursor=' + encodeURIComponent(cs.lists));
+          feedUrl = '/api/feed/recent?limit=20' + (qp.length ? '&' + qp.join('&') : '');
+        } else {
+          var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
+          feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
+                                        : '/api/reviews/feed?tab=videos&limit=20' + cursorParam;
+        }
         var res = await fetch(feedUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        var items = await res.json();
+        var payload = await res.json();
+        var items = tab === 'recent' ? (payload && payload.items) : payload;
         if (!Array.isArray(items) || items.length === 0) {
           s.done = true;
           // A tab with nothing at all gets its empty state instead of "all caught up".
@@ -1936,12 +2006,29 @@ const siteJsonLd = {
             sentinel.parentNode.insertBefore(tmp.firstChild, sentinel);
           }
         });
-        var last = items[items.length - 1];
-        s.cursor = last._date || last.published_at || last.created_at;
-        if (items.length < 20) {
-          s.done = true;
-          if (endEl) endEl.style.display = 'block';
-          if (sentinel) sentinel.remove();
+        if (tab === 'recent') {
+          var nc = (payload && payload.cursors) || {};
+          // A null cursor for a stream means it's exhausted. Record that in
+          // streamDone so the next request sends `*_done=1` instead of
+          // silently defaulting the cursor back to `now`.
+          if (!s.streamDone) s.streamDone = {};
+          if (nc.reviews === null) s.streamDone.reviews = true;
+          if (nc.recs    === null) s.streamDone.recs    = true;
+          if (nc.lists   === null) s.streamDone.lists   = true;
+          s.cursors = { reviews: nc.reviews, recs: nc.recs, lists: nc.lists };
+          if (s.streamDone.reviews && s.streamDone.recs && s.streamDone.lists) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
+        } else {
+          var last = items[items.length - 1];
+          s.cursor = last._date || last.published_at || last.created_at;
+          if (items.length < 20) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
         }
       } catch (e) {
         console.error('[feed] loadMore error:', e);
