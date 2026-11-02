@@ -442,6 +442,14 @@ const initialRecentCursors = {
   recs:    oldestRecDate,
   lists:   oldestListDate,
 }
+// Per-stream done at the point SSR finishes. A short initial batch means the
+// stream is already exhausted; the client passes `r_done=1` etc. so the
+// server doesn't silently re-fetch the newest rows for that stream.
+const initialRecentStreamDone = {
+  reviews: reviews.length < 30,
+  recs:    recentRecs.length < 30,
+  lists:   recentLists.length < 10,
+}
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
 const initialRecentDone = reviews.length < 30 && recentRecs.length < 30 && recentLists.length < 10
 const initialFollowingDone = followingReviews.length < 20
@@ -1433,7 +1441,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     })
   </script>
 
-  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursors, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
+  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursors, initialRecentStreamDone, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
   (function () {
     // ── Image emote map — keep in sync with src/data/reactions.ts ─────────────
     // Add new emote keys here whenever you add them to IMAGE_EMOTES in reactions.ts
@@ -1886,7 +1894,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       // Recent tab tracks a cursor per stream (reviews / recs / lists). A
       // shared cursor set to "oldest overall" silently skips reviews between
       // the oldest shown review and the oldest shown list/rec on the next page.
-      recent:    { cursors: initialRecentCursors, loading: false, done: initialRecentDone },
+      recent:    { cursors: initialRecentCursors, streamDone: initialRecentStreamDone, loading: false, done: initialRecentDone },
       following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone },
       videos:    { cursor: null,                   loading: false, done: false, count: 0 }
     };
@@ -1903,10 +1911,17 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         var feedUrl;
         if (tab === 'recent') {
           var cs = s.cursors || {};
+          var sd = s.streamDone || {};
           var qp = [];
-          if (cs.reviews) qp.push('r_cursor='  + encodeURIComponent(cs.reviews));
-          if (cs.recs)    qp.push('rc_cursor=' + encodeURIComponent(cs.recs));
-          if (cs.lists)   qp.push('l_cursor='  + encodeURIComponent(cs.lists));
+          // For each stream: send either its cursor (active) or r_done=1
+          // (exhausted). Omitting both would make the server default to
+          // `now` and silently re-fetch the newest rows on every page.
+          if (sd.reviews) qp.push('r_done=1');
+          else if (cs.reviews) qp.push('r_cursor=' + encodeURIComponent(cs.reviews));
+          if (sd.recs)    qp.push('rc_done=1');
+          else if (cs.recs)    qp.push('rc_cursor=' + encodeURIComponent(cs.recs));
+          if (sd.lists)   qp.push('l_done=1');
+          else if (cs.lists)   qp.push('l_cursor=' + encodeURIComponent(cs.lists));
           feedUrl = '/api/feed/recent?limit=20' + (qp.length ? '&' + qp.join('&') : '');
         } else {
           var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
@@ -1938,8 +1953,15 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         });
         if (tab === 'recent') {
           var nc = (payload && payload.cursors) || {};
+          // A null cursor for a stream means it's exhausted. Record that in
+          // streamDone so the next request sends `*_done=1` instead of
+          // silently defaulting the cursor back to `now`.
+          if (!s.streamDone) s.streamDone = {};
+          if (nc.reviews === null) s.streamDone.reviews = true;
+          if (nc.recs    === null) s.streamDone.recs    = true;
+          if (nc.lists   === null) s.streamDone.lists   = true;
           s.cursors = { reviews: nc.reviews, recs: nc.recs, lists: nc.lists };
-          if (!nc.reviews && !nc.recs && !nc.lists) {
+          if (s.streamDone.reviews && s.streamDone.recs && s.streamDone.lists) {
             s.done = true;
             if (endEl) endEl.style.display = 'block';
             if (sentinel) sentinel.remove();

@@ -48,26 +48,35 @@ export const GET: APIRoute = async (context) => {
   const rCursor  = url.searchParams.get("r_cursor")  ?? legacyCursor ?? now;
   const rcCursor = url.searchParams.get("rc_cursor") ?? legacyCursor ?? now;
   const lCursor  = url.searchParams.get("l_cursor")  ?? legacyCursor ?? now;
+  // Explicit per-stream "done" flags. Without these, once a stream exhausts
+  // the client stops sending its cursor — and the server would then default
+  // the cursor back to `now` and re-fetch the newest rows for that stream
+  // on every subsequent page. Those re-fetched rows never survive the merge
+  // (they're newer than the overall cursor), so the stream silently
+  // disappears from the feed. The flags let the client say "skip this stream".
+  const rDone  = url.searchParams.get("r_done")  === "1";
+  const rcDone = url.searchParams.get("rc_done") === "1";
+  const lDone  = url.searchParams.get("l_done")  === "1";
   const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "20"), 50);
 
   const db = getSupabaseAdmin();
 
   const [reviewsRes, recsRes, listsRes] = await Promise.all([
-    db.from("reviews")
+    rDone ? Promise.resolve({ data: [], error: null }) : db.from("reviews")
       .select(REVIEW_FIELDS)
       .eq("status", "published")
       .lt("published_at", rCursor)
       .order("published_at", { ascending: false })
       .limit(limit),
 
-    db.from("recommendations")
+    rcDone ? Promise.resolve({ data: [], error: null }) : db.from("recommendations")
       .select(REC_FIELDS)
       .eq("status", "published")
       .lt("created_at", rcCursor)
       .order("created_at", { ascending: false })
       .limit(limit),
 
-    db.from("lists")
+    lDone ? Promise.resolve({ data: [], error: null }) : db.from("lists")
       .select(LIST_FIELDS)
       .eq("visibility", "public")
       .not("last_posted_to_feed_at", "is", null)
