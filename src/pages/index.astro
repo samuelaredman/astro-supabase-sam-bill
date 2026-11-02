@@ -1195,6 +1195,29 @@ const siteJsonLd = {
     }
 
     var typeFilterMap = { reviews: 'review', lists: 'list', recs: 'rec' };
+    // Mark the first wrapper not filtered out — CSS strips its top border.
+    // `+` would leave a stray border on the first visible card after any run
+    // of hidden ones (filtered sibling still counts as adjacent).
+    function updateRecentFirstVisible() {
+      var recentEl = document.getElementById('tab-recent');
+      if (!recentEl) return;
+      var want = null;
+      if (recentEl.classList.contains('filter-reviews')) want = 'review';
+      else if (recentEl.classList.contains('filter-lists')) want = 'list';
+      else if (recentEl.classList.contains('filter-recs')) want = 'rec';
+      var found = false;
+      recentEl.querySelectorAll(':scope > div[data-feed-type]').forEach(function (el) {
+        var match = !want || el.getAttribute('data-feed-type') === want;
+        if (match && !found) {
+          el.classList.add('feed-first-visible');
+          found = true;
+        } else {
+          el.classList.remove('feed-first-visible');
+        }
+      });
+    }
+    window.__updateRecentFirstVisible = updateRecentFirstVisible;
+    updateRecentFirstVisible();
     document.querySelectorAll('.feed-tab').forEach(function(btn) {
       btn.addEventListener('click', function() {
         document.querySelectorAll('.feed-tab').forEach(function(b) { b.classList.remove('active') });
@@ -1212,6 +1235,7 @@ const siteJsonLd = {
           recentEl.classList.remove('filter-reviews', 'filter-lists', 'filter-recs');
           if (isTypeFilter) recentEl.classList.add('filter-' + tab);
         }
+        updateRecentFirstVisible();
       });
     })
     // Mobile feed-filter dropdown — toggle the pill list and reflect the choice.
@@ -2007,6 +2031,7 @@ const siteJsonLd = {
           }
         });
         if (tab === 'recent') {
+          if (window.__updateRecentFirstVisible) window.__updateRecentFirstVisible();
           var nc = (payload && payload.cursors) || {};
           // A null cursor for a stream means it's exhausted. Record that in
           // streamDone so the next request sends `*_done=1` instead of
@@ -2932,17 +2957,27 @@ const siteJsonLd = {
     .feed-title { font-size: 15.5px; line-height: 1.2; }
     .feed-subtitle { font-size: 12px; line-height: 1.2; margin-top: 1px; }
   }
-  #tab-recent.filter-reviews [data-feed-type="list"],
-  #tab-recent.filter-reviews [data-feed-type="rec"] { display: none !important; }
-  #tab-recent.filter-lists [data-feed-type="review"],
-  #tab-recent.filter-lists [data-feed-type="rec"] { display: none !important; }
-  #tab-recent.filter-recs [data-feed-type="review"],
-  #tab-recent.filter-recs [data-feed-type="list"] { display: none !important; }
+  /* Scoped out of Astro's data-astro-cid attribute: items inserted by
+     loadMore via innerHTML don't carry the component scope, so the scoped
+     form of these selectors silently fails to hide them. */
+  #tab-recent.filter-reviews :global([data-feed-type="list"]),
+  #tab-recent.filter-reviews :global([data-feed-type="rec"]) { display: none !important; }
+  #tab-recent.filter-lists :global([data-feed-type="review"]),
+  #tab-recent.filter-lists :global([data-feed-type="rec"]) { display: none !important; }
+  #tab-recent.filter-recs :global([data-feed-type="review"]),
+  #tab-recent.filter-recs :global([data-feed-type="list"]) { display: none !important; }
   /* Each card on the Recent tab is wrapped in <div data-feed-type="..."> so
      the card components' own :last-child border strip wipes every border.
-     Draw separators between adjacent wrappers instead. */
-  #tab-recent > div[data-feed-type] + div[data-feed-type] {
+     Draw separators on every wrapper and strip the first one via JS when the
+     filter changes (adjacent-sibling `+` would skip hidden siblings and leave
+     stray top borders on the first visible card after a run of hidden ones).
+     :global() so loadMore-inserted wrappers (built via innerHTML, missing the
+     Astro scope attribute) also get the separator. */
+  #tab-recent > :global(div[data-feed-type]) {
     border-top: 1px solid var(--border-subtle);
+  }
+  #tab-recent > :global(div[data-feed-type].feed-first-visible) {
+    border-top: none;
   }
   .genre-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .genre-pill { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; border: 1px solid transparent; }
