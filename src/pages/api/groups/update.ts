@@ -45,6 +45,7 @@ export const POST: APIRoute = async (context) => {
   if (join_prompt !== undefined)  updates.join_prompt = join_prompt?.trim() || null;
   if (stats_config !== undefined) updates.stats_config = stats_config;
   if ("polls_everyone" in body)   updates.polls_everyone = !!body.polls_everyone;
+  if ("forums_everyone" in body)  updates.forums_everyone = !!body.forums_everyone;
 
   // Overview Polls showcase mode + target poll
   if ("polls_showcase_mode" in body) {

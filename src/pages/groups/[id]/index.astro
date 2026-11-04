@@ -352,14 +352,22 @@ if (canSeeMemberContent) {
 const pollsShowcaseMode = ((group as any).polls_showcase_mode ?? "latest") as "latest" | "pinned" | "featured";
 const pollsShowcasePollId = (group as any).polls_showcase_poll_id ?? null;
 
-// ── Forums tab (full-list announcements + polls, including featured-game polls) ──
+// ── Forums tab (full-list announcements + polls + member-started threads) ──
 // Overview's showcases render the latest few; Forums is the full view behind "See all →".
-const forumSection: "announcements" | "polls" =
-  Astro.url.searchParams.get("section") === "polls" ? "polls" : "announcements";
+const forumSectionParam = Astro.url.searchParams.get("section");
+const forumSection: "announcements" | "polls" | "threads" =
+  forumSectionParam === "polls" ? "polls"
+  : forumSectionParam === "threads" ? "threads"
+  : "announcements";
+// Any member may start a thread by default; owner/mods can lock it to admins only.
+const forumsEveryone = (group as any).forums_everyone !== false;
+const canPostThread = isAdminOrOwner || canEditOverview || (isMember && forumsEveryone);
 let forumAnnouncements: any[] = [];
 let forumPolls: any[] = [];
+let forumThreads: any[] = [];
+let threadCommentCounts: Record<string, number> = {};
 if (canViewContent && activeTab === "forums") {
-  const [annRes, pollRowsRes] = await Promise.all([
+  const [annRes, pollRowsRes, threadRes] = await Promise.all([
     fetchAll((from, to) => db
       .from("group_announcements")
       .select("id, title, body, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
@@ -373,7 +381,42 @@ if (canViewContent && activeTab === "forums") {
       .order("pinned", { ascending: false })
       .order("created_at", { ascending: false })
       .limit(200),
+    (db as any).from("group_forum_threads")
+      .select("id, title, body, pinned, is_locked, created_at, updated_at, profile_id, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .eq("group_id", id)
+      .order("pinned", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(200),
   ]);
+  forumThreads = threadRes.data ?? [];
+  // Comment counts + author role tag for every thread — same pattern as announcements.
+  if (forumThreads.length > 0) {
+    const tIds = forumThreads.map((t: any) => t.id);
+    const authorIds = Array.from(new Set(forumThreads.map((t: any) => t.profile_id).filter(Boolean)));
+    const [tccRes, roleRes, staffRes] = await Promise.all([
+      (db as any).from("group_forum_thread_comments").select("thread_id").in("thread_id", tIds),
+      authorIds.length
+        ? db.from("group_members").select("profile_id, role").eq("group_id", id).in("profile_id", authorIds)
+        : Promise.resolve({ data: [] as any[] }),
+      authorIds.length
+        ? db.from("site_admins").select("profile_id").in("profile_id", authorIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+    for (const row of tccRes.data ?? []) threadCommentCounts[row.thread_id] = (threadCommentCounts[row.thread_id] ?? 0) + 1;
+    const roleMap = new Map<string, string>();
+    for (const m of (roleRes as any).data ?? []) roleMap.set(m.profile_id, m.role);
+    const staffSet = new Set<string>();
+    for (const s of (staffRes as any).data ?? []) staffSet.add(s.profile_id);
+    forumThreads = forumThreads.map((t: any) => {
+      const groupRole = t.profile_id ? roleMap.get(t.profile_id) ?? null : null;
+      const isStaff = t.profile_id ? staffSet.has(t.profile_id) : false;
+      const authorRole = groupRole === "owner" ? "Owner"
+        : groupRole === "admin" ? "Admin"
+        : isStaff ? "Staff"
+        : null;
+      return { ...t, authorRole };
+    });
+  }
   forumAnnouncements = annRes ?? [];
   // Comment counts + author role tag ("Owner"/"Admin"/"Staff") for every
   // announcement — same pattern as polls (see memberRoleMap above).
@@ -2978,6 +3021,11 @@ const groupOgDescription = group.description
         data-section="polls">
         Polls {forumPolls.length > 0 && <span class="tab-count">{forumPolls.length}</span>}
       </a>
+      <a href={`/groups/${group.id}?tab=forums&section=threads`}
+        class={`forums-sub-link${forumSection === "threads" ? " active" : ""}`}
+        data-section="threads">
+        Forums {forumThreads.length > 0 && <span class="tab-count">{forumThreads.length}</span>}
+      </a>
     </nav>
 
     <!-- Announcements section -->
@@ -3248,6 +3296,78 @@ const groupOgDescription = group.description
           );
         })
       }
+    </div>
+
+    <!-- Threads section (member-created discussions) -->
+    <div class={`forums-section${forumSection === "threads" ? " active" : ""}`} data-section="threads">
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          <span>Forum threads</span>
+          {canPostThread && (
+            <button class="ann-new-btn" data-ann-new="forums-threads" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New thread</button>
+          )}
+        </div>
+
+        {canPostThread && (
+          <PostComposer
+            composerId="group-forum-thread-new"
+            createUrl="/api/groups/forums/create"
+            extraFields={{ group_id: group.id }}
+            responseIdKey="id"
+            showTitle={true}
+            startHidden
+            openTriggerSelector='[data-ann-new="forums-threads"]'
+            placeholder="Start a discussion with the group…"
+            submitLabel="Post thread"
+            redirect="reload"
+          />
+        )}
+
+        {!canPostThread && isMember && !forumsEveryone && (
+          <div style="font-size:12px;color:var(--text-tertiary);padding:4px 0 8px">Only admins can start threads in this group.</div>
+        )}
+
+        {forumThreads.length === 0
+          ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No threads yet{canPostThread ? " — start the first one." : "."}</div>
+          : <ul class="ann-card-list">
+              {forumThreads.map((t: any) => (
+                <li class="ann-card ann-card-full" data-ann-href={`/groups/${group.id}/forums/${t.id}`}>
+                  <div class="ann-card-meta">
+                    {t.pinned && <span class="badge pinned">📌 Pinned</span>}
+                    <span class="badge category">thread</span>
+                    {t.is_locked && <span class="badge locked">🔒 Locked</span>}
+                  </div>
+                  {t.title?.trim() && (
+                    <a class="ann-card-title ann-card-title-link" href={`/groups/${group.id}/forums/${t.id}`}>
+                      {t.title.trim()}
+                    </a>
+                  )}
+                  <div class="ann-card-full-body" data-ann-body set:html={renderPostBody(t.body)} />
+                  <a class="ann-card-readmore" href={`/groups/${group.id}/forums/${t.id}`} hidden>Continue reading →</a>
+                  <div class="ann-card-footer">
+                    <span class="ann-card-author">
+                      <span class="ann-card-avatar">
+                        {t.profiles?.avatar_url
+                          ? <img src={t.profiles.avatar_url} alt={t.profiles?.username ?? ""} loading="lazy" />
+                          : getInitials(t.profiles?.username ?? "?")}
+                      </span>
+                      <span class="ann-card-username">{t.profiles?.username ?? "unknown"}</span>
+                      {t.authorRole && (
+                        <span class={`ann-card-role ann-card-role-${t.authorRole.toLowerCase()}`}>{t.authorRole}</span>
+                      )}
+                    </span>
+                    <span>·</span>
+                    <span>{timeAgo(t.created_at)}</span>
+                    <span class="ann-card-footer-spacer"></span>
+                    <a class="ann-card-discuss" href={`/groups/${group.id}/forums/${t.id}`}>
+                      💬 {threadCommentCounts[t.id] ?? 0} {(threadCommentCounts[t.id] ?? 0) === 1 ? "comment" : "comments"}
+                    </a>
+                  </div>
+                </li>
+              ))}
+            </ul>
+        }
+      </div>
     </div>
   </div>
   )}
