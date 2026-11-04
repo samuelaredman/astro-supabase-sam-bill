@@ -50,7 +50,8 @@ export const GET: APIRoute = async () => {
     fetchAll<{ id: string; slug: string | null }>((f, t) =>
       db.from('platforms').select('id, slug').not('slug', 'is', null).range(f, t)),
     fetchAll<{ id: string; slug: string | null }>((f, t) =>
-      db.from('developers').select('id, slug').not('slug', 'is', null).range(f, t)),
+      // Merged duplicates 301 to their main studio, so they stay out of the sitemap.
+      db.from('developers').select('id, slug').not('slug', 'is', null).is('canonical_developer_id', null).range(f, t)),
   ]);
 
   // For each hub type, collect the ids of entities linked to a reviewed game via

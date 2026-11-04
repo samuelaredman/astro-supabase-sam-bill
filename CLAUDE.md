@@ -2,7 +2,7 @@
 
 ## What this product is
 
-Chekpoint is a community game review site. Users create accounts, score games 1–10,
+Chekpoint is a community game review site. Users create accounts, score games 0.1–10,
 write reviews, follow other reviewers, react and comment on reviews, manage a personal
 watchlist, and organize into groups. The feed surfaces recent and hot-take reviews.
 Discovery happens via game pages, reviewer profiles, genre/platform/developer pages,
@@ -150,7 +150,7 @@ supabase/
 | `reviews` | `id` | uuid PK | NO | |
 | | `profile_id` | uuid FK→profiles | NO | |
 | | `game_id` | uuid FK→games | NO | |
-| | `score` | int | NO | 1–10 integers only |
+| | `score` | numeric(4,1) | YES | 0.1–10, one decimal place. NULL only on drafts. No DB CHECK — the range is enforced in the API |
 | | `title` | text | YES | |
 | | `body` | text | NO | Was VARCHAR — see Known Pitfalls |
 | | `status` | text | NO | `'published'` or `'draft'` |
@@ -472,6 +472,8 @@ make it read from the views, not from `reviews`, so the scaling swap below still
 | `reviewer_volume_percentile(profile_id)` | `/reviewers/[username]` |
 | `profile_game_community_stats(profile_id)` | `/reviewers/[username]` community averages |
 | `hub_game_review_stats(genre_id? \| platform_id? \| company_id?)` | genre / platform / studio hubs |
+| `home_trending_games(since, limit)` | `/` trending-games sidebar (reads `reviews` with a time filter — view is cumulative) |
+| `home_hot_takes(limit, min_deviation, min_reviews)` | `/` Hot Takes feed |
 
 - **Server-only.** Only `service_role` can read the views or execute the functions (migration
   `20260911000005`), so call them with `getSupabaseAdmin()`. Anon and authenticated clients get
@@ -755,8 +757,13 @@ console.error('[route-name] operation error:', JSON.stringify(error));
 
 5. **Always destructure and check `error`** on every insert, update, and delete.
 
-6. **Scores are integers 1–10 at the DB level.** Display with `.toFixed(1)` in
-   result cards only. Never store or compare as floats.
+6. **Scores are 0.1–10 with one decimal place** (`reviews.score` is `numeric(4,1)`:
+   exact decimal, not a float). Validate the range in the API before writing — the
+   DB has no CHECK, and `numeric(4,1)` would accept anything up to 999.9 and silently
+   round extra decimals. supabase-js returns numeric as a string or number depending
+   on the query, so `parseFloat` before comparing. Display with `.toFixed(1)`.
+   Aggregates (`game_review_stats.score_sum`) cast to integer, so averages built
+   from `score_sum` lose the decimals.
 
 7. **`reviews` drafts are invisible to anon.** RLS only exposes
    `status = 'published'` rows. Always filter by status in queries or you'll

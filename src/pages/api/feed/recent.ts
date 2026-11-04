@@ -37,32 +37,50 @@ const LIST_FIELDS = `
 
 export const GET: APIRoute = async (context) => {
   const url = new URL(context.request.url);
-  const cursor = url.searchParams.get("cursor") ?? new Date().toISOString();
+  // Per-stream cursors — reviews, recs, and lists each advance independently.
+  // A single shared cursor silently skips rows: if one stream is sparse (e.g.
+  // the oldest-of-10 list is 8 days old while the oldest-of-30 reviews is 1
+  // day old), the merged "oldest overall" cursor jumps past every review in
+  // between on the next page. Falls back to the legacy `cursor` param so an
+  // older client still gets something back; new client sends all three.
+  const now = new Date().toISOString();
+  const legacyCursor = url.searchParams.get("cursor");
+  const rCursor  = url.searchParams.get("r_cursor")  ?? legacyCursor ?? now;
+  const rcCursor = url.searchParams.get("rc_cursor") ?? legacyCursor ?? now;
+  const lCursor  = url.searchParams.get("l_cursor")  ?? legacyCursor ?? now;
+  // Explicit per-stream "done" flags. Without these, once a stream exhausts
+  // the client stops sending its cursor — and the server would then default
+  // the cursor back to `now` and re-fetch the newest rows for that stream
+  // on every subsequent page. Those re-fetched rows never survive the merge
+  // (they're newer than the overall cursor), so the stream silently
+  // disappears from the feed. The flags let the client say "skip this stream".
+  const rDone  = url.searchParams.get("r_done")  === "1";
+  const rcDone = url.searchParams.get("rc_done") === "1";
+  const lDone  = url.searchParams.get("l_done")  === "1";
   const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "20"), 50);
-  const overFetch = limit * 2;
 
   const db = getSupabaseAdmin();
 
   const [reviewsRes, recsRes, listsRes] = await Promise.all([
-    db.from("reviews")
+    rDone ? Promise.resolve({ data: [], error: null }) : db.from("reviews")
       .select(REVIEW_FIELDS)
       .eq("status", "published")
-      .lt("published_at", cursor)
+      .lt("published_at", rCursor)
       .order("published_at", { ascending: false })
-      .limit(overFetch),
+      .limit(limit),
 
-    db.from("recommendations")
+    rcDone ? Promise.resolve({ data: [], error: null }) : db.from("recommendations")
       .select(REC_FIELDS)
       .eq("status", "published")
-      .lt("created_at", cursor)
+      .lt("created_at", rcCursor)
       .order("created_at", { ascending: false })
-      .limit(overFetch),
+      .limit(limit),
 
-    db.from("lists")
+    lDone ? Promise.resolve({ data: [], error: null }) : db.from("lists")
       .select(LIST_FIELDS)
       .eq("visibility", "public")
       .not("last_posted_to_feed_at", "is", null)
-      .lt("last_posted_to_feed_at", cursor)
+      .lt("last_posted_to_feed_at", lCursor)
       .order("last_posted_to_feed_at", { ascending: false })
       .limit(limit),
   ]);
@@ -106,7 +124,26 @@ export const GET: APIRoute = async (context) => {
     .sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime())
     .slice(0, limit);
 
-  return new Response(JSON.stringify(items), {
+  // Advance each stream's cursor only to the oldest of its own rows in the
+  // output slice. A stream that fetched 0 rows is exhausted (null). A stream
+  // that fetched < limit but had no row in the slice is also exhausted —
+  // everything it has is older than the slice cutoff, so re-querying would
+  // just loop. A stream that fetched a full page but got nothing in the
+  // slice keeps its cursor so its rows reappear on the next merge.
+  function nextCursor(type: string, fetched: any[], prev: string): string | null {
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i]._type === type) return items[i]._date;
+    }
+    if (fetched.length < limit) return null;
+    return prev;
+  }
+  const cursors = {
+    reviews: nextCursor("review", reviews, rCursor),
+    recs:    nextCursor("rec",    recs,    rcCursor),
+    lists:   nextCursor("list",   lists,   lCursor),
+  };
+
+  return new Response(JSON.stringify({ items, cursors }), {
     status: 200,
     headers: {
       "Content-Type": "application/json",

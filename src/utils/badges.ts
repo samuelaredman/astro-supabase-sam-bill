@@ -22,6 +22,13 @@ export const BADGES: Record<string, BadgeDef> = {
     color: "#6050c8",
     icon: "✦",
   },
+  "founder": {
+    slug: "founder",
+    label: "Founder",
+    description: "Co-founder of Chekpoint.",
+    color: "#d4af37",
+    icon: "★",
+  },
 };
 
 export function getBadge(slug: string): BadgeDef | null {

@@ -4,8 +4,11 @@ import { igdbFetch, escapeIgdbString } from '../utils/igdb'
 import { igdbImage } from '../utils/format'
 import { GAME_CATEGORY_OR_FILTER, searchGameAliases } from '../utils/games'
 import Layout from '../components/Layout.astro'
+import ProfileBadge from '../components/ProfileBadge.astro'
+import { readBadgeSlugs, getBadge } from '../utils/badges'
 import { setPageCacheHeaders } from '../utils/cache';
 import { getPageUser } from '../utils/pageAuth';
+import { searchStudios } from '../utils/studios';
 
 export const prerender = false
 
@@ -52,7 +55,7 @@ if (tab === 'games') {
       supabase.rpc('search_games', rpcParams),
       searchGameAliases(supabase, query, 20),
       supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(6),
-      supabase.from('developers').select('id, name, slug').ilike('name', `%${query}%`).limit(6),
+      searchStudios(supabase, query, 6),
       igdbFetch('games', `fields id, name, slug, cover.url; search "${escapedQuery}"; limit 8;`),
       igdbFetch('games', `fields id, name, slug, cover.url; where name ~ *"${escapedQuery}"*; limit 8;`)
     ])
@@ -133,7 +136,7 @@ if (tab === 'games') {
     }
 
     profiles = profilesRes.data ?? []
-    companies = companiesRes.data ?? []
+    companies = companiesRes
     const existingIds = new Set(rawGames.map((g: any) => g.id))
     igdbGames = (igdbRes ?? []).filter((g: any) => !existingIds.has(g.igdb_id) && !existingIds.has(g.id))
 
@@ -233,18 +236,17 @@ if (tab === 'games') {
 
 if (tab === 'reviewers') {
   if (query.length > 1) {
-    const { data } = await supabase.from('profiles').select('id, username, avatar_url').ilike('username', `%${query}%`).limit(24)
+    const { data } = await supabase.from('profiles').select('id, username, avatar_url, profile_badges(badge_slug)').ilike('username', `%${query}%`).limit(24)
     profiles = data ?? []
   } else {
-    const { data } = await supabase.from('profiles').select('id, username, avatar_url').order('username').limit(50)
+    const { data } = await supabase.from('profiles').select('id, username, avatar_url, profile_badges(badge_slug)').order('username').limit(50)
     profiles = data ?? []
   }
 }
 
 if (tab === 'studios') {
   if (query.length > 1) {
-    const { data } = await supabase.from('developers').select('id, name, slug').ilike('name', `%${query}%`).limit(12)
-    companies = data ?? []
+    companies = await searchStudios(supabase, query, 12)
   } else {
     // Developers ranked by how many of their games have a published review,
     // ranked in Postgres (top_studios_by_reviewed_games). This used to read all
@@ -255,7 +257,7 @@ if (tab === 'studios') {
     if ((topDevs ?? []).length > 0) {
       companies = topDevs
     } else {
-      const { data } = await supabase.from('developers').select('id, name, slug').order('name').limit(24)
+      const { data } = await supabase.from('developers').select('id, name, slug').is('canonical_developer_id', null).order('name').limit(24)
       companies = data ?? []
     }
   }
@@ -317,6 +319,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   isLoggedIn={isLoggedIn}
   currentProfile={currentProfile}
   activeNav="search"
+  noindex={Astro.url.search.length > 0}
 >
   <main class="feed search-main">
     <div class="search-header">
@@ -508,7 +511,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
             </div>
           ) : (
             <div class="profile-list">
-              {profiles.map((profile: any) => (
+              {profiles.map((profile: any) => {
+                const slugs = readBadgeSlugs(profile);
+                const topBadge = slugs.map((s) => getBadge(s)).find((b) => !!b);
+                return (
                 <a href={`/reviewers/${profile.username}`} class="profile-item">
                   <div class="srch-avatar">
                     {profile.avatar_url
@@ -517,11 +523,15 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
                     }
                   </div>
                   <div>
-                    <div class="profile-username">@{profile.username}</div>
-                    <div class="profile-sub">Reviewer</div>
+                    <div class="profile-username">
+                      <span>@{profile.username}</span>
+                      {slugs.map((slug) => <ProfileBadge slug={slug} size="sm" />)}
+                    </div>
+                    <div class="profile-sub">{topBadge?.label ?? 'Reviewer'}</div>
                   </div>
                 </a>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -761,7 +771,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   .profile-item:hover { background: var(--bg-hover); }
   .srch-avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--tag-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 500; color: var(--text-secondary); overflow: hidden; flex-shrink: 0; }
   .srch-avatar img { width: 100%; height: 100%; object-fit: cover; }
-  .profile-username { font-size: 14px; font-weight: 500; }
+  .profile-username { font-size: 14px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .profile-sub { font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
 
   .company-list { display: flex; flex-direction: column; gap: 2px; }

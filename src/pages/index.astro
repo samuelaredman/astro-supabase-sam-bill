@@ -41,11 +41,12 @@ const REVIEW_FIELDS = `
   review_comments( id )
 `
 const db = supabase as any
+const adminDb = getSupabaseAdmin() as any;
 const [
   profileRes,
   platformsRes,
   rawReviewsRes,
-  weekReviewsRes,
+  trendingRes,
   siteStats,
   genresRes,
 ] = await Promise.all([
@@ -54,7 +55,8 @@ const [
     : Promise.resolve({ data: null }),
   db.from('platforms').select('id, name, slug').order('name', { ascending: true }),
   db.from('reviews').select(REVIEW_FIELDS).eq('status', 'published').order('published_at', { ascending: false }).limit(30),
-  db.from('reviews').select('game_id, games(id, title, slug, cover_img_url)').eq('status', 'published').gte('published_at', oneWeekAgo).limit(500),
+  // Service-role: home_trending_games is REVOKEd from anon/authenticated.
+  (adminDb as any).rpc('home_trending_games', { p_since: oneWeekAgo, p_limit: 5 }),
   getSiteStats(),
   db.from('genres').select('id, name, slug').order('name'),
 ])
@@ -63,14 +65,12 @@ const currentProfile = profileRes.data ?? null
 const { data: platforms } = platformsRes
 
 // ── Lists shared to feed ──
-const adminDb = getSupabaseAdmin() as any;
-
 async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit: number) {
   if (profileIdFilter && profileIdFilter.length === 0) return [];
 
   let listsQuery = adminDb
     .from('lists')
-    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, last_posted_to_feed_at, profiles(id, username, avatar_url)')
+    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, last_posted_to_feed_at, profiles(id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey(badge_slug))')
     .eq('visibility', 'public')
     .not('last_posted_to_feed_at', 'is', null)
     .order('last_posted_to_feed_at', { ascending: false })
@@ -135,6 +135,9 @@ async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit:
     ownerId: l.profiles?.id ?? null,
     ownerUsername: l.profiles?.username,
     ownerAvatar: l.profiles?.avatar_url,
+    ownerBadgeSlugs: Array.isArray(l.profiles?.profile_badges)
+      ? l.profiles.profile_badges.map((b: any) => b?.badge_slug).filter((s: any) => typeof s === 'string')
+      : [],
     coverUrls: listCoversByListId[l.id] ?? [],
     entryCount: listCountByListId[l.id] ?? 0,
     upVotes: listUpByListId[l.id] ?? 0,
@@ -180,12 +183,12 @@ const [
   currentProfile
     ? db.from('follows').select('following_id').eq('follower_id', currentProfile.id)
     : Promise.resolve({ data: [] }),
+  // Hot-takes ranking: 30 newest reviews deviating ≥ 2.5 from the game's
+  // community average. Returns review IDs + each game's avg/count so the
+  // hot-take card ("avg X across Y reviews") renders without a second lookup.
+  // Service-role: home_hot_takes is REVOKEd from anon/authenticated.
   isLoggedIn
-    ? db.from('reviews')
-        .select('id, game_id, score, published_at, created_at')
-        .eq('status', 'published')
-        .order('published_at', { ascending: false })
-        .limit(500)
+    ? (adminDb as any).rpc('home_hot_takes', { p_limit: 30, p_min_deviation: 2.5, p_min_reviews: 2 })
     : Promise.resolve({ data: [] }),
 ]);
 if (recsError) console.error('[index] recommendations query error:', JSON.stringify(recsError));
@@ -202,24 +205,47 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// Merge all types, sort by date. Shows all SSR-fetched items in one chronological feed.
-// Infinite scroll (loadMore) continues from the oldest item's date.
+// Merge all types, sort by date. The initial per-stream fetches cover
+// mismatched date ranges (30 reviews may only reach ~24h back while 30 recs
+// stretch to months ago), so rendering every row would put old recs/lists
+// below reviews that are still younger than the next page of reviews that
+// loadMore will insert — the feed looks like it jumps from a recent review
+// to months-old posts, then a batch of day-old reviews appears below them.
+// Trim the SSR feed at the youngest stream tail (the max of each stream's
+// oldest fetched row). The trimmed items aren't lost: each stream's initial
+// cursor is set to the trim point so loadMore picks them up in order.
+const rawReviewTail = reviews.length > 0
+  ? (reviews[reviews.length - 1].published_at ?? reviews[reviews.length - 1].created_at)
+  : null;
+const rawRecTail = recentRecs.length > 0 ? recentRecs[recentRecs.length - 1].createdAt : null;
+const rawListTail = recentLists.length > 0
+  ? (recentLists[recentLists.length - 1].last_posted_to_feed_at ?? recentLists[recentLists.length - 1].created_at)
+  : null;
+const streamTails: string[] = [rawReviewTail, rawRecTail, rawListTail].filter((d): d is string => !!d);
+// Only trim when every stream contributed rows — otherwise there's no
+// mismatch to equalize, and the oldest-of-N streams would discard the lot.
+const feedCutoff: string | null = streamTails.length === 3
+  ? streamTails.reduce((a, b) => (a > b ? a : b))
+  : null;
+
 const feedItems: any[] = [
   ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
   // Lists ride the feed on their last post-to-feed time (not created_at), so
   // a repost surfaces the list again instead of leaving it buried.
   ...recentLists.map((l: any) => ({ ...l, _date: l.last_posted_to_feed_at ?? l.created_at })),
   ...recentRecs,
-].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
+]
+  .filter((item: any) => !feedCutoff || item._date >= feedCutoff)
+  .sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
-const trendingMap: Record<string, { title: string; slug: string; cover: string | null; count: number }> = {}
-for (const r of weekReviewsRes.data ?? []) {
-  const g = (r as any).games
-  if (!g) continue
-  if (!trendingMap[g.id]) trendingMap[g.id] = { title: g.title, slug: g.slug, cover: g.cover_img_url, count: 0 }
-  trendingMap[g.id].count++
-}
-const trending = Object.values(trendingMap).sort((a, b) => b.count - a.count).slice(0, 5)
+if (trendingRes.error) console.error('[index] home_trending_games rpc error:', JSON.stringify(trendingRes.error))
+const trending: { title: string; slug: string; cover: string | null; count: number }[] =
+  ((trendingRes.data ?? []) as any[]).map((r) => ({
+    title: r.title,
+    slug: r.slug,
+    cover: r.cover_img_url,
+    count: r.review_count,
+  }))
 
 // Chekpoint Creators strip — the newest upload from each badged creator's
 // linked YouTube channel. Fetched in parallel; the strip only renders for
@@ -323,30 +349,23 @@ const totalReviewers = siteStats.totalReviewers
 
 const { data: genres } = genresRes
 
+// Temporary — Phantom Blade Zero giveaway sidebar widget cover art. Delete
+// with /giveaway when the giveaway ends.
+const { data: giveawayGameRow } = await (supabase as any)
+  .from('games')
+  .select('title, cover_img_url')
+  .eq('slug', 'phantom-blade-zero')
+  .maybeSingle();
+const giveawayCover = igdbImage(giveawayGameRow?.cover_img_url, 't_cover_big') ?? null;
+
 const lastReview: any = lastReviewData ?? null
 const followingIds = (followRows ?? []).map((r: any) => r.following_id)
 
 // ── Hot Takes ranking: published reviews scoring ≥2.5 away from their game's
-// consensus average, most-recent-first. Ranked from the light projection above;
-// only the 30 that survive get hydrated for rendering. ──
-const HT_MIN_DEVIATION = 2.5
-const htScores: Record<string, number[]> = {}
-for (const r of (htRanking ?? []) as any[]) {
-  if (r.game_id == null || r.score == null) continue
-  ;(htScores[r.game_id] ||= []).push(r.score)
-}
-const htAvg: Record<string, number> = {}
-for (const [id, s] of Object.entries(htScores)) {
-  if (s.length >= 2) htAvg[id] = s.reduce((a, b) => a + b, 0) / s.length
-}
-const htWinners = ((htRanking ?? []) as any[])
-  .filter((r) => r.game_id != null && htAvg[r.game_id] !== undefined
-    && Math.abs(r.score - htAvg[r.game_id]) >= HT_MIN_DEVIATION)
-  .sort((a, b) =>
-    new Date(b.published_at || b.created_at).getTime() -
-    new Date(a.published_at || a.created_at).getTime()
-  )
-  .slice(0, 30)
+// consensus average, most-recent-first. The ranking + per-game avg/count come
+// from the `home_hot_takes` RPC (migration 20261031000002); only the 30 that
+// survive get hydrated for rendering. ──
+const htWinners = (htRanking ?? []) as Array<{ id: string; game_avg_score: number; game_review_count: number }>
 const htWinnerIds = htWinners.map((r) => r.id)
 
 // ── Third wave: the followed-reviewer feed and the hot-take hydration ──
@@ -400,19 +419,19 @@ await attachReviewVideos(db, [
   ...(htFull ?? []),
 ])
 {
-  // Re-apply the ranking order the light pass produced, and attach the numbers
-  // the card renders.
-  const byId = new Map((htFull ?? []).map((r: any) => [r.id, r]))
+  // Preserve the RPC's newest-first order and attach the numbers the card renders.
+  const byId = new Map<string, any>((htFull ?? []).map((r: any) => [r.id, r]))
   hotTakes = htWinners
     .map((w) => {
       const full = byId.get(w.id)
       if (!full) return null
+      const avg = w.game_avg_score
       return {
         ...full,
-        _htAvg: htAvg[w.game_id],
-        _htDeviation: w.score - htAvg[w.game_id],
-        _htAbs: Math.abs(w.score - htAvg[w.game_id]),
-        _htCount: htScores[w.game_id].length,
+        _htAvg: avg,
+        _htDeviation: full.score - avg,
+        _htAbs: Math.abs(full.score - avg),
+        _htCount: w.game_review_count,
       }
     })
     .filter(Boolean)
@@ -432,15 +451,74 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
 const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
-const lastFeedItem = feedItems.length > 0 ? feedItems[feedItems.length - 1] : null
-const initialRecentCursor = lastFeedItem?._date ?? null
+// Per-stream cursors for /api/feed/recent — using a single overall "oldest
+// item" cursor silently skipped reviews between the oldest shown review and
+// the oldest shown list/rec. Each stream now continues from its own tail.
+// If a stream was trimmed by the SSR cutoff above (its tail < feedCutoff),
+// its cursor starts at the cutoff so loadMore picks up the trimmed rows in
+// chronological order rather than skipping past them.
+function initialCursorFor(rawTail: string | null): string | null {
+  if (!rawTail) return null;
+  if (feedCutoff && rawTail < feedCutoff) return feedCutoff;
+  return rawTail;
+}
+const initialRecentCursors = {
+  reviews: initialCursorFor(rawReviewTail),
+  recs:    initialCursorFor(rawRecTail),
+  lists:   initialCursorFor(rawListTail),
+}
+// Per-stream done at the point SSR finishes. A short initial batch means the
+// stream is already exhausted; the client passes `r_done=1` etc. so the
+// server doesn't silently re-fetch the newest rows for that stream.
+// Exception: if feedCutoff bumped the stream's cursor forward (its SSR tail is
+// older than the cutoff), the trimmed rows between tail and cutoff are still
+// waiting to be fetched — the stream is NOT done even if the SSR fetch was
+// short. Without this guard a site with <10 lists total and any list older
+// than the review tail would permanently hide that list.
+function initialStreamDone(fetched: number, limit: number, rawTail: string | null, cursor: string | null): boolean {
+  if (fetched >= limit) return false;
+  if (cursor !== rawTail) return false; // cursor was bumped by feedCutoff — more to fetch
+  return true;
+}
+const initialRecentStreamDone = {
+  reviews: initialStreamDone(reviews.length,     30, rawReviewTail, initialRecentCursors.reviews),
+  recs:    initialStreamDone(recentRecs.length,  30, rawRecTail,    initialRecentCursors.recs),
+  lists:   initialStreamDone(recentLists.length, 10, rawListTail,   initialRecentCursors.lists),
+}
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
-const initialRecentDone = reviews.length < 30 && recentRecs.length < 30 && recentLists.length < 10
+const initialRecentDone = initialRecentStreamDone.reviews && initialRecentStreamDone.recs && initialRecentStreamDone.lists
 const initialFollowingDone = followingReviews.length < 20
 
 const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
+
+// Tells Google the site's name is "Chekpoint" (not the dictionary word
+// "checkpoint"), so it shows as the site name in results and wins brand searches.
+const siteJsonLd = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'WebSite',
+      '@id': 'https://chekpoint.gg/#website',
+      name: 'Chekpoint',
+      alternateName: ['Chekpoint.gg', 'chekpoint.gg'],
+      url: 'https://chekpoint.gg/',
+      description: 'Community-driven video game reviews and scores from players.',
+      publisher: { '@id': 'https://chekpoint.gg/#organization' },
+      potentialAction: {
+        '@type': 'SearchAction',
+        target: { '@type': 'EntryPoint', urlTemplate: 'https://chekpoint.gg/search?q={search_term_string}' },
+        'query-input': 'required name=search_term_string',
+      },
+    },
+    {
+      '@type': 'Organization',
+      '@id': 'https://chekpoint.gg/#organization',
+      name: 'Chekpoint',
+      url: 'https://chekpoint.gg/',
+    },
+  ],
+}
 ---
 
 <Layout
@@ -450,6 +528,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   isLoggedIn={isLoggedIn}
   currentProfile={currentProfile}
   activeNav="home">
+  <script slot="head" type="application/ld+json" is:inline set:html={JSON.stringify(siteJsonLd)} />
 
   <main class="feed">
 
@@ -501,8 +580,11 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
             <span class="creators-section-icon" aria-hidden="true">✦</span>
             Chekpoint Creators
           </span>
-          {creatorVideos.length > 1 && (
+          {creatorVideos.length >= 1 && (
             <div class="creators-dots" id="creatorsDots" role="tablist" aria-label="Jump to creator">
+              {/* Mobile-only giveaway dot. Desktop hides it via CSS; the strip's
+                  JS reindexes visible dots at init so positions stay in sync. */}
+              <button type="button" class="creators-dot creators-dot--giveaway creators-dot--active" data-index="0" role="tab" aria-label="Giveaway"></button>
               {creatorVideos.map((_, i) => (
                 <button
                   type="button"
@@ -518,10 +600,22 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
         <div
           class="creators-strip"
           id="creatorsStrip"
-          data-auto-rotate={creatorVideos.length > 1 ? 'true' : 'false'}
+          data-auto-rotate={creatorVideos.length >= 1 ? 'true' : 'false'}
           data-count={creatorVideos.length}
         >
           <div class="creators-track" id="creatorsTrack">
+            {/* Temporary — Phantom Blade Zero giveaway slide. Mobile-only (desktop
+                hides via CSS); keeps the sidebar tile as the desktop entry point.
+                Delete with src/pages/giveaway.astro. */}
+            <a href="/giveaway" class="creator-slide creator-slide--giveaway" aria-label="Enter the Phantom Blade Zero giveaway">
+              {giveawayCover && <img src={giveawayCover} alt="" class="creator-slide-giveaway-cover" loading="lazy" />}
+              <div class="creator-slide-giveaway-scrim" aria-hidden="true"></div>
+              <div class="creator-slide-giveaway-body">
+                <div class="creator-slide-giveaway-tag">GIVEAWAY</div>
+                <div class="creator-slide-giveaway-title">3 × Phantom Blade Zero</div>
+                <div class="creator-slide-giveaway-cta">Enter now →</div>
+              </div>
+            </a>
             {creatorVideos.map(({ creator, channel, video, descriptionShort, channelBioShort, subsLabel, viewsLabel, durationLabel, ageLabel, communityGroup }) => {
               const channelAvatar = channel?.avatarUrl ?? creator.avatar_url;
               const channelName = channel?.name ?? creator.username;
@@ -681,6 +775,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
                 ownerId={item.ownerId}
                 ownerUsername={item.ownerUsername}
                 ownerAvatar={item.ownerAvatar ?? null}
+                ownerBadgeSlugs={item.ownerBadgeSlugs ?? []}
                 createdAt={item.created_at}
                 upVotes={item.upVotes}
                 downVotes={item.downVotes}
@@ -762,6 +857,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
                 ownerId={item.ownerId}
                 ownerUsername={item.ownerUsername}
                 ownerAvatar={item.ownerAvatar ?? null}
+                ownerBadgeSlugs={item.ownerBadgeSlugs ?? []}
                 createdAt={item.created_at}
                 upVotes={item.upVotes}
                 downVotes={item.downVotes}
@@ -882,8 +978,8 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     </div>
     <div class="composer-field" style="margin-top:12px">
       <label class="composer-label">Review</label>
-      <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="5000"></textarea>
-      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 5000</div>
+      <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="10000"></textarea>
+      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 10000</div>
     </div>
     <div class="composer-row" style="margin-top:12px">
       <div class="composer-field" style="flex:1">
@@ -927,9 +1023,23 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       if (!strip) return;
       var track = document.getElementById('creatorsTrack');
       if (!track) return;
-      var count = parseInt(strip.dataset.count || '0', 10) || 0;
+      // Compute count from visible slides so the mobile-only giveaway slide
+      // (hidden on desktop via display:none) is included on mobile but not
+      // desktop. Reindex visible dots to match their visible slide position.
+      var slides = Array.prototype.filter.call(
+        track.querySelectorAll('.creator-slide'),
+        function (s) { return s.offsetParent !== null; }
+      );
+      var count = slides.length;
       if (count <= 0) return;
-      var dots = document.querySelectorAll('#creatorsDots .creators-dot');
+      var dots = Array.prototype.filter.call(
+        document.querySelectorAll('#creatorsDots .creators-dot'),
+        function (d) { return d.offsetParent !== null; }
+      );
+      dots.forEach(function (d, i) {
+        d.dataset.index = String(i);
+        d.classList.toggle('creators-dot--active', i === 0);
+      });
       var index = 0;
 
       function goTo(i) {
@@ -1005,7 +1115,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       document.getElementById('spoilerCheck').checked = false
       document.getElementById('youtubeUrl').value = ''
       document.getElementById('composerError').textContent = ''
-      document.getElementById('charCount').textContent = '0 / 5000'
+      document.getElementById('charCount').textContent = '0 / 10000'
       document.getElementById('charCount').style.color = 'var(--text-tertiary)'
       document.getElementById('gameResults').classList.remove('open')
     }
@@ -1095,6 +1205,40 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     }
 
     var typeFilterMap = { reviews: 'review', lists: 'list', recs: 'rec' };
+    // Mark the first wrapper not filtered out — CSS strips its top border.
+    // `+` would leave a stray border on the first visible card after any run
+    // of hidden ones (filtered sibling still counts as adjacent).
+    function updateRecentFirstVisible() {
+      var recentEl = document.getElementById('tab-recent');
+      if (!recentEl) return;
+      var want = null;
+      if (recentEl.classList.contains('filter-reviews')) want = 'review';
+      else if (recentEl.classList.contains('filter-lists')) want = 'list';
+      else if (recentEl.classList.contains('filter-recs')) want = 'rec';
+      var found = false;
+      recentEl.querySelectorAll(':scope > div[data-feed-type]').forEach(function (el) {
+        var match = !want || el.getAttribute('data-feed-type') === want;
+        if (match && !found) {
+          el.classList.add('feed-first-visible');
+          found = true;
+        } else {
+          el.classList.remove('feed-first-visible');
+        }
+      });
+    }
+    window.__updateRecentFirstVisible = updateRecentFirstVisible;
+    updateRecentFirstVisible();
+    // Videos tab has no type filter — the first wrapper is always first visible.
+    function updateVideosFirstVisible() {
+      var videosEl = document.getElementById('tab-videos');
+      if (!videosEl) return;
+      var found = false;
+      videosEl.querySelectorAll(':scope > div[data-feed-type]').forEach(function (el) {
+        if (!found) { el.classList.add('feed-first-visible'); found = true; }
+        else el.classList.remove('feed-first-visible');
+      });
+    }
+    window.__updateVideosFirstVisible = updateVideosFirstVisible;
     document.querySelectorAll('.feed-tab').forEach(function(btn) {
       btn.addEventListener('click', function() {
         document.querySelectorAll('.feed-tab').forEach(function(b) { b.classList.remove('active') });
@@ -1112,6 +1256,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
           recentEl.classList.remove('filter-reviews', 'filter-lists', 'filter-recs');
           if (isTypeFilter) recentEl.classList.add('filter-' + tab);
         }
+        updateRecentFirstVisible();
       });
     })
     // Mobile feed-filter dropdown — toggle the pill list and reflect the choice.
@@ -1147,8 +1292,8 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     document.getElementById('reviewBody').addEventListener('input', function() {
       const count = this.value.length
       const el = document.getElementById('charCount')
-      el.textContent = count + ' / 5000'
-      el.style.color = count > 4500 ? (count >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
+      el.textContent = count + ' / 10000'
+      el.style.color = count > 9000 ? (count >= 10000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
     })
     document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(el => {
       el.addEventListener('click', () => el.classList.remove('spoiler-hidden'))
@@ -1297,7 +1442,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       if (!score || parseFloat(score) < 0.1 || parseFloat(score) > 10) { errorEl.textContent = 'Please enter a score between 0.1 and 10.'; return; }
       if (!title) { errorEl.textContent = 'Please add a title.'; return; }
       if (!body) { errorEl.textContent = 'Please write a review.'; return; }
-      if (body.length > 5000) { errorEl.textContent = 'Review must be at most 5000 characters.'; return; }
+      if (body.length > 10000) { errorEl.textContent = 'Review must be at most 10000 characters.'; return; }
       if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) { errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return; }
       const btn = document.getElementById('submitReview')
       btn.disabled = true
@@ -1396,7 +1541,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     })
   </script>
 
-  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursor, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
+  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursors, initialRecentStreamDone, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
   (function () {
     // ── Image emote map — keep in sync with src/data/reactions.ts ─────────────
     // Add new emote keys here whenever you add them to IMAGE_EMOTES in reactions.ts
@@ -1466,8 +1611,9 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       return slugs.map(function (slug) {
         var def = BADGES[slug];
         if (!def) return '';
-        return '<span class="profile-badge profile-badge--sm profile-badge--icon-only" style="--badge-color:' + esc(def.color) + '" title="' + esc(def.description) + '" aria-label="' + esc(def.label) + '">'
+        return '<span class="profile-badge profile-badge--sm" style="--badge-color:' + esc(def.color) + '" title="' + esc(def.description) + '" aria-label="' + esc(def.label) + '">'
           + '<span class="profile-badge-icon" aria-hidden="true">' + esc(def.icon) + '</span>'
+          + '<span class="profile-badge-label">' + esc(def.label) + '</span>'
           + '</span>';
       }).join('');
     }
@@ -1779,6 +1925,7 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
          + (avatar ? '<img src="' + esc(avatar) + '" alt="' + esc(username) + '" />' : '<span>' + esc(inits) + '</span>')
          + '</a>'
          + '<a href="/reviewers/' + esc(username) + '" class="lfc-reviewer-name">@' + esc(username) + '</a>'
+         + renderBadges(l.profiles?.profile_badges || l.ownerBadgeSlugs)
          + '<span class="lfc-action">shared a list</span>'
          + '<span class="lfc-dot">·</span>'
          + '<span class="lfc-ts">' + esc(timeAgo(ts)) + '</span>'
@@ -1844,7 +1991,10 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
 
     // ── Per-tab state ──────────────────────────────────────────────────────────
     var state = {
-      recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
+      // Recent tab tracks a cursor per stream (reviews / recs / lists). A
+      // shared cursor set to "oldest overall" silently skips reviews between
+      // the oldest shown review and the oldest shown list/rec on the next page.
+      recent:    { cursors: initialRecentCursors, streamDone: initialRecentStreamDone, loading: false, done: initialRecentDone },
       following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone },
       videos:    { cursor: null,                   loading: false, done: false, count: 0 }
     };
@@ -1858,13 +2008,30 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
       var endEl    = document.getElementById('end-' + tab);
       if (loader) loader.style.display = 'block';
       try {
-        var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
-        var feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
-                    : tab === 'videos'    ? '/api/reviews/feed?tab=videos&limit=20' + cursorParam
-                    : '/api/feed/recent?limit=20' + cursorParam;
+        var feedUrl;
+        if (tab === 'recent') {
+          var cs = s.cursors || {};
+          var sd = s.streamDone || {};
+          var qp = [];
+          // For each stream: send either its cursor (active) or r_done=1
+          // (exhausted). Omitting both would make the server default to
+          // `now` and silently re-fetch the newest rows on every page.
+          if (sd.reviews) qp.push('r_done=1');
+          else if (cs.reviews) qp.push('r_cursor=' + encodeURIComponent(cs.reviews));
+          if (sd.recs)    qp.push('rc_done=1');
+          else if (cs.recs)    qp.push('rc_cursor=' + encodeURIComponent(cs.recs));
+          if (sd.lists)   qp.push('l_done=1');
+          else if (cs.lists)   qp.push('l_cursor=' + encodeURIComponent(cs.lists));
+          feedUrl = '/api/feed/recent?limit=20' + (qp.length ? '&' + qp.join('&') : '');
+        } else {
+          var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
+          feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
+                                        : '/api/reviews/feed?tab=videos&limit=20' + cursorParam;
+        }
         var res = await fetch(feedUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        var items = await res.json();
+        var payload = await res.json();
+        var items = tab === 'recent' ? (payload && payload.items) : payload;
         if (!Array.isArray(items) || items.length === 0) {
           s.done = true;
           // A tab with nothing at all gets its empty state instead of "all caught up".
@@ -1884,18 +2051,49 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
             sentinel.parentNode.insertBefore(tmp.firstChild, sentinel);
           }
         });
-        var last = items[items.length - 1];
-        s.cursor = last._date || last.published_at || last.created_at;
-        if (items.length < 20) {
-          s.done = true;
-          if (endEl) endEl.style.display = 'block';
-          if (sentinel) sentinel.remove();
+        if (tab === 'recent') {
+          if (window.__updateRecentFirstVisible) window.__updateRecentFirstVisible();
+          var nc = (payload && payload.cursors) || {};
+          // A null cursor for a stream means it's exhausted. Record that in
+          // streamDone so the next request sends `*_done=1` instead of
+          // silently defaulting the cursor back to `now`.
+          if (!s.streamDone) s.streamDone = {};
+          if (nc.reviews === null) s.streamDone.reviews = true;
+          if (nc.recs    === null) s.streamDone.recs    = true;
+          if (nc.lists   === null) s.streamDone.lists   = true;
+          s.cursors = { reviews: nc.reviews, recs: nc.recs, lists: nc.lists };
+          if (s.streamDone.reviews && s.streamDone.recs && s.streamDone.lists) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
+        } else {
+          if (tab === 'videos' && window.__updateVideosFirstVisible) window.__updateVideosFirstVisible();
+          var last = items[items.length - 1];
+          s.cursor = last._date || last.published_at || last.created_at;
+          if (items.length < 20) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
         }
       } catch (e) {
         console.error('[feed] loadMore error:', e);
       } finally {
         s.loading = false;
         if (loader) loader.style.display = 'none';
+        // IntersectionObserver only fires on state transitions. Under a type
+        // filter the loaded page is mostly display:none, so the sentinel
+        // barely moves and the observer stays silent even though it's still
+        // on-screen. If the sentinel is still in viewport after this load,
+        // keep draining until the viewport fills with visible items or the
+        // stream exhausts.
+        if (!s.done && sentinel && sentinel.isConnected) {
+          var rect = sentinel.getBoundingClientRect();
+          if (rect.top < (window.innerHeight || 0) + 300) {
+            setTimeout(function () { loadMore(tab); }, 0);
+          }
+        }
       }
     }
 
@@ -1923,8 +2121,19 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
   <RecommendationComposer />
 
   <div slot="sidebar-right">
+    {/* Temporary — Phantom Blade Zero giveaway. Remove with src/pages/giveaway.astro once over. */}
+    <a href="/giveaway" class="pbz-giveaway-tile" aria-label="Enter the Phantom Blade Zero giveaway">
+      {giveawayCover && <img src={giveawayCover} alt="" class="pbz-giveaway-cover" loading="lazy" />}
+      <div class="pbz-giveaway-scrim" aria-hidden="true"></div>
+      <div class="pbz-giveaway-body">
+        <div class="pbz-giveaway-tag">GIVEAWAY</div>
+        <div class="pbz-giveaway-title">3 × Phantom Blade Zero</div>
+        <div class="pbz-giveaway-cta">Enter now →</div>
+      </div>
+    </a>
+
     {isLoggedIn && lastReview && (
-      <div class="widget">
+      <div class="widget" style="margin-top:4px">
         <div class="widget-title">Your last review</div>
         <a href={`/games/${lastReview.games?.slug}`} style="display:flex;gap:12px;align-items:flex-start;text-decoration:none">
           <div style="flex-shrink:0;width:52px;height:70px;border-radius:8px;overflow:hidden;background:var(--tag-bg);border:1px solid var(--border)">
@@ -2057,6 +2266,139 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
 </Layout>
 
 <style>
+  /* Temporary — Phantom Blade Zero mobile giveaway slide inside the Creators
+     strip. Hidden on desktop so the sidebar tile stays the only entry point
+     there; visible as the first slide on mobile. Delete with /giveaway page.
+     Uses two-class selectors (.creator-slide.creator-slide--giveaway) so
+     these rules beat the base .creator-slide { display: grid } that is
+     defined later in the file, regardless of source order. */
+  .creator-slide.creator-slide--giveaway { display: none; }
+  .creators-dot.creators-dot--giveaway { display: none; }
+  @media (max-width: 768px) {
+    .creator-slide.creator-slide--giveaway {
+      display: block;
+      position: relative;
+      flex: 0 0 100%;
+      aspect-ratio: 16 / 7;
+      border-radius: 12px;
+      overflow: hidden;
+      text-decoration: none;
+      color: #fff;
+      isolation: isolate;
+      background: linear-gradient(135deg, #6050c8, #a855f7, #ec4899);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    }
+    .creator-slide-giveaway-cover {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 0;
+    }
+    .creator-slide-giveaway-scrim {
+      position: absolute; inset: 0;
+      background: linear-gradient(90deg, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.45) 60%, rgba(0,0,0,0.2) 100%);
+      z-index: 1;
+    }
+    .creator-slide-giveaway-body {
+      position: relative; z-index: 2;
+      display: flex; flex-direction: column;
+      justify-content: center;
+      height: 100%;
+      padding: 10px 14px;
+    }
+    .creator-slide-giveaway-tag {
+      display: inline-block;
+      align-self: flex-start;
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.22);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      margin-bottom: 5px;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    }
+    .creator-slide-giveaway-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 18px;
+      font-weight: 400;
+      line-height: 1.15;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+    }
+    .creator-slide-giveaway-cta {
+      font-size: 11.5px;
+      font-weight: 600;
+      margin-top: 3px;
+      opacity: 0.95;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+    }
+    .creators-dot.creators-dot--giveaway { display: block; }
+  }
+
+  /* Temporary — Phantom Blade Zero giveaway tile. Delete with /giveaway page. */
+  .pbz-giveaway-tile {
+    position: relative;
+    display: block;
+    aspect-ratio: 16 / 9;
+    border-radius: 14px;
+    overflow: hidden;
+    text-decoration: none;
+    color: #fff;
+    box-shadow: var(--shadow);
+    isolation: isolate;
+    background: linear-gradient(135deg, #6050c8, #a855f7, #ec4899);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .pbz-giveaway-tile:hover { transform: translateY(-2px); box-shadow: 0 14px 32px rgba(96, 80, 200, 0.4); }
+  .pbz-giveaway-cover {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    z-index: 0;
+    transition: transform 0.6s ease;
+  }
+  .pbz-giveaway-tile:hover .pbz-giveaway-cover { transform: scale(1.05); }
+  .pbz-giveaway-scrim {
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.55) 55%, rgba(0,0,0,0.88) 100%);
+    z-index: 1;
+  }
+  .pbz-giveaway-body {
+    position: relative; z-index: 2;
+    display: flex; flex-direction: column;
+    justify-content: flex-end;
+    height: 100%;
+    padding: 12px 14px;
+  }
+  .pbz-giveaway-tag {
+    display: inline-block;
+    align-self: flex-start;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    margin-bottom: 8px;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  }
+  .pbz-giveaway-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 20px;
+    font-weight: 400;
+    line-height: 1.15;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+  }
+  .pbz-giveaway-cta {
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 4px;
+    opacity: 0.95;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  }
+
   /* ── Right-sidebar footer links (replaces the old global site footer) ── */
   .side-foot { margin-top: 16px; padding: 0 4px; display: flex; flex-direction: column; gap: 8px; }
   .side-foot-links { display: flex; flex-wrap: wrap; gap: 14px; }
@@ -2601,6 +2943,14 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     .creator-slide-videostats { font-size: 11px; }
     .creator-slide-desc { display: none; }
     .creator-slide-channel { grid-column: 1 / -1; }
+    /* Stack the CTAs vertically on phones so "See profile" sits above
+       "Join community". The block is still right-anchored via the 980px
+       rule's margin-left:auto, and the buttons keep their natural widths. */
+    .creator-slide-actions {
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+    }
   }
 
   .feed-tabs { display: flex; align-items: center; gap: 6px; padding: 12px 20px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-card); position: sticky; top: 73px; z-index: 9; flex-wrap: wrap; }
@@ -2641,17 +2991,29 @@ const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
     .feed-title { font-size: 15.5px; line-height: 1.2; }
     .feed-subtitle { font-size: 12px; line-height: 1.2; margin-top: 1px; }
   }
-  #tab-recent.filter-reviews [data-feed-type="list"],
-  #tab-recent.filter-reviews [data-feed-type="rec"] { display: none !important; }
-  #tab-recent.filter-lists [data-feed-type="review"],
-  #tab-recent.filter-lists [data-feed-type="rec"] { display: none !important; }
-  #tab-recent.filter-recs [data-feed-type="review"],
-  #tab-recent.filter-recs [data-feed-type="list"] { display: none !important; }
+  /* Scoped out of Astro's data-astro-cid attribute: items inserted by
+     loadMore via innerHTML don't carry the component scope, so the scoped
+     form of these selectors silently fails to hide them. */
+  #tab-recent.filter-reviews :global([data-feed-type="list"]),
+  #tab-recent.filter-reviews :global([data-feed-type="rec"]) { display: none !important; }
+  #tab-recent.filter-lists :global([data-feed-type="review"]),
+  #tab-recent.filter-lists :global([data-feed-type="rec"]) { display: none !important; }
+  #tab-recent.filter-recs :global([data-feed-type="review"]),
+  #tab-recent.filter-recs :global([data-feed-type="list"]) { display: none !important; }
   /* Each card on the Recent tab is wrapped in <div data-feed-type="..."> so
      the card components' own :last-child border strip wipes every border.
-     Draw separators between adjacent wrappers instead. */
-  #tab-recent > div[data-feed-type] + div[data-feed-type] {
+     Draw separators on every wrapper and strip the first one via JS when the
+     filter changes (adjacent-sibling `+` would skip hidden siblings and leave
+     stray top borders on the first visible card after a run of hidden ones).
+     :global() so loadMore-inserted wrappers (built via innerHTML, missing the
+     Astro scope attribute) also get the separator. */
+  #tab-recent > :global(div[data-feed-type]),
+  #tab-videos > :global(div[data-feed-type]) {
     border-top: 1px solid var(--border-subtle);
+  }
+  #tab-recent > :global(div[data-feed-type].feed-first-visible),
+  #tab-videos > :global(div[data-feed-type].feed-first-visible) {
+    border-top: none;
   }
   .genre-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .genre-pill { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; border: 1px solid transparent; }

@@ -71,8 +71,8 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "Missing required fields." }, 400);
   if (parseFloat(score) < 0.1 || parseFloat(score) > 10)
     return json({ error: "Score must be between 0.1 and 10." }, 400);
-  if (reviewBody.length > 5000)
-    return json({ error: "Review must be at most 5000 characters." }, 400);
+  if (reviewBody.length > 10000)
+    return json({ error: "Review must be at most 10000 characters." }, 400);
 
   const publishing = review.status !== "published";
 

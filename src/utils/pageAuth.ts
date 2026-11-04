@@ -40,7 +40,29 @@ export async function getPageUser(
   if (!claims?.sub) return null;
 
   context.locals.onboardingProfile = loadOnboardingProfile('auth_user_id', claims.sub);
+  context.locals.isSiteAdmin = loadIsSiteAdmin(claims.sub);
   return { id: claims.sub, email: claims.email ?? null };
+}
+
+// Never rejects: Layout awaits via `awaitIsSiteAdmin` which falls back to false.
+async function loadIsSiteAdmin(authUserId: string): Promise<boolean> {
+  try {
+    const { data } = await getSupabaseAdmin()
+      .from('site_admins')
+      .select('profile_id, profiles!inner(auth_user_id)')
+      .eq('profiles.auth_user_id', authUserId)
+      .maybeSingle();
+    return !!data;
+  } catch (e) {
+    console.error('[loadIsSiteAdmin] error:', e);
+    return false;
+  }
+}
+
+export async function awaitIsSiteAdmin(locals: App.Locals): Promise<boolean> {
+  const started = locals.isSiteAdmin;
+  if (started) return started;
+  return false;
 }
 
 // Never rejects: the promise can be dropped unawaited when a page redirects.

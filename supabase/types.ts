@@ -153,6 +153,7 @@ export type Database = {
       }
       developers: {
         Row: {
+          canonical_developer_id: string | null
           country: string | null
           description: string | null
           founded_year: number | null
@@ -164,6 +165,7 @@ export type Database = {
           website_url: string | null
         }
         Insert: {
+          canonical_developer_id?: string | null
           country?: string | null
           description?: string | null
           founded_year?: number | null
@@ -175,6 +177,7 @@ export type Database = {
           website_url?: string | null
         }
         Update: {
+          canonical_developer_id?: string | null
           country?: string | null
           description?: string | null
           founded_year?: number | null
@@ -185,7 +188,15 @@ export type Database = {
           slug?: string
           website_url?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "developers_canonical_developer_id_fkey"
+            columns: ["canonical_developer_id"]
+            isOneToOne: false
+            referencedRelation: "developers"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       follows: {
         Row: {
@@ -911,24 +922,33 @@ export type Database = {
           created_at: string
           group_id: string
           id: string
+          is_locked: boolean
           pinned: boolean
           profile_id: string
+          title: string | null
+          updated_at: string | null
         }
         Insert: {
           body: string
           created_at?: string
           group_id: string
           id?: string
+          is_locked?: boolean
           pinned?: boolean
           profile_id: string
+          title?: string | null
+          updated_at?: string | null
         }
         Update: {
           body?: string
           created_at?: string
           group_id?: string
           id?: string
+          is_locked?: boolean
           pinned?: boolean
           profile_id?: string
+          title?: string | null
+          updated_at?: string | null
         }
         Relationships: [
           {
@@ -940,6 +960,58 @@ export type Database = {
           },
           {
             foreignKeyName: "group_announcements_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_announcement_comments: {
+        Row: {
+          announcement_id: string
+          body: string
+          created_at: string
+          id: string
+          parent_id: string | null
+          profile_id: string
+          updated_at: string | null
+        }
+        Insert: {
+          announcement_id: string
+          body: string
+          created_at?: string
+          id?: string
+          parent_id?: string | null
+          profile_id: string
+          updated_at?: string | null
+        }
+        Update: {
+          announcement_id?: string
+          body?: string
+          created_at?: string
+          id?: string
+          parent_id?: string | null
+          profile_id?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_announcement_comments_announcement_id_fkey"
+            columns: ["announcement_id"]
+            isOneToOne: false
+            referencedRelation: "group_announcements"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_announcement_comments_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "group_announcement_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_announcement_comments_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"

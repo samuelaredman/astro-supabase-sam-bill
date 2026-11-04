@@ -12,7 +12,7 @@ export const POST: APIRoute = async (context) => {
 
   const { recommendation_id, body, contains_spoilers, status } = await context.request.json();
   if (!recommendation_id) return json({ error: "recommendation_id is required." }, 400);
-  if (body && body.trim().length > 5000) return json({ error: "Recommendation must be 5000 characters or fewer." }, 400);
+  if (body && body.trim().length > 10000) return json({ error: "Recommendation must be 10000 characters or fewer." }, 400);
 
   // Only the author can edit
   const { data: rec } = await (db as any)

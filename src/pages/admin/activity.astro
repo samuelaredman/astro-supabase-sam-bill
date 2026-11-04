@@ -30,6 +30,48 @@ const retentionRows: RetentionRow[] = ((retentionRaw as any[]) ?? []).map((r) =>
   retained_pct: Number(r.retained_pct ?? 0),
 }));
 
+// Marketing campaigns (date windows) with their signups' retention, plus an
+// organic baseline row (campaign_id null) over the same 90 days.
+const { data: campaignRaw, error: campError } = await db.rpc('admin_campaign_cohorts', { organic_days: 90 });
+if (campError) {
+  console.error('[admin/activity] campaign rpc error:', JSON.stringify(campError));
+}
+
+type CampaignRow = {
+  campaign_id: string | null;
+  name: string;
+  kind: string;
+  starts_on: string;
+  ends_on: string | null;
+  signups: number;
+  returned_1d: number;
+  matured: number;
+  retained_14d: number;
+};
+const campaignRows: CampaignRow[] = ((campaignRaw as any[]) ?? []).map((r) => ({
+  campaign_id: r.campaign_id ?? null,
+  name: r.name,
+  kind: r.kind,
+  starts_on: r.starts_on,
+  ends_on: r.ends_on ?? null,
+  signups: Number(r.signups ?? 0),
+  returned_1d: Number(r.returned_1d ?? 0),
+  matured: Number(r.matured ?? 0),
+  retained_14d: Number(r.retained_14d ?? 0),
+}));
+const campaigns = campaignRows.filter((c) => c.campaign_id);
+
+function pct(part: number, whole: number): string {
+  return whole === 0 ? '—' : `${Math.round((1000 * part) / whole) / 10}%`;
+}
+// The day a cohort's last signups have had 14 days to come back.
+function maturesOn(c: CampaignRow): string {
+  const last = c.ends_on ?? new Date().toISOString().slice(0, 10);
+  const d = new Date(last + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 15);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
 const retentionTotal = retentionRows.reduce((a, r) => a + r.cohort_size, 0);
 const retentionReturned = retentionRows.reduce((a, r) => a + r.retained_14d, 0);
 const retentionPct = retentionTotal === 0 ? 0 : Math.round((1000 * retentionReturned) / retentionTotal) / 10;
@@ -149,9 +191,40 @@ const hoverZones = last30Rows.map((_r, i) => {
   return { i, x: left, width: right - left, cx: xAt(i) };
 });
 
+// Campaign shading — one band per campaign over the chart days it covers.
+const today = new Date().toISOString().slice(0, 10);
+function campaignsOn(day: string): string[] {
+  return campaigns
+    .filter((c) => day >= c.starts_on && day <= (c.ends_on ?? today))
+    .map((c) => c.name);
+}
+const campaignBands = campaigns
+  .map((c) => {
+    const idxs = last30Rows
+      .map((r, i) => (r.day >= c.starts_on && r.day <= (c.ends_on ?? today) ? i : -1))
+      .filter((i) => i >= 0);
+    if (idxs.length === 0) return null;
+    const first = idxs[0];
+    const last = idxs[idxs.length - 1];
+    const x1 = Math.max(PAD_L, xAt(first) - xStep / 2);
+    const x2 = Math.min(CHART_W - PAD_R, xAt(last) + xStep / 2);
+    // Label inside the band, anchored to whichever edge keeps it on the chart.
+    const rightHalf = x1 > PAD_L + PLOT_W / 2;
+    const label = c.name.length > 26 ? c.name.slice(0, 25) + '…' : c.name;
+    return {
+      name: label,
+      x: x1,
+      width: Math.max(4, x2 - x1),
+      labelX: rightHalf ? x2 - 4 : x1 + 4,
+      anchor: rightHalf ? 'end' : 'start',
+    };
+  })
+  .filter((b) => b !== null);
+
 // Data for the client-side hover script — one record per day.
 const chartData = last30Rows.map((r) => ({
   day: r.day,
+  campaigns: campaignsOn(r.day),
   signups: r.signups,
   reviews: r.reviews,
   comments: r.comments,
@@ -215,6 +288,13 @@ function fmtWeekday(s: string): string {
               </div>
               <div class="chart-plot">
                 <svg class="line-chart" viewBox={`0 0 ${CHART_W} ${CHART_H}`} role="img" aria-label="Daily activity trend chart">
+                  {/* Campaign bands (behind everything) */}
+                  {campaignBands.map((b) => (
+                    <g class="campaign-band">
+                      <rect x={b.x} y={PAD_T} width={b.width} height={PLOT_H} />
+                      <text x={b.labelX} y={PAD_T + 11} text-anchor={b.anchor}>{b.name}</text>
+                    </g>
+                  ))}
                   {/* Gridlines + y labels */}
                   {yTicks.map((t) => (
                     <g>
@@ -298,7 +378,12 @@ function fmtWeekday(s: string): string {
                         + '<span class="tt-val">' + row[s.key] + '</span>'
                         + '</div>';
                     }).join('');
-                    tooltip.innerHTML = '<div class="tt-day">' + fmtDay(row.day) + '</div>' + rows;
+                    var camp = row.campaigns.length
+                      ? '<div class="tt-campaign">' + row.campaigns.map(function (n) {
+                          return n.replace(/[&<>"]/g, function (ch) { return '&#' + ch.charCodeAt(0) + ';'; });
+                        }).join(', ') + '</div>'
+                      : '';
+                    tooltip.innerHTML = '<div class="tt-day">' + fmtDay(row.day) + '</div>' + camp + rows;
                     tooltip.style.display = 'block';
 
                     var wrapRect = wrap.getBoundingClientRect();
@@ -337,6 +422,78 @@ function fmtWeekday(s: string): string {
                 })();
               </script>
             </div>
+          </section>
+
+          <section class="admin-section" id="campaigns">
+            <h3 class="admin-section-title">Campaigns <span class="section-sub">vs organic signups, last 90 days</span></h3>
+            <p class="admin-section-note">Users are grouped by the day they signed up (UTC). "Came back" = posted a review, comment, or rec at least a day after signing up, so posting to enter a giveaway on day one doesn't count. 14-day retention only counts users who signed up at least 14 days ago.</p>
+            {campError && <p class="admin-empty">Couldn't load campaigns — have the marketing_campaigns / admin_campaign_cohorts migrations been applied?</p>}
+            <div class="admin-table-wrap">
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Campaign</th>
+                    <th>Dates</th>
+                    <th class="num">Signups</th>
+                    <th class="num">Came back</th>
+                    <th class="num">14-day</th>
+                    <th>&nbsp;</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {campaignRows.map((c) => (
+                    <tr class={c.campaign_id ? '' : 'campaign-organic'}>
+                      <td>
+                        {c.name}
+                        {c.campaign_id && <span class="admin-chip admin-chip-neutral campaign-kind">{c.kind}</span>}
+                      </td>
+                      <td class="campaign-dates">
+                        {c.campaign_id
+                          ? `${fmtDay(c.starts_on)} – ${c.ends_on ? fmtDay(c.ends_on) : 'ongoing'}`
+                          : 'Outside all campaigns'}
+                      </td>
+                      <td class={`num${c.signups === 0 ? ' zero' : ''}`}>{c.signups}</td>
+                      <td class="num">
+                        {c.returned_1d} <span class="campaign-pct">{pct(c.returned_1d, c.signups)}</span>
+                      </td>
+                      <td class="num">
+                        {c.matured === 0
+                          ? <span class="campaign-pending">{c.signups === 0 ? '—' : `from ${maturesOn(c)}`}</span>
+                          : <>{c.retained_14d}/{c.matured} <span class="campaign-pct">{pct(c.retained_14d, c.matured)}</span></>}
+                      </td>
+                      <td class="num">
+                        {c.campaign_id && (
+                          <button type="button" class="admin-btn admin-btn-ghost admin-btn-sm" data-campaign-delete={c.campaign_id} data-campaign-name={c.name}>Delete</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <details class="campaign-add">
+              <summary class="admin-btn admin-btn-sm">+ Add campaign</summary>
+              <form id="campaignForm" class="campaign-form">
+                <label>Name<input class="admin-input" name="name" maxlength="80" required placeholder="Phantom Blade Zero giveaway" /></label>
+                <label>Type
+                  <select class="admin-input" name="kind">
+                    <option value="giveaway">Giveaway</option>
+                    <option value="creator">Creator</option>
+                    <option value="ad">Ad</option>
+                    <option value="social">Social</option>
+                    <option value="other">Other</option>
+                  </select>
+                </label>
+                <label>Starts<input class="admin-input" type="date" name="starts_on" required /></label>
+                <label><span>Ends <span class="campaign-optional">· blank = ongoing</span></span><input class="admin-input" type="date" name="ends_on" /></label>
+                <label class="campaign-notes">Notes<input class="admin-input" name="notes" maxlength="500" placeholder="Optional — who ran it, where it was posted" /></label>
+                <div class="campaign-form-actions">
+                  <button type="submit" class="admin-btn admin-btn-primary admin-btn-sm">Save campaign</button>
+                  <span class="campaign-form-error" role="alert"></span>
+                </div>
+              </form>
+            </details>
           </section>
 
           <section class="admin-section">
@@ -417,7 +574,102 @@ function fmtWeekday(s: string): string {
   </main>
 </Layout>
 
+<script>
+async function post(url: string, body: unknown) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error ?? 'Something went wrong.');
+  return data;
+}
+
+function reloadToCampaigns() {
+  window.location.hash = 'campaigns';
+  window.location.reload();
+}
+
+const form = document.getElementById('campaignForm') as HTMLFormElement | null;
+form?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errEl = form.querySelector('.campaign-form-error') as HTMLElement;
+  const btn = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+  const fd = new FormData(form);
+  errEl.textContent = '';
+  btn.disabled = true;
+  try {
+    await post('/api/admin/campaigns/create', {
+      name: fd.get('name'),
+      kind: fd.get('kind'),
+      starts_on: fd.get('starts_on'),
+      ends_on: fd.get('ends_on') || null,
+      notes: fd.get('notes'),
+    });
+    reloadToCampaigns();
+  } catch (err: any) {
+    errEl.textContent = err.message;
+    btn.disabled = false;
+  }
+});
+
+document.getElementById('campaigns')?.addEventListener('click', async (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-campaign-delete]');
+  if (!btn) return;
+  if (!window.confirm(`Delete "${btn.dataset.campaignName}"? Its signups will count as organic.`)) return;
+  btn.disabled = true;
+  try {
+    await post('/api/admin/campaigns/delete', { id: btn.dataset.campaignDelete });
+    reloadToCampaigns();
+  } catch (err: any) {
+    btn.disabled = false;
+    alert(err.message);
+  }
+});
+</script>
+
 <style>
+  .line-chart .campaign-band rect { fill: var(--accent); opacity: 0.12; }
+  .line-chart .campaign-band text { font-size: 10px; font-weight: 600; fill: var(--accent); font-family: inherit; }
+  .chart-tooltip .tt-campaign {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    margin: -2px 0 6px;
+  }
+
+  .campaign-kind { margin-left: 8px; text-transform: capitalize; }
+  .campaign-dates { color: var(--text-secondary); white-space: nowrap; }
+  .campaign-organic td { color: var(--text-secondary); font-style: italic; }
+  .campaign-pct { color: var(--text-tertiary); font-size: 12px; margin-left: 4px; }
+  .campaign-pending { color: var(--text-tertiary); font-size: 12px; }
+
+  .campaign-add { margin-top: 12px; }
+  .campaign-add > summary { list-style: none; cursor: pointer; width: fit-content; }
+  .campaign-add > summary::-webkit-details-marker { display: none; }
+  .campaign-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-card);
+  }
+  .campaign-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .campaign-form .campaign-notes { grid-column: 1 / -1; }
+  .campaign-optional { color: var(--text-tertiary); font-weight: 400; }
+  .campaign-form-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; }
+  .campaign-form-error { color: var(--score-low, #c0392b); font-size: 13px; }
+
   /* Page-local only — primitives in src/styles/admin.css. */
   .chart-wrap {
     padding: 16px;
