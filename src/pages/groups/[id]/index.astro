@@ -24,6 +24,7 @@ import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 import ProfileBadge from "../../../components/ProfileBadge.astro";
 import PostComposer from "../../../components/forum/PostComposer.astro";
+import ReportModal from "../../../components/ReportModal.astro";
 import { renderPostBody, postExcerpt } from "../../../utils/richPost";
 import { readBadgeSlugs } from "../../../utils/badges";
 import { getPageUser } from "../../../utils/pageAuth";
@@ -2859,7 +2860,7 @@ const groupOgDescription = group.description
                 ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">{pollsShowcaseMode === "featured" ? "The featured poll was removed. Pick another via Change." : "No polls yet."}</div>
                 : polls.map((p: any) => {
                   const hasVoted = !!p.myOptionId;
-                  const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+                  const canManagePoll = canEditOverview || p.profile_id === currentProfile?.id;
                   const showResults = hasVoted || p.closed;
                   return (
                     <div class="poll-item" data-poll-id={p.id}>
@@ -3143,7 +3144,7 @@ const groupOgDescription = group.description
         ? <div class="card" style="font-size:13px;color:var(--text-tertiary)">No polls yet.</div>
         : forumPolls.map((p: any) => {
           const hasVoted = !!p.myOptionId;
-          const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+          const canManagePoll = canEditOverview || p.profile_id === currentProfile?.id;
           const showResults = hasVoted || p.closed;
           const game = p.games;
           const gameHref = p.featured_game_id
@@ -3178,19 +3179,20 @@ const groupOgDescription = group.description
                 {p.pinned && <span class="fp-poll-chip fp-poll-chip-pin">📌 Pinned</span>}
                 {p.closed && <span class="fp-poll-chip fp-poll-chip-closed">🔒 Closed</span>}
                 {p.featured_game_id && <span class="fp-poll-chip fp-poll-chip-featured">★ Featured</span>}
-                {canManagePoll && (
-                  <span class="fp-poll-admin-actions">
-                    {canEditOverview && (
-                      <button class="announcement-action" onclick={`togglePollPinned('${p.id}', ${!p.pinned})`}>{p.pinned ? "Unpin" : "Pin"}</button>
-                    )}
-                    {!p.featured_game_id && (
-                      <>
-                        <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
-                        <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
-                      </>
-                    )}
-                  </span>
-                )}
+                <span class="fp-poll-admin-actions">
+                  {!!currentProfile && p.profile_id !== currentProfile.id && (
+                    <button class="announcement-action" onclick={`window.openReport && window.openReport('group_poll', '${p.id}')`}>Report</button>
+                  )}
+                  {canManagePoll && canEditOverview && (
+                    <button class="announcement-action" onclick={`togglePollPinned('${p.id}', ${!p.pinned})`}>{p.pinned ? "Unpin" : "Pin"}</button>
+                  )}
+                  {canManagePoll && !p.featured_game_id && (
+                    <>
+                      <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
+                      <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
+                    </>
+                  )}
+                </span>
               </header>
 
               <h3 class="fp-poll-question">{p.question}</h3>
@@ -3330,12 +3332,26 @@ const groupOgDescription = group.description
         {forumThreads.length === 0
           ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No threads yet{canPostThread ? " — start the first one." : "."}</div>
           : <ul class="ann-card-list">
-              {forumThreads.map((t: any) => (
+              {forumThreads.map((t: any) => {
+                const isOwnThread = !!currentProfile && t.profile_id === currentProfile.id;
+                const canDeleteThread = canEditOverview || isOwnThread;
+                const canReportThread = !!currentProfile && !isOwnThread;
+                return (
                 <li class="ann-card ann-card-full" data-ann-href={`/groups/${group.id}/forums/${t.id}`}>
                   <div class="ann-card-meta">
                     {t.pinned && <span class="badge pinned">📌 Pinned</span>}
                     <span class="badge category">thread</span>
                     {t.is_locked && <span class="badge locked">🔒 Locked</span>}
+                    {(canDeleteThread || canReportThread) && (
+                      <span style="margin-left:auto;display:inline-flex;gap:10px">
+                        {canReportThread && (
+                          <button type="button" class="announcement-action" data-report-thread={t.id}>Report</button>
+                        )}
+                        {canDeleteThread && (
+                          <button type="button" class="announcement-action" data-delete-thread={t.id}>Delete</button>
+                        )}
+                      </span>
+                    )}
                   </div>
                   {t.title?.trim() && (
                     <a class="ann-card-title ann-card-title-link" href={`/groups/${group.id}/forums/${t.id}`}>
@@ -3364,7 +3380,8 @@ const groupOgDescription = group.description
                     </a>
                   </div>
                 </li>
-              ))}
+              );
+              })}
             </ul>
         }
       </div>
@@ -3985,6 +4002,30 @@ async function deleteAnnouncement(announcementId) {
   else { const d = await res.json(); alert(d.error ?? 'Error'); }
 }
 window.deleteAnnouncement = deleteAnnouncement;
+
+// ── Forum threads: delete + report from the Forums > Forums list card ──
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('[data-delete-thread],[data-report-thread]');
+  if (!btn) return;
+  const delId = btn.getAttribute('data-delete-thread');
+  if (delId) {
+    e.preventDefault(); e.stopPropagation();
+    if (!confirm('Delete this thread and all its comments?')) return;
+    fetch('/api/groups/forums/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thread_id: delId }),
+    }).then(async (r) => {
+      if (r.ok) btn.closest('li')?.remove();
+      else { const d = await r.json(); alert(d.error ?? 'Error'); }
+    });
+    return;
+  }
+  const reportId = btn.getAttribute('data-report-thread');
+  if (reportId) {
+    e.preventDefault(); e.stopPropagation();
+    if (window.openReport) window.openReport('forum_thread', reportId);
+  }
+});
 
 // ── Polls ──
 function togglePollForm(prefix) {
@@ -4610,5 +4651,6 @@ window.deletePoll = deletePoll;
   window.savePollsShowcase = savePollsShowcase
 </script>
 <CropModal />
+<ReportModal />
 </div><!-- /#accentScope -->
 </Layout>
