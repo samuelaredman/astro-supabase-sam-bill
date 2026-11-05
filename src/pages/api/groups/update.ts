@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, getGroupAuthority } from "../../../utils/api";
-import { validateName } from "../../../utils/moderation/nameRules";
+import { validateGroupName } from "../../../utils/moderation/nameRules";
 import { groupOwnerYouTube, readGroupShowcaseKeys } from "../../../utils/groupShowcases";
 import { parseYouTubeId } from "../../../utils/youtube";
 
@@ -37,7 +37,7 @@ export const POST: APIRoute = async (context) => {
   const updates: Record<string, any> = {};
 
   if (name !== undefined) {
-    const nameCheck = validateName(name);
+    const nameCheck = validateGroupName(name);
     if (!nameCheck.ok) return json({ error: nameCheck.error }, 400);
     updates.name = name.trim();
   }
@@ -45,6 +45,7 @@ export const POST: APIRoute = async (context) => {
   if (join_prompt !== undefined)  updates.join_prompt = join_prompt?.trim() || null;
   if (stats_config !== undefined) updates.stats_config = stats_config;
   if ("polls_everyone" in body)   updates.polls_everyone = !!body.polls_everyone;
+  if ("forums_everyone" in body)  updates.forums_everyone = !!body.forums_everyone;
 
   // Overview Polls showcase mode + target poll
   if ("polls_showcase_mode" in body) {
