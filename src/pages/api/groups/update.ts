@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, getGroupAuthority } from "../../../utils/api";
-import { validateName } from "../../../utils/moderation/nameRules";
+import { validateGroupName } from "../../../utils/moderation/nameRules";
 import { groupOwnerYouTube, readGroupShowcaseKeys } from "../../../utils/groupShowcases";
 import { parseYouTubeId } from "../../../utils/youtube";
 
@@ -37,7 +37,7 @@ export const POST: APIRoute = async (context) => {
   const updates: Record<string, any> = {};
 
   if (name !== undefined) {
-    const nameCheck = validateName(name);
+    const nameCheck = validateGroupName(name);
     if (!nameCheck.ok) return json({ error: nameCheck.error }, 400);
     updates.name = name.trim();
   }

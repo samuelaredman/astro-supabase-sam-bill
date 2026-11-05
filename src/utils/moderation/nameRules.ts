@@ -65,3 +65,23 @@ export function validateName(input: unknown): ValidateNameResult {
 
   return { ok: true };
 }
+
+// Group names are display names, not identifiers: they may contain spaces,
+// punctuation and the word "Chekpoint". Still screen for profanity and the
+// RESERVED_EXACT impersonation words, but let the display-shape through.
+const GROUP_NAME_BAD_FORMAT: ValidateNameResult = {
+  ok: false,
+  error: "Group names must be 2–60 characters.",
+};
+
+export function validateGroupName(input: unknown): ValidateNameResult {
+  const trimmed = typeof input === "string" ? input.trim() : "";
+  if (!trimmed) return { ok: false, error: "Group name is required." };
+  if (trimmed.length < 2 || trimmed.length > 60) return GROUP_NAME_BAD_FORMAT;
+
+  const normalized = normalize(trimmed);
+  if (RESERVED_EXACT.has(normalized)) return UNAVAILABLE;
+  if (profanityMatcher.hasMatch(trimmed) || profanityMatcher.hasMatch(normalized)) return UNAVAILABLE;
+
+  return { ok: true };
+}
