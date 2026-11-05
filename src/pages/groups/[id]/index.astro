@@ -1235,6 +1235,17 @@ const groupOgDescription = group.description
   .ann-card-meta .badge.category{background:var(--bg-hover);color:var(--text-secondary)}
   .ann-card-meta .badge.pinned{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
   .ann-card-meta .badge.locked{background:var(--bg-hover);color:var(--text-tertiary)}
+  /* Staff-authored threads: a role chip in the meta row and an accent left border
+     so admin/owner threads stand out from member-started ones. */
+  .ann-card-meta .badge.staff{font-weight:700}
+  .ann-card-meta .badge.staff.staff-owner{background:#271e00;color:#fbbf24}
+  .ann-card-meta .badge.staff.staff-admin{background:var(--accent-subtle);color:var(--accent)}
+  .ann-card-meta .badge.staff.staff-staff{background:#0b2a1a;color:#4ade80}
+  .ann-card-staff{box-shadow:inset 3px 0 0 var(--accent)}
+  .ann-card-staff-owner{box-shadow:inset 3px 0 0 #fbbf24}
+  .ann-card-staff-admin{box-shadow:inset 3px 0 0 var(--accent)}
+  .ann-card-staff-staff{box-shadow:inset 3px 0 0 #4ade80}
+  .ann-card-pinned{border-color:var(--accent)}
   .ann-card-title{font-size:15px;font-weight:600;color:var(--text-primary);margin:0 0 4px;line-height:1.35}
   .ann-card-excerpt{font-size:13px;color:var(--text-secondary);line-height:1.55;margin:0 0 8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
   .ann-card-footer{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-tertiary);flex-wrap:wrap}
@@ -3336,14 +3347,27 @@ const groupOgDescription = group.description
                 const isOwnThread = !!currentProfile && t.profile_id === currentProfile.id;
                 const canDeleteThread = canEditOverview || isOwnThread;
                 const canReportThread = !!currentProfile && !isOwnThread;
+                // Mods (owner/admin/can_edit_group) can pin any thread; see /api/groups/forums/pin.
+                const canPinThread = canEditOverview;
+                const authorRoleKey = t.authorRole ? String(t.authorRole).toLowerCase() : null;
+                const isStaffAuthored = authorRoleKey === "owner" || authorRoleKey === "admin" || authorRoleKey === "staff";
                 return (
-                <li class="ann-card ann-card-full" data-ann-href={`/groups/${group.id}/forums/${t.id}`}>
+                <li
+                  class={`ann-card ann-card-full${isStaffAuthored ? ` ann-card-staff ann-card-staff-${authorRoleKey}` : ""}${t.pinned ? " ann-card-pinned" : ""}`}
+                  data-ann-href={`/groups/${group.id}/forums/${t.id}`}
+                >
                   <div class="ann-card-meta">
                     {t.pinned && <span class="badge pinned">📌 Pinned</span>}
                     <span class="badge category">thread</span>
+                    {t.authorRole && (
+                      <span class={`badge staff staff-${authorRoleKey}`}>{t.authorRole === "Owner" ? "👑 " : t.authorRole === "Admin" ? "★ " : ""}{t.authorRole}</span>
+                    )}
                     {t.is_locked && <span class="badge locked">🔒 Locked</span>}
-                    {(canDeleteThread || canReportThread) && (
+                    {(canPinThread || canDeleteThread || canReportThread) && (
                       <span style="margin-left:auto;display:inline-flex;gap:10px">
+                        {canPinThread && (
+                          <button type="button" class="announcement-action" data-pin-thread={t.id} data-pinned={t.pinned ? "1" : "0"}>{t.pinned ? "Unpin" : "Pin"}</button>
+                        )}
                         {canReportThread && (
                           <button type="button" class="announcement-action" data-report-thread={t.id}>Report</button>
                         )}
@@ -4003,9 +4027,9 @@ async function deleteAnnouncement(announcementId) {
 }
 window.deleteAnnouncement = deleteAnnouncement;
 
-// ── Forum threads: delete + report from the Forums > Forums list card ──
+// ── Forum threads: pin + delete + report from the Forums > Forums list card ──
 document.addEventListener('click', (e) => {
-  const btn = e.target.closest?.('[data-delete-thread],[data-report-thread]');
+  const btn = e.target.closest?.('[data-delete-thread],[data-report-thread],[data-pin-thread]');
   if (!btn) return;
   const delId = btn.getAttribute('data-delete-thread');
   if (delId) {
@@ -4017,6 +4041,20 @@ document.addEventListener('click', (e) => {
     }).then(async (r) => {
       if (r.ok) btn.closest('li')?.remove();
       else { const d = await r.json(); alert(d.error ?? 'Error'); }
+    });
+    return;
+  }
+  const pinId = btn.getAttribute('data-pin-thread');
+  if (pinId) {
+    e.preventDefault(); e.stopPropagation();
+    const makePinned = btn.getAttribute('data-pinned') !== '1';
+    btn.disabled = true;
+    fetch('/api/groups/forums/pin', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thread_id: pinId, pinned: makePinned }),
+    }).then(async (r) => {
+      if (r.ok) window.location.reload();
+      else { const d = await r.json(); alert(d.error ?? 'Error'); btn.disabled = false; }
     });
     return;
   }
