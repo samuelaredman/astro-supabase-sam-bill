@@ -38,7 +38,7 @@ const [{ data: game }, { data: cp }] = await Promise.all([
     .from('games')
     .select(`
       id, title, slug, game_description, cover_img_url,
-      date_released, igdb_id, canonical_game_id,
+      date_released, igdb_id, canonical_game_id, igdb_category,
       game_genres(genres(id, name, slug)),
       game_platforms(platforms(id, name, slug)),
       game_companies(role, developers(id, name, slug))
@@ -392,11 +392,39 @@ const rankStats = rankRows?.[0] ?? null
 const allTimeRank: number = rankStats?.all_time_rank ?? 0
 const allTimeTotal: number = rankStats?.all_time_total ?? 0
 
-// ── Children: collapsed editions/versions + related franchise content ──
-// Rendered below "Similar games" in the same card style.
+// ── Children: collapsed editions/versions, DLCs/expansions, related franchise content ──
+// Editions live in the new "DLC & Editions" tab; DLC/expansion children live in the same
+// tab; everything else (remake, sequel, series_sibling, similar, expanded_game) renders
+// as "Related games" in Overview.
+const DLC_RELATION_TYPES = new Set(['dlc', 'expansion', 'standalone_expansion'])
+
+// If this game IS a DLC/expansion, resolve its parent for the "DLC for [parent]" chip.
+// Parent edges are stored as (from_game_id=parent, to_game_id=this), so we query the
+// reverse direction and filter to DLC-ish relation types.
+const isDlcPage = game.igdb_category === 1 || game.igdb_category === 2 || game.igdb_category === 4
+let parentGame: { id: string; title: string; slug: string | null } | null = null
+if (isDlcPage) {
+  const { data: parentRelRow } = await (supabase as any)
+    .from('game_relationships')
+    .select('from_game_id')
+    .eq('to_game_id', game.id)
+    .in('relation_type', ['dlc', 'expansion', 'standalone_expansion'])
+    .limit(1)
+    .maybeSingle()
+  if (parentRelRow?.from_game_id) {
+    const { data: parentRow } = await (supabase as any)
+      .from('games')
+      .select('id, title, slug')
+      .eq('id', parentRelRow.from_game_id)
+      .maybeSingle()
+    if (parentRow) parentGame = parentRow
+  }
+}
+const parentChipLabel = game.igdb_category === 2 || game.igdb_category === 4 ? 'Expansion for' : 'DLC for'
+
 const { data: editionsRaw } = await (supabase as any)
   .from('games')
-  .select('id, title, slug, cover_img_url, date_released')
+  .select('id, title, slug, version_title, cover_img_url, date_released')
   .eq('canonical_game_id', game.id)
   .order('date_released', { ascending: true })
 const editions = editionsRaw ?? []
@@ -407,26 +435,52 @@ const { data: relRows } = await (supabase as any)
   .eq('from_game_id', game.id)
 const relTypeById = new Map<string, string>((relRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
 const relIds = [...relTypeById.keys()]
+let dlcChildren: any[] = []
 let relatedChildren: any[] = []
 if (relIds.length > 0) {
   const { data: relGames } = await (supabase as any)
     .from('games')
-    .select('id, title, slug, cover_img_url, date_released')
+    .select('id, title, slug, cover_img_url, date_released, igdb_category')
     .in('id', relIds)
     .is('canonical_game_id', null)   // only related nodes that are themselves canonical
-  relatedChildren = (relGames ?? []).map((g: any) => ({ ...g, relation_type: relTypeById.get(g.id) }))
+  for (const g of (relGames ?? [])) {
+    const rt = relTypeById.get(g.id) ?? ''
+    const entry = { ...g, relation_type: rt }
+    if (DLC_RELATION_TYPES.has(rt)) dlcChildren.push(entry)
+    else relatedChildren.push(entry)
+  }
+  dlcChildren.sort((a, b) => {
+    if (!a.date_released && !b.date_released) return 0
+    if (!a.date_released) return 1
+    if (!b.date_released) return -1
+    return String(a.date_released).localeCompare(String(b.date_released))
+  })
 }
 
-// Avg score per child, read from the game_review_stats view (not every review).
-const childIds = [...editions.map((e: any) => e.id), ...relatedChildren.map((r: any) => r.id)]
+// Avg score + review count per child, read from the game_review_stats view (not every review).
+const childIds = [
+  ...editions.map((e: any) => e.id),
+  ...dlcChildren.map((d: any) => d.id),
+  ...relatedChildren.map((r: any) => r.id),
+]
 const childScores: Record<string, number> = {}
+const childReviewCounts: Record<string, number> = {}
 if (childIds.length > 0) {
   const { data: childAvgRows } = await db
-    .from('game_review_stats').select('game_id, avg_score').in('game_id', childIds)
+    .from('game_review_stats').select('game_id, avg_score, review_count').in('game_id', childIds)
   for (const row of (childAvgRows ?? []) as any[]) {
     if (row.avg_score != null) childScores[row.game_id] = row.avg_score
+    if (row.review_count != null) childReviewCounts[row.game_id] = row.review_count
   }
 }
+
+// Label a DLC row for the badge next to its title. Expansion (igdb_category 2) and
+// standalone_expansion (4) show "Expansion"; everything else in the tab is "DLC".
+function dlcBadgeLabel(c: any): string {
+  return c.igdb_category === 2 || c.igdb_category === 4 ? 'Expansion' : 'DLC'
+}
+
+const dlcTabCount = dlcChildren.length + editions.length
 const allTimePct = allTimeTotal > 0 ? Math.round(((allTimeTotal - allTimeRank) / allTimeTotal) * 100) : 0
 const genreRank: number = rankStats?.genre_rank ?? 0
 const genreTotal: number = rankStats?.genre_total ?? 0
@@ -645,6 +699,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .cover-placeholder{width:130px;height:173px;border-radius:12px;background:var(--bg-card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0}
     .game-info{flex:1;min-width:0;padding-bottom:4px}
     .game-title{font-family:'Cinzel',serif;font-size:32px;line-height:1.1;letter-spacing:.04em;margin-bottom:8px;font-weight:600;text-shadow:0 2px 20px rgba(0,0,0,.6)}
+    .parent-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;margin-bottom:10px;border-radius:999px;background:rgba(96,80,200,.15);border:1px solid rgba(96,80,200,.4);text-decoration:none;font-size:12px;color:var(--text-secondary);transition:background .15s,border-color .15s}
+    .parent-chip:hover{background:rgba(96,80,200,.25);border-color:rgba(96,80,200,.6)}
+    .parent-chip-label{text-transform:uppercase;letter-spacing:.06em;font-weight:600;color:var(--game-accent,#6050c8);font-size:10px}
+    .parent-chip-title{color:var(--text-primary);font-weight:500}
     .meta-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
     .meta-tag{font-size:13px;color:var(--text-secondary)}
     .meta-sep{color:var(--text-tertiary);font-size:10px}
@@ -758,6 +816,21 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .similar-score-badge.score-low{background:rgba(48,14,14,.88);color:#f87171;border:1px solid rgba(248,113,113,.4)}
     .similar-info{padding:6px 8px 8px}
     .similar-title{font-size:10px;font-weight:500;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--text-secondary)}
+    .similar-sub{font-size:9px;color:var(--text-tertiary);margin-top:2px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+
+    /* DLC & Editions tab cards — larger than similar-card since DLC content is primary */
+    .dlc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+    .dlc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,border-color .15s;display:flex;flex-direction:column;text-decoration:none;color:inherit}
+    .dlc-card:hover{transform:translateY(-3px);border-color:var(--game-accent)}
+    .dlc-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:32px;position:relative}
+    .dlc-cover img{width:100%;height:100%;object-fit:cover}
+    .dlc-info{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px}
+    .dlc-badge-row{display:flex;align-items:center;gap:8px}
+    .dlc-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;background:var(--tag-bg);color:var(--text-secondary);border:1px solid var(--border-subtle)}
+    .dlc-badge.dlc-badge-exp{background:rgba(96,80,200,.15);color:var(--game-accent,#6050c8);border-color:rgba(96,80,200,.4)}
+    .dlc-year{font-size:11px;color:var(--text-tertiary)}
+    .dlc-title{font-size:14px;font-weight:600;line-height:1.3;color:var(--text-primary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .dlc-meta{font-size:11px;color:var(--text-tertiary);margin-top:2px}
 
     /* SIDEBAR */
     .desc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px}
@@ -1000,6 +1073,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         : <div class="cover-placeholder">🎮</div>
       }
       <div class="game-info">
+        {parentGame && (
+          <a href={`/games/${parentGame.slug}`} class="parent-chip">
+            <span class="parent-chip-label">{parentChipLabel}</span>
+            <span class="parent-chip-title">{parentGame.title}</span>
+          </a>
+        )}
         <h1 class="game-title">{game.title}</h1>
         <div class="meta-row">
           {releaseYear && <span class="meta-tag">{releaseYear}</span>}
@@ -1043,6 +1122,9 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     <nav class="tab-nav">
       <a href={`/games/${game.slug}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`} data-tab="overview">Overview</a>
       <a href={`/games/${game.slug}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`} data-tab="reviews">Reviews {reviewList.length > 0 && <span class="tab-count">{reviewList.length}</span>}</a>
+      {dlcTabCount > 0 && (
+        <a href={`/games/${game.slug}?tab=dlc`} class={`tab-link ${activeTab === 'dlc' ? 'active' : ''}`} data-tab="dlc">DLC & Editions <span class="tab-count">{dlcTabCount}</span></a>
+      )}
       <a href={`/games/${game.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">Stats</a>
       <a href={`/games/${game.slug}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">Recommendations {gameRecs.length > 0 && <span class="tab-count">{gameRecs.length}</span>}</a>
     </nav>
@@ -1096,29 +1178,6 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
                         {coverUrl ? <img src={coverUrl ?? ''} alt={g.title} loading="lazy" /> : '🎮'}
                         {g.chekpointScore != null && (
                           <div class={`similar-score-badge ${scoreClass(g.chekpointScore)}`}>{g.chekpointScore.toFixed(1)}</div>
-                        )}
-                      </div>
-                      <div class="similar-info"><div class="similar-title">{g.title}</div></div>
-                    </a>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {editions.length > 0 && (
-            <div class="section">
-              <div class="section-header"><span class="section-title">Editions & versions</span></div>
-              <div class="similar-scroll">
-                {editions.map((g: any) => {
-                  const cover = igdbImage(g.cover_img_url, 't_cover_big')
-                  const sc = childScores[g.id]
-                  return (
-                    <a href={`/games/${g.slug}`} class="similar-card">
-                      <div class="similar-cover">
-                        {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
-                        {sc != null && (
-                          <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
                         )}
                       </div>
                       <div class="similar-info"><div class="similar-title">{g.title}</div></div>
@@ -1318,6 +1377,75 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         </>
       )}
     </div>
+
+    <!-- ── DLC & EDITIONS TAB ── -->
+    {dlcTabCount > 0 && (
+      <div class={`tab-panel ${activeTab === 'dlc' ? 'active' : ''}`} data-tab="dlc">
+        {dlcChildren.length > 0 && (
+          <div class="section">
+            <div class="section-header">
+              <span class="section-title">DLC & Expansions</span>
+              <span class="section-count">{dlcChildren.length}</span>
+            </div>
+            <div class="dlc-grid">
+              {dlcChildren.map((g: any) => {
+                const cover = igdbImage(g.cover_img_url, 't_cover_big')
+                const sc = childScores[g.id]
+                const rc = childReviewCounts[g.id] ?? 0
+                const year = g.date_released ? new Date(g.date_released).getFullYear() : null
+                return (
+                  <a href={`/games/${g.slug}`} class="dlc-card">
+                    <div class="dlc-cover">
+                      {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
+                      {sc != null && (
+                        <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
+                      )}
+                    </div>
+                    <div class="dlc-info">
+                      <div class="dlc-badge-row">
+                        <span class={`dlc-badge ${g.igdb_category === 2 || g.igdb_category === 4 ? 'dlc-badge-exp' : ''}`}>{dlcBadgeLabel(g)}</span>
+                        {year && <span class="dlc-year">{year}</span>}
+                      </div>
+                      <div class="dlc-title">{g.title}</div>
+                      <div class="dlc-meta">{rc > 0 ? `${rc} review${rc === 1 ? '' : 's'}` : 'No reviews yet'}</div>
+                    </div>
+                  </a>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {editions.length > 0 && (
+          <div class="section">
+            <div class="section-header">
+              <span class="section-title">Editions & versions</span>
+              <span class="section-count">{editions.length}</span>
+            </div>
+            <div class="similar-scroll">
+              {editions.map((g: any) => {
+                const cover = igdbImage(g.cover_img_url, 't_cover_big')
+                const sc = childScores[g.id]
+                return (
+                  <a href={`/games/${g.slug}`} class="similar-card">
+                    <div class="similar-cover">
+                      {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
+                      {sc != null && (
+                        <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
+                      )}
+                    </div>
+                    <div class="similar-info">
+                      <div class="similar-title">{g.title}</div>
+                      {g.version_title && <div class="similar-sub">{g.version_title}</div>}
+                    </div>
+                  </a>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    )}
 
     <!-- ── STATS TAB ── -->
     <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">
