@@ -965,6 +965,20 @@ const siteJsonLd = {
       </div>
       <input type="hidden" id="gameId" />
     </div>
+
+    <!-- Main Game / DLC toggle + picker — appears only after a base-game
+         pick that has DLCs/expansions in game_relationships. -->
+    <div id="homeTypeRow" class="composer-field" style="display:none;margin-top:12px">
+      <label class="composer-label">Reviewing</label>
+      <div class="home-type-toggle" role="tablist" aria-label="Review target">
+        <button type="button" id="homeTypeMain" class="home-type-tab active" role="tab" aria-selected="true">Main Game</button>
+        <button type="button" id="homeTypeDlc" class="home-type-tab" role="tab" aria-selected="false">DLC</button>
+      </div>
+      <div id="homeDlcPicker" style="display:none;margin-top:10px">
+        <div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:8px">Pick a DLC or expansion</div>
+        <div id="homeDlcGrid" class="home-dlc-grid"></div>
+      </div>
+    </div>
     <div class="composer-field" style="margin-top:12px">
       <label class="composer-label">Score</label>
       <div style="display:flex;align-items:center;gap:8px">
@@ -1118,6 +1132,12 @@ const siteJsonLd = {
       document.getElementById('charCount').textContent = '0 / 10000'
       document.getElementById('charCount').style.color = 'var(--text-tertiary)'
       document.getElementById('gameResults').classList.remove('open')
+      // Hide the DLC toggle + clear picker — next game selection will re-populate it
+      const typeRow = document.getElementById('homeTypeRow')
+      if (typeRow) typeRow.style.display = 'none'
+      const grid = document.getElementById('homeDlcGrid')
+      if (grid) grid.innerHTML = ''
+      _homeSelectedTarget = null
     }
     var postMenuBtn = document.getElementById('postMenuBtn')
     var postMenuDropdown = document.getElementById('postMenuDropdown')
@@ -1358,11 +1378,13 @@ const siteJsonLd = {
                   document.getElementById('gameId').value = data.id
                   document.getElementById('composerError').textContent = ''
                   fetchGamePlatforms(data.id)
+                  fetchGameDlcs(data.id)
                 })
                 .catch(() => { document.getElementById('composerError').textContent = 'Failed to import game, try again.' })
             } else {
               document.getElementById('gameId').value = game.id
               fetchGamePlatforms(game.id)
+              fetchGameDlcs(game.id)
             }
           })
           results.appendChild(item)
@@ -1382,6 +1404,95 @@ const siteJsonLd = {
           platforms.map(p => `<option value="${p.id}">${p.name}</option>`).join('')
       }
     }
+
+    // After the user picks a base game in the game search, surface the
+    // Main Game / DLC toggle if this base has DLC/expansion children.
+    // _homeSelectedTarget is the game_id the review will actually post against —
+    // defaults to the picked base game, changes when the user picks a DLC in
+    // the toggle's grid.
+    let _homeSelectedTarget = null
+
+    function _homeEscape(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+    }
+
+    function _homeSetType(type) {
+      const mainBtn = document.getElementById('homeTypeMain')
+      const dlcBtn  = document.getElementById('homeTypeDlc')
+      const picker  = document.getElementById('homeDlcPicker')
+      if (!mainBtn || !dlcBtn || !picker) return
+      if (type === 'dlc') {
+        mainBtn.classList.remove('active'); mainBtn.setAttribute('aria-selected', 'false')
+        dlcBtn.classList.add('active');     dlcBtn.setAttribute('aria-selected', 'true')
+        picker.style.display = 'block'
+        const picked = picker.querySelector('.home-dlc-option.selected')
+        _homeSelectedTarget = picked ? picked.getAttribute('data-dlc-id') : document.getElementById('gameId').value
+      } else {
+        mainBtn.classList.add('active');    mainBtn.setAttribute('aria-selected', 'true')
+        dlcBtn.classList.remove('active');  dlcBtn.setAttribute('aria-selected', 'false')
+        picker.style.display = 'none'
+        _homeSelectedTarget = document.getElementById('gameId').value
+      }
+    }
+
+    function _homeResetTypeRow() {
+      document.getElementById('homeTypeRow').style.display = 'none'
+      document.getElementById('homeDlcPicker').style.display = 'none'
+      document.getElementById('homeDlcGrid').innerHTML = ''
+      const main = document.getElementById('homeTypeMain'); if (main) main.classList.add('active')
+      const dlc  = document.getElementById('homeTypeDlc');  if (dlc)  dlc.classList.remove('active')
+      _homeSelectedTarget = document.getElementById('gameId').value || null
+    }
+
+    async function fetchGameDlcs(gameId) {
+      _homeResetTypeRow()
+      _homeSelectedTarget = gameId
+      try {
+        const res = await fetch('/api/games/' + encodeURIComponent(gameId) + '/dlcs')
+        if (!res.ok) return
+        const data = await res.json()
+        const dlcs = (data.dlcs || []).filter(d => d.igdb_category === 1 || d.igdb_category === 2 || d.igdb_category === 4)
+        if (dlcs.length === 0) return
+        const grid = document.getElementById('homeDlcGrid')
+        grid.innerHTML = dlcs.map(d => {
+          const cover = d.cover_img_url
+            ? (d.cover_img_url.startsWith('//') ? 'https:' + d.cover_img_url : d.cover_img_url).replace(/t_[a-z0-9_]+/, 't_cover_small')
+            : null
+          const badge = (d.igdb_category === 2 || d.igdb_category === 4) ? 'Expansion' : 'DLC'
+          const img = cover
+            ? '<img src="' + _homeEscape(cover) + '" alt="' + _homeEscape(d.title) + '" loading="lazy" />'
+            : '<div class="home-dlc-option-cover-placeholder">🎮</div>'
+          return '<button type="button" class="home-dlc-option" data-dlc-id="' + _homeEscape(d.id) + '">' +
+            img +
+            '<div class="home-dlc-option-info">' +
+              '<div class="home-dlc-option-badge">' + badge + '</div>' +
+              '<div class="home-dlc-option-title">' + _homeEscape(d.title) + '</div>' +
+            '</div>' +
+          '</button>'
+        }).join('')
+        document.getElementById('homeTypeRow').style.display = 'block'
+      } catch (e) { /* fetch failed — silently skip the toggle */ }
+    }
+
+    // Wire the toggle buttons once on load.
+    (function _initHomeTypeToggle() {
+      const mainBtn = document.getElementById('homeTypeMain')
+      const dlcBtn  = document.getElementById('homeTypeDlc')
+      if (mainBtn) mainBtn.addEventListener('click', () => _homeSetType('main'))
+      if (dlcBtn)  dlcBtn.addEventListener('click',  () => _homeSetType('dlc'))
+      const grid = document.getElementById('homeDlcGrid')
+      if (grid) {
+        grid.addEventListener('click', (e) => {
+          const opt = e.target.closest('.home-dlc-option')
+          if (!opt) return
+          grid.querySelectorAll('.home-dlc-option').forEach(o => o.classList.remove('selected'))
+          opt.classList.add('selected')
+          _homeSelectedTarget = opt.getAttribute('data-dlc-id')
+        })
+      }
+    })()
     // ── Save draft: needs a game + review text; score/title/hours can come later. ──
     document.getElementById('saveDraftReview').addEventListener('click', async () => {
       const gameId = document.getElementById('gameId').value
@@ -1397,6 +1508,12 @@ const siteJsonLd = {
       if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
       if (!body) { errorEl.textContent = 'Write something before saving a draft.'; return; }
       if (scoreRaw && (parseFloat(scoreRaw) < 0.1 || parseFloat(scoreRaw) > 10)) { errorEl.textContent = 'Score must be between 0.1 and 10.'; return; }
+      // DLC toggle active without a pick: _homeSelectedTarget still equals base gameId.
+      const dlcBtnA = document.getElementById('homeTypeDlc')
+      if (dlcBtnA && dlcBtnA.classList.contains('active') && _homeSelectedTarget === gameId) {
+        errorEl.textContent = 'Pick which DLC or expansion you want to review.'; return;
+      }
+      const targetGameId = _homeSelectedTarget || gameId
       const dBtn = document.getElementById('saveDraftReview')
       dBtn.disabled = true
       dBtn.textContent = 'Saving...'
@@ -1405,7 +1522,7 @@ const siteJsonLd = {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            game_id: gameId,
+            game_id: targetGameId,
             score: scoreRaw ? parseFloat(scoreRaw) : null,
             title: title || null,
             body,
@@ -1444,6 +1561,12 @@ const siteJsonLd = {
       if (!body) { errorEl.textContent = 'Please write a review.'; return; }
       if (body.length > 10000) { errorEl.textContent = 'Review must be at most 10000 characters.'; return; }
       if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) { errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return; }
+      // DLC toggle active without a pick: _homeSelectedTarget still equals base gameId.
+      const dlcBtnB = document.getElementById('homeTypeDlc')
+      if (dlcBtnB && dlcBtnB.classList.contains('active') && _homeSelectedTarget === gameId) {
+        errorEl.textContent = 'Pick which DLC or expansion you want to review.'; return;
+      }
+      const targetGameId = _homeSelectedTarget || gameId
       const btn = document.getElementById('submitReview')
       btn.disabled = true
       btn.textContent = 'Posting...'
@@ -1451,7 +1574,7 @@ const siteJsonLd = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          game_id: gameId,
+          game_id: targetGameId,
           score: parseFloat(score),
           title, body,
           platform_played_on: platformId || null,
@@ -3082,6 +3205,20 @@ const siteJsonLd = {
   .composer-draft:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
   .composer-draft:disabled { opacity: 0.6; cursor: default; }
   .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; margin-top: 8px; }
+
+  /* Homepage composer Main Game / DLC toggle — mirrors game-page composer styles. */
+  .home-type-toggle { display: inline-flex; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 3px; gap: 2px; }
+  .home-type-tab { background: transparent; border: none; padding: 6px 16px; font-size: 13px; font-weight: 500; color: var(--text-secondary); font-family: inherit; cursor: pointer; border-radius: 999px; transition: background .15s, color .15s; }
+  .home-type-tab:hover { color: var(--text-primary); }
+  .home-type-tab.active { background: var(--accent, #6050c8); color: white; font-weight: 600; }
+  .home-dlc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; max-height: 260px; overflow-y: auto; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+  .home-dlc-option { display: flex; align-items: center; gap: 10px; padding: 8px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; text-align: left; font-family: inherit; transition: border-color .15s, background .15s; }
+  .home-dlc-option:hover { border-color: var(--accent, #6050c8); background: var(--bg-hover); }
+  .home-dlc-option.selected { border-color: var(--accent, #6050c8); background: rgba(96, 80, 200, .1); }
+  .home-dlc-option img, .home-dlc-option-cover-placeholder { width: 36px; height: 50px; object-fit: cover; border-radius: 4px; flex-shrink: 0; background: var(--tag-bg); display: flex; align-items: center; justify-content: center; font-size: 16px; }
+  .home-dlc-option-info { flex: 1; min-width: 0; }
+  .home-dlc-option-badge { font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--accent, #6050c8); margin-bottom: 2px; }
+  .home-dlc-option-title { font-size: 12px; font-weight: 500; color: var(--text-primary); line-height: 1.2; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .report-trigger-sm { font-size: 11px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; font-family: inherit; padding: 2px 6px; border-radius: 6px; transition: color 0.15s, background 0.15s; }
   .report-trigger-sm:hover { color: #f87171; background: rgba(248,113,113,.08); }
 
