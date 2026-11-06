@@ -227,7 +227,7 @@ async function handleXbox(db: any, profileId: string, id: string): Promise<Respo
   const allIds = [baseGameId, ...dlcIds];
   const { data: rows, error } = await db
     .from("user_xbox_achievements")
-    .select("name, description, icon_url, unlocked, unlocked_at, rarity, gamerscore, game_id")
+    .select("name, description, icon_url, unlocked, unlocked_at, rarity, gamerscore, game_id, xbox_game_title")
     .eq("profile_id", profileId)
     .in("game_id", allIds)
     .limit(5000);
@@ -249,9 +249,15 @@ async function handleXbox(db: any, profileId: string, id: string): Promise<Respo
   // the seed was a DLC (seedGame.title was the DLC's title, not the base's).
   if (metaById.has(baseGameId)) baseGameTitle = metaById.get(baseGameId)!.title;
 
-  // 6. Bucket rows by game_id.
+  // 6. Bucket rows by game_id. Also capture the Xbox-native title per game_id
+  //    as a fallback label for cases where the Chekpoint games.title is
+  //    unavailable (unmatched DLC titleId, orphaned row, etc.).
+  const xboxTitleByGame = new Map<string, string>();
   const byGame = new Map<string, Achievement[]>();
   for (const r of (rows ?? [])) {
+    if (r.xbox_game_title && !xboxTitleByGame.has(r.game_id)) {
+      xboxTitleByGame.set(r.game_id, r.xbox_game_title);
+    }
     if (!byGame.has(r.game_id)) byGame.set(r.game_id, []);
     byGame.get(r.game_id)!.push({
       name: r.name ?? null,
@@ -276,7 +282,9 @@ async function handleXbox(db: any, profileId: string, id: string): Promise<Respo
 
   const groups: GroupOut[] = sortedGameIds.map((gid) => {
     const isBase = gid === baseGameId;
-    const label = isBase ? 'Base Game' : (metaById.get(gid)?.title ?? 'DLC');
+    const label = isBase
+      ? 'Base Game'
+      : (metaById.get(gid)?.title ?? xboxTitleByGame.get(gid) ?? 'DLC');
     const key = isBase ? 'base' : `dlc:${gid}`;
     const achievements = byGame.get(gid)!.sort(sortAchievements);
     return buildGroup(key, label, achievements);

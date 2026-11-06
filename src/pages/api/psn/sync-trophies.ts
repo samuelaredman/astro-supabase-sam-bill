@@ -5,6 +5,7 @@ import {
   isPsnAuthExpired,
   fetchAllTitles,
   fetchTitleTrophySchema,
+  fetchTitleTrophyGroups,
   fetchEarnedTrophies,
   primaryPsnPlatform,
   type PsnTokens,
@@ -320,22 +321,38 @@ export const POST: APIRoute = async (context) => {
       trophyHits++;
 
       // Schema (names, descriptions, icons, rarity) is per-title, cached
-      // across users. Only fetch when missing or stale.
+      // across users. Only fetch when missing or stale. Also treat entries
+      // without trophy_groups as stale — they were cached before the groups
+      // call was wired up, and without them the achievement modal can't show
+      // proper DLC pack names.
       const cached = schemaCache.get(t.npCommId);
-      const stale = !cached || Date.now() - new Date(cached.fetched_at).getTime() > SCHEMA_TTL_MS;
+      const stale =
+        !cached ||
+        Date.now() - new Date(cached.fetched_at).getTime() > SCHEMA_TTL_MS ||
+        !cached.trophy_groups;
 
       let schemaArr: any[] = cached?.trophies ?? [];
 
       if (stale) {
-        const fresh = await fetchTitleTrophySchema(authPayload, t.npCommId, t.serviceName);
+        // Trophies (flat list, keyed by trophyGroupId+trophyId) and the group
+        // metadata (group names + icons) come from separate Sony endpoints.
+        // Fetch both — without the groups call, DLC packs would show as raw
+        // group IDs ("001") instead of proper names ("Ashes of Ariandel") in
+        // the achievement modal. The groups call is best-effort: if it fails
+        // we still cache the trophies.
+        const [fresh, groups] = await Promise.all([
+          fetchTitleTrophySchema(authPayload, t.npCommId, t.serviceName),
+          fetchTitleTrophyGroups(authPayload, t.npCommId, t.serviceName),
+        ]);
         if (fresh && fresh.length > 0) {
           schemaArr = fresh;
-          const row = {
+          const row: Record<string, unknown> = {
             np_communication_id: t.npCommId,
             np_service_name: t.serviceName,
             trophies: fresh,
             fetched_at: new Date().toISOString(),
           };
+          if (groups && groups.length > 0) row.trophy_groups = groups;
           schemaCache.set(t.npCommId, row);
           schemaUpserts.push(row);
         }
