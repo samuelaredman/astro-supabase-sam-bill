@@ -398,6 +398,30 @@ const allTimeTotal: number = rankStats?.all_time_total ?? 0
 // as "Related games" in Overview.
 const DLC_RELATION_TYPES = new Set(['dlc', 'expansion', 'standalone_expansion'])
 
+// Collapse per-game platforms into display-group labels (PS4 + PS4 Pro → "PlayStation 4"),
+// preserving the display_order sort. Mirrors the collapse logic in
+// src/pages/api/games/platforms.ts — used here to label DLC cards compactly.
+function dedupePlatforms(gps: any): Array<{ id: string; name: string }> {
+  const seen = new Set<string>()
+  return (gps ?? [])
+    .map((gp: any) => gp.platforms)
+    .filter((p: any) => p && (p.display_group || p.name))
+    .sort((a: any, b: any) => (a.display_order ?? 99) - (b.display_order ?? 99))
+    .filter((p: any) => {
+      const key = p.display_group ?? p.name
+      if (seen.has(key)) return false
+      seen.add(key); return true
+    })
+    .map((p: any) => ({ id: p.id, name: p.display_group ?? p.name }))
+}
+
+function formatDlcDate(d: string | null): string | null {
+  if (!d) return null
+  const dt = new Date(d)
+  if (isNaN(dt.getTime())) return null
+  return dt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
 // If this game IS a DLC/expansion, resolve its parent for the "DLC for [parent]" chip.
 // Parent edges are stored as (from_game_id=parent, to_game_id=this), so we query the
 // reverse direction and filter to DLC-ish relation types.
@@ -440,12 +464,12 @@ let relatedChildren: any[] = []
 if (relIds.length > 0) {
   const { data: relGames } = await (supabase as any)
     .from('games')
-    .select('id, title, slug, cover_img_url, date_released, igdb_category')
+    .select('id, title, slug, cover_img_url, date_released, igdb_category, game_description, game_platforms(platforms(id, name, display_group, display_order))')
     .in('id', relIds)
     .is('canonical_game_id', null)   // only related nodes that are themselves canonical
   for (const g of (relGames ?? [])) {
     const rt = relTypeById.get(g.id) ?? ''
-    const entry = { ...g, relation_type: rt }
+    const entry = { ...g, relation_type: rt, platform_labels: dedupePlatforms(g.game_platforms) }
     if (DLC_RELATION_TYPES.has(rt)) dlcChildren.push(entry)
     else relatedChildren.push(entry)
   }
@@ -830,6 +854,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .dlc-badge.dlc-badge-exp{background:rgba(96,80,200,.15);color:var(--game-accent,#6050c8);border-color:rgba(96,80,200,.4)}
     .dlc-year{font-size:11px;color:var(--text-tertiary)}
     .dlc-title{font-size:14px;font-weight:600;line-height:1.3;color:var(--text-primary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .dlc-desc{font-size:11.5px;color:var(--text-secondary);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .dlc-platforms{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+    .dlc-platform-chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;background:var(--tag-bg);border:1px solid var(--border-subtle);font-size:10px;font-weight:500;color:var(--text-secondary);white-space:nowrap}
+    .dlc-platform-more{display:inline-flex;align-items:center;padding:1px 5px;font-size:10px;font-weight:500;color:var(--text-tertiary)}
     .dlc-meta{font-size:11px;color:var(--text-tertiary);margin-top:2px}
 
     /* SIDEBAR */
@@ -1392,7 +1420,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
                 const cover = igdbImage(g.cover_img_url, 't_cover_big')
                 const sc = childScores[g.id]
                 const rc = childReviewCounts[g.id] ?? 0
-                const year = g.date_released ? new Date(g.date_released).getFullYear() : null
+                const date = formatDlcDate(g.date_released)
+                const platformLabels: any[] = g.platform_labels ?? []
                 return (
                   <a href={`/games/${g.slug}`} class="dlc-card">
                     <div class="dlc-cover">
@@ -1404,9 +1433,22 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
                     <div class="dlc-info">
                       <div class="dlc-badge-row">
                         <span class={`dlc-badge ${g.igdb_category === 2 || g.igdb_category === 4 ? 'dlc-badge-exp' : ''}`}>{dlcBadgeLabel(g)}</span>
-                        {year && <span class="dlc-year">{year}</span>}
+                        {date && <span class="dlc-year">{date}</span>}
                       </div>
                       <div class="dlc-title">{g.title}</div>
+                      {g.game_description && (
+                        <div class="dlc-desc">{g.game_description}</div>
+                      )}
+                      {platformLabels.length > 0 && (
+                        <div class="dlc-platforms">
+                          {platformLabels.slice(0, 4).map((p) => (
+                            <span class="dlc-platform-chip">{p.name}</span>
+                          ))}
+                          {platformLabels.length > 4 && (
+                            <span class="dlc-platform-more">+{platformLabels.length - 4}</span>
+                          )}
+                        </div>
+                      )}
                       <div class="dlc-meta">{rc > 0 ? `${rc} review${rc === 1 ? '' : 's'}` : 'No reviews yet'}</div>
                     </div>
                   </a>

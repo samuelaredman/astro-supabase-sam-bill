@@ -23,6 +23,8 @@ type DlcEntry = {
   date_released: string | null;
   igdb_category: number | null;
   relation_type: string;
+  game_description: string | null;
+  platforms: Array<{ id: string; name: string }>;
   avg_score: number | null;
   review_count: number;
 };
@@ -73,7 +75,7 @@ export const GET: APIRoute = async ({ params }) => {
     const [{ data: dlcGames }, { data: statRows }] = await Promise.all([
       db
         .from("games")
-        .select("id, title, slug, cover_img_url, date_released, igdb_category")
+        .select("id, title, slug, cover_img_url, date_released, igdb_category, game_description, game_platforms(platforms(id, name, display_group, display_order))")
         .in("id", dlcIds)
         .is("canonical_game_id", null),
       db
@@ -98,6 +100,8 @@ export const GET: APIRoute = async ({ params }) => {
         date_released: g.date_released ?? null,
         igdb_category: g.igdb_category ?? null,
         relation_type: relTypeById.get(g.id) ?? "dlc",
+        game_description: g.game_description ?? null,
+        platforms: dedupePlatforms(g.game_platforms),
         avg_score: statsById.get(g.id)?.avg_score ?? null,
         review_count: statsById.get(g.id)?.review_count ?? 0,
       }))
@@ -121,4 +125,21 @@ function byReleaseAsc(a: { date_released: string | null }, b: { date_released: s
   if (!a.date_released) return 1;
   if (!b.date_released) return -1;
   return a.date_released.localeCompare(b.date_released);
+}
+
+// Collapse per-game platforms into display-group labels (PS4 + PS4 Pro →
+// "PlayStation 4"), preserving the display_order sort. Mirrors the collapse
+// logic in src/pages/api/games/platforms.ts and the game slug page.
+function dedupePlatforms(gps: any): Array<{ id: string; name: string }> {
+  const seen = new Set<string>();
+  return (gps ?? [])
+    .map((gp: any) => gp.platforms)
+    .filter((p: any) => p && (p.display_group || p.name))
+    .sort((a: any, b: any) => (a.display_order ?? 99) - (b.display_order ?? 99))
+    .filter((p: any) => {
+      const key = p.display_group ?? p.name;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    })
+    .map((p: any) => ({ id: p.id, name: p.display_group ?? p.name }));
 }
