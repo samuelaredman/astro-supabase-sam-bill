@@ -42,3 +42,13 @@ export function igdbImage(url: string | null | undefined, size = 't_cover_big'):
   const clean = url.startsWith('//') ? `https:${url}` : url;
   return clean.replace(/t_[a-z0-9_]+/, size);
 }
+
+// DLC/Expansion label for review-card badges. Returns null for base games so
+// the badge doesn't render. cat 2 and 4 are "expansion" family; cat 1 is a
+// DLC-addon. Other categories (remake/remaster/port/update/bundle/pack) are
+// standalone enough that the badge would be noise.
+export function dlcLabelFromCategory(cat: number | null | undefined): 'DLC' | 'Expansion' | null {
+  if (cat === 2 || cat === 4) return 'Expansion';
+  if (cat === 1) return 'DLC';
+  return null;
+}

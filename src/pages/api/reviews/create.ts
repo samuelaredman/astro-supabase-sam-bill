@@ -4,7 +4,7 @@ import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
 import { readYouTubeField } from "../../../utils/youtube";
-import { resolveCanonicalGameId } from "../../../utils/games";
+import { resolveCanonicalGameId, isReviewableGameCategory } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -22,6 +22,18 @@ export const POST: APIRoute = async (context) => {
   // reviewable game. All downstream code (dupe check, insert, finalize) sees the
   // canonical id.
   const game_id = await resolveCanonicalGameId(db, body.game_id);
+
+  // Defensive reviewability gate. Blocks reviews on mod / episode / season /
+  // fork rows where posting one in isolation would be nonsensical. Base games,
+  // DLC, expansions, remakes, remasters, bundles, ports, updates, packs are
+  // all allowed through — Slice 1's ranking filter keeps the non-rankable
+  // ones out of leaderboards without blocking the review itself.
+  const { data: targetGame } = await db
+    .from("games").select("igdb_category").eq("id", game_id).maybeSingle();
+  if (!targetGame) return json({ error: "Game not found." }, 404);
+  if (!isReviewableGameCategory(targetGame.igdb_category)) {
+    return json({ error: "This game can't be reviewed directly — try reviewing the base game instead." }, 400);
+  }
 
   const youtube = readYouTubeField(body);
   if ("error" in youtube) return json({ error: youtube.error }, 400);

@@ -28,7 +28,7 @@ export const PROFILE_REVIEWS_SELECT = `
   id, score, title, body, published_at, created_at,
   contains_spoilers, play_time_hours, status,
   played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) ),
+  games ( id, title, slug, cover_img_url, date_released, igdb_category, game_genres(genres(id, name, slug)) ),
   review_votes ( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),
   review_comments( id )
