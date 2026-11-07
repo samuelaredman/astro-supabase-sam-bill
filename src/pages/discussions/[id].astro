@@ -1,0 +1,302 @@
+---
+export const prerender = false;
+import Layout from "../../components/Layout.astro";
+import PostComposer from "../../components/forum/PostComposer.astro";
+import CommentThread from "../../components/CommentThread.astro";
+import ProfileBadge from "../../components/ProfileBadge.astro";
+import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../utils/database";
+import { getPageUser } from "../../utils/pageAuth";
+import { isSiteAdmin } from "../../utils/api";
+import { renderPostBody } from "../../utils/richPost";
+import { readBadgeSlugs } from "../../utils/badges";
+import { setPageCacheHeaders } from "../../utils/cache";
+import type { CommentData } from "../../utils/comments";
+
+const { id } = Astro.params;
+if (!id) return Astro.redirect("/discussions");
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, serverClient);
+const isLoggedIn = !!user;
+const db = getSupabaseAdmin() as any;
+
+let currentProfile: any = null;
+if (user) {
+  const { data: cp } = await db.from("profiles").select("id, username, avatar_url").eq("auth_user_id", user.id).maybeSingle();
+  currentProfile = cp ?? null;
+}
+
+const { data: discussion } = await db
+  .from("site_discussions")
+  .select("id, profile_id, title, body, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+  .eq("id", id)
+  .maybeSingle();
+if (!discussion) return new Response("Discussion not found", { status: 404 });
+
+const siteAdmin = currentProfile ? await isSiteAdmin(db, currentProfile.id) : false;
+const isAuthor = !!currentProfile && discussion.profile_id === currentProfile.id;
+const canEdit = isAuthor || siteAdmin;
+const canModerate = siteAdmin;
+const canSeeAdminBar = canModerate || isAuthor;
+
+const { data: commentRows } = await db
+  .from("site_discussion_comments")
+  .select(`
+    id, body, created_at, updated_at, parent_id, profile_id,
+    profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
+    site_discussion_comment_votes ( vote, profile_id ),
+    site_discussion_comment_reactions ( reaction_type, profile_id )
+  `)
+  .eq("discussion_id", id)
+  .order("created_at", { ascending: true });
+const allComments: any[] = commentRows ?? [];
+
+function topAncestor(c: any): any {
+  if (!c.parent_id) return c;
+  const parent = allComments.find((x) => x.id === c.parent_id);
+  return parent ? topAncestor(parent) : c;
+}
+const topLevel = allComments.filter((c: any) => !c.parent_id);
+const repliesByTop: Record<string, any[]> = {};
+for (const c of allComments) {
+  if (!c.parent_id) continue;
+  const anc = topAncestor(c);
+  if (anc.id === c.id) continue;
+  (repliesByTop[anc.id] ||= []).push(c);
+}
+
+function shapeSiteDiscussionComment(c: any): CommentData {
+  const cvArr = Array.isArray(c.site_discussion_comment_votes)
+    ? c.site_discussion_comment_votes
+    : (c.site_discussion_comment_votes ? [c.site_discussion_comment_votes] : []);
+  const up = cvArr.filter((v: any) => v.vote === 1).length;
+  const down = cvArr.filter((v: any) => v.vote === -1).length;
+  const myVote = currentProfile
+    ? (cvArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0)
+    : 0;
+  const isMine = !!currentProfile && c.profiles?.id === currentProfile.id;
+  const rxArr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(c.site_discussion_comment_reactions) ? c.site_discussion_comment_reactions : [];
+  const rxMap: Record<string, { count: number; mine: boolean }> = {};
+  for (const r of rxArr) {
+    if (!rxMap[r.reaction_type]) rxMap[r.reaction_type] = { count: 0, mine: false };
+    rxMap[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) rxMap[r.reaction_type].mine = true;
+  }
+  return {
+    id: c.id,
+    author: {
+      id: c.profiles?.id ?? "",
+      username: c.profiles?.username ?? "unknown",
+      avatarUrl: c.profiles?.avatar_url ?? null,
+      badges: readBadgeSlugs(c.profiles),
+    },
+    body: c.body,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    upvotes: up,
+    downvotes: down,
+    myVote: myVote as 1 | -1 | 0,
+    canEdit: isMine,
+    canDelete: canModerate || isMine,
+    canReport: !!currentProfile && !isMine,
+    reactions: Object.entries(rxMap)
+      .map(([type, info]) => ({ type, count: info.count, mine: info.mine }))
+      .sort((a, b) => b.count - a.count),
+  };
+}
+
+const threadComments: CommentData[] = topLevel.map((c: any) => ({
+  ...shapeSiteDiscussionComment(c),
+  replies: (repliesByTop[c.id] ?? []).map((r: any) => shapeSiteDiscussionComment(r)),
+}));
+
+function fmtDate(s: string): string {
+  return new Date(s).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+const discussionsHref = "/discussions";
+const commentCount = allComments.length;
+const titleText = discussion.title?.trim() ?? "";
+const browserTitle = titleText || "Discussion";
+
+setPageCacheHeaders(Astro.response.headers, isLoggedIn, 60);
+---
+
+<Layout
+  title={`${browserTitle} — Chekpoint`}
+  description={discussion.body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160)}
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+  activeNav="discussions"
+  variant="two-col"
+>
+  <main class="ann-page">
+    <a class="back" href={discussionsHref}>← Discussions</a>
+
+    <article class="ann-post" data-discussion-id={discussion.id}>
+      <div class="ann-meta">
+        {discussion.pinned && <span class="badge pinned">📌 Pinned</span>}
+        <span class="badge category">discussion</span>
+        {discussion.is_locked && <span class="badge locked" id="lock-badge">🔒 Locked</span>}
+      </div>
+      {titleText && <h1 class="ann-title" data-edit-hide>{titleText}</h1>}
+      <div class="ann-byline">
+        <a href={`/reviewers/${discussion.profiles?.username}`} class="ann-author">
+          {discussion.profiles?.username ?? "unknown"}
+        </a>
+        {readBadgeSlugs(discussion.profiles).map((slug: string) => <ProfileBadge slug={slug} size="sm" />)}
+        <span>·</span>
+        <span>{fmtDate(discussion.created_at)}</span>
+        {discussion.updated_at && <span class="edited">(edited)</span>}
+      </div>
+      <div class="ann-body" data-edit-hide set:html={renderPostBody(discussion.body)} />
+
+      {canEdit && (
+        <PostComposer
+          composerId="discussion-edit"
+          mode="edit"
+          postId={discussion.id}
+          title={discussion.title ?? ""}
+          body={discussion.body}
+          createUrl="/api/discussions/update"
+          updateUrl="/api/discussions/update"
+          extraFields={{ discussion_id: discussion.id }}
+          bodyField="body"
+          titleField="title"
+          submitLabel="Save changes"
+          editSubmitLabel="Save changes"
+        />
+      )}
+
+      {canSeeAdminBar && (
+        <div class="ann-admin-bar">
+          {canEdit && <button id="post-edit-open">Edit</button>}
+          {canModerate && <button data-action="toggle-lock">{discussion.is_locked ? "Unlock comments" : "Lock comments"}</button>}
+          {canModerate && <button data-action="toggle-pin">{discussion.pinned ? "Unpin" : "Pin"}</button>}
+          <button data-action="delete-discussion" class="danger">Delete</button>
+        </div>
+      )}
+    </article>
+
+    <section class="ann-comments">
+      <h2 class="comments-title">
+        Comments
+        {commentCount > 0 && <span class="comments-count">{commentCount}</span>}
+      </h2>
+
+      {discussion.is_locked && (
+        <p class="locked-note">🔒 This discussion is locked.</p>
+      )}
+
+      <CommentThread
+        comments={threadComments}
+        currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
+        target={{ type: "site_discussion_comment", id: discussion.id }}
+        canCompose={!discussion.is_locked && isLoggedIn}
+        showDownvote={true}
+        maxLength={2000}
+        maxDepth={1}
+        isModerator={canModerate}
+        signinReturnTo={Astro.url.pathname}
+      />
+    </section>
+  </main>
+</Layout>
+
+<script is:inline define:vars={{ discussionId: discussion.id, discussionsHref }}>
+  (function () {
+    function post(url, payload) {
+      return fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); });
+    }
+    document.addEventListener("click", function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== "BUTTON") return;
+      var action = t.getAttribute("data-action");
+      if (action === "delete-discussion") {
+        if (!confirm("Delete this discussion and all its comments?")) return;
+        post("/api/discussions/delete", { discussion_id: discussionId }).then(function (res) {
+          if (res.ok) window.location.href = discussionsHref;
+          else alert((res.d && res.d.error) || "Failed to delete.");
+        });
+        return;
+      }
+      if (action === "toggle-lock") {
+        var makeLocked = t.textContent.indexOf("Lock ") === 0;
+        t.disabled = true;
+        post("/api/discussions/lock", { discussion_id: discussionId, is_locked: makeLocked }).then(function (res) {
+          if (res.ok) window.location.reload();
+          else { alert((res.d && res.d.error) || "Failed."); t.disabled = false; }
+        });
+        return;
+      }
+      if (action === "toggle-pin") {
+        var makePinned = t.textContent === "Pin";
+        t.disabled = true;
+        post("/api/discussions/pin", { discussion_id: discussionId, pinned: makePinned }).then(function (res) {
+          if (res.ok) window.location.reload();
+          else { alert((res.d && res.d.error) || "Failed."); t.disabled = false; }
+        });
+        return;
+      }
+    });
+  })();
+</script>
+
+<style>
+  .ann-page { min-width: 0; padding: 24px 20px 60px; }
+  .back { display: inline-block; margin-bottom: 10px; font-size: 13px; color: var(--text-secondary); text-decoration: none; }
+  .back:hover { color: var(--accent); }
+
+  .ann-post { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 22px 22px 18px; margin-bottom: 20px; }
+  .ann-meta { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: capitalize; }
+  .badge.category { background: var(--bg-hover); color: var(--text-secondary); }
+  .badge.pinned { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .badge.locked { background: var(--bg-hover); color: var(--text-tertiary); }
+
+  .ann-title { font-size: 24px; font-weight: 700; margin: 0 0 6px; color: var(--text-primary); line-height: 1.3; }
+  .ann-byline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-tertiary); margin-bottom: 14px; flex-wrap: wrap; }
+  .ann-author { color: var(--text-secondary); font-weight: 600; text-decoration: none; }
+  .ann-author:hover { color: var(--accent); }
+  .edited { font-size: 11px; color: var(--text-tertiary); }
+
+  .ann-body { font-size: 15px; color: var(--text-primary); line-height: 1.75; }
+  .ann-body :global(h2) { font-size: 20px; font-weight: 700; margin: 20px 0 8px; }
+  .ann-body :global(h3) { font-size: 17px; font-weight: 600; margin: 16px 0 6px; }
+  .ann-body :global(p) { margin: 0 0 12px; }
+  .ann-body :global(ul), .ann-body :global(ol) { padding-left: 22px; margin: 0 0 12px; }
+  .ann-body :global(li) { margin-bottom: 4px; }
+  .ann-body :global(blockquote) { border-left: 3px solid var(--accent); margin: 0 0 12px; padding: 4px 12px; color: var(--text-secondary); font-style: italic; }
+  .ann-body :global(img) { max-width: 100%; border-radius: 10px; display: block; margin: 12px 0; }
+  .ann-body :global(iframe) { width: 100%; aspect-ratio: 16/9; border-radius: 10px; border: none; display: block; margin: 12px 0; }
+  .ann-body :global(div[data-youtube-video]) { margin: 12px 0; }
+  .ann-body :global(div[data-youtube-video] iframe) { width: 100%; aspect-ratio: 16/9; border-radius: 10px; border: none; }
+  .ann-body :global(.mention) { color: var(--accent); }
+  .ann-body :global(.comment-emote) { height: 20px; vertical-align: middle; }
+
+  .ann-admin-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border-subtle); }
+  .ann-admin-bar button {
+    background: var(--bg-hover); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 12px; font: inherit; font-size: 12px; font-weight: 600;
+    color: var(--text-secondary); cursor: pointer;
+  }
+  .ann-admin-bar button:hover { color: var(--text-primary); border-color: var(--accent); }
+  .ann-admin-bar button.danger { color: var(--score-low, #e5484d); }
+  .ann-admin-bar button.danger:hover { border-color: var(--score-low, #e5484d); }
+
+  .ann-comments { padding: 0 2px; }
+  .comments-title { font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 16px 0 12px; display: flex; align-items: center; gap: 8px; }
+  .comments-count { font-size: 13px; color: var(--text-tertiary); font-weight: 500; }
+  .locked-note { font-size: 13px; color: var(--text-tertiary); margin: 8px 0 16px; padding: 10px 12px; background: var(--bg-hover); border-radius: 8px; }
+
+  @media (max-width: 600px) {
+    .ann-page { padding: 16px 14px 40px; }
+    .ann-post { padding: 16px; }
+    .ann-title { font-size: 20px; }
+  }
+</style>

@@ -47,6 +47,7 @@ export type CommentTargetType =
   | "forum_post_comment"
   | "announcement_comment"
   | "forum_thread_comment"
+  | "site_discussion_comment"
   | "list_comment"
   | "recommendation_comment"
   | "review_comment";
@@ -57,6 +58,7 @@ export interface CommentTarget {
    *  For forum_post_comment: the forum_posts.id.
    *  For announcement_comment: the group_announcements.id.
    *  For forum_thread_comment: the group_forum_threads.id.
+   *  For site_discussion_comment: the site_discussions.id.
    *  For list_comment: the lists.id.
    *  For recommendation_comment: the recommendations.id.
    *  For review_comment: the reviews.id. */
