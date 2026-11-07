@@ -41,7 +41,7 @@ export const GROUP_FEED_SELECT = `
   id, score, title, body, play_time_hours,
   contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url ),
+  games ( id, title, slug, cover_img_url, date_released ),
   profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   review_votes( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),

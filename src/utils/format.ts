@@ -42,3 +42,25 @@ export function igdbImage(url: string | null | undefined, size = 't_cover_big'):
   const clean = url.startsWith('//') ? `https:${url}` : url;
   return clean.replace(/t_[a-z0-9_]+/, size);
 }
+
+/**
+ * True when a review was posted before the game it reviews was released —
+ * drives the "PLAYED BEFORE RELEASE" badge on review cards.
+ *
+ * games.date_released is a DATE (YYYY-MM-DD, no time); treat it as midnight UTC
+ * on that day. Reviews written on release day are considered on-release, not
+ * pre-release. Missing release date → not pre-release (we can't tell).
+ */
+export function isPreRelease(
+  dateReleased: string | null | undefined,
+  publishedAt: string | null | undefined,
+  createdAt: string | null | undefined,
+): boolean {
+  if (!dateReleased) return false;
+  const reviewed = publishedAt ?? createdAt;
+  if (!reviewed) return false;
+  const releaseMs = new Date(`${dateReleased}T00:00:00Z`).getTime();
+  const reviewedMs = new Date(reviewed).getTime();
+  if (!Number.isFinite(releaseMs) || !Number.isFinite(reviewedMs)) return false;
+  return reviewedMs < releaseMs;
+}
