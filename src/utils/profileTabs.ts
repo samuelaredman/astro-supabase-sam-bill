@@ -95,6 +95,13 @@ export async function loadReviewsTab(ctx: ProfileTabContext) {
     )] as string[];
     const devs = [...new Set(devsByGameId[r.games?.id] ?? [])] as string[];
     const votes = getVoteCounts(r.review_votes);
+    // game_type bucket for the Phase 3 Slice 4 review-type filter. base =
+    // standalone content (base game / remake / remaster / expanded_game),
+    // dlc = anything else so one chip covers expansions + DLC-addons +
+    // mods / updates / ports / bundles. Null means unknown — treat as base.
+    const cat = r.games?.igdb_category;
+    const game_type: 'base' | 'dlc' =
+      cat == null || cat === 0 || cat === 8 || cat === 9 || cat === 10 ? 'base' : 'dlc';
     return {
       review: r,
       searchText: `${r.games?.title ?? ''} ${r.title ?? ''}`.trim(),
@@ -102,6 +109,7 @@ export async function loadReviewsTab(ctx: ProfileTabContext) {
       genres,
       devs,
       platform: r.played_on?.name ?? '',
+      game_type,
       score: r.score,
       date: r.published_at ?? r.created_at,
       up: votes.up,
