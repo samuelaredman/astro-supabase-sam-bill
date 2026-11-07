@@ -9,6 +9,7 @@ import { IMAGE_EMOTE_MAP, IMAGE_EMOTES } from '../../utils/reactions';
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
 import type { CommentData } from '../../utils/comments';
+import { readBadgeSlugs } from '../../utils/badges';
 
 const { id } = Astro.params;
 
@@ -68,7 +69,12 @@ if (!post) return Astro.redirect('/404');
 
 const { data: commentsRaw } = await db
   .from('forum_comments')
-  .select('id, body, created_at, parent_id, profiles ( id, username, avatar_url )')
+  .select(`
+    id, body, created_at, updated_at, parent_id,
+    profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
+    forum_comment_votes ( vote, profile_id ),
+    forum_comment_reactions ( reaction_type, profile_id )
+  `)
   .eq('post_id', id)
   .order('created_at', { ascending: true });
 const allComments = commentsRaw ?? [];
@@ -97,35 +103,52 @@ function fmtDate(s: string): string {
 
 const commentCount = allComments.length;
 
-// Shape forum_comments rows into CommentData[] for the shared CommentThread.
-// Forum comments currently have no votes / reactions / edit API — props on
-// the component below gate the UI, and the shared script's routes already
-// return no-op URLs for the actions we don't support here.
-const threadComments: CommentData[] = topLevel.map((c: any) => ({
-  id: c.id,
-  author: {
-    id: c.profiles?.id ?? '',
-    username: c.profiles?.username ?? 'unknown',
-    avatarUrl: c.profiles?.avatar_url ?? null,
-  },
-  body: c.body,
-  createdAt: c.created_at,
-  upvotes: 0,
-  canEdit: false,
-  canDelete: isAdmin || (!!currentProfile && c.profiles?.id === currentProfile.id),
-  canReport: false,
-  replies: (repliesByTop[c.id] ?? []).map((r: any) => ({
-    id: r.id,
+// Shape forum_comments rows into CommentData[] for the shared CommentThread,
+// aggregating votes and reactions the same way review comments do.
+function shapeForumComment(c: any): CommentData {
+  const cvArr = Array.isArray(c.forum_comment_votes)
+    ? c.forum_comment_votes
+    : (c.forum_comment_votes ? [c.forum_comment_votes] : []);
+  const up = cvArr.filter((v: any) => v.vote === 1).length;
+  const down = cvArr.filter((v: any) => v.vote === -1).length;
+  const myVote = currentProfile
+    ? (cvArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0)
+    : 0;
+  const isMine = !!currentProfile && c.profiles?.id === currentProfile.id;
+  const rxArr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(c.forum_comment_reactions) ? c.forum_comment_reactions : [];
+  const rxMap: Record<string, { count: number; mine: boolean }> = {};
+  for (const r of rxArr) {
+    if (!rxMap[r.reaction_type]) rxMap[r.reaction_type] = { count: 0, mine: false };
+    rxMap[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) rxMap[r.reaction_type].mine = true;
+  }
+  return {
+    id: c.id,
     author: {
-      id: r.profiles?.id ?? '',
-      username: r.profiles?.username ?? 'unknown',
-      avatarUrl: r.profiles?.avatar_url ?? null,
+      id: c.profiles?.id ?? '',
+      username: c.profiles?.username ?? 'unknown',
+      avatarUrl: c.profiles?.avatar_url ?? null,
+      badges: readBadgeSlugs(c.profiles),
     },
-    body: r.body,
-    createdAt: r.created_at,
-    upvotes: 0,
-    canDelete: isAdmin || (!!currentProfile && r.profiles?.id === currentProfile.id),
-  })),
+    body: c.body,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    upvotes: up,
+    downvotes: down,
+    myVote: myVote as 1 | -1 | 0,
+    canEdit: isMine,
+    canDelete: isAdmin || isMine,
+    canReport: !!currentProfile && !isMine,
+    reactions: Object.entries(rxMap)
+      .map(([type, info]) => ({ type, count: info.count, mine: info.mine }))
+      .sort((a, b) => b.count - a.count),
+  };
+}
+
+const threadComments: CommentData[] = topLevel.map((c: any) => ({
+  ...shapeForumComment(c),
+  replies: (repliesByTop[c.id] ?? []).map((r: any) => shapeForumComment(r)),
 }));
 
 // Only the post's author can edit it, and only while they're a site_admin
@@ -216,8 +239,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn, 120);
         currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
         target={{ type: 'forum_post_comment', id: post.id }}
         canCompose={!post.is_locked && isLoggedIn}
-        showVotes={false}
-        showReactions={false}
+        showDownvote={true}
         maxLength={2000}
         maxDepth={1}
         isModerator={isAdmin}

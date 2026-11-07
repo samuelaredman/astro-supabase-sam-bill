@@ -56,7 +56,12 @@ const canSeeAdminBar = canModerate || isAuthor;
 
 const { data: commentRows } = await db
   .from("group_announcement_comments")
-  .select("id, body, created_at, parent_id, profile_id, profiles ( id, username, avatar_url )")
+  .select(`
+    id, body, created_at, updated_at, parent_id, profile_id,
+    profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
+    group_announcement_comment_votes ( vote, profile_id ),
+    group_announcement_comment_reactions ( reaction_type, profile_id )
+  `)
   .eq("announcement_id", annId)
   .order("created_at", { ascending: true });
 const allComments: any[] = commentRows ?? [];
@@ -75,31 +80,50 @@ for (const c of allComments) {
   (repliesByTop[anc.id] ||= []).push(c);
 }
 
-const threadComments: CommentData[] = topLevel.map((c: any) => ({
-  id: c.id,
-  author: {
-    id: c.profiles?.id ?? "",
-    username: c.profiles?.username ?? "unknown",
-    avatarUrl: c.profiles?.avatar_url ?? null,
-  },
-  body: c.body,
-  createdAt: c.created_at,
-  upvotes: 0,
-  canEdit: false,
-  canDelete: canModerate || (!!currentProfile && c.profiles?.id === currentProfile.id),
-  canReport: false,
-  replies: (repliesByTop[c.id] ?? []).map((r: any) => ({
-    id: r.id,
+function shapeAnnouncementComment(c: any): CommentData {
+  const cvArr = Array.isArray(c.group_announcement_comment_votes)
+    ? c.group_announcement_comment_votes
+    : (c.group_announcement_comment_votes ? [c.group_announcement_comment_votes] : []);
+  const up = cvArr.filter((v: any) => v.vote === 1).length;
+  const down = cvArr.filter((v: any) => v.vote === -1).length;
+  const myVote = currentProfile
+    ? (cvArr.find((v: any) => v.profile_id === currentProfile!.id)?.vote ?? 0)
+    : 0;
+  const isMine = !!currentProfile && c.profiles?.id === currentProfile.id;
+  const rxArr: { reaction_type: string; profile_id: string }[] =
+    Array.isArray(c.group_announcement_comment_reactions) ? c.group_announcement_comment_reactions : [];
+  const rxMap: Record<string, { count: number; mine: boolean }> = {};
+  for (const r of rxArr) {
+    if (!rxMap[r.reaction_type]) rxMap[r.reaction_type] = { count: 0, mine: false };
+    rxMap[r.reaction_type].count++;
+    if (currentProfile && r.profile_id === currentProfile.id) rxMap[r.reaction_type].mine = true;
+  }
+  return {
+    id: c.id,
     author: {
-      id: r.profiles?.id ?? "",
-      username: r.profiles?.username ?? "unknown",
-      avatarUrl: r.profiles?.avatar_url ?? null,
+      id: c.profiles?.id ?? "",
+      username: c.profiles?.username ?? "unknown",
+      avatarUrl: c.profiles?.avatar_url ?? null,
+      badges: readBadgeSlugs(c.profiles),
     },
-    body: r.body,
-    createdAt: r.created_at,
-    upvotes: 0,
-    canDelete: canModerate || (!!currentProfile && r.profiles?.id === currentProfile.id),
-  })),
+    body: c.body,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    upvotes: up,
+    downvotes: down,
+    myVote: myVote as 1 | -1 | 0,
+    canEdit: isMine,
+    canDelete: canModerate || isMine,
+    canReport: !!currentProfile && !isMine,
+    reactions: Object.entries(rxMap)
+      .map(([type, info]) => ({ type, count: info.count, mine: info.mine }))
+      .sort((a, b) => b.count - a.count),
+  };
+}
+
+const threadComments: CommentData[] = topLevel.map((c: any) => ({
+  ...shapeAnnouncementComment(c),
+  replies: (repliesByTop[c.id] ?? []).map((r: any) => shapeAnnouncementComment(r)),
 }));
 
 function fmtDate(s: string): string {
@@ -189,8 +213,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn, 60);
         currentUser={currentProfile ? { id: currentProfile.id, username: currentProfile.username, avatarUrl: currentProfile.avatar_url } : null}
         target={{ type: "announcement_comment", id: announcement.id }}
         canCompose={!announcement.is_locked && isLoggedIn && isMember}
-        showVotes={false}
-        showReactions={false}
+        showDownvote={true}
         maxLength={2000}
         maxDepth={1}
         isModerator={canModerate}
