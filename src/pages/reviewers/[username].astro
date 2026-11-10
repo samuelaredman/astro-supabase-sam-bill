@@ -100,7 +100,6 @@ const [
   { data: volumePercentileRaw },
   { data: groupMembershipRows },
   { data: featuredGroupRow },
-  { data: reviewTypeCountsRows },
 ] = await Promise.all([
   // Split out from the main select so a not-yet-applied migration degrades one
   // field instead of 404ing the whole profile (the select above uses .single()).
@@ -161,11 +160,6 @@ const [
         .eq('id', (reviewer as any).featured_group_id)
         .maybeSingle()
     : Promise.resolve({ data: null }),
-  // Phase 3 Slice 4 — breakdown that drives the "N reviews · N games · N DLC"
-  // subtitle under the profile name. Base games / expansions / dlc_addons are
-  // split server-side; "DLC" in the subtitle is the delta (total - games) so
-  // mod/update/port reviews also land in the DLC bucket visually.
-  db.rpc('profile_review_type_counts', { p_profile_id: reviewer.id }),
 ]);
 
 (reviewer as any).showcase_achievements = (_showcaseAchData as any)?.showcase_achievements ?? null;
@@ -502,21 +496,6 @@ const hotTakes = [...perGameData]
 // From reviewer_volume_percentile() in wave 1; NULL when there's nobody to compare against.
 const volumePercentile: number | null = (volumePercentileRaw as number | null) ?? null
 
-// ── Review-type breakdown subtitle (Phase 3 Slice 4) ──
-// profile_review_type_counts returns a single row: { total, games, expansions, dlc_addons }.
-// "DLC" in the subtitle is total - games so reviews on mods/updates/ports also land in
-// the DLC bucket visually (keeps the subtitle legible without a four-way split).
-const reviewTypeCountsRow: any = Array.isArray(reviewTypeCountsRows)
-  ? (reviewTypeCountsRows as any[])[0]
-  : (reviewTypeCountsRows as any)
-const _reviewTotal = Number(reviewTypeCountsRow?.total ?? publishedReviews.length)
-const _reviewGames = Number(reviewTypeCountsRow?.games ?? publishedReviews.length)
-const reviewBreakdown = {
-  total: _reviewTotal,
-  games: _reviewGames,
-  dlc: Math.max(0, _reviewTotal - _reviewGames),
-}
-
 const distJson = JSON.stringify(scoreDistribution)
 const statsJson = JSON.stringify({
   reviewCount: publishedReviews.length,
@@ -732,7 +711,6 @@ const reviewerBreadcrumbJsonLd = {
     .profile-follow-stat:hover{opacity:.75}
     .profile-follow-num{font-size:15px;font-weight:700;color:var(--text-primary)}
     .profile-follow-label{font-size:13px;color:var(--text-tertiary)}
-    .profile-breakdown{font-size:12px;color:var(--text-tertiary);opacity:.75}
     .profile-actions{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
     .profile-bio{font-size:14px;color:var(--text-secondary);line-height:1.6;cursor:text;border-radius:6px;padding:4px 6px;transition:background .15s;margin:-4px -6px}
     .profile-bio:hover{background:var(--tag-bg)}
@@ -1535,17 +1513,6 @@ const reviewerBreadcrumbJsonLd = {
           <span class="profile-follow-num">{followingCount ?? 0}</span>
           <span class="profile-follow-label">Following</span>
         </a>
-        {reviewBreakdown.total > 0 && (
-          <a href={`/reviewers/${reviewer.username}?tab=reviews#tab-nav`} class="profile-follow-stat">
-            <span class="profile-follow-num">{reviewBreakdown.total}</span>
-            <span class="profile-follow-label">
-              Reviews
-              {reviewBreakdown.dlc > 0 && (
-                <span class="profile-breakdown"> · {reviewBreakdown.games} games · {reviewBreakdown.dlc} DLC</span>
-              )}
-            </span>
-          </a>
-        )}
       </div>
 
       {isOwnProfile && (
