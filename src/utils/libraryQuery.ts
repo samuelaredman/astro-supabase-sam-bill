@@ -301,6 +301,7 @@ export async function queryLibraryPage(
       steamAchTotal:    null as number | null,
       psnAchUnlocked:   null as number | null,
       psnAchTotal:      null as number | null,
+      psnHasPlatinum:   false,
       xboxAchUnlocked:  null as number | null,
       xboxAchTotal:     null as number | null,
     };
@@ -384,6 +385,27 @@ export async function queryLibraryPage(
         it.psnAchTotal = it.psnTrophiesTotal;
       }
     }
+
+    // Per-game platinum ownership. A PSN platinum is awarded once every non-DLC
+    // trophy is earned, so an owned platinum is the base-game 100% signal — treat
+    // it as "100% complete" even when DLC trophies drag achUnlocked < achTotal.
+    // Mirrors the list-page treatment in pages/lists/[id]/index.astro.
+    if (npCommIds.length > 0) {
+      const { data: platRows, error: platErr } = await db
+        .from('user_trophies')
+        .select('np_communication_id')
+        .eq('profile_id', profileId)
+        .eq('trophy_type', 'platinum')
+        .eq('earned', true)
+        .in('np_communication_id', npCommIds);
+      if (platErr) {
+        console.error('[library query] platinum lookup error:', JSON.stringify(platErr));
+      }
+      const platSet = new Set<string>((platRows ?? []).map((r: any) => r.np_communication_id));
+      for (const it of gameItems as any[]) {
+        if (it.psnNpCommId && platSet.has(it.psnNpCommId)) it.psnHasPlatinum = true;
+      }
+    }
   }
 
   // Per-game Xbox achievement progress.
@@ -463,6 +485,7 @@ export async function queryLibraryPage(
     lastPlayed:  it.psnLastPlayed,
     achUnlocked: it.psnAchUnlocked,
     achTotal:    it.psnAchTotal,
+    hasPlatinum: it.psnHasPlatinum === true,
   });
   const xboxRow = (it: any) => ({
     ...shared(it),
