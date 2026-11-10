@@ -1005,14 +1005,20 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .gc-type-tab{background:transparent;border:none;padding:6px 16px;font-size:13px;font-weight:500;color:var(--text-secondary);font-family:inherit;cursor:pointer;border-radius:999px;transition:background .15s,color .15s}
     .gc-type-tab:hover{color:var(--text-primary)}
     .gc-type-tab.active{background:var(--game-accent,#6050c8);color:white;font-weight:600}
-    .gc-dlc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;max-height:260px;overflow-y:auto;padding:4px;border:1px solid var(--border);border-radius:10px;background:var(--bg)}
-    .gc-dlc-option{display:flex;align-items:center;gap:10px;padding:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;cursor:pointer;text-align:left;font-family:inherit;transition:border-color .15s,background .15s}
-    .gc-dlc-option:hover{border-color:var(--game-accent,#6050c8);background:var(--bg-hover)}
-    .gc-dlc-option.selected{border-color:var(--game-accent,#6050c8);background:rgba(96,80,200,.1)}
-    .gc-dlc-option img,.gc-dlc-option-cover-placeholder{width:36px;height:50px;object-fit:cover;border-radius:4px;flex-shrink:0;background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:16px}
-    .gc-dlc-option-info{flex:1;min-width:0}
-    .gc-dlc-option-badge{font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#14b8a6;margin-bottom:2px}
-    .gc-dlc-option-title{font-size:12px;font-weight:500;color:var(--text-primary);line-height:1.2;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    /* DLC autocomplete — click/focus the input to drop the list down, type to
+       filter, click an option to fill the input with the DLC's title. Same
+       shape as the game-search autocomplete on the homepage composer. */
+    .gc-dlc-autocomplete{position:relative}
+    .gc-dlc-results{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;z-index:100;max-height:420px;overflow-y:auto;display:none;box-shadow:var(--shadow-md);padding:4px}
+    .gc-dlc-results.open{display:block}
+    .gc-dlc-item{display:flex;align-items:center;gap:12px;padding:10px;border-radius:10px;cursor:pointer;transition:background .15s}
+    .gc-dlc-item:hover{background:var(--bg-hover)}
+    .gc-dlc-item-cover{width:38px;height:50px;flex-shrink:0;border-radius:6px;overflow:hidden;border:1px solid var(--border);background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:16px}
+    .gc-dlc-item-cover img{width:100%;height:100%;object-fit:cover}
+    .gc-dlc-item-info{min-width:0;flex:1}
+    .gc-dlc-item-title{font-size:14px;font-weight:500;color:var(--text-primary);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .gc-dlc-item-badge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#14b8a6}
+    .gc-dlc-empty{padding:24px;text-align:center;color:var(--text-tertiary);font-size:14px}
 
     @media (max-width: 640px) {
       #gameComposer {
@@ -2508,28 +2514,19 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           <button type="button" id="gcTypeDlc" class="gc-type-tab" role="tab" aria-selected="false">DLC</button>
         </div>
         <div id="gcDlcPicker" style="display:none;margin-top:10px">
-          <div style="font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:8px">Pick a DLC or expansion</div>
-          <div class="gc-dlc-grid">
-            {composerDlcList.map((d: any) => (
-              <button
-                type="button"
-                class="gc-dlc-option"
-                data-dlc-id={d.id}
-                data-dlc-title={d.title}
-              >
-                {d.cover_img_url ? (
-                  <img src={igdbImage(d.cover_img_url, 't_cover_small') ?? ''} alt={d.title} loading="lazy" />
-                ) : (
-                  <div class="gc-dlc-option-cover-placeholder">🎮</div>
-                )}
-                <div class="gc-dlc-option-info">
-                  <div class="gc-dlc-option-badge">{d.igdb_category === 2 || d.igdb_category === 4 ? 'Expansion' : 'DLC'}</div>
-                  <div class="gc-dlc-option-title">{d.title}</div>
-                </div>
-              </button>
-            ))}
+          <div class="gc-dlc-autocomplete">
+            <input type="text" id="gcDlcSearch" class="composer-input" placeholder="Pick a DLC or expansion..." autocomplete="off" />
+            <div class="gc-dlc-results" id="gcDlcResults"></div>
           </div>
         </div>
+        <script id="gcDlcList" type="application/json" is:inline set:html={JSON.stringify(
+          composerDlcList.map((d: any) => ({
+            id: d.id,
+            title: d.title,
+            cover_img_url: d.cover_img_url,
+            igdb_category: d.igdb_category,
+          }))
+        )}></script>
       </div>
     )}
 
@@ -2603,6 +2600,19 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   // DLC's game_id so submit posts the review against the right target.
   var selectedTargetGameId = gameId
 
+  // DLC list is serialized into the <script id="gcDlcList"> payload at SSR.
+  var _gcDlcList = []
+  try {
+    var _gcDlcListEl = document.getElementById('gcDlcList')
+    if (_gcDlcListEl && _gcDlcListEl.textContent) _gcDlcList = JSON.parse(_gcDlcListEl.textContent) || []
+  } catch (e) { _gcDlcList = [] }
+
+  function _gcEscape(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
   function _gcSetType(type) {
     var mainBtn = document.getElementById('gcTypeMain')
     var dlcBtn  = document.getElementById('gcTypeDlc')
@@ -2612,10 +2622,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       mainBtn.classList.remove('active'); mainBtn.setAttribute('aria-selected', 'false')
       dlcBtn.classList.add('active');     dlcBtn.setAttribute('aria-selected', 'true')
       picker.style.display = 'block'
-      // If a DLC is already highlighted, keep its id; otherwise fall back to
-      // base game id until the user actually picks one.
-      var picked = picker.querySelector('.gc-dlc-option.selected')
-      selectedTargetGameId = picked ? picked.getAttribute('data-dlc-id') : gameId
+      // Keep a prior pick if the user already selected one this session;
+      // otherwise fall back to the base game until they actually pick a DLC.
+      var input = document.getElementById('gcDlcSearch')
+      var pickedId = input && input.dataset.dlcId
+      selectedTargetGameId = pickedId || gameId
     } else {
       mainBtn.classList.add('active');    mainBtn.setAttribute('aria-selected', 'true')
       dlcBtn.classList.remove('active');  dlcBtn.setAttribute('aria-selected', 'false')
@@ -2624,13 +2635,35 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     }
   }
 
-  function _gcPickDlc(btn) {
-    var picker = document.getElementById('gcDlcPicker')
-    if (!picker) return
-    var all = picker.querySelectorAll('.gc-dlc-option')
-    for (var i = 0; i < all.length; i++) all[i].classList.remove('selected')
-    btn.classList.add('selected')
-    selectedTargetGameId = btn.getAttribute('data-dlc-id')
+  function _gcRenderDlcResults(filterText) {
+    var results = document.getElementById('gcDlcResults')
+    if (!results) return
+    var q = (filterText || '').trim().toLowerCase()
+    var matches = q
+      ? _gcDlcList.filter(function(d) { return (d.title || '').toLowerCase().indexOf(q) >= 0 })
+      : _gcDlcList
+    if (matches.length === 0) {
+      results.innerHTML = '<div class="gc-dlc-empty">No DLCs match</div>'
+      results.classList.add('open')
+      return
+    }
+    results.innerHTML = matches.map(function(d) {
+      var cover = d.cover_img_url
+        ? (d.cover_img_url.indexOf('//') === 0 ? 'https:' + d.cover_img_url : d.cover_img_url).replace(/t_[a-z0-9_]+/, 't_cover_big')
+        : null
+      var badge = (d.igdb_category === 2 || d.igdb_category === 4) ? 'Expansion' : 'DLC'
+      var coverHtml = cover
+        ? '<img src="' + _gcEscape(cover) + '" alt="" loading="lazy" />'
+        : '🎮'
+      return '<div class="gc-dlc-item" data-dlc-id="' + _gcEscape(d.id) + '" data-dlc-title="' + _gcEscape(d.title) + '">' +
+        '<div class="gc-dlc-item-cover">' + coverHtml + '</div>' +
+        '<div class="gc-dlc-item-info">' +
+          '<div class="gc-dlc-item-title">' + _gcEscape(d.title) + '</div>' +
+          '<div class="gc-dlc-item-badge">' + badge + '</div>' +
+        '</div>' +
+      '</div>'
+    }).join('')
+    results.classList.add('open')
   }
 
   if (composerShowDlcToggle) {
@@ -2638,11 +2671,32 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     var dlcBtn  = document.getElementById('gcTypeDlc')
     if (mainBtn) mainBtn.addEventListener('click', function() { _gcSetType('main') })
     if (dlcBtn)  dlcBtn.addEventListener('click',  function() { _gcSetType('dlc') })
-    var picker = document.getElementById('gcDlcPicker')
-    if (picker) {
-      picker.addEventListener('click', function(e) {
-        var opt = e.target.closest('.gc-dlc-option')
-        if (opt) _gcPickDlc(opt)
+    var input = document.getElementById('gcDlcSearch')
+    var results = document.getElementById('gcDlcResults')
+    if (input && results) {
+      input.addEventListener('focus', function() { _gcRenderDlcResults(input.value) })
+      input.addEventListener('input', function() {
+        // Keystroke after a prior pick clears the stored id so a stale selection
+        // can't ride through when the user retypes.
+        if (input.dataset.dlcId) {
+          delete input.dataset.dlcId
+          selectedTargetGameId = gameId
+        }
+        _gcRenderDlcResults(input.value)
+      })
+      // mousedown (not click) so the input's blur can't close the list before
+      // the pick registers.
+      results.addEventListener('mousedown', function(e) {
+        var item = e.target.closest('.gc-dlc-item')
+        if (!item) return
+        e.preventDefault()
+        input.value = item.getAttribute('data-dlc-title') || ''
+        input.dataset.dlcId = item.getAttribute('data-dlc-id') || ''
+        selectedTargetGameId = input.dataset.dlcId
+        results.classList.remove('open')
+      })
+      document.addEventListener('click', function(e) {
+        if (!e.target.closest('.gc-dlc-autocomplete')) results.classList.remove('open')
       })
     }
   }
