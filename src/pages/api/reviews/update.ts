@@ -5,7 +5,7 @@ import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
 import { readYouTubeField } from "../../../utils/youtube";
 import { attachReviewVideos } from "../../../utils/reviewVideos";
-import { resolveCanonicalGameId } from "../../../utils/games";
+import { resolveCanonicalGameId, isReviewableGameCategory } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -83,6 +83,19 @@ export const POST: APIRoute = async (context) => {
   const canonicalGameId = publishing
     ? await resolveCanonicalGameId(db, review.game_id)
     : review.game_id;
+
+  // Defensive reviewability gate — mirrors /api/reviews/create. Blocks a draft
+  // from being published against a non-reviewable category (mod/episode/
+  // season/fork). Won't fire for ordinary edits of existing published reviews
+  // because the target can't change here.
+  if (publishing) {
+    const { data: targetGame } = await db
+      .from("games").select("igdb_category").eq("id", canonicalGameId).maybeSingle();
+    if (!targetGame) return json({ error: "Game not found." }, 404);
+    if (!isReviewableGameCategory(targetGame.igdb_category)) {
+      return json({ error: "This game can't be reviewed directly — try reviewing the base game instead." }, 400);
+    }
+  }
 
   // Enforce one published review per canonical game before flipping status
   // (friendlier than letting the reviews_one_published_per_revision unique

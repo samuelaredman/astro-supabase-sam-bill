@@ -38,7 +38,7 @@ const [{ data: game }, { data: cp }] = await Promise.all([
     .from('games')
     .select(`
       id, title, slug, game_description, cover_img_url,
-      date_released, igdb_id, canonical_game_id,
+      date_released, igdb_id, canonical_game_id, igdb_category,
       game_genres(genres(id, name, slug)),
       game_platforms(platforms(id, name, slug)),
       game_companies(role, developers(id, name, slug))
@@ -397,41 +397,209 @@ const rankStats = rankRows?.[0] ?? null
 const allTimeRank: number = rankStats?.all_time_rank ?? 0
 const allTimeTotal: number = rankStats?.all_time_total ?? 0
 
-// ── Children: collapsed editions/versions + related franchise content ──
-// Rendered below "Similar games" in the same card style.
-const { data: editionsRaw } = await (supabase as any)
-  .from('games')
-  .select('id, title, slug, cover_img_url, date_released')
-  .eq('canonical_game_id', game.id)
-  .order('date_released', { ascending: true })
-const editions = editionsRaw ?? []
+// ── Children: DLCs/expansions, editions, remakes, remasters, updates, etc. ──
+// Everything feeding the "DLC & Editions" tab is gathered here and bucketed into
+// labeled sections below. Franchise-level siblings (sequels, series, similar)
+// stay in the Overview's "Related games" section.
 
-const { data: relRows } = await (supabase as any)
+// Collapse per-game platforms into display-group labels (PS4 + PS4 Pro → "PlayStation 4"),
+// preserving the display_order sort. Mirrors the collapse logic in
+// src/pages/api/games/platforms.ts — used here to label DLC cards compactly.
+function dedupePlatforms(gps: any): Array<{ id: string; name: string }> {
+  const seen = new Set<string>()
+  return (gps ?? [])
+    .map((gp: any) => gp.platforms)
+    .filter((p: any) => p && (p.display_group || p.name))
+    .sort((a: any, b: any) => (a.display_order ?? 99) - (b.display_order ?? 99))
+    .filter((p: any) => {
+      const key = p.display_group ?? p.name
+      if (seen.has(key)) return false
+      seen.add(key); return true
+    })
+    .map((p: any) => ({ id: p.id, name: p.display_group ?? p.name }))
+}
+
+function formatDlcDate(d: string | null): string | null {
+  if (!d) return null
+  const dt = new Date(d)
+  if (isNaN(dt.getTime())) return null
+  return dt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+// If this game IS a DLC/expansion, resolve its parent for the "DLC for [parent]" chip.
+// Parent edges are stored as (from_game_id=parent, to_game_id=this), so we query the
+// reverse direction and filter to DLC-ish relation types.
+const isDlcPage = game.igdb_category === 1 || game.igdb_category === 2 || game.igdb_category === 4
+let parentGame: { id: string; title: string; slug: string | null } | null = null
+if (isDlcPage) {
+  const { data: parentRelRow } = await (supabase as any)
+    .from('game_relationships')
+    .select('from_game_id')
+    .eq('to_game_id', game.id)
+    .in('relation_type', ['dlc', 'expansion', 'standalone_expansion'])
+    .limit(1)
+    .maybeSingle()
+  if (parentRelRow?.from_game_id) {
+    const { data: parentRow } = await (supabase as any)
+      .from('games')
+      .select('id, title, slug')
+      .eq('id', parentRelRow.from_game_id)
+      .maybeSingle()
+    if (parentRow) parentGame = parentRow
+  }
+}
+const parentChipLabel = game.igdb_category === 2 || game.igdb_category === 4 ? 'Expansion for' : 'DLC for'
+
+// Which relationship types this tab surfaces. 'sequel', 'series_sibling',
+// 'similar' stay in the Overview's "Related games" section.
+const TAB_RELATION_TYPES = ['dlc', 'expansion', 'standalone_expansion', 'remake', 'expanded_game']
+
+// Fetch every potential tab entry in parallel, then de-duplicate + bucket.
+// Three disjoint sources — each contributes different parts of the DLC graph:
+//   (a) canonical children: rows with canonical_game_id = this. GOTY/Deluxe/
+//       Anniversary editions, plus collapsed remasters/ports/packs.
+//   (b) relationship children: rows the graph points at (DLC, expansions,
+//       remakes, expanded editions).
+//   (c) update children: cat=14 rows whose IGDB-side parent_game points at
+//       this game. These never make it into game_relationships because the
+//       IGDB importer's relationTypeForChildCategory doesn't map category 14
+//       (treated as "update/patch" rather than a reviewable relationship).
+const CHILD_SELECT = 'id, title, slug, version_title, cover_img_url, date_released, igdb_category, game_description, game_platforms(platforms(id, name, display_group, display_order))'
+const [{ data: canonicalChildrenRaw }, { data: relRows }, { data: updateChildrenRaw }] = await Promise.all([
+  (supabase as any)
+    .from('games')
+    .select(CHILD_SELECT)
+    .eq('canonical_game_id', game.id)
+    .order('date_released', { ascending: true }),
+  (supabase as any)
+    .from('game_relationships')
+    .select('to_game_id, relation_type')
+    .eq('from_game_id', game.id)
+    .in('relation_type', TAB_RELATION_TYPES),
+  game.igdb_id
+    ? (supabase as any)
+        .from('games')
+        .select(CHILD_SELECT)
+        .eq('igdb_parent_game', game.igdb_id)
+        .eq('igdb_category', 14)
+        .is('canonical_game_id', null)
+    : Promise.resolve({ data: [] }),
+])
+
+// Related games (Overview) — unchanged behavior. Pulled separately so it only
+// gets sequels/siblings/similar (not the types moving into the tab).
+const { data: relatedRelRows } = await (supabase as any)
   .from('game_relationships')
   .select('to_game_id, relation_type')
   .eq('from_game_id', game.id)
-const relTypeById = new Map<string, string>((relRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
-const relIds = [...relTypeById.keys()]
+  .in('relation_type', ['sequel', 'series_sibling', 'similar'])
+const relatedTypeById = new Map<string, string>((relatedRelRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
+const relatedIds = [...relatedTypeById.keys()]
 let relatedChildren: any[] = []
-if (relIds.length > 0) {
-  const { data: relGames } = await (supabase as any)
-    .from('games')
-    .select('id, title, slug, cover_img_url, date_released')
-    .in('id', relIds)
-    .is('canonical_game_id', null)   // only related nodes that are themselves canonical
-  relatedChildren = (relGames ?? []).map((g: any) => ({ ...g, relation_type: relTypeById.get(g.id) }))
+if (relatedIds.length > 0) {
+  const { data: rg } = await (supabase as any)
+    .from('games').select('id, title, slug, cover_img_url, date_released').in('id', relatedIds).is('canonical_game_id', null)
+  relatedChildren = (rg ?? []).map((g: any) => ({ ...g, relation_type: relatedTypeById.get(g.id) }))
 }
 
-// Avg score per child, read from the game_review_stats view (not every review).
-const childIds = [...editions.map((e: any) => e.id), ...relatedChildren.map((r: any) => r.id)]
+// Shape + dedupe the tab's candidate children (same id can appear via multiple sources).
+const relTypeByChildId = new Map<string, string>((relRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
+const relChildIds = [...relTypeByChildId.keys()]
+const { data: relGamesRaw } = relChildIds.length > 0
+  ? await (supabase as any)
+      .from('games')
+      .select(CHILD_SELECT)
+      .in('id', relChildIds)
+      .is('canonical_game_id', null)
+  : { data: [] }
+
+const tabChildrenById = new Map<string, any>()
+function addTabChild(g: any, relation_type: string | null): void {
+  if (!g || tabChildrenById.has(g.id)) return
+  tabChildrenById.set(g.id, {
+    ...g,
+    relation_type,
+    platform_labels: dedupePlatforms(g.game_platforms),
+  })
+}
+for (const g of (relGamesRaw ?? [])) addTabChild(g, relTypeByChildId.get(g.id) ?? null)
+for (const g of (canonicalChildrenRaw ?? [])) addTabChild(g, null)
+for (const g of (updateChildrenRaw ?? [])) addTabChild(g, null)
+const tabChildren = [...tabChildrenById.values()]
+
+// Avg score + review count per child, read from the game_review_stats view (not every review).
+const childIds = [
+  ...tabChildren.map((c: any) => c.id),
+  ...relatedChildren.map((r: any) => r.id),
+]
 const childScores: Record<string, number> = {}
+const childReviewCounts: Record<string, number> = {}
 if (childIds.length > 0) {
   const { data: childAvgRows } = await db
-    .from('game_review_stats').select('game_id, avg_score').in('game_id', childIds)
+    .from('game_review_stats').select('game_id, avg_score, review_count').in('game_id', childIds)
   for (const row of (childAvgRows ?? []) as any[]) {
     if (row.avg_score != null) childScores[row.game_id] = row.avg_score
+    if (row.review_count != null) childReviewCounts[row.game_id] = row.review_count
   }
 }
+
+// Section definitions for the DLC & Editions tab. Each entry lands in the
+// FIRST matching section (order matters). Only sections with entries render.
+// The final "Rereleases & Editions" catches anything that didn't match a
+// specific category — GOTY / Deluxe / Anniversary, cat=0 with version_title,
+// etc. — so nothing is dropped silently.
+const TAB_DLC_RELATIONS = new Set(['dlc', 'expansion', 'standalone_expansion'])
+interface TabSectionDef { key: string; label: string; match: (c: any) => boolean }
+const TAB_SECTION_DEFS: TabSectionDef[] = [
+  { key: 'dlc-exp',      label: 'DLC & Expansions',      match: (c) => TAB_DLC_RELATIONS.has(c.relation_type) },
+  { key: 'enhanced',     label: 'Enhanced Editions',     match: (c) => c.relation_type === 'expanded_game' || c.igdb_category === 10 },
+  { key: 'remakes',      label: 'Remakes',               match: (c) => c.relation_type === 'remake' || c.igdb_category === 8 },
+  { key: 'remasters',    label: 'Remasters',             match: (c) => c.igdb_category === 9 },
+  { key: 'updates',      label: 'Updates & Patches',     match: (c) => c.igdb_category === 14 },
+  { key: 'ports',        label: 'Ports',                 match: (c) => c.igdb_category === 11 },
+  { key: 'bundles',      label: 'Bundles & Packs',       match: (c) => c.igdb_category === 3 || c.igdb_category === 13 },
+  { key: 'rereleases',   label: 'Rereleases & Editions', match: () => true },
+]
+const tabSections = TAB_SECTION_DEFS.map((d) => ({ ...d, entries: [] as any[] }))
+for (const child of tabChildren) {
+  const section = tabSections.find((s) => s.match(child))
+  if (section) section.entries.push(child)
+}
+for (const s of tabSections) {
+  s.entries.sort((a, b) => {
+    if (!a.date_released && !b.date_released) return 0
+    if (!a.date_released) return 1
+    if (!b.date_released) return -1
+    return String(a.date_released).localeCompare(String(b.date_released))
+  })
+}
+const visibleTabSections = tabSections.filter((s) => s.entries.length > 0)
+
+// Label a card for the type chip when the section it sits in is heterogeneous
+// (i.e., DLC & Expansions mixes category 1 and 2/4). Other sections are
+// uniform, so the section header does the labeling — no chip needed.
+function dlcBadgeLabel(c: any): string {
+  return c.igdb_category === 2 || c.igdb_category === 4 ? 'Expansion' : 'DLC'
+}
+
+const dlcTabCount = tabChildren.length
+
+// DLCs offered in the write-review composer's "DLC" toggle target picker.
+// Only populated when the current page is a base game (cat 0/null) with
+// at least one DLC-or-expansion child — otherwise the composer just targets
+// the current page directly.
+const composerIsBasePage = game.igdb_category == null || game.igdb_category === 0
+const composerDlcList = composerIsBasePage
+  ? (tabSections.find((s: any) => s.key === 'dlc-exp')?.entries ?? []).map((d: any) => ({
+      id: d.id,
+      title: d.title,
+      slug: d.slug,
+      cover_img_url: d.cover_img_url,
+      igdb_category: d.igdb_category,
+      date_released: d.date_released,
+    }))
+  : []
+const composerShowDlcToggle = composerDlcList.length > 0
 const allTimePct = allTimeTotal > 0 ? Math.round(((allTimeTotal - allTimeRank) / allTimeTotal) * 100) : 0
 const genreRank: number = rankStats?.genre_rank ?? 0
 const genreTotal: number = rankStats?.genre_total ?? 0
@@ -650,6 +818,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .cover-placeholder{width:130px;height:173px;border-radius:12px;background:var(--bg-card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0}
     .game-info{flex:1;min-width:0;padding-bottom:4px}
     .game-title{font-family:'Cinzel',serif;font-size:32px;line-height:1.1;letter-spacing:.04em;margin-bottom:8px;font-weight:600;text-shadow:0 2px 20px rgba(0,0,0,.6)}
+    /* "DLC for" / "Expansion for" chip on a DLC page linking to its parent —
+       teal to stay in family with the other DLC/Expansion badges. */
+    .parent-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;margin-bottom:10px;border-radius:999px;background:rgba(20,184,166,.14);border:1px solid rgba(20,184,166,.45);text-decoration:none;font-size:12px;color:var(--text-secondary);transition:background .15s,border-color .15s}
+    .parent-chip:hover{background:rgba(20,184,166,.22);border-color:rgba(20,184,166,.65)}
+    .parent-chip-label{text-transform:uppercase;letter-spacing:.06em;font-weight:600;color:#14b8a6;font-size:10px}
+    .parent-chip-title{color:var(--text-primary);font-weight:500}
     .meta-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
     .meta-tag{font-size:13px;color:var(--text-secondary)}
     .meta-sep{color:var(--text-tertiary);font-size:10px}
@@ -763,6 +937,31 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .similar-score-badge.score-low{background:rgba(48,14,14,.88);color:#f87171;border:1px solid rgba(248,113,113,.4)}
     .similar-info{padding:6px 8px 8px}
     .similar-title{font-size:10px;font-weight:500;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--text-secondary)}
+    .similar-sub{font-size:9px;color:var(--text-tertiary);margin-top:2px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+
+    /* DLC & Editions tab cards — larger than similar-card since DLC content is primary */
+    .dlc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+    .dlc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,border-color .15s;display:flex;flex-direction:column;text-decoration:none;color:inherit}
+    .dlc-card:hover{transform:translateY(-3px);border-color:var(--game-accent)}
+    .dlc-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:32px;position:relative}
+    .dlc-cover img{width:100%;height:100%;object-fit:cover}
+    /* The shared .similar-score-badge is sized for 100px-wide similar-card thumbnails.
+       DLC cards are 220px+ wide, so override position + dims here (color variants
+       are still inherited from the .similar-score-badge.score-* rules). */
+    .dlc-cover .similar-score-badge{bottom:8px;right:8px;min-width:44px;height:32px;padding:0 10px;border-radius:6px;font-size:18px}
+    .dlc-info{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px}
+    .dlc-badge-row{display:flex;align-items:center;gap:8px}
+    /* Teal — distinct from the site's purple accent; DLC and Expansion share
+       the same color (the chip's label text carries the distinction). */
+    .dlc-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;background:rgba(20,184,166,.14);color:#14b8a6;border:1px solid rgba(20,184,166,.45)}
+    .dlc-year{font-size:11px;color:var(--text-tertiary)}
+    .dlc-title{font-size:14px;font-weight:600;line-height:1.3;color:var(--text-primary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .dlc-version-sub{font-size:11px;color:var(--text-tertiary);margin-top:-2px;font-style:italic}
+    .dlc-desc{font-size:11.5px;color:var(--text-secondary);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .dlc-platforms{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+    .dlc-platform-chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;background:var(--tag-bg);border:1px solid var(--border-subtle);font-size:10px;font-weight:500;color:var(--text-secondary);white-space:nowrap}
+    .dlc-platform-more{display:inline-flex;align-items:center;padding:1px 5px;font-size:10px;font-weight:500;color:var(--text-tertiary)}
+    .dlc-meta{font-size:11px;color:var(--text-tertiary);margin-top:2px}
 
     /* SIDEBAR */
     .desc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px}
@@ -805,6 +1004,26 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .composer-draft:hover:not(:disabled){background:var(--bg-hover);color:var(--text-primary);border-color:var(--accent)}
     .composer-draft:disabled{opacity:.6;cursor:default}
     .composer-error{font-size:13px;color:#c0392b;min-height:18px;margin-top:8px}
+
+    /* ── Composer: Main Game / DLC toggle ── */
+    .gc-type-toggle{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:3px;gap:2px}
+    .gc-type-tab{background:transparent;border:none;padding:6px 16px;font-size:13px;font-weight:500;color:var(--text-secondary);font-family:inherit;cursor:pointer;border-radius:999px;transition:background .15s,color .15s}
+    .gc-type-tab:hover{color:var(--text-primary)}
+    .gc-type-tab.active{background:var(--game-accent,#6050c8);color:white;font-weight:600}
+    /* DLC autocomplete — click/focus the input to drop the list down, type to
+       filter, click an option to fill the input with the DLC's title. Same
+       shape as the game-search autocomplete on the homepage composer. */
+    .gc-dlc-autocomplete{position:relative}
+    .gc-dlc-results{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;z-index:100;max-height:420px;overflow-y:auto;display:none;box-shadow:var(--shadow-md);padding:4px}
+    .gc-dlc-results.open{display:block}
+    .gc-dlc-item{display:flex;align-items:center;gap:12px;padding:10px;border-radius:10px;cursor:pointer;transition:background .15s}
+    .gc-dlc-item:hover{background:var(--bg-hover)}
+    .gc-dlc-item-cover{width:38px;height:50px;flex-shrink:0;border-radius:6px;overflow:hidden;border:1px solid var(--border);background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:16px}
+    .gc-dlc-item-cover img{width:100%;height:100%;object-fit:cover}
+    .gc-dlc-item-info{min-width:0;flex:1}
+    .gc-dlc-item-title{font-size:14px;font-weight:500;color:var(--text-primary);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .gc-dlc-item-badge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#14b8a6}
+    .gc-dlc-empty{padding:24px;text-align:center;color:var(--text-tertiary);font-size:14px}
 
     @media (max-width: 640px) {
       #gameComposer {
@@ -1005,6 +1224,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         : <div class="cover-placeholder">🎮</div>
       }
       <div class="game-info">
+        {parentGame && (
+          <a href={`/games/${parentGame.slug}`} class="parent-chip">
+            <span class="parent-chip-label">{parentChipLabel}</span>
+            <span class="parent-chip-title">{parentGame.title}</span>
+          </a>
+        )}
         <h1 class="game-title">{game.title}</h1>
         <div class="meta-row">
           {releaseYear && <span class="meta-tag">{releaseYear}</span>}
@@ -1048,6 +1273,9 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     <nav class="tab-nav">
       <a href={`/games/${game.slug}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`} data-tab="overview">Overview</a>
       <a href={`/games/${game.slug}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`} data-tab="reviews">Reviews {reviewList.length > 0 && <span class="tab-count">{reviewList.length}</span>}</a>
+      {dlcTabCount > 0 && (
+        <a href={`/games/${game.slug}?tab=dlc`} class={`tab-link ${activeTab === 'dlc' ? 'active' : ''}`} data-tab="dlc">DLC & Editions <span class="tab-count">{dlcTabCount}</span></a>
+      )}
       <a href={`/games/${game.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">Stats</a>
       <a href={`/games/${game.slug}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">Recommendations {gameRecs.length > 0 && <span class="tab-count">{gameRecs.length}</span>}</a>
     </nav>
@@ -1101,29 +1329,6 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
                         {coverUrl ? <img src={coverUrl ?? ''} alt={g.title} loading="lazy" /> : '🎮'}
                         {g.chekpointScore != null && (
                           <div class={`similar-score-badge ${scoreClass(g.chekpointScore)}`}>{g.chekpointScore.toFixed(1)}</div>
-                        )}
-                      </div>
-                      <div class="similar-info"><div class="similar-title">{g.title}</div></div>
-                    </a>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {editions.length > 0 && (
-            <div class="section">
-              <div class="section-header"><span class="section-title">Editions & versions</span></div>
-              <div class="similar-scroll">
-                {editions.map((g: any) => {
-                  const cover = igdbImage(g.cover_img_url, 't_cover_big')
-                  const sc = childScores[g.id]
-                  return (
-                    <a href={`/games/${g.slug}`} class="similar-card">
-                      <div class="similar-cover">
-                        {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
-                        {sc != null && (
-                          <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
                         )}
                       </div>
                       <div class="similar-info"><div class="similar-title">{g.title}</div></div>
@@ -1323,6 +1528,68 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         </>
       )}
     </div>
+
+    <!-- ── DLC & EDITIONS TAB ── -->
+    {dlcTabCount > 0 && (
+      <div class={`tab-panel ${activeTab === 'dlc' ? 'active' : ''}`} data-tab="dlc">
+        {visibleTabSections.map((section) => (
+          <div class="section">
+            <div class="section-header">
+              <span class="section-title">{section.label}</span>
+              <span class="section-count">{section.entries.length}</span>
+            </div>
+            <div class="dlc-grid">
+              {section.entries.map((g: any) => {
+                const cover = igdbImage(g.cover_img_url, 't_cover_big')
+                const sc = childScores[g.id]
+                const rc = childReviewCounts[g.id] ?? 0
+                const date = formatDlcDate(g.date_released)
+                const platformLabels: any[] = g.platform_labels ?? []
+                // Only the mixed DLC & Expansions section shows the DLC/Expansion
+                // type chip — every other section's header already labels the type.
+                const showTypeChip = section.key === 'dlc-exp'
+                return (
+                  <a href={`/games/${g.slug}`} class="dlc-card">
+                    <div class="dlc-cover">
+                      {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
+                      {sc != null && (
+                        <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
+                      )}
+                    </div>
+                    <div class="dlc-info">
+                      {(showTypeChip || date) && (
+                        <div class="dlc-badge-row">
+                          {showTypeChip && (
+                            <span class="dlc-badge">{dlcBadgeLabel(g)}</span>
+                          )}
+                          {date && <span class="dlc-year">{date}</span>}
+                        </div>
+                      )}
+                      <div class="dlc-title">{g.title}</div>
+                      {g.version_title && <div class="dlc-version-sub">{g.version_title}</div>}
+                      {g.game_description && (
+                        <div class="dlc-desc">{g.game_description}</div>
+                      )}
+                      {platformLabels.length > 0 && (
+                        <div class="dlc-platforms">
+                          {platformLabels.slice(0, 4).map((p) => (
+                            <span class="dlc-platform-chip">{p.name}</span>
+                          ))}
+                          {platformLabels.length > 4 && (
+                            <span class="dlc-platform-more">+{platformLabels.length - 4}</span>
+                          )}
+                        </div>
+                      )}
+                      {rc > 0 && <div class="dlc-meta">{rc} review{rc === 1 ? '' : 's'}</div>}
+                    </div>
+                  </a>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
 
     <!-- ── STATS TAB ── -->
     <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">
@@ -2244,6 +2511,30 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 
   <!-- Form -->
   <div id="gcFormContent">
+    {composerShowDlcToggle && (
+      <div class="composer-field" style="margin-bottom:14px">
+        <label class="composer-label">Reviewing</label>
+        <div class="gc-type-toggle" role="tablist" aria-label="Review target">
+          <button type="button" id="gcTypeMain" class="gc-type-tab active" role="tab" aria-selected="true">Main Game</button>
+          <button type="button" id="gcTypeDlc" class="gc-type-tab" role="tab" aria-selected="false">DLC</button>
+        </div>
+        <div id="gcDlcPicker" style="display:none;margin-top:10px">
+          <div class="gc-dlc-autocomplete">
+            <input type="text" id="gcDlcSearch" class="composer-input" placeholder="Pick a DLC or expansion..." autocomplete="off" />
+            <div class="gc-dlc-results" id="gcDlcResults"></div>
+          </div>
+        </div>
+        <script id="gcDlcList" type="application/json" is:inline set:html={JSON.stringify(
+          composerDlcList.map((d: any) => ({
+            id: d.id,
+            title: d.title,
+            cover_img_url: d.cover_img_url,
+            igdb_category: d.igdb_category,
+          }))
+        )}></script>
+      </div>
+    )}
+
     <div class="composer-field">
       <label class="composer-label">Score</label>
       <div style="display:flex;align-items:center;gap:8px">
@@ -2293,7 +2584,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   </div>
 </div>
 
-<script is:inline define:vars={{ isLoggedIn, gameId: game.id, gameTitle: game.title, draftReview, autoOpenDraft }}>
+<script is:inline define:vars={{ isLoggedIn, gameId: game.id, gameTitle: game.title, draftReview, autoOpenDraft, composerDlcList, composerShowDlcToggle }}>
   // Id of the draft review being resumed (set on load if one exists, or after a first save).
   var currentReviewDraftId = draftReview ? draftReview.id : null
 
@@ -2309,6 +2600,112 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     document.getElementById('gcCharCount').textContent = (draftReview.body || '').length + ' / 10000'
   }
 
+  // Main Game / DLC toggle state. selectedTargetGameId defaults to this page's
+  // game.id — when the user flips to DLC and picks a child, it updates to that
+  // DLC's game_id so submit posts the review against the right target.
+  var selectedTargetGameId = gameId
+
+  // DLC list is serialized into the <script id="gcDlcList"> payload at SSR.
+  var _gcDlcList = []
+  try {
+    var _gcDlcListEl = document.getElementById('gcDlcList')
+    if (_gcDlcListEl && _gcDlcListEl.textContent) _gcDlcList = JSON.parse(_gcDlcListEl.textContent) || []
+  } catch (e) { _gcDlcList = [] }
+
+  function _gcEscape(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  function _gcSetType(type) {
+    var mainBtn = document.getElementById('gcTypeMain')
+    var dlcBtn  = document.getElementById('gcTypeDlc')
+    var picker  = document.getElementById('gcDlcPicker')
+    if (!mainBtn || !dlcBtn || !picker) return
+    if (type === 'dlc') {
+      mainBtn.classList.remove('active'); mainBtn.setAttribute('aria-selected', 'false')
+      dlcBtn.classList.add('active');     dlcBtn.setAttribute('aria-selected', 'true')
+      picker.style.display = 'block'
+      // Keep a prior pick if the user already selected one this session;
+      // otherwise fall back to the base game until they actually pick a DLC.
+      var input = document.getElementById('gcDlcSearch')
+      var pickedId = input && input.dataset.dlcId
+      selectedTargetGameId = pickedId || gameId
+    } else {
+      mainBtn.classList.add('active');    mainBtn.setAttribute('aria-selected', 'true')
+      dlcBtn.classList.remove('active');  dlcBtn.setAttribute('aria-selected', 'false')
+      picker.style.display = 'none'
+      selectedTargetGameId = gameId
+    }
+  }
+
+  function _gcRenderDlcResults(filterText) {
+    var results = document.getElementById('gcDlcResults')
+    if (!results) return
+    var q = (filterText || '').trim().toLowerCase()
+    var matches = q
+      ? _gcDlcList.filter(function(d) { return (d.title || '').toLowerCase().indexOf(q) >= 0 })
+      : _gcDlcList
+    if (matches.length === 0) {
+      results.innerHTML = '<div class="gc-dlc-empty">No DLCs match</div>'
+      results.classList.add('open')
+      return
+    }
+    results.innerHTML = matches.map(function(d) {
+      var cover = d.cover_img_url
+        ? (d.cover_img_url.indexOf('//') === 0 ? 'https:' + d.cover_img_url : d.cover_img_url).replace(/t_[a-z0-9_]+/, 't_cover_big')
+        : null
+      var badge = (d.igdb_category === 2 || d.igdb_category === 4) ? 'Expansion' : 'DLC'
+      var coverHtml = cover
+        ? '<img src="' + _gcEscape(cover) + '" alt="" loading="lazy" />'
+        : '🎮'
+      return '<div class="gc-dlc-item" data-dlc-id="' + _gcEscape(d.id) + '" data-dlc-title="' + _gcEscape(d.title) + '">' +
+        '<div class="gc-dlc-item-cover">' + coverHtml + '</div>' +
+        '<div class="gc-dlc-item-info">' +
+          '<div class="gc-dlc-item-title">' + _gcEscape(d.title) + '</div>' +
+          '<div class="gc-dlc-item-badge">' + badge + '</div>' +
+        '</div>' +
+      '</div>'
+    }).join('')
+    results.classList.add('open')
+  }
+
+  if (composerShowDlcToggle) {
+    var mainBtn = document.getElementById('gcTypeMain')
+    var dlcBtn  = document.getElementById('gcTypeDlc')
+    if (mainBtn) mainBtn.addEventListener('click', function() { _gcSetType('main') })
+    if (dlcBtn)  dlcBtn.addEventListener('click',  function() { _gcSetType('dlc') })
+    var input = document.getElementById('gcDlcSearch')
+    var results = document.getElementById('gcDlcResults')
+    if (input && results) {
+      input.addEventListener('focus', function() { _gcRenderDlcResults(input.value) })
+      input.addEventListener('input', function() {
+        // Keystroke after a prior pick clears the stored id so a stale selection
+        // can't ride through when the user retypes.
+        if (input.dataset.dlcId) {
+          delete input.dataset.dlcId
+          selectedTargetGameId = gameId
+        }
+        _gcRenderDlcResults(input.value)
+      })
+      // mousedown (not click) so the input's blur can't close the list before
+      // the pick registers.
+      results.addEventListener('mousedown', function(e) {
+        var item = e.target.closest('.gc-dlc-item')
+        if (!item) return
+        e.preventDefault()
+        input.value = item.getAttribute('data-dlc-title') || ''
+        input.dataset.dlcId = item.getAttribute('data-dlc-id') || ''
+        selectedTargetGameId = input.dataset.dlcId
+        results.classList.remove('open')
+      })
+      document.addEventListener('click', function(e) {
+        if (!e.target.closest('.gc-dlc-autocomplete')) results.classList.remove('open')
+      })
+    }
+  }
+
   function openGameComposer() {
     if (!isLoggedIn) {
       document.getElementById('gcSignInPrompt').style.display = 'block'
@@ -2317,6 +2714,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     }
     document.getElementById('gameComposer').style.display = 'block'
     document.getElementById('gameComposerOverlay').style.display = 'block'
+    // Reset toggle to Main Game each open — target the current page by default.
+    if (composerShowDlcToggle) _gcSetType('main')
     // Re-hydrate a saved draft each time the composer is opened.
     if (currentReviewDraftId) prefillReviewDraft()
     document.getElementById('gcScore').focus()
@@ -2375,6 +2774,13 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     if (!score || score < 0.1 || score > 10) { errEl.textContent = 'Score must be between 0.1 and 10.'; return }
     if (!title) { errEl.textContent = 'Title is required.'; return }
     if (!body) { errEl.textContent = 'Review is required.'; return }
+    // DLC toggle active but no DLC picked yet: either stayed on Main Game (OK)
+    // or picked DLC without selecting one (block). selectedTargetGameId still
+    // equals gameId when nothing was picked in DLC mode.
+    var dlcBtn = document.getElementById('gcTypeDlc')
+    if (dlcBtn && dlcBtn.classList.contains('active') && selectedTargetGameId === gameId) {
+      errEl.textContent = 'Pick which DLC or expansion you want to review.'; return
+    }
 
     btn.disabled = true
     btn.textContent = 'Posting…'
@@ -2399,7 +2805,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              game_id: gameId,
+              game_id: selectedTargetGameId,
               score,
               title,
               body,

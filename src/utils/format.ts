@@ -64,3 +64,13 @@ export function isPreRelease(
   if (!Number.isFinite(releaseMs) || !Number.isFinite(reviewedMs)) return false;
   return reviewedMs < releaseMs;
 }
+
+// DLC/Expansion label for review-card badges. Returns null for base games so
+// the badge doesn't render. cat 2 and 4 are "expansion" family; cat 1 is a
+// DLC-addon. Other categories (remake/remaster/port/update/bundle/pack) are
+// standalone enough that the badge would be noise.
+export function dlcLabelFromCategory(cat: number | null | undefined): 'DLC' | 'Expansion' | null {
+  if (cat === 2 || cat === 4) return 'Expansion';
+  if (cat === 1) return 'DLC';
+  return null;
+}

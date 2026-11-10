@@ -132,6 +132,21 @@ const { username } = Astro.props;
   @keyframes sunbeam-b      { to { transform: rotate(360deg); } }
   @keyframes sunbeam-fade-a { from { opacity: .2;  } to { opacity: .9;  } }
   @keyframes sunbeam-fade-b { from { opacity: .15; } to { opacity: .75; } }
+
+  /* Per-group section header shown when a game splits into Base Game + DLC
+     groups (PSN trophy groups, Xbox DLC children). Hidden entirely for single-
+     group payloads (Steam always, non-DLC games) so the modal stays visually
+     identical to today for those. */
+  .ach-group-head{display:flex;align-items:center;gap:10px;padding:14px 10px 8px;border-top:1px solid var(--border-subtle)}
+  .ach-group-head:first-child{border-top:none;padding-top:4px}
+  .ach-group-label{flex:1;font-size:13.5px;font-weight:700;color:var(--text-primary);letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ach-group-stats{display:flex;align-items:center;gap:8px;flex-shrink:0}
+  .ach-group-count{font-size:12px;font-weight:600;color:var(--text-primary)}
+  .ach-group-xp{font-size:11.5px;color:var(--text-tertiary)}
+  .ach-group-bar{flex:1;max-width:110px;height:4px;border-radius:2px;background:var(--tag-bg);overflow:hidden}
+  .ach-group-bar-fill{height:100%;border-radius:2px;background:var(--score-great,#4ade80);transition:width .25s}
+  .ach-group-pct{font-size:12px;font-weight:600;color:var(--score-great,#4ade80);min-width:36px;text-align:right}
+  .ach-group-empty{padding:0 10px 10px;font-size:12px;color:var(--text-tertiary)}
 </style>
 
 <div class="modal-backdrop" id="achDetailModal" onclick="closeAchDetailOnBackdrop(event)">
@@ -270,25 +285,73 @@ const { username } = Astro.props;
       }
     }
 
+    function _filterAchievements(items, q) {
+      if (!q) return items
+      return items.filter(function(a) {
+        return (a.name && a.name.toLowerCase().indexOf(q) !== -1) ||
+               (a.description && a.description.toLowerCase().indexOf(q) !== -1)
+      })
+    }
+
+    function _achGroupHeadHtml(g) {
+      var pct = g.count > 0 ? Math.round(g.unlocked / g.count * 100) : 0
+      var xp = (g.xp_total != null)
+        ? '<span class="ach-group-xp">' + _achEscape(g.xp_earned != null ? g.xp_earned : 0) +
+          ' / ' + _achEscape(g.xp_total) + ' G</span>'
+        : ''
+      return '<div class="ach-group-head">' +
+        '<div class="ach-group-label">' + _achEscape(g.label || 'Group') + '</div>' +
+        '<div class="ach-group-stats">' +
+          xp +
+          '<span class="ach-group-count">' + _achEscape(g.unlocked) + ' / ' + _achEscape(g.count) + '</span>' +
+          '<div class="ach-group-bar"><div class="ach-group-bar-fill" style="width:' + pct + '%"></div></div>' +
+          '<span class="ach-group-pct">' + pct + '%</span>' +
+        '</div>' +
+      '</div>'
+    }
+
     function renderAchDetailList() {
       var body = document.getElementById('achDetailBody')
       if (!body || !_achDetailData) return
       var q = (document.getElementById('achDetailSearch')?.value || '').trim().toLowerCase()
-      var items = _achDetailData.achievements || []
-      if (q) {
-        items = items.filter(function(a) {
-          return (a.name && a.name.toLowerCase().indexOf(q) !== -1) ||
-                 (a.description && a.description.toLowerCase().indexOf(q) !== -1)
-        })
+      var groups = _achDetailData.groups || []
+
+      // Single-group (Steam always, non-DLC games): render exactly as the
+      // pre-grouping UI — no group header, flat achievement list — so the
+      // common case looks identical to today.
+      if (groups.length <= 1) {
+        var items = _filterAchievements((groups[0] && groups[0].achievements) || [], q)
+        if (items.length === 0) {
+          body.innerHTML = '<div class="modal-empty">No achievements match.</div>'
+          return
+        }
+        body.innerHTML = items.map(_achRowHtml).join('')
+        _wireHiddenRows(body)
+        return
       }
-      if (items.length === 0) {
+
+      // Multi-group: group head summary + its filtered achievements, repeated.
+      // A group that filters to zero rows is still shown as a header with an
+      // "No achievements match." line so the user can see which bucket the
+      // search cleared out.
+      var html = ''
+      var anyMatched = false
+      for (var i = 0; i < groups.length; i++) {
+        var g = groups[i]
+        var items = _filterAchievements(g.achievements || [], q)
+        html += _achGroupHeadHtml(g)
+        if (items.length === 0) {
+          html += '<div class="ach-group-empty">' + (q ? 'No achievements match.' : 'No achievements.') + '</div>'
+        } else {
+          anyMatched = true
+          html += items.map(_achRowHtml).join('')
+        }
+      }
+      if (!anyMatched && q) {
         body.innerHTML = '<div class="modal-empty">No achievements match.</div>'
         return
       }
-      body.innerHTML = items.map(_achRowHtml).join('')
-      // Wire reveal on each hidden row directly — the previous delegated
-      // listener on #achDetailBody was unreliable in some flows; attaching
-      // per-row at render time avoids any bubbling / timing weirdness.
+      body.innerHTML = html
       _wireHiddenRows(body)
     }
     window.renderAchDetailList = renderAchDetailList
@@ -298,9 +361,13 @@ const { username } = Astro.props;
       if (!rarityEl) return
       if (data.source !== 'psn') { rarityEl.innerHTML = ''; return }
       var counts = { platinum: 0, gold: 0, silver: 0, bronze: 0 }
-      for (var i = 0; i < data.achievements.length; i++) {
-        var t = data.achievements[i].trophy_type
-        if (t && counts.hasOwnProperty(t)) counts[t]++
+      var groups = data.groups || []
+      for (var gi = 0; gi < groups.length; gi++) {
+        var achs = groups[gi].achievements || []
+        for (var i = 0; i < achs.length; i++) {
+          var t = achs[i].trophy_type
+          if (t && counts.hasOwnProperty(t)) counts[t]++
+        }
       }
       var tiers = ['platinum', 'gold', 'silver', 'bronze']
       var html = ''
@@ -344,10 +411,25 @@ const { username } = Astro.props;
           _achDetailData = res.j
           document.getElementById('achDetailTitle').textContent = res.j.game_title || 'Achievements'
           document.getElementById('achDetailSub').textContent = res.j.platform_label || ''
-          var total = res.j.total || 0
-          var unlocked = res.j.unlocked || 0
-          var pct = total ? Math.round(unlocked / total * 100) : 0
-          document.getElementById('achDetailCount').textContent = unlocked + ' / ' + total
+          // New response shape: { total: { count, unlocked, percent, xp_earned, xp_total }, groups: [...] }.
+          // Fall back to the old flat shape in case any client fetched a cached response.
+          var t = res.j.total
+          var count, unlocked, pct, xpEarned, xpTotal
+          if (t && typeof t === 'object') {
+            count = t.count || 0
+            unlocked = t.unlocked || 0
+            pct = t.percent != null ? t.percent : (count ? Math.round(unlocked / count * 100) : 0)
+            xpEarned = t.xp_earned
+            xpTotal = t.xp_total
+          } else {
+            count = t || 0
+            unlocked = res.j.unlocked || 0
+            pct = count ? Math.round(unlocked / count * 100) : 0
+            xpEarned = null; xpTotal = null
+          }
+          var countText = unlocked + ' / ' + count
+          if (xpTotal != null) countText += ' · ' + (xpEarned != null ? xpEarned : 0) + ' / ' + xpTotal + ' G'
+          document.getElementById('achDetailCount').textContent = countText
           document.getElementById('achDetailPct').textContent = pct + '%'
           document.getElementById('achDetailBarFill').style.width = pct + '%'
           _renderAchDetailRarity(res.j)

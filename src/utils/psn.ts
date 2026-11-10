@@ -4,6 +4,7 @@ import {
   exchangeRefreshTokenForAuthTokens,
   getUserTitles,
   getTitleTrophies,
+  getTitleTrophyGroups,
   getUserTrophiesEarnedForTitle,
   getProfileFromAccountId,
   getUserPlayedGames,
@@ -167,6 +168,36 @@ export async function fetchTitleTrophySchema(
     // "all" pulls the default group + every DLC group in one call.
     const res = await getTitleTrophies(auth, npCommunicationId, 'all', { npServiceName });
     return res.trophies ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Per-title metadata for every trophy group (default + DLC packs). Separate
+// from the flat trophy list because Sony exposes group names / icons only here.
+// Returns `null` on any error so the caller can proceed with trophies-only
+// data; without this, PSN DLC packs would show as raw group IDs ("001") in the
+// achievement modal instead of their proper names ("Ashes of Ariandel").
+export type PsnTrophyGroup = {
+  trophyGroupId: string;
+  name: string;
+  iconUrl: string | null;
+  definedTrophies: Record<string, number> | null;
+};
+
+export async function fetchTitleTrophyGroups(
+  auth: AuthorizationPayload,
+  npCommunicationId: string,
+  npServiceName: 'trophy' | 'trophy2',
+): Promise<PsnTrophyGroup[] | null> {
+  try {
+    const res = await getTitleTrophyGroups(auth, npCommunicationId, { npServiceName });
+    return (res.trophyGroups ?? []).map((g: any) => ({
+      trophyGroupId: g.trophyGroupId,
+      name: g.trophyGroupName ?? g.trophyGroupId,
+      iconUrl: g.trophyGroupIconUrl ?? null,
+      definedTrophies: g.definedTrophies ?? null,
+    }));
   } catch {
     return null;
   }

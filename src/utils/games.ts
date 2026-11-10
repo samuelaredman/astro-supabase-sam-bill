@@ -74,6 +74,31 @@ export function isAllowedGameCategory(
   return isNotableEdition(category, title);
 }
 
+// Categories a user can post a review against. Intentionally more permissive
+// than ALLOWED_GAME_CATEGORIES (which gates rankings/discovery): a reviewer
+// can log playing a bundle, port, DLC-addon, update, etc. — those reviews
+// stay visible on the game's own page, in the reviewer's profile, and in
+// feeds, but the Slice 1 ranking filter keeps them out of leaderboards.
+// Blocked: mods (5), episodes (6), seasons (7), forks (12) — reviewing one
+// in isolation would be weird, and typically users mean the base game.
+export const REVIEWABLE_GAME_CATEGORIES = [
+  0,  // main_game
+  1,  // dlc_addon
+  2,  // expansion
+  3,  // bundle
+  4,  // standalone_expansion
+  8,  // remake
+  9,  // remaster
+  10, // expanded_game
+  11, // port
+  13, // pack
+  14, // update
+];
+
+export function isReviewableGameCategory(category: number | null | undefined): boolean {
+  return category == null || REVIEWABLE_GAME_CATEGORIES.includes(category);
+}
+
 // PostgREST .or() filter string for direct (non-embedded) queries against `games`.
 // Mirrors isAllowedGameCategory: allowed categories, plus bundle titles matching
 // the notable-edition keyword list.

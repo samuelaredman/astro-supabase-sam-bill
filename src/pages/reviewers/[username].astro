@@ -1257,6 +1257,13 @@ const reviewerBreadcrumbJsonLd = {
     .lib-dt-bar-fill{height:100%;border-radius:3px;background:var(--accent);transition:width .2s}
     .lib-dt-bar-fill.full{background:var(--score-great,#4ade80)}
     .lib-dt-pct{font-size:11px;font-weight:600;color:var(--text-secondary);flex-shrink:0;min-width:34px;text-align:right}
+    /* PSN base + DLC — two stacked progress rows sharing the wrap's hit target
+       and "View all" cta. Fixed-width label column keeps the two bars aligned;
+       pct uses tabular numerals so "100%" and "13%" line up right-edge. */
+    .lib-dt-bars-split{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0}
+    .lib-dt-bars-row{display:flex;align-items:center;gap:8px}
+    .lib-dt-bars-row .lib-dt-pct{font-variant-numeric:tabular-nums}
+    .lib-dt-bars-label{font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-tertiary);flex-shrink:0;min-width:30px}
     /* Clickable completion bar opens the per-game achievement list modal. The
        whole wrap is still a <button>, but the chip at the end gives the row an
        explicit affordance so people know the bar is interactive. */
@@ -3766,7 +3773,7 @@ const reviewerBreadcrumbJsonLd = {
   }
 
   // ── REVIEWS TAB: Overview / Detailed views + shared search & filters ──
-  var _reviewState = { view: 'overview', sort: 'az', genre: '', platform: '', dev: '', search: '' }
+  var _reviewState = { view: 'overview', sort: 'az', genre: '', platform: '', dev: '', game_type: '', search: '' }
 
   function applyReviewFilters() {
     var grids = ['reviewsOverviewList', 'reviewsList']
@@ -3785,6 +3792,7 @@ const reviewerBreadcrumbJsonLd = {
         if (show && s.genre && (item.dataset.genres || '').split(',').indexOf(s.genre) === -1) show = false
         if (show && s.dev && (item.dataset.devs || '').split(',').indexOf(s.dev) === -1) show = false
         if (show && s.platform && (item.dataset.platform || '') !== s.platform) show = false
+        if (show && s.game_type && (item.dataset.gameType || '') !== s.game_type) show = false
         item.style.display = show ? '' : 'none'
       })
 
@@ -4104,18 +4112,32 @@ const reviewerBreadcrumbJsonLd = {
   function _libXboxPerfect(it) {
     return it.sourcePlatform === 'xbox' && it.achTotal > 0 && it.achUnlocked === it.achTotal
   }
+  // PSN: base-game completion = the trophy milestone we celebrate. Prefer the
+  // base/DLC split when present (trophy_group_id = 'default' trophies all earned);
+  // fall back to an owned platinum (reliable even when per-group counts haven't
+  // been synced); fall back again to the lumped count for platinumless + unsplit
+  // rows (rare — the library sync aggregate path).
   function _libPsnPerfect(it) {
-    return it.sourcePlatform === 'psn' && it.achTotal > 0 && it.achUnlocked === it.achTotal
+    if (it.sourcePlatform !== 'psn') return false
+    if (it.baseAchTotal != null && it.baseAchTotal > 0) {
+      return it.baseAchUnlocked === it.baseAchTotal
+    }
+    if (it.hasPlatinum) return true
+    return it.achTotal > 0 && it.achUnlocked === it.achTotal
   }
   function _libPerfectCls(it) {
-    if (!(it.achTotal && it.achUnlocked === it.achTotal)) return ''
     if (_libPsnPerfect(it)) return ' lib-cover-platinum'
     if (_libXboxPerfect(it)) return ' lib-cover-xbox'
-    return ' lib-cover-perfect'
+    if (_libSteamPerfect(it)) return ' lib-cover-perfect'
+    return ''
   }
   function _libPerfectTitle(it) {
-    if (!(it.achTotal && it.achUnlocked === it.achTotal)) return ''
-    return ' title="' + (_libPsnPerfect(it) ? '100% trophies' : (_libXboxPerfect(it) ? '100% achievements on Xbox' : '100% achievements')) + '"'
+    if (_libPsnPerfect(it)) {
+      return ' title="' + (it.hasPlatinum ? 'Platinum trophy earned' : '100% trophies') + '"'
+    }
+    if (_libXboxPerfect(it)) return ' title="100% achievements on Xbox"'
+    if (_libSteamPerfect(it)) return ' title="100% achievements"'
+    return ''
   }
   function _libCornerBadge(it) {
     if (_libSteamPerfect(it)) return _LIB_PERFECT_RIBBON
@@ -4148,8 +4170,22 @@ const reviewerBreadcrumbJsonLd = {
     } else if (it.sourcePlatform === 'xbox' && it.xboxTitleId != null) {
       parts.push('<span class="lib-dt-mi lib-dt-mi--xbox"><span class="lib-dt-plat lib-dt-plat--xbox">' + _DT_XBOX + '</span>Xbox</span>')
     }
-    if (it.achTotal != null && it.achTotal > 0)
-      parts.push('<span class="lib-dt-mi">' + _DT_TROPHY + it.achUnlocked + '/' + it.achTotal + '</span>')
+    // PSN rows have their trophies split into base (trophy_group_id='default')
+    // vs DLC packs. If the DLC side exists, show a split count + two bars so the
+    // user sees that a platinumed game is base-100% even when DLC trophies drag
+    // the combined total under 100%. Steam/Xbox don't surface this split here.
+    var psnSplit = it.sourcePlatform === 'psn'
+      && typeof it.baseAchTotal === 'number' && it.baseAchTotal > 0
+      && typeof it.dlcAchTotal  === 'number' && it.dlcAchTotal  > 0
+    if (it.achTotal != null && it.achTotal > 0) {
+      if (psnSplit) {
+        parts.push('<span class="lib-dt-mi">' + _DT_TROPHY +
+          'Base ' + it.baseAchUnlocked + '/' + it.baseAchTotal +
+          ' · DLC ' + it.dlcAchUnlocked + '/' + it.dlcAchTotal + '</span>')
+      } else {
+        parts.push('<span class="lib-dt-mi">' + _DT_TROPHY + it.achUnlocked + '/' + it.achTotal + '</span>')
+      }
+    }
     var hrs = _libFmtHours(it)
     if (hrs) parts.push('<span class="lib-dt-mi">' + _DT_CLOCK + hrs + '</span>')
     // Prefer Steam's last-played date; fall back to when the row was last changed.
@@ -4160,7 +4196,6 @@ const reviewerBreadcrumbJsonLd = {
       : ''
     var bar = ''
     if (it.achTotal != null && it.achTotal > 0) {
-      var pct = Math.round((it.achUnlocked / it.achTotal) * 100)
       // Source + external id so the modal can fetch the full per-game list.
       // Steam/PSN/Xbox each key differently (appid / npCommId / titleId).
       var achSid = it.sourcePlatform === 'steam' ? it.steamAppid
@@ -4177,11 +4212,30 @@ const reviewerBreadcrumbJsonLd = {
       var cta = achClickable
         ? '<span class="lib-dt-bar-cta">View all<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg></span>'
         : ''
-      bar = barOpen +
-        '<div class="lib-dt-bar"><div class="lib-dt-bar-fill' + (pct >= 100 ? ' full' : '') + '" style="width:' + pct + '%"></div></div>' +
-        '<span class="lib-dt-pct">' + pct + '%</span>' +
-        cta +
-      barClose
+      if (psnSplit) {
+        var basePct = Math.round((it.baseAchUnlocked / it.baseAchTotal) * 100)
+        var dlcPct  = Math.round((it.dlcAchUnlocked  / it.dlcAchTotal)  * 100)
+        bar = barOpen +
+          '<div class="lib-dt-bars-split">' +
+            '<div class="lib-dt-bars-row"><span class="lib-dt-bars-label">Base</span>' +
+              '<div class="lib-dt-bar"><div class="lib-dt-bar-fill' + (basePct >= 100 ? ' full' : '') + '" style="width:' + basePct + '%"></div></div>' +
+              '<span class="lib-dt-pct">' + basePct + '%</span>' +
+            '</div>' +
+            '<div class="lib-dt-bars-row"><span class="lib-dt-bars-label">DLC</span>' +
+              '<div class="lib-dt-bar"><div class="lib-dt-bar-fill' + (dlcPct >= 100 ? ' full' : '') + '" style="width:' + dlcPct + '%"></div></div>' +
+              '<span class="lib-dt-pct">' + dlcPct + '%</span>' +
+            '</div>' +
+          '</div>' +
+          cta +
+        barClose
+      } else {
+        var pct = Math.round((it.achUnlocked / it.achTotal) * 100)
+        bar = barOpen +
+          '<div class="lib-dt-bar"><div class="lib-dt-bar-fill' + (pct >= 100 ? ' full' : '') + '" style="width:' + pct + '%"></div></div>' +
+          '<span class="lib-dt-pct">' + pct + '%</span>' +
+          cta +
+        barClose
+      }
     }
     return '<div class="lib-dt-row" data-game-id="' + it.gameId + '">' +
       '<a class="lib-dt-cover' + _libPerfectCls(it) + '" href="/games/' + it.slug + '"' +
@@ -4410,13 +4464,23 @@ const reviewerBreadcrumbJsonLd = {
 
     // Overview grid shows one cover per game — a game owned on both Steam and
     // PSN comes back as two rows from the API (see the split pass in
-    // library.ts). Detailed view renders both; overview dedupes by gameId,
-    // keeping the first occurrence.
+    // library.ts). Detailed view renders both; overview dedupes by gameId. If
+    // one of the platforms for that game qualifies as "perfect" (100% Steam /
+    // platinum PSN / 100% Xbox), upgrade to that row so the border + badge
+    // show — otherwise keep the first occurrence.
     var _seenOverview = {}
-    var overviewItems = items.filter(function(it) {
-      if (_seenOverview[it.gameId]) return false
-      _seenOverview[it.gameId] = true
-      return true
+    var overviewItems = []
+    items.forEach(function(it) {
+      var existingIdx = _seenOverview[it.gameId]
+      if (existingIdx === undefined) {
+        _seenOverview[it.gameId] = overviewItems.length
+        overviewItems.push(it)
+        return
+      }
+      var kept = overviewItems[existingIdx]
+      if (!_libPerfectCls(kept) && _libPerfectCls(it)) {
+        overviewItems[existingIdx] = it
+      }
     })
     grid.innerHTML = overviewItems.map(function(it) {
       var coverUrl = it.cover

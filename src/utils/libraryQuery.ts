@@ -166,7 +166,7 @@ export async function queryLibraryPage(
   };
 
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, psn_platinum_earned, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at';
   const from = (page - 1) * LIBRARY_PAGE_SIZE;
 
   let rows: any[] | null;
@@ -292,6 +292,7 @@ export async function queryLibraryPage(
       psnLastPlayed:   ugs?.psn_last_played_at ?? null,
       psnTrophiesEarned: ugs?.psn_trophies_earned ?? null,
       psnTrophiesTotal:  ugs?.psn_trophies_total ?? null,
+      psnPlatinumFromLib: ugs?.psn_platinum_earned === true,
       xboxTitleId:       ugs?.xbox_title_id ?? null,
       xboxLastPlayed:    ugs?.xbox_last_played_at ?? null,
       xboxCurrentScore:  ugs?.xbox_current_gamerscore ?? null,
@@ -301,6 +302,14 @@ export async function queryLibraryPage(
       steamAchTotal:    null as number | null,
       psnAchUnlocked:   null as number | null,
       psnAchTotal:      null as number | null,
+      // Split of the above by trophy_group_id ('default' is the base game, every
+      // other group is a DLC/expansion pack) so the UI can show base + DLC rows
+      // separately and treat base-100% as the completion milestone.
+      psnBaseAchUnlocked: null as number | null,
+      psnBaseAchTotal:    null as number | null,
+      psnDlcAchUnlocked:  null as number | null,
+      psnDlcAchTotal:     null as number | null,
+      psnHasPlatinum:   false,
       xboxAchUnlocked:  null as number | null,
       xboxAchTotal:     null as number | null,
     };
@@ -349,13 +358,14 @@ export async function queryLibraryPage(
         .map((i) => i.psnNpCommId)
         .filter((x: any): x is string => typeof x === 'string')
     )];
-    const counts = new Map<string, { earned: number; total: number }>();
+    type TrophyTally = { base: { earned: number; total: number }; dlc: { earned: number; total: number } };
+    const counts = new Map<string, TrophyTally>();
     if (npCommIds.length > 0) {
       const CHUNK = 1000;
       for (let start = 0; ; start += CHUNK) {
         const { data: tRows, error: tErr } = await db
           .from('user_trophies')
-          .select('np_communication_id, earned')
+          .select('np_communication_id, earned, trophy_group_id')
           .eq('profile_id', profileId)
           .in('np_communication_id', npCommIds)
           .range(start, start + CHUNK - 1);
@@ -365,9 +375,12 @@ export async function queryLibraryPage(
         }
         for (const row of tRows ?? []) {
           const id = (row as any).np_communication_id as string;
-          const cur = counts.get(id) ?? { earned: 0, total: 0 };
-          cur.total++;
-          if ((row as any).earned) cur.earned++;
+          const cur = counts.get(id) ?? { base: { earned: 0, total: 0 }, dlc: { earned: 0, total: 0 } };
+          // 'default' is the base game's trophy group; every other id is a DLC
+          // / expansion pack (per psn-api's TitleTrophyGroup convention).
+          const bucket = (row as any).trophy_group_id === 'default' ? cur.base : cur.dlc;
+          bucket.total++;
+          if ((row as any).earned) bucket.earned++;
           counts.set(id, cur);
         }
         if (!tRows || tRows.length < CHUNK) break;
@@ -377,11 +390,43 @@ export async function queryLibraryPage(
       if (!it.psnNpCommId) continue;
       const c = counts.get(it.psnNpCommId);
       if (c) {
-        it.psnAchUnlocked = c.earned;
-        it.psnAchTotal = c.total;
+        it.psnBaseAchUnlocked = c.base.total > 0 ? c.base.earned : null;
+        it.psnBaseAchTotal    = c.base.total > 0 ? c.base.total  : null;
+        it.psnDlcAchUnlocked  = c.dlc.total  > 0 ? c.dlc.earned  : null;
+        it.psnDlcAchTotal     = c.dlc.total  > 0 ? c.dlc.total   : null;
+        it.psnAchUnlocked = c.base.earned + c.dlc.earned;
+        it.psnAchTotal    = c.base.total  + c.dlc.total;
       } else if (typeof it.psnTrophiesTotal === 'number' && it.psnTrophiesTotal > 0) {
+        // Fallback when we have no per-trophy rows — only the aggregate from the
+        // library sync. Can't split base vs DLC here, so the single-bar UI
+        // branch handles this case (checks psnBaseAchTotal == null).
         it.psnAchUnlocked = it.psnTrophiesEarned ?? 0;
         it.psnAchTotal = it.psnTrophiesTotal;
+      }
+    }
+
+    // Per-game platinum ownership. A PSN platinum is awarded once every non-DLC
+    // trophy is earned, so an owned platinum is the base-game 100% signal — treat
+    // it as "100% complete" even when DLC trophies drag achUnlocked < achTotal.
+    // Mirrors the list-page treatment in pages/lists/[id]/index.astro.
+    if (npCommIds.length > 0) {
+      const { data: platRows, error: platErr } = await db
+        .from('user_trophies')
+        .select('np_communication_id')
+        .eq('profile_id', profileId)
+        .eq('trophy_type', 'platinum')
+        .eq('earned', true)
+        .in('np_communication_id', npCommIds);
+      if (platErr) {
+        console.error('[library query] platinum lookup error:', JSON.stringify(platErr));
+      }
+      const platSet = new Set<string>((platRows ?? []).map((r: any) => r.np_communication_id));
+      for (const it of gameItems as any[]) {
+        if (!it.psnNpCommId) continue;
+        // Either signal is enough — per-trophy sync populates platSet; the
+        // lightweight library sync populates psnPlatinumFromLib. Users who've
+        // only run the library sync still get the platinum treatment here.
+        if (platSet.has(it.psnNpCommId) || it.psnPlatinumFromLib) it.psnHasPlatinum = true;
       }
     }
   }
@@ -463,6 +508,11 @@ export async function queryLibraryPage(
     lastPlayed:  it.psnLastPlayed,
     achUnlocked: it.psnAchUnlocked,
     achTotal:    it.psnAchTotal,
+    baseAchUnlocked: it.psnBaseAchUnlocked,
+    baseAchTotal:    it.psnBaseAchTotal,
+    dlcAchUnlocked:  it.psnDlcAchUnlocked,
+    dlcAchTotal:     it.psnDlcAchTotal,
+    hasPlatinum: it.psnHasPlatinum === true,
   });
   const xboxRow = (it: any) => ({
     ...shared(it),

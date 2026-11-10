@@ -26,7 +26,7 @@ const { data: rawReviews } = await (serverClient as any)
     id, score, title, body, play_time_hours,
     contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
-    games ( id, title, slug, cover_img_url, date_released ),
+    games ( id, title, slug, cover_img_url, date_released, igdb_category ),
     review_votes ( vote, profile_id )
   `)
   .eq("profile_id", profile?.id)
@@ -39,6 +39,17 @@ const reviewCount = reviews.length;
 const avgScore = reviewCount > 0
   ? (reviews.reduce((sum: number, r: any) => sum + r.score, 0) / reviewCount).toFixed(1)
   : null;
+
+// Review-type breakdown (Phase 3 Slice 4). Computed inline from the already-
+// fetched reviews since igdb_category rides on each row — no extra RPC needed.
+// "Games" = base/remake/remaster/expanded_game (cat NULL/0/8/9/10). "DLC" is
+// everything else, so the subtitle naturally buckets expansions / DLC-addons /
+// mods / updates / ports together.
+const reviewGamesCount = reviews.filter((r: any) => {
+  const c = r.games?.igdb_category;
+  return c == null || c === 0 || c === 8 || c === 9 || c === 10;
+}).length;
+const reviewDlcCount = reviewCount - reviewGamesCount;
 const totalHours = reviews.reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0);
 const totalVotesReceived = reviews.reduce((sum: number, r: any) => {
   const votes = Array.isArray(r.review_votes) ? r.review_votes : r.review_votes ? [r.review_votes] : [];
@@ -340,7 +351,12 @@ const showSearchNudge = !!profile && !profile.search_indexable && reviewCount > 
     <div class="feed-header">
       <div>
         <div class="feed-title">My Profile</div>
-        <div class="feed-subtitle">{reviewCount} review{reviewCount !== 1 ? 's' : ''}</div>
+        <div class="feed-subtitle">
+          {reviewCount} review{reviewCount !== 1 ? 's' : ''}
+          {reviewDlcCount > 0 && (
+            <span style="opacity:.75"> · {reviewGamesCount} games · {reviewDlcCount} DLC</span>
+          )}
+        </div>
       </div>
       <button class="signout-btn" id="signoutBtn">Sign out</button>
     </div>

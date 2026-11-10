@@ -15,7 +15,7 @@ const { data: reviewer, error } = await (supabase as any)
     id, username, avatar_url, is_active, search_indexable,
     reviews (
       id, score, title, published_at, created_at, status,
-      games ( id, title, slug, cover_img_url )
+      games ( id, title, slug, cover_img_url, igdb_category )
     )
   `)
   .eq('username', username)
@@ -83,6 +83,17 @@ function formatDate(dateStr: string): string {
       <span id="searchClear" class="search-clear" style="display:none">×</span>
     </div>
 
+    {reviews.some((r: any) => {
+      const c = r.games?.igdb_category;
+      return c != null && c !== 0 && c !== 8 && c !== 9 && c !== 10;
+    }) && (
+      <div class="type-filter-row">
+        <button class="type-filter-pill active" data-type="all">All</button>
+        <button class="type-filter-pill" data-type="base">Games</button>
+        <button class="type-filter-pill" data-type="dlc">DLC</button>
+      </div>
+    )}
+
     {reviews.length === 0 ? (
       <div class="empty">
         <div class="empty-title">No reviews yet</div>
@@ -92,8 +103,11 @@ function formatDate(dateStr: string): string {
       <ul class="game-list" id="gameList">
         {reviews.map((review: any) => {
           const ts = review.published_at ?? review.created_at;
+          const cat = review.games.igdb_category;
+          const gameType = cat == null || cat === 0 || cat === 8 || cat === 9 || cat === 10 ? 'base' : 'dlc';
+          const typeBadge = cat === 2 || cat === 4 ? 'Expansion' : cat === 1 ? 'DLC' : null;
           return (
-            <li class="game-row" data-title={review.games.title.toLowerCase()}>
+            <li class="game-row" data-title={review.games.title.toLowerCase()} data-game-type={gameType}>
               <a href={`/games/${review.games.slug}`} class="cover-link">
                 {igdbCover(review.games.cover_img_url)
                   ? <img class="cover" src={igdbCover(review.games.cover_img_url) ?? ''} alt={review.games.title} loading="lazy" />
@@ -101,7 +115,10 @@ function formatDate(dateStr: string): string {
                 }
               </a>
               <div class="row-body">
-                <a href={`/games/${review.games.slug}`} class="game-title">{review.games.title}</a>
+                <div class="game-title-row">
+                  <a href={`/games/${review.games.slug}`} class="game-title">{review.games.title}</a>
+                  {typeBadge && <span class={`game-type-chip game-type-${typeBadge.toLowerCase()}`}>{typeBadge}</span>}
+                </div>
                 {review.title && <div class="review-title">"{review.title}"</div>}
               </div>
               <div class="row-meta">
@@ -128,18 +145,27 @@ function formatDate(dateStr: string): string {
   var list  = document.getElementById('gameList');
   var noRes = document.getElementById('noResults');
 
+  var _typeFilter = 'all';
+
+  function applyFilters() {
+    if (!list) return;
+    var q = (input && input.value || '').trim().toLowerCase();
+    var rows = list.querySelectorAll('.game-row');
+    var visible = 0;
+    rows.forEach(function(row) {
+      var titleOk = row.dataset.title.includes(q);
+      var typeOk = _typeFilter === 'all' || row.dataset.gameType === _typeFilter;
+      var show = titleOk && typeOk;
+      row.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    noRes.style.display = visible === 0 ? '' : 'none';
+  }
+
   if (input && list) {
     input.addEventListener('input', function() {
-      var q = input.value.trim().toLowerCase();
-      clear.style.display = q ? '' : 'none';
-      var rows = list.querySelectorAll('.game-row');
-      var visible = 0;
-      rows.forEach(function(row) {
-        var match = row.dataset.title.includes(q);
-        row.style.display = match ? '' : 'none';
-        if (match) visible++;
-      });
-      noRes.style.display = visible === 0 ? '' : 'none';
+      clear.style.display = input.value.trim() ? '' : 'none';
+      applyFilters();
     });
 
     clear.addEventListener('click', function() {
@@ -148,6 +174,15 @@ function formatDate(dateStr: string): string {
       input.focus();
     });
   }
+
+  document.querySelectorAll('.type-filter-pill').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.type-filter-pill').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      _typeFilter = btn.dataset.type;
+      applyFilters();
+    });
+  });
 </script>
 
 <style>
@@ -285,6 +320,34 @@ function formatDate(dateStr: string): string {
     transition: color 0.15s;
   }
   .game-title:hover { color: var(--accent); }
+
+  .game-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .game-title-row .game-title { flex: 0 1 auto; min-width: 0; }
+  .game-type-chip {
+    display: inline-flex; align-items: center;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    flex-shrink: 0;
+    border: 1px solid;
+  }
+  .game-type-expansion {
+    background: rgba(96,80,200,.15); color: var(--accent, #6050c8); border-color: rgba(96,80,200,.4);
+  }
+  .game-type-dlc {
+    background: var(--tag-bg); color: var(--text-secondary); border-color: var(--border-subtle);
+  }
+
+  .type-filter-row { display: flex; gap: 6px; margin-bottom: 16px; }
+  .type-filter-pill {
+    padding: 5px 12px; border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-card); color: var(--text-secondary);
+    font-size: 12px; font-weight: 500; font-family: inherit; cursor: pointer;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .type-filter-pill:hover { color: var(--text-primary); }
+  .type-filter-pill.active { background: var(--accent, #6050c8); color: white; border-color: var(--accent, #6050c8); }
 
   .review-title {
     font-size: 12px;
