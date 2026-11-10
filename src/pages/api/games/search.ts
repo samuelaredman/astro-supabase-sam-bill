@@ -30,8 +30,16 @@ export const GET: APIRoute = async ({ request }) => {
   // text (accents intact) on IGDB's own server, so "ooo" would never
   // literal-match a stored name of "Öoo" there no matter how we post-filter
   // the response client-side.
+  // RPC fetches a wider pool than we'll ultimately show (post-filter drops most
+  // rows for popular franchises — Skyrim/Zelda have ~10 edition+DLC rows that
+  // all substring-match but only ~1 survives `canonical_game_id IS NULL` +
+  // allowed-category). Fetching only 8 here meant the main game (longer title,
+  // lower similarity) never made the RPC's cut, so search would surface a stray
+  // DLC instead. 40 covers the deepest franchises comfortably. Proper fix is to
+  // move the canonical+category filter into search_games itself (Phase 5
+  // migration that was skipped); until then, over-fetch and filter in app.
   const [rpcRes, aliasIds, igdbSearchRes, igdbNameRes] = await Promise.all([
-    supabase.rpc('search_games', { search_query: q, result_limit: 8 }),
+    supabase.rpc('search_games', { search_query: q, result_limit: 40 }),
     searchGameAliases(supabase, q, 8),
     igdbFetch("games", `
       fields name, slug, cover.url, first_release_date;
