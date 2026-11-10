@@ -166,7 +166,7 @@ export async function queryLibraryPage(
   };
 
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, psn_platinum_earned, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at';
   const from = (page - 1) * LIBRARY_PAGE_SIZE;
 
   let rows: any[] | null;
@@ -292,6 +292,7 @@ export async function queryLibraryPage(
       psnLastPlayed:   ugs?.psn_last_played_at ?? null,
       psnTrophiesEarned: ugs?.psn_trophies_earned ?? null,
       psnTrophiesTotal:  ugs?.psn_trophies_total ?? null,
+      psnPlatinumFromLib: ugs?.psn_platinum_earned === true,
       xboxTitleId:       ugs?.xbox_title_id ?? null,
       xboxLastPlayed:    ugs?.xbox_last_played_at ?? null,
       xboxCurrentScore:  ugs?.xbox_current_gamerscore ?? null,
@@ -421,7 +422,11 @@ export async function queryLibraryPage(
       }
       const platSet = new Set<string>((platRows ?? []).map((r: any) => r.np_communication_id));
       for (const it of gameItems as any[]) {
-        if (it.psnNpCommId && platSet.has(it.psnNpCommId)) it.psnHasPlatinum = true;
+        if (!it.psnNpCommId) continue;
+        // Either signal is enough — per-trophy sync populates platSet; the
+        // lightweight library sync populates psnPlatinumFromLib. Users who've
+        // only run the library sync still get the platinum treatment here.
+        if (platSet.has(it.psnNpCommId) || it.psnPlatinumFromLib) it.psnHasPlatinum = true;
       }
     }
   }

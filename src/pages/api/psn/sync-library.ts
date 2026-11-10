@@ -148,6 +148,7 @@ export const POST: APIRoute = async (context) => {
     platform: 'PS3' | 'PS4' | 'PS5';
     earned: number;
     total: number;
+    hasPlatinum: boolean;
     progress: number;
     lastUpdatedDateTime: string | null;
   };
@@ -174,6 +175,10 @@ export const POST: APIRoute = async (context) => {
       platform,
       earned,
       total,
+      // Sony awards a platinum once every non-DLC trophy is earned, so this is
+      // the reliable base-game-100% signal — stored so the library badge works
+      // without a separate psn/sync-trophies pass.
+      hasPlatinum: (t.earnedTrophies?.platinum ?? 0) > 0,
       progress: t.progress ?? 0,
       lastUpdatedDateTime: t.lastUpdatedDateTime ?? null,
     };
@@ -250,6 +255,7 @@ export const POST: APIRoute = async (context) => {
       psn_platform: psnEntry.platform,
       psn_trophies_earned: psnEntry.earned,
       psn_trophies_total: psnEntry.total,
+      psn_platinum_earned: psnEntry.hasPlatinum,
       psn_progress: psnEntry.progress,
       psn_playtime_minutes: playtime?.minutes ?? null,
       psn_last_played_at: lastPlayedAt,
