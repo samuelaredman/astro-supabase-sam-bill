@@ -208,33 +208,25 @@ export const POST: APIRoute = async (context) => {
 
   const collapsed = Array.from(bestByName.values());
 
-  // Match against games using npCommunicationId first, title as fallback. The
-  // RPC returns `matched_by: 'id' | 'title'` so we can backfill the mapping
-  // onto title-matched games — the next sync (any user) hits the ID path.
-  // Historical context: pure title matching dropped Apex Legends, EA SPORTS
-  // College Football 25/26, STAR WARS Battlefront II, Ratchet & Clank (2016)
-  // off real users' libraries because PSN display names rarely match IGDB
-  // titles exactly (™ stripping, "EA SPORTS" prefixes, colons, remake vs
-  // original name collisions).
+  // Match against games strictly by npCommunicationId. Previously the matcher
+  // had a fuzzy title fallback that resolved first-sight games in one shot,
+  // but it was non-deterministic for games sharing a normalized title (the
+  // 2002 PS2 vs 2016 PS4 Ratchet & Clank picked arbitrarily by `ORDER BY
+  // c.id ASC`) and the backfill cemented the wrong pick onto games.
+  // psn_np_communication_id for every future user. All first-sight seeding
+  // now happens in the IGDB auto-import pass below where we can layer
+  // deterministic filters; ambiguous cases are queued for admin review.
   const matchBatches = await Promise.all(
     chunk(collapsed, TITLE_CHUNK).map((entries) =>
       (db as any).rpc('match_psn_games', {
-        psn_titles: entries.map((e) => e.name),
         psn_np_comm_ids: entries.map((e) => e.npCommId),
       }),
     ),
   );
 
-  type MatchRow = {
-    id: string;
-    title: string;
-    psn_title: string;
-    psn_np_communication_id: string | null;
-    matched_by: 'id' | 'title';
-  };
+  type MatchRow = { id: string; psn_np_communication_id: string };
   const matches: MatchRow[] = [];
   const seenGameIds = new Set<string>();
-  const titleBackfill: Array<{ game_id: string; np_comm_id: string }> = [];
   for (const { data, error } of matchBatches) {
     if (error) {
       console.error('[psn/sync-library] match_psn_games error:', JSON.stringify(error));
@@ -244,41 +236,27 @@ export const POST: APIRoute = async (context) => {
       if (seenGameIds.has(row.id)) continue;
       seenGameIds.add(row.id);
       matches.push(row);
-      // Title match → record the npCommId on the game so every future sync
-      // for every user hits the ID fast path. One backfill per game, forever.
-      if (row.matched_by === 'title' && row.psn_np_communication_id) {
-        titleBackfill.push({ game_id: row.id, np_comm_id: row.psn_np_communication_id });
-      }
     }
   }
 
-  // Fire-and-forget the backfill — it's a persistence optimization; sync must
-  // not fail because an UPDATE did. Chunked to keep each request bounded.
-  if (titleBackfill.length > 0) {
-    (async () => {
-      for (const { game_id, np_comm_id } of titleBackfill) {
-        const { error } = await (db as any)
-          .from('games')
-          .update({ psn_np_communication_id: np_comm_id })
-          .eq('id', game_id)
-          .is('psn_np_communication_id', null);
-        if (error) {
-          console.error('[psn/sync-library] mapping backfill error (non-fatal):',
-            JSON.stringify(error));
-        }
-      }
-    })();
-  }
-
-  // IGDB auto-import pass — for PSN titles the DB matcher couldn't resolve,
-  // try an IGDB search filtered by the entry's PSN platform. Narrowing by
-  // platform disambiguates the collisions (SW Battlefront II 2017 is PS4-only,
-  // Ratchet & Clank 2016 is PS4-only, etc.) so we only auto-import on a
-  // single-hit result. Ambiguous (>1 hit) or no-hit → log for admin review.
-  // Capped per-sync to keep us under Netlify's 10s budget.
-  const matchedNpCommIds = new Set(
-    matches.map((m) => m.psn_np_communication_id).filter((v): v is string => !!v),
-  );
+  // IGDB auto-import pass — for PSN titles not already mapped, do an IGDB
+  // `search` narrowed by three layered filters before auto-importing:
+  //   1) PSN platform (platforms contains PS3/PS4/PS5 IGDB id)
+  //   2) Allowed game types (main/expansion/standalone/remake/remaster/
+  //      expanded) — drops DLCs, bundles, and ports that would wrong-match
+  //   3) first_release_date <= the user's lastUpdatedDateTime — the user can't
+  //      have earned trophies before the game was released, so any IGDB entry
+  //      dated after that is impossible by construction. This is what kills
+  //      the remake-vs-port edge case: a hypothetical PS4 Classic port of a
+  //      PS2 game would still release at port-time, so it's included, but a
+  //      later remake with no trophies on this npCommId is excluded. IGDB's
+  //      `search` already considers alternative_names, so trademark /
+  //      capitalization variants ("STAR WARS Battlefront II" ↔ "Star Wars:
+  //      Battlefront II") resolve naturally.
+  // Only auto-import single-hit results. 0 hits or 2+ hits → admin log. We
+  // never guess — the previous "best-effort title match" approach is the very
+  // thing this PR is removing.
+  const matchedNpCommIds = new Set(matches.map((m) => m.psn_np_communication_id));
   const unmatchedCollapsed = collapsed.filter((c) => !matchedNpCommIds.has(c.npCommId));
 
   const autoImportCandidates = unmatchedCollapsed.slice(0, IGDB_AUTO_IMPORT_CAP);
@@ -288,22 +266,27 @@ export const POST: APIRoute = async (context) => {
   for (const entry of autoImportCandidates) {
     try {
       const platformId = IGDB_PLATFORM_BY_PSN[entry.platform];
-      // Mirror the DB matcher's normalization: PSN's trophyTitleName often
-      // includes ™®© (e.g. "Apex Legends™", "EA SPORTS™ College Football 25")
-      // which IGDB's fuzzy `search` may or may not forgive. Stripping keeps
-      // the auto-import consistent with how match_psn_games already handles
-      // these characters.
+      // PSN's trophyTitleName often includes ™®© ("Apex Legends™", "EA SPORTS™
+      // College Football 25"). IGDB's fuzzy `search` may not forgive those,
+      // so strip them before the query.
       const searchName = entry.name.replace(/[™®©]/g, '').replace(/\s+/g, ' ').trim();
-      // `search` is IGDB's fuzzy name matcher. Platform + game-type filters
-      // (main game / expansion / standalone / remake / remaster / expanded
-      // game — same set as GAME_CATEGORY_OR_FILTER in utils/games.ts) drop
-      // DLCs, bundles, and non-games that would pollute auto-import.
+      // Release upper bound from the user's own trophy-earn data. If PSN
+      // reported trophies for this title with lastUpdatedDateTime = T, the
+      // game released at some point ≤ T. Converted to IGDB's unix-seconds
+      // first_release_date. Missing timestamp → no bound (fall back to
+      // platform + type filters only).
+      const lastUpdatedUnix = entry.lastUpdatedDateTime
+        ? Math.floor(new Date(entry.lastUpdatedDateTime).getTime() / 1000)
+        : null;
+      const dateClause = Number.isFinite(lastUpdatedUnix as number)
+        ? ` & first_release_date <= ${lastUpdatedUnix}`
+        : '';
       const rows = await igdbFetch(
         'games',
         `
           search "${escapeIgdbString(searchName)}";
-          fields id, name, platforms.id, game_type;
-          where platforms = (${platformId}) & game_type = (0,2,4,8,9,10);
+          fields id, name, platforms.id, game_type, first_release_date;
+          where platforms = (${platformId}) & game_type = (0,2,4,8,9,10)${dateClause};
           limit 5;
         `,
       );
@@ -323,9 +306,10 @@ export const POST: APIRoute = async (context) => {
         toLog.push(entry);
         continue;
       }
-      // Record the mapping on the freshly imported row so the next sync hits
-      // the ID path. Ignore errors — the game is imported either way; worst
-      // case the next sync re-resolves via title.
+      // Seed the mapping on the imported row. The unique index on games.
+      // psn_np_communication_id prevents two games from claiming the same
+      // npCommId; the `is null` guard prevents clobbering a mapping someone
+      // else wrote concurrently.
       const { error: mapErr } = await (db as any)
         .from('games')
         .update({ psn_np_communication_id: entry.npCommId })
@@ -339,10 +323,7 @@ export const POST: APIRoute = async (context) => {
         seenGameIds.add(result.game.id);
         matches.push({
           id: result.game.id,
-          title: result.game.title,
-          psn_title: entry.name,
           psn_np_communication_id: entry.npCommId,
-          matched_by: 'id',
         });
       }
     } catch (e) {
@@ -388,7 +369,11 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  const collapsedByLowerName = new Map(collapsed.map((c) => [c.name.toLowerCase(), c]));
+  // Match rows now carry npCommId directly (the DB match returns it; the IGDB
+  // import pass populates it from the collapsed entry), so the collapsed
+  // lookup moves from name → npCommId. Previously the title path produced
+  // rows keyed by display name, which required a lowercased-name map here.
+  const collapsedByNpCommId = new Map(collapsed.map((c) => [c.npCommId, c]));
 
   type AggRow = {
     row: Record<string, unknown>;
@@ -397,7 +382,7 @@ export const POST: APIRoute = async (context) => {
   };
   const perCanonical = new Map<string, AggRow>();
   for (const match of matches) {
-    const psnEntry = collapsedByLowerName.get((match.psn_title ?? match.title).toLowerCase().trim());
+    const psnEntry = collapsedByNpCommId.get(match.psn_np_communication_id);
     if (!psnEntry) continue;
     const canonicalId = canonicalOf.get(match.id) ?? match.id;
     const playtime = playtimeByLowerName.get(psnEntry.name.toLowerCase()) ?? null;
