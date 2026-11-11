@@ -452,6 +452,166 @@ export type ImportGameResult =
  * graph; the helpers are kept for the historical `game_aliases` lookup
  * path but no longer invoked here.
  */
+// Reverse-relationship IGDB fields on a parent that enumerate its child games.
+// Eager-import walks these to pull DLCs/expansions/remakes etc. into the DB so
+// the game page's "DLC & Editions" tab + the composer's DLC toggle work on the
+// very next request after the parent lands.
+const CHILD_RELATION_FIELDS = ['dlcs', 'expansions', 'standalone_expansions', 'expanded_games', 'remakes'] as const;
+
+// Hard cap on how many missing children we'll fetch + insert on a single
+// import call. Netlify's function budget is 10s and each child is ~500ms of
+// sequential DB work (insert + 6 junction upserts + relationship persist). 10
+// keeps the worst case around 5s so the parent import stays under 7–8s end to
+// end. Franchise behemoths (Sims 4, Minecraft, 30+ DLCs) are truncated here —
+// the backfill script picks up whatever's left.
+const MAX_EAGER_CHILDREN = 10;
+
+// The IGDB fields we need to materialize a fresh games row + its junctions.
+// Shared between the main import and the eager child import so a child lands in
+// the DB with the same metadata depth as a user-initiated import.
+const FULL_IGDB_GAME_FIELDS = `
+  id, name, slug, summary, storyline, game_type, status,
+  first_release_date, cover.url,
+  parent_game, version_parent, version_title,
+  dlcs, expansions, standalone_expansions, expanded_games, remakes,
+  external_games.category, external_games.uid,
+  genres.id, genres.name, genres.slug,
+  platforms.id, platforms.name, platforms.slug,
+  themes.id, themes.name, themes.slug,
+  game_modes.id, game_modes.name, game_modes.slug,
+  franchises.id, franchises.name, franchises.slug,
+  collections.id, collections.name, collections.slug
+`;
+
+// Inserts a fresh games row + junctions + Steam appids from an already-fetched
+// IGDB payload. Deliberately does NOT call persistGameRelationshipsFromIgdb —
+// the caller orders that after children are in the DB, so parent→child edges
+// resolve on the first pass instead of waiting for a backfill.
+type FreshGameRow = { id: string; title: string; slug: string; cover_img_url: string | null; date_released: string | null };
+async function _insertFreshGameFromIgdb(
+  db: any,
+  g: any,
+): Promise<FreshGameRow | null> {
+  const coverUrl = g.cover?.url
+    ? `https:${g.cover.url.replace('t_thumb', 't_cover_big')}`
+    : null;
+  const slug = makeGameSlug(g.name, g.slug);
+  const { data: slugConflict } = await db.from('games').select('id').eq('slug', slug).maybeSingle();
+  const finalSlug = slugConflict ? `${slug}-${g.id}` : slug;
+
+  const parentIgdbId  = asIgdbId(g.parent_game);
+  const versionIgdbId = asIgdbId(g.version_parent);
+  const collapseCandidate =
+    versionIgdbId ?? (parentIgdbId != null && isImportCollapseCategory(g.game_type) ? parentIgdbId : null);
+  let importedCanonicalId: string | null = null;
+  if (collapseCandidate != null) {
+    const { data: parentRow } = await db
+      .from('games')
+      .select('id, canonical_game_id')
+      .eq('igdb_id', collapseCandidate)
+      .maybeSingle();
+    if (parentRow) {
+      // One-level flat: if the parent is itself an edition, point at its root.
+      importedCanonicalId = (parentRow as any).canonical_game_id ?? (parentRow as any).id;
+    }
+  }
+
+  const { data: inserted, error: insertError } = await db
+    .from('games')
+    .insert({
+      title:            g.name,
+      slug:             finalSlug,
+      game_description: g.summary   ?? null,
+      storyline:        g.storyline ?? null,
+      igdb_category:    g.game_type ?? null,
+      igdb_status:      g.status    ?? null,
+      igdb_parent_game:    parentIgdbId,
+      igdb_version_parent: versionIgdbId,
+      version_title:       g.version_title ?? null,
+      canonical_game_id:   importedCanonicalId,
+      cover_img_url:    coverUrl,
+      date_released:    g.first_release_date
+        ? new Date(g.first_release_date * 1000).toISOString().split('T')[0]
+        : null,
+      igdb_id: g.id,
+    })
+    .select('id, title, slug, cover_img_url, date_released')
+    .single();
+
+  if (insertError) {
+    console.error('[_insertFreshGameFromIgdb] insert error for igdb_id', g.id, ':', JSON.stringify(insertError));
+    return null;
+  }
+
+  await Promise.all([
+    upsertJunction(db, inserted.id, g.genres,     'genres',     'game_genres',     'genre_id'),
+    upsertJunction(db, inserted.id, g.platforms,  'platforms',  'game_platforms',  'platform_id'),
+    upsertJunction(db, inserted.id, g.themes,     'themes',     'game_themes',     'theme_id'),
+    upsertJunction(db, inserted.id, g.game_modes, 'game_modes', 'game_game_modes', 'game_mode_id'),
+    upsertJunction(db, inserted.id, g.franchises, 'franchises', 'game_franchises', 'franchise_id'),
+    upsertJunction(db, inserted.id, g.collections,'collections','game_collections','collection_id'),
+    persistSteamAppsFromIgdb(db, inserted.id, g),
+  ]);
+
+  return inserted;
+}
+
+// Walks a parent's IGDB reverse-relationship arrays, pulls in any child games
+// that aren't in our catalog yet (batched into one IGDB call), and persists
+// each child's own relationships. Non-recursive: grand-children are left to a
+// later call. Shared by importGameByIgdbId (so brand-new imports arrive with a
+// populated DLC tab) and the one-shot backfill script.
+export async function importMissingChildrenFromIgdb(
+  db: any,
+  parentIgdbGame: any,
+): Promise<{ attempted: number; inserted: number }> {
+  const childIgdbIds = new Set<number>();
+  for (const field of CHILD_RELATION_FIELDS) {
+    for (const raw of parentIgdbGame?.[field] ?? []) {
+      const id = asIgdbId(raw);
+      if (id != null) childIgdbIds.add(id);
+    }
+  }
+  if (childIgdbIds.size === 0) return { attempted: 0, inserted: 0 };
+
+  const allIds = [...childIgdbIds];
+  // Chunked existence check so a franchise with hundreds of relationship ids
+  // doesn't blow the PostgREST .in() URL length.
+  const existingSet = new Set<number>();
+  for (let i = 0; i < allIds.length; i += 100) {
+    const batch = allIds.slice(i, i + 100);
+    const { data: existingRows } = await db
+      .from('games').select('igdb_id').in('igdb_id', batch);
+    for (const r of (existingRows ?? []) as any[]) existingSet.add(r.igdb_id);
+  }
+  const missingIds = allIds.filter((id) => !existingSet.has(id)).slice(0, MAX_EAGER_CHILDREN);
+  if (missingIds.length === 0) return { attempted: 0, inserted: 0 };
+
+  const children = await igdbFetch('games', `
+    fields ${FULL_IGDB_GAME_FIELDS};
+    where id = (${missingIds.join(',')});
+    limit ${missingIds.length};
+  `);
+  if (!children || children.length === 0) return { attempted: missingIds.length, inserted: 0 };
+
+  let inserted = 0;
+  for (const child of children as any[]) {
+    try {
+      const row = await _insertFreshGameFromIgdb(db, child);
+      if (row) {
+        // Persist edges from the child's perspective — writes its inbound
+        // link to this parent (via child.parent_game) plus any outbound edges
+        // whose other endpoint happens to already be in the DB.
+        await persistGameRelationshipsFromIgdb(db, row.id, child);
+        inserted++;
+      }
+    } catch (e) {
+      console.error('[importMissingChildrenFromIgdb] child import failed for igdb_id', (child as any)?.id, ':', e);
+    }
+  }
+  return { attempted: missingIds.length, inserted };
+}
+
 export async function importGameByIgdbId(db: any, igdbId: number): Promise<ImportGameResult> {
   const { data: existing } = await db
     .from('games')
@@ -480,16 +640,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
 
     if (needsRefresh) {
       const refresh = await igdbFetch("games", `
-        fields game_type,
-               parent_game, version_parent, version_title,
-               dlcs, expansions, standalone_expansions, expanded_games, remakes,
-               external_games.category, external_games.uid,
-               genres.id, genres.name, genres.slug,
-               platforms.id, platforms.name, platforms.slug,
-               themes.id, themes.name, themes.slug,
-               game_modes.id, game_modes.name, game_modes.slug,
-               franchises.id, franchises.name, franchises.slug,
-               collections.id, collections.name, collections.slug;
+        fields ${FULL_IGDB_GAME_FIELDS};
         where id = ${igdbId};
         limit 1;
       `);
@@ -507,9 +658,12 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
           upsertJunction(db, existing.id, g.game_modes, 'game_modes', 'game_game_modes', 'game_mode_id'),
           upsertJunction(db, existing.id, g.franchises, 'franchises', 'game_franchises', 'franchise_id'),
           upsertJunction(db, existing.id, g.collections,'collections','game_collections','collection_id'),
-          persistGameRelationshipsFromIgdb(db, existing.id, g),
           persistSteamAppsFromIgdb(db, existing.id, g),
         ]);
+        // Eager children first, then relationships — so parent→child edges
+        // resolve for the newly-landed children on this pass.
+        await importMissingChildrenFromIgdb(db, g);
+        await persistGameRelationshipsFromIgdb(db, existing.id, g);
       }
     }
 
@@ -517,17 +671,7 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
   }
 
   const games = await igdbFetch("games", `
-    fields name, slug, summary, storyline, game_type, status,
-           first_release_date, cover.url,
-           parent_game, version_parent, version_title,
-           dlcs, expansions, standalone_expansions, expanded_games, remakes,
-           external_games.category, external_games.uid,
-           genres.id, genres.name, genres.slug,
-           platforms.id, platforms.name, platforms.slug,
-           themes.id, themes.name, themes.slug,
-           game_modes.id, game_modes.name, game_modes.slug,
-           franchises.id, franchises.name, franchises.slug,
-           collections.id, collections.name, collections.slug;
+    fields ${FULL_IGDB_GAME_FIELDS};
     where id = ${igdbId};
     limit 1;
   `);
@@ -535,75 +679,17 @@ export async function importGameByIgdbId(db: any, igdbId: number): Promise<Impor
   if (!games || games.length === 0) return { ok: false, error: 'Game not found on IGDB', status: 404 };
 
   const game = games[0];
-  const coverUrl = game.cover?.url
-    ? `https:${game.cover.url.replace('t_thumb', 't_cover_big')}`
-    : null;
 
-  const slug = makeGameSlug(game.name, game.slug);
-  const { data: slugConflict } = await db.from('games').select('id').eq('slug', slug).maybeSingle();
-  const finalSlug = slugConflict ? `${slug}-${igdbId}` : slug;
-
-  // Resolve a parent/version link at import time so new editions don't show up
-  // in search until the next backfill. version_parent is a definitional "edition
-  // of X" link so it's always safe; parent_game is only safe for rows IGDB
-  // itself classifies as a collapse type (bundle/port/remaster/pack) or as an
-  // update — anything else is a separately-reviewable node (DLC, expansion,
-  // sequel) and must stay canonical. If the parent isn't in the DB yet, we
-  // leave canonical_game_id null and let the next backfill sweep it.
-  const parentIgdbId  = asIgdbId(game.parent_game);
-  const versionIgdbId = asIgdbId(game.version_parent);
-  const collapseCandidate =
-    versionIgdbId ?? (parentIgdbId != null && isImportCollapseCategory(game.game_type) ? parentIgdbId : null);
-  let importedCanonicalId: string | null = null;
-  if (collapseCandidate != null) {
-    const { data: parentRow } = await db
-      .from('games')
-      .select('id, canonical_game_id')
-      .eq('igdb_id', collapseCandidate)
-      .maybeSingle();
-    if (parentRow) {
-      // One-level flat: if the parent is itself an edition, point at its root.
-      importedCanonicalId = (parentRow as any).canonical_game_id ?? (parentRow as any).id;
-    }
+  const inserted = await _insertFreshGameFromIgdb(db, game);
+  if (!inserted) {
+    return { ok: false, error: 'Failed to import game.', status: 500 };
   }
 
-  const { data: inserted, error: insertError } = await db
-    .from('games')
-    .insert({
-      title:            game.name,
-      slug:             finalSlug,
-      game_description: game.summary   ?? null,
-      storyline:        game.storyline ?? null,
-      igdb_category:    game.game_type ?? null,
-      igdb_status:      game.status    ?? null,
-      igdb_parent_game:    parentIgdbId,
-      igdb_version_parent: versionIgdbId,
-      version_title:       game.version_title ?? null,
-      canonical_game_id:   importedCanonicalId,
-      cover_img_url:    coverUrl,
-      date_released:    game.first_release_date
-        ? new Date(game.first_release_date * 1000).toISOString().split('T')[0]
-        : null,
-      igdb_id: game.id,
-    })
-    .select('id, title, slug, cover_img_url, date_released')
-    .single();
-
-  if (insertError) {
-    console.error('[importGameByIgdbId] DB insert error:', JSON.stringify(insertError));
-    return { ok: false, error: `Failed to import game: ${insertError.message}`, status: 500 };
-  }
-
-  await Promise.all([
-    upsertJunction(db, inserted.id, game.genres,     'genres',     'game_genres',     'genre_id'),
-    upsertJunction(db, inserted.id, game.platforms,  'platforms',  'game_platforms',  'platform_id'),
-    upsertJunction(db, inserted.id, game.themes,     'themes',     'game_themes',     'theme_id'),
-    upsertJunction(db, inserted.id, game.game_modes, 'game_modes', 'game_game_modes', 'game_mode_id'),
-    upsertJunction(db, inserted.id, game.franchises, 'franchises', 'game_franchises', 'franchise_id'),
-    upsertJunction(db, inserted.id, game.collections,'collections','game_collections','collection_id'),
-    persistGameRelationshipsFromIgdb(db, inserted.id, game),
-    persistSteamAppsFromIgdb(db, inserted.id, game),
-  ]);
+  // Order matters: pull missing DLCs/expansions/… into the DB first, then
+  // persist the parent→child edges so the first render of the DLC & Editions
+  // tab is already populated instead of waiting on a backfill.
+  await importMissingChildrenFromIgdb(db, game);
+  await persistGameRelationshipsFromIgdb(db, inserted.id, game);
 
   return { ok: true, game: inserted };
 }
