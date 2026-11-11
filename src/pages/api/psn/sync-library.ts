@@ -288,6 +288,12 @@ export const POST: APIRoute = async (context) => {
   for (const entry of autoImportCandidates) {
     try {
       const platformId = IGDB_PLATFORM_BY_PSN[entry.platform];
+      // Mirror the DB matcher's normalization: PSN's trophyTitleName often
+      // includes ™®© (e.g. "Apex Legends™", "EA SPORTS™ College Football 25")
+      // which IGDB's fuzzy `search` may or may not forgive. Stripping keeps
+      // the auto-import consistent with how match_psn_games already handles
+      // these characters.
+      const searchName = entry.name.replace(/[™®©]/g, '').replace(/\s+/g, ' ').trim();
       // `search` is IGDB's fuzzy name matcher. Platform + game-type filters
       // (main game / expansion / standalone / remake / remaster / expanded
       // game — same set as GAME_CATEGORY_OR_FILTER in utils/games.ts) drop
@@ -295,7 +301,7 @@ export const POST: APIRoute = async (context) => {
       const rows = await igdbFetch(
         'games',
         `
-          search "${escapeIgdbString(entry.name)}";
+          search "${escapeIgdbString(searchName)}";
           fields id, name, platforms.id, game_type;
           where platforms = (${platformId}) & game_type = (0,2,4,8,9,10);
           limit 5;
