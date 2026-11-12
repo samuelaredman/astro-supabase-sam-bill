@@ -4,11 +4,27 @@ import {
   fetchAllTitles,
   isXboxAuthInvalid,
   type XboxTitleSummary,
+  type XboxConsole,
 } from "../../../utils/xbox";
+import { igdbFetch, escapeIgdbString } from "../../../utils/igdb";
+import { importGameByIgdbId } from "../../../utils/games";
 
 const IN_CHUNK = 100;
 const WRITE_CHUNK = 500;
 const TITLE_CHUNK = 200;
+
+// Per-sync cap on IGDB-driven imports (see PSN sync-library.ts for context).
+const IGDB_AUTO_IMPORT_CAP = 10;
+
+// Xbox console → IGDB platform id. Narrowing by platform resolves the same
+// class of same-title re-release collisions PSN hits (e.g. Gears of War on
+// Xbox 360 vs Xbox One Ultimate Edition). Xbox 360 = 12, Xbox One = 49,
+// Xbox Series X|S = 169 in IGDB.
+const IGDB_PLATFORM_BY_XBOX: Record<XboxConsole, number> = {
+  'Xbox 360': 12,
+  'Xbox One': 49,
+  'Xbox Series X|S': 169,
+};
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -59,22 +75,36 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0 });
   }
 
-  const xboxNames = titles.map((t) => t.name).filter((n): n is string => !!n && n.length > 0);
+  // Keep only titles with a usable titleId + name + platform — everything the
+  // ID matcher and IGDB auto-import both need. Drops anomalous rows (pre-360
+  // games, dev kits) rather than threading nulls through the pipeline.
+  const validTitles = titles.filter(
+    (t): t is XboxTitleSummary & { platform: XboxConsole } =>
+      !!t.titleId && !!t.name && !!t.platform,
+  );
 
+  // Match by titleId against games.xbox_title_id. Previously the matcher did
+  // normalized title + trigram fuzzy matching — same class of bug fixed on
+  // PSN in 20261111000001 (demonstrated by the Ratchet & Clank 2002-vs-2016
+  // case). Xbox doesn't have a pre-populated ID bridge the way Steam does
+  // (via game_steam_apps), so the IGDB auto-import pass below seeds it on
+  // first-sight games, same pattern as PSN sync-library.ts.
+  const xboxTitleIds = validTitles.map((t) => t.titleId);
   const matchBatches = await Promise.all(
-    chunk(xboxNames, TITLE_CHUNK).map((batch) =>
-      (db as any).rpc('match_xbox_games', { xbox_titles: batch }),
+    chunk(xboxTitleIds, TITLE_CHUNK).map((batch) =>
+      (db as any).rpc('match_xbox_games', { xbox_title_ids: batch }),
     ),
   );
 
-  const matches: Array<{ id: string; title: string; xbox_title: string }> = [];
+  type MatchRow = { id: string; xbox_title_id: string };
+  const matches: MatchRow[] = [];
   const seenGameIds = new Set<string>();
   for (const { data, error } of matchBatches) {
     if (error) {
       console.error('[xbox/sync-library] match_xbox_games error:', JSON.stringify(error));
       return json({ error: 'Failed to match games.' }, 500);
     }
-    for (const row of (data ?? []) as Array<{ id: string; title: string; xbox_title: string }>) {
+    for (const row of (data ?? []) as MatchRow[]) {
       if (!seenGameIds.has(row.id)) {
         seenGameIds.add(row.id);
         matches.push(row);
@@ -82,13 +112,93 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
+  // IGDB auto-import pass with layered filters (platform + allowed game_type
+  // + first_release_date upper bound) — same shape as PSN sync-library.ts.
+  // The lastPlayed timestamp caps the release date: a user can't have earned
+  // gamerscore before the game released. Single-hit only; 0 or 2+ → admin log.
+  const matchedTitleIds = new Set(matches.map((m) => m.xbox_title_id));
+  const unmatchedTitles = validTitles.filter((t) => !matchedTitleIds.has(t.titleId));
+
+  const autoImportCandidates = unmatchedTitles.slice(0, IGDB_AUTO_IMPORT_CAP);
+  const deferredUnmatched = unmatchedTitles.slice(IGDB_AUTO_IMPORT_CAP);
+  type ToLog = typeof validTitles[number];
+  const toLog: ToLog[] = [...deferredUnmatched];
+
+  for (const entry of autoImportCandidates) {
+    try {
+      const platformId = IGDB_PLATFORM_BY_XBOX[entry.platform];
+      const searchName = entry.name.replace(/[™®©]/g, '').replace(/\s+/g, ' ').trim();
+      const lastPlayedUnix = entry.lastPlayed
+        ? Math.floor(new Date(entry.lastPlayed).getTime() / 1000)
+        : null;
+      const dateClause = Number.isFinite(lastPlayedUnix as number)
+        ? ` & first_release_date <= ${lastPlayedUnix}`
+        : '';
+      const rows = await igdbFetch(
+        'games',
+        `
+          search "${escapeIgdbString(searchName)}";
+          fields id, name, platforms.id, game_type, first_release_date;
+          where platforms = (${platformId}) & game_type = (0,2,4,8,9,10)${dateClause};
+          limit 5;
+        `,
+      );
+      const hits = Array.isArray(rows) ? rows : [];
+      if (hits.length !== 1) {
+        toLog.push(entry);
+        continue;
+      }
+      const igdbId = Number(hits[0]?.id);
+      if (!Number.isFinite(igdbId)) {
+        toLog.push(entry);
+        continue;
+      }
+      const result = await importGameByIgdbId(db, igdbId);
+      if (!result.ok) {
+        console.error('[xbox/sync-library] auto-import failed:', entry.name, result.error);
+        toLog.push(entry);
+        continue;
+      }
+      const { error: mapErr } = await (db as any)
+        .from('games')
+        .update({ xbox_title_id: entry.titleId })
+        .eq('id', result.game.id)
+        .is('xbox_title_id', null);
+      if (mapErr) {
+        console.error('[xbox/sync-library] mapping write error (non-fatal):', JSON.stringify(mapErr));
+      }
+      if (!seenGameIds.has(result.game.id)) {
+        seenGameIds.add(result.game.id);
+        matches.push({ id: result.game.id, xbox_title_id: entry.titleId });
+      }
+    } catch (e) {
+      console.error('[xbox/sync-library] IGDB search error for', entry.name, e);
+      toLog.push(entry);
+    }
+  }
+
+  if (toLog.length > 0) {
+    (db as any).rpc('log_unmatched_xbox_titles', {
+      title_ids: toLog.map((e) => e.titleId),
+      titles: toLog.map((e) => e.name),
+      platforms: toLog.map((e) => e.platform),
+    }).then(({ error }: any) => {
+      if (error) {
+        console.error('[xbox/sync-library] log_unmatched_xbox_titles error (non-fatal):',
+          JSON.stringify(error));
+      }
+    });
+  }
+
   if (matches.length === 0) {
     await (db as any).from('profiles').update({ xbox_synced_at: new Date().toISOString() }).eq('id', profile.id);
     return json({ matched: 0, updated: 0, unmatched: titles.length, total: titles.length });
   }
 
-  const titlesByLowerName = new Map<string, XboxTitleSummary>();
-  for (const t of titles) titlesByLowerName.set(t.name.toLowerCase().trim(), t);
+  // Map titleId → Xbox summary so the aggregate loop below can read
+  // gamerscore / lastPlayed off the source row without a second lookup.
+  const titlesByTitleId = new Map<string, XboxTitleSummary>();
+  for (const t of validTitles) titlesByTitleId.set(t.titleId, t);
 
   // Resolve matched ids to their canonical rows — a title that matches a
   // collapsed edition records ownership on the main game. Multiple editions
@@ -114,7 +224,7 @@ export const POST: APIRoute = async (context) => {
   };
   const perCanonical = new Map<string, AggRow>();
   for (const match of matches) {
-    const xt = titlesByLowerName.get((match.xbox_title ?? match.title).toLowerCase().trim());
+    const xt = titlesByTitleId.get(match.xbox_title_id);
     if (!xt) continue;
     const canonicalId = canonicalOf.get(match.id) ?? match.id;
     const progress = xt.maxGamerscore > 0
