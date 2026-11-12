@@ -360,19 +360,42 @@ export const POST: APIRoute = async (context) => {
 
       // Trophy schema is keyed by (trophyGroupId, trophyId). Missing
       // trophyGroupId defaults to 'default' — some old titles return a null.
+      // Also build a trophyId-only lookup: psn-api's UserThinTrophy (the
+      // earned-trophies response) does NOT carry trophyGroupId, and PSN
+      // assigns trophyIds sequentially across every group within a title,
+      // so trophyId alone is enough to resolve the group via the schema.
       const schemaByKey = new Map<string, any>();
+      const groupIdByTrophyId = new Map<number, string>();
       for (const s of schemaArr) {
         const gid = s.trophyGroupId ?? 'default';
         schemaByKey.set(`${gid}:${s.trophyId}`, s);
+        groupIdByTrophyId.set(s.trophyId, gid);
+      }
+
+      // One-time cleanup for pre-fix data: DLC trophies were previously
+      // written with trophy_group_id='default' because the earned-trophies
+      // response has no trophyGroupId and the old fallback only probed the
+      // 'default' slot. Delete those mistagged rows so the upsert below
+      // rewrites them under their correct group.
+      const dlcTrophyIds = schemaArr
+        .filter((s: any) => (s.trophyGroupId ?? 'default') !== 'default')
+        .map((s: any) => s.trophyId);
+      if (dlcTrophyIds.length > 0) {
+        const { error: delErr } = await (db as any)
+          .from('user_trophies')
+          .delete()
+          .eq('profile_id', profile.id)
+          .eq('np_communication_id', t.npCommId)
+          .eq('trophy_group_id', 'default')
+          .in('trophy_id', dlcTrophyIds);
+        if (delErr) console.error(`[psn/sync-trophies] legacy group cleanup ${t.npCommId}:`, JSON.stringify(delErr));
       }
 
       const game_id = gameIdByNpComm.get(t.npCommId) ?? null;
       const now = new Date().toISOString();
 
       const rows = earned.map((ut) => {
-        // Earned response includes trophyGroupId when the request used "all";
-        // fall back to schema's group for safety.
-        const gid = (ut as any).trophyGroupId ?? schemaByKey.get(`default:${ut.trophyId}`)?.trophyGroupId ?? 'default';
+        const gid = groupIdByTrophyId.get(ut.trophyId) ?? 'default';
         const schema = schemaByKey.get(`${gid}:${ut.trophyId}`) ?? {};
         const earnedRate = typeof ut.trophyEarnedRate === 'string'
           ? Number(ut.trophyEarnedRate)
