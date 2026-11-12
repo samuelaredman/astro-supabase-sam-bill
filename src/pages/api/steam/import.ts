@@ -1,5 +1,7 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, type SupabaseAdmin } from "../../../utils/api";
+import { igdbFetch } from "../../../utils/igdb";
+import { importGameByIgdbId } from "../../../utils/games";
 
 // PostgREST encodes .in() as URL query params — large arrays get silently
 // truncated. Keep each chunk well inside any gateway URL limit.
@@ -9,6 +11,23 @@ const IN_CHUNK = 100;
 const WRITE_CHUNK = 500;
 // Batch size for the matcher RPCs.
 const TITLE_CHUNK = 200;
+
+// IGDB external_games lookup batch size. Verified via probe: IGDB accepts
+// `where external_game_source = 1 & uid = ("a","b",...)` in one call and
+// returns a row per matching appid. 100 keeps us well under IGDB's 500-row
+// response cap.
+const IGDB_LOOKUP_CHUNK = 100;
+
+// Per-sync cap on first-sight game imports (full IGDB fetch + genre/platform/
+// dev joins). Existing-game appid mappings are much cheaper (just a
+// game_steam_apps upsert via importGameByIgdbId's fast branch) and don't
+// count toward this cap.
+const IGDB_NEW_IMPORT_CAP = 20;
+
+// IGDB external_games.external_game_source values. Confirmed via probe —
+// IGDB renamed `category` to `external_game_source` on this endpoint; the
+// old `category` field no longer filters. 1 = Steam storefront.
+const IGDB_EXTERNAL_STEAM = 1;
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -188,13 +207,82 @@ export const POST: APIRoute = async (context) => {
         matchedTitles.add((row.steam_title ?? row.title).toLowerCase().trim());
       }
     }
-
-    // Log unmatched titles for admin review — mirrors prior behavior.
-    const unmatchedForLog = unmatchedTitles.filter(
-      t => !matchedTitles.has(t.toLowerCase().trim())
-    );
-    logUnmatchedTitles(db, unmatchedForLog);
   }
+
+  // Step 3 — IGDB external_games auto-import for appids still unmatched
+  // after steps 1 and 2. Deterministic bridge via IGDB's own index of Steam
+  // storefront entries: `where external_game_source = 1 & uid = <appid>`
+  // returns the IGDB game id directly. For each hit:
+  //   - If chekpoint already has the game (by igdb_id): fast path —
+  //     importGameByIgdbId just upserts game_steam_apps and returns. Not
+  //     counted against the import cap (~30ms per call).
+  //   - If chekpoint doesn't have it: full IGDB import — capped per sync to
+  //     stay under Netlify's 10s budget. Deferred games land in the unmatched
+  //     log and auto-import on next sync (converges within a few syncs).
+  // Anything IGDB doesn't know about → unmatched log for admin review.
+  const stillUnmatchedAppids = steamAppids.filter(
+    a => !matches.some(m => m.steam_appid === a),
+  );
+
+  if (stillUnmatchedAppids.length > 0) {
+    // Batch IGDB external_games lookup — one call per IGDB_LOOKUP_CHUNK.
+    const igdbByAppid = new Map<number, number>();
+    for (const batch of chunk(stillUnmatchedAppids, IGDB_LOOKUP_CHUNK)) {
+      const uidList = batch.map(a => `"${a}"`).join(',');
+      try {
+        const rows = await igdbFetch(
+          'external_games',
+          `
+            fields game, uid;
+            where external_game_source = ${IGDB_EXTERNAL_STEAM} & uid = (${uidList});
+            limit ${batch.length};
+          `,
+        );
+        for (const r of (Array.isArray(rows) ? rows : []) as Array<{ game: number; uid: string }>) {
+          const a = parseInt(r.uid, 10);
+          if (Number.isFinite(a) && typeof r.game === 'number') igdbByAppid.set(a, r.game);
+        }
+      } catch (e) {
+        console.error('[steam/import] IGDB external_games batch error:', e);
+      }
+    }
+
+    console.log(`[steam/import] Step 3: IGDB resolved ${igdbByAppid.size} / ${stillUnmatchedAppids.length} unmatched appids`);
+
+    // Import each resolved IGDB id. Existing games are the fast path (uncapped);
+    // only new-game full imports count against IGDB_NEW_IMPORT_CAP.
+    let newImportCount = 0;
+    for (const appid of stillUnmatchedAppids) {
+      const igdbId = igdbByAppid.get(appid);
+      if (!igdbId) continue;
+
+      const { data: existing } = await (db as any)
+        .from('games')
+        .select('id')
+        .eq('igdb_id', igdbId)
+        .maybeSingle();
+      if (!existing && newImportCount >= IGDB_NEW_IMPORT_CAP) continue;
+
+      const result = await importGameByIgdbId(db, igdbId);
+      if (!result.ok) {
+        console.error('[steam/import] auto-import failed for appid', appid, result.error);
+        continue;
+      }
+      if (!existing) newImportCount++;
+      if (!seenMatchedIds.has(result.game.id)) {
+        seenMatchedIds.add(result.game.id);
+        matches.push({ id: result.game.id, steam_appid: appid });
+      }
+    }
+  }
+
+  // Final unmatched log — anything that fell through all three steps.
+  const finalMatchedAppids = new Set(matches.map(m => m.steam_appid));
+  const unmatchedForLog = steamAppids
+    .filter(a => !finalMatchedAppids.has(a))
+    .map(a => entryByAppid.get(a)?.name)
+    .filter((n): n is string => !!n);
+  logUnmatchedTitles(db, unmatchedForLog);
 
   console.log(`[steam/import] matched ${matches.length} / ${steamAppids.length} appids`);
 
