@@ -1,5 +1,7 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, type SupabaseAdmin } from "../../../utils/api";
+import { igdbFetch } from "../../../utils/igdb";
+import { importGameByIgdbId } from "../../../utils/games";
 
 // PostgREST encodes .in() as URL query params — large arrays get silently
 // truncated. Keep each chunk well inside any gateway URL limit.
@@ -7,10 +9,22 @@ const IN_CHUNK = 100;
 // Insert / RPC payload chunk — large enough to be efficient, small enough to
 // avoid body-size issues at Supabase's API gateway.
 const WRITE_CHUNK = 500;
-// match_steam_games returns at most one row per input title (ROW_NUMBER rn=1).
-// Chunking inputs keeps each RPC response well under Supabase's max-rows=1000
-// hard cap, which Range-header pagination cannot reliably override on RPC calls.
+// match_steam_games is now ID-based (steam_appid lookup against game_steam_apps),
+// so one row per input appid. TITLE_CHUNK is retained as the batch size.
 const TITLE_CHUNK = 200;
+
+// Per-sync cap on IGDB-driven imports — each importGameByIgdbId on a first-
+// sight game can take 500-1500ms (IGDB metadata fetch + genre/platform/dev
+// joins). Capping keeps us under Netlify's 10s budget on a cold library;
+// subsequent syncs drain the rest (cooldown is 60s). Hits against games
+// already in chekpoint are much cheaper — just a game_steam_apps upsert —
+// and aren't counted toward this cap.
+const IGDB_AUTO_IMPORT_CAP = 20;
+
+// IGDB external_games category for the Steam storefront. Same constant as
+// collectSteamAppids() uses in utils/games.ts — kept in sync by both referring
+// to the IGDB docs value (1 = Steam).
+const IGDB_EXTERNAL_STEAM = 1;
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -18,7 +32,8 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-// Fire-and-forget — logging a sync gap must never fail the actual sync.
+// Fire-and-forget — logging a sync gap must never fail the actual sync. Names
+// are the display titles from Steam; title_key dedup lives in the SQL function.
 function logUnmatchedTitles(db: SupabaseAdmin, titles: string[]): void {
   if (titles.length === 0) return;
   (db as any).rpc('log_unmatched_steam_titles', { titles }).then(
@@ -94,75 +109,136 @@ export const POST: APIRoute = async (context) => {
     }, 422);
   }
 
-  // Build lowercase→playtime / →appid / →last-played maps from Steam library.
-  // rtime_last_played is unix-seconds; 0 means "never played / unknown".
-  const steamByTitle = new Map<string, number>();
-  const appidByTitle  = new Map<string, number>();
-  const lastPlayedByTitle = new Map<string, string | null>();
-  const originalCaseByTitle = new Map<string, string>();
+  // Index Steam's response by appid — the stable identifier we match on. The
+  // old code indexed by lowercase title and later had to look playtime/last-
+  // played back up by the steam_title the matcher happened to echo; matching
+  // on appid removes that indirection entirely.
+  type SteamEntry = { appid: number; name: string; playtime: number; lastPlayed: string | null };
+  const entryByAppid = new Map<number, SteamEntry>();
   for (const g of steamGames) {
-    if (g.name) {
-      const key = g.name.toLowerCase().trim();
-      steamByTitle.set(key, g.playtime_forever);
-      appidByTitle.set(key, g.appid);
-      lastPlayedByTitle.set(
-        key,
-        g.rtime_last_played && g.rtime_last_played > 0
-          ? new Date(g.rtime_last_played * 1000).toISOString()
-          : null,
-      );
-      originalCaseByTitle.set(key, g.name);
-    }
+    if (!g.name || !g.appid) continue;
+    entryByAppid.set(g.appid, {
+      appid: g.appid,
+      name: g.name,
+      playtime: g.playtime_forever,
+      // rtime_last_played is unix-seconds; 0 means "never played / unknown".
+      lastPlayed: g.rtime_last_played && g.rtime_last_played > 0
+        ? new Date(g.rtime_last_played * 1000).toISOString()
+        : null,
+    });
   }
 
-  // Match against our games table via DB function (case-insensitive).
-  // Chunk input titles so each RPC call handles at most TITLE_CHUNK titles.
-  // match_steam_games returns at most one row per input title, so each batch
-  // returns ≤ TITLE_CHUNK rows — safely under Supabase's max-rows=1000 cap.
-  // (Range-header pagination on RPC calls is unreliable when the function uses
-  //  SELECT DISTINCT without ORDER BY, and max-rows still caps the page size.)
-  const steamTitles = Array.from(steamByTitle.keys());
-  console.log(`[steam/import] Sending ${steamTitles.length} titles to match_steam_games`);
-  console.log(`[steam/import] Sample Steam titles (first 20):`, steamTitles.slice(0, 20));
+  // Match against our games table by appid via game_steam_apps (many appids
+  // can map to one canonical game — editions, regional releases). Previously
+  // the matcher did normalized title + trigram fuzzy matching with an
+  // arbitrary ORDER BY c.id ASC tiebreak — same class of bug fixed on PSN in
+  // 20261111000001, demonstrated there by the Ratchet & Clank 2002-vs-2016
+  // case. Steam title ambiguity is rarer but the fix is strictly better and
+  // the appid bridge already exists (game_steam_apps, populated by
+  // importGameByIgdbId's persistSteamAppsFromIgdb).
+  const steamAppids = Array.from(entryByAppid.keys());
+  console.log(`[steam/import] Matching ${steamAppids.length} appids via game_steam_apps`);
 
-  // Fire all title batches in parallel — sequential calls were eating the
-  // entire Netlify 10s timeout before the INSERT step could run.
   const matchBatchResults = await Promise.all(
-    chunk(steamTitles, TITLE_CHUNK).map(titleBatch =>
-      (db as any).rpc('match_steam_games', { steam_titles: titleBatch })
+    chunk(steamAppids, TITLE_CHUNK).map(batch =>
+      (db as any).rpc('match_steam_games', { steam_appids: batch })
     )
   );
 
-  // steam_title is the input value Steam sent that matched this game — use it
-  // (not our title, which can differ after normalization) to look up playtime
-  // and appid below.
-  const allMatchedGames: Array<{ id: string; title: string; steam_title: string }> = [];
+  type MatchRow = { id: string; steam_appid: number };
+  const matches: MatchRow[] = [];
   const seenMatchedIds = new Set<string>();
   for (const { data: batchMatches, error: matchError } of matchBatchResults) {
     if (matchError) {
       console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
       return json({ error: 'Failed to match games.' }, 500);
     }
-    for (const row of (batchMatches ?? []) as Array<{ id: string; title: string; steam_title: string }>) {
+    for (const row of (batchMatches ?? []) as MatchRow[]) {
       if (!seenMatchedIds.has(row.id)) {
         seenMatchedIds.add(row.id);
-        allMatchedGames.push(row);
+        matches.push(row);
       }
     }
   }
-  const matches = allMatchedGames;
 
-  console.log(`[steam/import] match_steam_games returned ${matches.length} matches:`, matches.map(m => m.title));
+  // IGDB auto-import pass for appids not already bridged in game_steam_apps.
+  // Steam → IGDB is deterministic: one batch query against external_games
+  // where category = 1 (Steam) AND uid = <appid-as-string> returns {uid, game}
+  // pairs. For each, importGameByIgdbId handles both branches — if the game
+  // is already in chekpoint it just upserts game_steam_apps (fast path, not
+  // counted against the cap); if new it does the full IGDB import (slow).
+  // Anything IGDB doesn't know gets logged for admin review.
+  const matchedAppids = new Set(matches.map(m => m.steam_appid));
+  const unmatchedAppids = steamAppids.filter(a => !matchedAppids.has(a));
 
-  if (matches.length > 0) {
-    const matchedTitlesSet = new Set(matches.map(m => (m.steam_title ?? m.title).toLowerCase().trim()));
-    const unmatched = steamTitles.filter(t => !matchedTitlesSet.has(t));
-    console.log(`[steam/import] Unmatched Steam titles (${unmatched.length}):`, unmatched);
-    logUnmatchedTitles(db, unmatched.map(t => originalCaseByTitle.get(t) ?? t));
+  if (unmatchedAppids.length > 0) {
+    // Batch lookup — IGDB's where clause supports uid = ("a","b",...) on
+    // string uids. One call per batch of appids.
+    const igdbByAppid = new Map<number, number>();
+    for (const batch of chunk(unmatchedAppids, 100)) {
+      const uidList = batch.map(a => `"${a}"`).join(',');
+      try {
+        const rows = await igdbFetch(
+          'external_games',
+          `
+            fields game, uid;
+            where category = ${IGDB_EXTERNAL_STEAM} & uid = (${uidList});
+            limit ${batch.length};
+          `,
+        );
+        for (const r of (Array.isArray(rows) ? rows : []) as Array<{ game: number; uid: string }>) {
+          const a = parseInt(r.uid, 10);
+          if (Number.isFinite(a) && typeof r.game === 'number') igdbByAppid.set(a, r.game);
+        }
+      } catch (e) {
+        console.error('[steam/import] IGDB external_games batch error:', e);
+      }
+    }
+
+    // Import — capped at IGDB_AUTO_IMPORT_CAP *new* games per sync. Existing
+    // games (importGameByIgdbId's fast branch) don't count because they just
+    // upsert game_steam_apps and return — tens of milliseconds each.
+    let newImportCount = 0;
+    for (const appid of unmatchedAppids) {
+      const igdbId = igdbByAppid.get(appid);
+      if (!igdbId) {
+        // IGDB doesn't know this appid — defer to admin.
+        continue;
+      }
+      // Peek at whether the game already exists; if yes, importGameByIgdbId
+      // just upserts game_steam_apps and returns fast (not counted).
+      const { data: existing } = await (db as any)
+        .from('games')
+        .select('id')
+        .eq('igdb_id', igdbId)
+        .maybeSingle();
+      if (!existing && newImportCount >= IGDB_AUTO_IMPORT_CAP) continue;
+
+      const result = await importGameByIgdbId(db, igdbId);
+      if (!result.ok) {
+        console.error('[steam/import] auto-import failed for appid', appid, result.error);
+        continue;
+      }
+      if (!existing) newImportCount++;
+      if (!seenMatchedIds.has(result.game.id)) {
+        seenMatchedIds.add(result.game.id);
+        matches.push({ id: result.game.id, steam_appid: appid });
+      }
+    }
+
+    // Anything we still couldn't resolve → unmatched log. Includes IGDB
+    // misses and whatever got deferred by the cap.
+    const resolvedAppids = new Set(matches.map(m => m.steam_appid));
+    const stillUnmatched = unmatchedAppids
+      .filter(a => !resolvedAppids.has(a))
+      .map(a => entryByAppid.get(a)?.name)
+      .filter((n): n is string => !!n);
+    logUnmatchedTitles(db, stillUnmatched);
   }
 
+  console.log(`[steam/import] matched ${matches.length} / ${steamAppids.length} appids`);
+
   if (matches.length === 0) {
-    logUnmatchedTitles(db, steamGames.map(g => g.name));
     await db.from('profiles').update({ steam_synced_at: new Date().toISOString() }).eq('id', profile.id);
     return json({ matched: 0, updated: 0, unmatched: steamGames.length, total: steamGames.length });
   }
@@ -186,7 +262,9 @@ export const POST: APIRoute = async (context) => {
   // For each canonical game, aggregate playtime across every owned edition that
   // collapses into it. Pick appid / last_played from whichever edition the user
   // has played most recently (fallback: highest-playtime edition) so refresh
-  // writes reflect the primary edition they're actually playing.
+  // writes reflect the primary edition they're actually playing. With appid-
+  // based matching we read directly from the match row's steam_appid instead
+  // of the old title → appid indirection.
   const perCanonical = new Map<string, {
     playtime: number;
     appid: number | null;
@@ -196,11 +274,10 @@ export const POST: APIRoute = async (context) => {
   }>();
   for (const game of matches) {
     const canonicalId = canonicalOf.get(game.id) ?? game.id;
-    // Key off the Steam-sent title, not ours — they diverge after normalization.
-    const key        = (game.steam_title ?? game.title).toLowerCase().trim();
-    const playtime   = steamByTitle.get(key) ?? 0;
-    const appid      = appidByTitle.get(key) ?? null;
-    const lastPlayed = lastPlayedByTitle.get(key) ?? null;
+    const entry       = entryByAppid.get(game.steam_appid);
+    const playtime    = entry?.playtime ?? 0;
+    const appid       = game.steam_appid;
+    const lastPlayed  = entry?.lastPlayed ?? null;
     const lastPlayedTs = lastPlayed ? Date.parse(lastPlayed) : 0;
 
     const existing = perCanonical.get(canonicalId);
