@@ -38,10 +38,32 @@ export const POST: APIRoute = async (context) => {
   const resolved = await Promise.all(
     (rawGameIds as string[]).map((id) => resolveCanonicalGameId(db, id))
   );
-  const game_ids = [...new Set(resolved)];
+  const canonical_ids = [...new Set(resolved)];
 
   if (action === "delete") {
-    for (const ids of chunk(game_ids, CHUNK_SIZE)) {
+    // Delete must target every row in each canonical group — not just the
+    // canonical row — because older syncs wrote user_game_status at the
+    // edition's game_id directly (before the canonical-collapse write path
+    // was in place). A user clicking delete on their library card for a
+    // deluxe/anniversary edition sends the edition's id; resolving to
+    // canonical then deleting only the canonical leaves the edition row in
+    // place and the card persists after "removal". Expand each canonical
+    // into {canonical + all editions whose canonical_game_id = canonical}
+    // and delete across the whole set in one shot.
+    const affectedGameIds = new Set<string>(canonical_ids);
+    for (const idChunk of chunk(canonical_ids, CHUNK_SIZE)) {
+      const { data: editionRows, error: editionErr } = await db
+        .from("games")
+        .select("id")
+        .in("canonical_game_id", idChunk);
+      if (editionErr) {
+        console.error("[bulk-update] edition lookup error:", JSON.stringify(editionErr));
+        return json({ error: "Failed to delete entries" }, 500);
+      }
+      for (const r of ((editionRows ?? []) as any[])) affectedGameIds.add(r.id);
+    }
+    const toDelete = [...affectedGameIds];
+    for (const ids of chunk(toDelete, CHUNK_SIZE)) {
       const { error } = await db.from("user_game_status")
         .delete()
         .eq("profile_id", profile.id)
@@ -51,13 +73,13 @@ export const POST: APIRoute = async (context) => {
         return json({ error: "Failed to delete entries" }, 500);
       }
     }
-    return json({ affected: game_ids.length });
+    return json({ affected: canonical_ids.length });
   }
 
   // set_status — upsert all. Owned is not mutually exclusive with status —
   // every status except want_to_play implies ownership by default.
   const isOwned = status !== "want_to_play";
-  const rows = game_ids.map((game_id) => ({
+  const rows = canonical_ids.map((game_id) => ({
     profile_id: profile.id,
     game_id,
     status,
@@ -72,5 +94,5 @@ export const POST: APIRoute = async (context) => {
       return json({ error: "Failed to update entries" }, 500);
     }
   }
-  return json({ affected: game_ids.length });
+  return json({ affected: canonical_ids.length });
 };
