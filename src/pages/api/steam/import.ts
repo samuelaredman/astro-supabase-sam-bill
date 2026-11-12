@@ -1,7 +1,5 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json, type SupabaseAdmin } from "../../../utils/api";
-import { igdbFetch } from "../../../utils/igdb";
-import { importGameByIgdbId } from "../../../utils/games";
 
 // PostgREST encodes .in() as URL query params — large arrays get silently
 // truncated. Keep each chunk well inside any gateway URL limit.
@@ -9,22 +7,8 @@ const IN_CHUNK = 100;
 // Insert / RPC payload chunk — large enough to be efficient, small enough to
 // avoid body-size issues at Supabase's API gateway.
 const WRITE_CHUNK = 500;
-// match_steam_games is now ID-based (steam_appid lookup against game_steam_apps),
-// so one row per input appid. TITLE_CHUNK is retained as the batch size.
+// Batch size for the matcher RPCs.
 const TITLE_CHUNK = 200;
-
-// Per-sync cap on IGDB-driven imports — each importGameByIgdbId on a first-
-// sight game can take 500-1500ms (IGDB metadata fetch + genre/platform/dev
-// joins). Capping keeps us under Netlify's 10s budget on a cold library;
-// subsequent syncs drain the rest (cooldown is 60s). Hits against games
-// already in chekpoint are much cheaper — just a game_steam_apps upsert —
-// and aren't counted toward this cap.
-const IGDB_AUTO_IMPORT_CAP = 20;
-
-// IGDB external_games category for the Steam storefront. Same constant as
-// collectSteamAppids() uses in utils/games.ts — kept in sync by both referring
-// to the IGDB docs value (1 = Steam).
-const IGDB_EXTERNAL_STEAM = 1;
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -128,112 +112,88 @@ export const POST: APIRoute = async (context) => {
     });
   }
 
-  // Match against our games table by appid via game_steam_apps (many appids
-  // can map to one canonical game — editions, regional releases). Previously
-  // the matcher did normalized title + trigram fuzzy matching with an
-  // arbitrary ORDER BY c.id ASC tiebreak — same class of bug fixed on PSN in
-  // 20261111000001, demonstrated there by the Ratchet & Clank 2002-vs-2016
-  // case. Steam title ambiguity is rarer but the fix is strictly better and
-  // the appid bridge already exists (game_steam_apps, populated by
-  // importGameByIgdbId's persistSteamAppsFromIgdb).
+  // Step 1 — appid fast path. Resolves games that already have a mapping in
+  // game_steam_apps (populated by importGameByIgdbId's persistSteamAppsFromIgdb
+  // on any game imported via the IGDB flow). For games that don't have a
+  // mapping yet — which is the overwhelming majority of chekpoint's existing
+  // catalog, since persistSteamAppsFromIgdb is a recent addition — we fall
+  // back to title matching in step 2.
   const steamAppids = Array.from(entryByAppid.keys());
-  console.log(`[steam/import] Matching ${steamAppids.length} appids via game_steam_apps`);
+  console.log(`[steam/import] Step 1: appid match for ${steamAppids.length} appids`);
 
-  const matchBatchResults = await Promise.all(
+  const appidBatches = await Promise.all(
     chunk(steamAppids, TITLE_CHUNK).map(batch =>
       (db as any).rpc('match_steam_games', { steam_appids: batch })
     )
   );
 
-  type MatchRow = { id: string; steam_appid: number };
-  const matches: MatchRow[] = [];
+  type AppidMatchRow = { id: string; steam_appid: number };
+  const matches: Array<{ id: string; steam_appid: number }> = [];
   const seenMatchedIds = new Set<string>();
-  for (const { data: batchMatches, error: matchError } of matchBatchResults) {
+  for (const { data: batchMatches, error: matchError } of appidBatches) {
     if (matchError) {
-      console.error('[steam/import] match_steam_games error:', JSON.stringify(matchError));
+      console.error('[steam/import] appid match_steam_games error:', JSON.stringify(matchError));
       return json({ error: 'Failed to match games.' }, 500);
     }
-    for (const row of (batchMatches ?? []) as MatchRow[]) {
+    for (const row of (batchMatches ?? []) as AppidMatchRow[]) {
       if (!seenMatchedIds.has(row.id)) {
         seenMatchedIds.add(row.id);
-        matches.push(row);
+        matches.push({ id: row.id, steam_appid: row.steam_appid });
       }
     }
   }
 
-  // IGDB auto-import pass for appids not already bridged in game_steam_apps.
-  // Steam → IGDB is deterministic: one batch query against external_games
-  // where category = 1 (Steam) AND uid = <appid-as-string> returns {uid, game}
-  // pairs. For each, importGameByIgdbId handles both branches — if the game
-  // is already in chekpoint it just upserts game_steam_apps (fast path, not
-  // counted against the cap); if new it does the full IGDB import (slow).
-  // Anything IGDB doesn't know gets logged for admin review.
+  // Step 2 — title fallback for appids the appid path didn't resolve. Uses
+  // the title-based matcher that was in place before PR #110 (restored in
+  // 20261112000000 so it coexists with the appid version; Postgres resolves
+  // the right one by argument name). Not deterministic for games sharing a
+  // normalized title, but that's a rare edge for Steam (unlike PSN where it
+  // was the primary failure mode); the alternative is zero games imported.
   const matchedAppids = new Set(matches.map(m => m.steam_appid));
   const unmatchedAppids = steamAppids.filter(a => !matchedAppids.has(a));
 
   if (unmatchedAppids.length > 0) {
-    // Batch lookup — IGDB's where clause supports uid = ("a","b",...) on
-    // string uids. One call per batch of appids.
-    const igdbByAppid = new Map<number, number>();
-    for (const batch of chunk(unmatchedAppids, 100)) {
-      const uidList = batch.map(a => `"${a}"`).join(',');
-      try {
-        const rows = await igdbFetch(
-          'external_games',
-          `
-            fields game, uid;
-            where category = ${IGDB_EXTERNAL_STEAM} & uid = (${uidList});
-            limit ${batch.length};
-          `,
-        );
-        for (const r of (Array.isArray(rows) ? rows : []) as Array<{ game: number; uid: string }>) {
-          const a = parseInt(r.uid, 10);
-          if (Number.isFinite(a) && typeof r.game === 'number') igdbByAppid.set(a, r.game);
-        }
-      } catch (e) {
-        console.error('[steam/import] IGDB external_games batch error:', e);
-      }
-    }
-
-    // Import — capped at IGDB_AUTO_IMPORT_CAP *new* games per sync. Existing
-    // games (importGameByIgdbId's fast branch) don't count because they just
-    // upsert game_steam_apps and return — tens of milliseconds each.
-    let newImportCount = 0;
+    // Build title → appid reverse lookup so we can tie each title-match row
+    // back to the appid it came from.
+    const appidByLowerName = new Map<string, number>();
     for (const appid of unmatchedAppids) {
-      const igdbId = igdbByAppid.get(appid);
-      if (!igdbId) {
-        // IGDB doesn't know this appid — defer to admin.
-        continue;
-      }
-      // Peek at whether the game already exists; if yes, importGameByIgdbId
-      // just upserts game_steam_apps and returns fast (not counted).
-      const { data: existing } = await (db as any)
-        .from('games')
-        .select('id')
-        .eq('igdb_id', igdbId)
-        .maybeSingle();
-      if (!existing && newImportCount >= IGDB_AUTO_IMPORT_CAP) continue;
+      const entry = entryByAppid.get(appid);
+      if (entry?.name) appidByLowerName.set(entry.name.toLowerCase().trim(), appid);
+    }
+    const unmatchedTitles = [...appidByLowerName.keys()]
+      .map(k => entryByAppid.get(appidByLowerName.get(k)!)?.name)
+      .filter((n): n is string => !!n);
 
-      const result = await importGameByIgdbId(db, igdbId);
-      if (!result.ok) {
-        console.error('[steam/import] auto-import failed for appid', appid, result.error);
-        continue;
+    console.log(`[steam/import] Step 2: title match for ${unmatchedTitles.length} unmatched appids`);
+
+    const titleBatches = await Promise.all(
+      chunk(unmatchedTitles, TITLE_CHUNK).map(batch =>
+        (db as any).rpc('match_steam_games', { steam_titles: batch })
+      )
+    );
+
+    type TitleMatchRow = { id: string; title: string; steam_title: string };
+    const matchedTitles = new Set<string>();
+    for (const { data: batchMatches, error: matchError } of titleBatches) {
+      if (matchError) {
+        console.error('[steam/import] title match_steam_games error:', JSON.stringify(matchError));
+        return json({ error: 'Failed to match games.' }, 500);
       }
-      if (!existing) newImportCount++;
-      if (!seenMatchedIds.has(result.game.id)) {
-        seenMatchedIds.add(result.game.id);
-        matches.push({ id: result.game.id, steam_appid: appid });
+      for (const row of (batchMatches ?? []) as TitleMatchRow[]) {
+        if (seenMatchedIds.has(row.id)) continue;
+        const appid = appidByLowerName.get((row.steam_title ?? row.title).toLowerCase().trim());
+        if (appid == null) continue;
+        seenMatchedIds.add(row.id);
+        matches.push({ id: row.id, steam_appid: appid });
+        matchedTitles.add((row.steam_title ?? row.title).toLowerCase().trim());
       }
     }
 
-    // Anything we still couldn't resolve → unmatched log. Includes IGDB
-    // misses and whatever got deferred by the cap.
-    const resolvedAppids = new Set(matches.map(m => m.steam_appid));
-    const stillUnmatched = unmatchedAppids
-      .filter(a => !resolvedAppids.has(a))
-      .map(a => entryByAppid.get(a)?.name)
-      .filter((n): n is string => !!n);
-    logUnmatchedTitles(db, stillUnmatched);
+    // Log unmatched titles for admin review — mirrors prior behavior.
+    const unmatchedForLog = unmatchedTitles.filter(
+      t => !matchedTitles.has(t.toLowerCase().trim())
+    );
+    logUnmatchedTitles(db, unmatchedForLog);
   }
 
   console.log(`[steam/import] matched ${matches.length} / ${steamAppids.length} appids`);
