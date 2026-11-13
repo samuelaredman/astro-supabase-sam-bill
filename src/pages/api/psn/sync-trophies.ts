@@ -214,7 +214,11 @@ export const POST: APIRoute = async (context) => {
         npCommId: t.npCommunicationId,
         serviceName: t.npServiceName,
         platform,
-        name: t.trophyTitleName ?? '',
+        // Mirrors sync-library: PSN returns some trophy-set names with a
+        // " Trophies" suffix that isn't the game name. Strip it so the title
+        // stored on user_trophies / shown in the achievement modal matches
+        // the library card.
+        name: (t.trophyTitleName ?? '').replace(/\s+Trophies$/i, '').trim(),
         lastUpdated: t.lastUpdatedDateTime ?? null,
       });
     }
