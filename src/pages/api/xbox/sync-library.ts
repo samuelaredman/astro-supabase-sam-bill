@@ -181,6 +181,9 @@ export const POST: APIRoute = async (context) => {
       xbox_max_gamerscore: xt.maxGamerscore,
       xbox_progress: progress,
       xbox_last_played_at: xt.lastPlayed,
+      // Library rendering uses this edition's title/cover; the row still keys
+      // on the canonical id for review + aggregation.
+      display_game_id: match.id,
     };
     const lastPlayedTs = xt.lastPlayed ? Date.parse(xt.lastPlayed) : 0;
 

@@ -166,7 +166,7 @@ export async function queryLibraryPage(
   };
 
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, psn_platinum_earned, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, psn_platinum_earned, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at, display_game_id';
   const from = (page - 1) * LIBRARY_PAGE_SIZE;
 
   let rows: any[] | null;
@@ -279,6 +279,13 @@ export async function queryLibraryPage(
       title:     g?.title ?? '',
       slug:      g?.slug ?? '',
       cover:     g?.cover_img_url ?? null,
+      // The platform imports record the primary edition the user owns (e.g.
+      // "Okami HD" under the canonical Okami row). If set and different from
+      // the canonical row, the UI swaps in the edition's title + cover. Click
+      // targets, review score, and achievements still key on the canonical.
+      displayGameId: ugs?.display_game_id ?? null,
+      displayTitle:  null as string | null,
+      displayCover:  null as string | null,
       status:    ugs?.status ?? '',
       owned:     ugs?.is_owned ?? false,
       isHidden:  ugs?.is_hidden ?? false,
@@ -475,8 +482,46 @@ export async function queryLibraryPage(
     }
   }
 
+  // Attach edition title/cover when the row's display_game_id points at a
+  // different games row than the canonical one (the import's primary edition
+  // for this user — see the Steam/PSN/Xbox sync files). Keeps `title`/`slug`/
+  // `cover` as the canonical so the review link + sort order don't move.
+  {
+    const extraIds = [...new Set(
+      (gameItems as any[])
+        .filter((it) => it.displayGameId && it.displayGameId !== it.gameId)
+        .map((it) => it.displayGameId as string)
+    )];
+    if (extraIds.length > 0) {
+      const byId = new Map<string, { title: string | null; cover: string | null }>();
+      const CHUNK = 500;
+      for (let start = 0; start < extraIds.length; start += CHUNK) {
+        const slice = extraIds.slice(start, start + CHUNK);
+        const { data: dRows, error: dErr } = await db
+          .from('games')
+          .select('id, title, cover_img_url')
+          .in('id', slice);
+        if (dErr) {
+          console.error('[library query] display game fetch error (non-fatal):', JSON.stringify(dErr));
+          continue;
+        }
+        for (const r of (dRows ?? []) as any[]) {
+          byId.set(r.id as string, { title: r.title ?? null, cover: r.cover_img_url ?? null });
+        }
+      }
+      for (const it of gameItems as any[]) {
+        if (!it.displayGameId || it.displayGameId === it.gameId) continue;
+        const d = byId.get(it.displayGameId);
+        if (!d) continue;
+        it.displayTitle = d.title;
+        it.displayCover = d.cover;
+      }
+    }
+  }
+
   const shared = (it: any) => ({
     gameId: it.gameId, title: it.title, slug: it.slug, cover: it.cover,
+    displayTitle: it.displayTitle, displayCover: it.displayCover,
     status: it.status, owned: it.owned, isHidden: it.isHidden,
     updatedAt: it.updatedAt,
   });
