@@ -163,15 +163,18 @@ export async function queryLibraryPage(
     if (dev)   dimJoins.push('game_companies!inner(role,developers!inner(name))');
     const gamesSel = dimJoins.length ? `${gamesSelect}, ${dimJoins.join(', ')}` : gamesSelect;
 
+    // user_game_status has four FKs to games now (game_id + three per-platform
+    // display columns). PostgREST refuses to auto-embed when the relationship
+    // is ambiguous — pin it to the canonical game_id FK on both sides.
     let qb =
       base === 'ugs'
         ? db
             .from('user_game_status')
-            .select(`${ugsSelect}, games!inner(${gamesSel})`, countOpts)
+            .select(`${ugsSelect}, games!game_id!inner(${gamesSel})`, countOpts)
             .eq('profile_id', profileId)
         : db
             .from('games')
-            .select(`${gamesSel}, user_game_status!inner(${ugsSelect})`, countOpts)
+            .select(`${gamesSel}, user_game_status!game_id!inner(${ugsSelect})`, countOpts)
             .eq('user_game_status.profile_id', profileId);
 
     const c = (col: string) => (base === 'ugs' ? col : `user_game_status.${col}`);

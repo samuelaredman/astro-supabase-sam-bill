@@ -343,7 +343,7 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     const names = new Set<string>();
     for (let start = 0; ; start += CHUNK) {
       let q = db.from(junction)
-        .select(`${dimEmbed}, games!inner(user_game_status!inner(profile_id, is_hidden))`)
+        .select(`${dimEmbed}, games!inner(user_game_status!game_id!inner(profile_id, is_hidden))`)
         .eq('games.user_game_status.profile_id', reviewer.id)
         .eq('games.user_game_status.is_hidden', false);
       if (roleFilter) q = q.eq('role', roleFilter);
