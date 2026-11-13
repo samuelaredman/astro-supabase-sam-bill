@@ -166,7 +166,7 @@ export async function queryLibraryPage(
   };
 
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, psn_platinum_earned, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at, display_game_id';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, psn_platinum_earned, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at, steam_display_game_id, psn_display_game_id, xbox_display_game_id';
   const from = (page - 1) * LIBRARY_PAGE_SIZE;
 
   let rows: any[] | null;
@@ -279,13 +279,14 @@ export async function queryLibraryPage(
       title:     g?.title ?? '',
       slug:      g?.slug ?? '',
       cover:     g?.cover_img_url ?? null,
-      // The platform imports record the primary edition the user owns (e.g.
-      // "Okami HD" under the canonical Okami row). If set and different from
-      // the canonical row, the UI swaps in the edition's title + cover. Click
-      // targets, review score, and achievements still key on the canonical.
-      displayGameId: ugs?.display_game_id ?? null,
-      displayTitle:  null as string | null,
-      displayCover:  null as string | null,
+      // The platform imports record the primary edition each platform's user
+      // owns (e.g. "Okami HD" vs canonical "Okami"). The library's platform
+      // split rows read the matching column so Steam / PSN / Xbox each render
+      // their own edition. Click targets, review score, and achievements still
+      // key on the canonical.
+      steamDisplayGameId: ugs?.steam_display_game_id ?? null,
+      psnDisplayGameId:   ugs?.psn_display_game_id   ?? null,
+      xboxDisplayGameId:  ugs?.xbox_display_game_id  ?? null,
       status:    ugs?.status ?? '',
       owned:     ugs?.is_owned ?? false,
       isHidden:  ugs?.is_hidden ?? false,
@@ -482,21 +483,23 @@ export async function queryLibraryPage(
     }
   }
 
-  // Attach edition title/cover when the row's display_game_id points at a
-  // different games row than the canonical one (the import's primary edition
-  // for this user — see the Steam/PSN/Xbox sync files). Keeps `title`/`slug`/
-  // `cover` as the canonical so the review link + sort order don't move.
+  // Each platform's split row renders the edition that platform's sync picked.
+  // Fetch one games row per distinct edition id (skipping any that equal the
+  // canonical — those render canonical and need no override) and look it up
+  // per-row below.
+  const displayById = new Map<string, { title: string | null; cover: string | null }>();
   {
-    const extraIds = [...new Set(
-      (gameItems as any[])
-        .filter((it) => it.displayGameId && it.displayGameId !== it.gameId)
-        .map((it) => it.displayGameId as string)
-    )];
-    if (extraIds.length > 0) {
-      const byId = new Map<string, { title: string | null; cover: string | null }>();
+    const extraIds = new Set<string>();
+    for (const it of gameItems as any[]) {
+      for (const id of [it.steamDisplayGameId, it.psnDisplayGameId, it.xboxDisplayGameId]) {
+        if (id && id !== it.gameId) extraIds.add(id);
+      }
+    }
+    if (extraIds.size > 0) {
+      const ids = [...extraIds];
       const CHUNK = 500;
-      for (let start = 0; start < extraIds.length; start += CHUNK) {
-        const slice = extraIds.slice(start, start + CHUNK);
+      for (let start = 0; start < ids.length; start += CHUNK) {
+        const slice = ids.slice(start, start + CHUNK);
         const { data: dRows, error: dErr } = await db
           .from('games')
           .select('id, title, cover_img_url')
@@ -506,22 +509,18 @@ export async function queryLibraryPage(
           continue;
         }
         for (const r of (dRows ?? []) as any[]) {
-          byId.set(r.id as string, { title: r.title ?? null, cover: r.cover_img_url ?? null });
+          displayById.set(r.id as string, { title: r.title ?? null, cover: r.cover_img_url ?? null });
         }
-      }
-      for (const it of gameItems as any[]) {
-        if (!it.displayGameId || it.displayGameId === it.gameId) continue;
-        const d = byId.get(it.displayGameId);
-        if (!d) continue;
-        it.displayTitle = d.title;
-        it.displayCover = d.cover;
       }
     }
   }
+  const resolveDisplay = (gameId: string, displayId: string | null): { title: string | null; cover: string | null } => {
+    if (!displayId || displayId === gameId) return { title: null, cover: null };
+    return displayById.get(displayId) ?? { title: null, cover: null };
+  };
 
   const shared = (it: any) => ({
     gameId: it.gameId, title: it.title, slug: it.slug, cover: it.cover,
-    displayTitle: it.displayTitle, displayCover: it.displayCover,
     status: it.status, owned: it.owned, isHidden: it.isHidden,
     updatedAt: it.updatedAt,
   });
@@ -531,45 +530,60 @@ export async function queryLibraryPage(
     psnPlatform: null,
     xboxTitleId: null,
   };
-  const steamRow = (it: any) => ({
-    ...shared(it),
-    ...emptyPlatformFields,
-    rowKey: `${it.gameId}:steam`,
-    sourcePlatform: 'steam' as const,
-    steamAppid: it.steamAppid,
-    playtime:    it.steamPlaytime,
-    lastPlayed:  it.steamLastPlayed,
-    achUnlocked: it.steamAchUnlocked,
-    achTotal:    it.steamAchTotal,
-  });
-  const psnRow = (it: any) => ({
-    ...shared(it),
-    ...emptyPlatformFields,
-    rowKey: `${it.gameId}:psn`,
-    sourcePlatform: 'psn' as const,
-    psnNpCommId: it.psnNpCommId,
-    psnPlatform: it.psnPlatform,
-    playtime:    it.psnPlaytime,
-    lastPlayed:  it.psnLastPlayed,
-    achUnlocked: it.psnAchUnlocked,
-    achTotal:    it.psnAchTotal,
-    baseAchUnlocked: it.psnBaseAchUnlocked,
-    baseAchTotal:    it.psnBaseAchTotal,
-    dlcAchUnlocked:  it.psnDlcAchUnlocked,
-    dlcAchTotal:     it.psnDlcAchTotal,
-    hasPlatinum: it.psnHasPlatinum === true,
-  });
-  const xboxRow = (it: any) => ({
-    ...shared(it),
-    ...emptyPlatformFields,
-    rowKey: `${it.gameId}:xbox`,
-    sourcePlatform: 'xbox' as const,
-    xboxTitleId: it.xboxTitleId,
-    playtime:    null,
-    lastPlayed:  it.xboxLastPlayed,
-    achUnlocked: it.xboxAchUnlocked,
-    achTotal:    it.xboxAchTotal,
-  });
+  const steamRow = (it: any) => {
+    const d = resolveDisplay(it.gameId, it.steamDisplayGameId);
+    return {
+      ...shared(it),
+      ...emptyPlatformFields,
+      displayTitle: d.title,
+      displayCover: d.cover,
+      rowKey: `${it.gameId}:steam`,
+      sourcePlatform: 'steam' as const,
+      steamAppid: it.steamAppid,
+      playtime:    it.steamPlaytime,
+      lastPlayed:  it.steamLastPlayed,
+      achUnlocked: it.steamAchUnlocked,
+      achTotal:    it.steamAchTotal,
+    };
+  };
+  const psnRow = (it: any) => {
+    const d = resolveDisplay(it.gameId, it.psnDisplayGameId);
+    return {
+      ...shared(it),
+      ...emptyPlatformFields,
+      displayTitle: d.title,
+      displayCover: d.cover,
+      rowKey: `${it.gameId}:psn`,
+      sourcePlatform: 'psn' as const,
+      psnNpCommId: it.psnNpCommId,
+      psnPlatform: it.psnPlatform,
+      playtime:    it.psnPlaytime,
+      lastPlayed:  it.psnLastPlayed,
+      achUnlocked: it.psnAchUnlocked,
+      achTotal:    it.psnAchTotal,
+      baseAchUnlocked: it.psnBaseAchUnlocked,
+      baseAchTotal:    it.psnBaseAchTotal,
+      dlcAchUnlocked:  it.psnDlcAchUnlocked,
+      dlcAchTotal:     it.psnDlcAchTotal,
+      hasPlatinum: it.psnHasPlatinum === true,
+    };
+  };
+  const xboxRow = (it: any) => {
+    const d = resolveDisplay(it.gameId, it.xboxDisplayGameId);
+    return {
+      ...shared(it),
+      ...emptyPlatformFields,
+      displayTitle: d.title,
+      displayCover: d.cover,
+      rowKey: `${it.gameId}:xbox`,
+      sourcePlatform: 'xbox' as const,
+      xboxTitleId: it.xboxTitleId,
+      playtime:    null,
+      lastPlayed:  it.xboxLastPlayed,
+      achUnlocked: it.xboxAchUnlocked,
+      achTotal:    it.xboxAchTotal,
+    };
+  };
 
   const items: any[] = [];
   for (const it of gameItems as any[]) {

@@ -398,7 +398,7 @@ export const POST: APIRoute = async (context) => {
       psn_last_played_at: lastPlayedAt,
       // Library rendering uses this edition's title/cover; the row still keys
       // on the canonical id for review + aggregation.
-      display_game_id: match.id,
+      psn_display_game_id: match.id,
     };
     const lastPlayedTs = lastPlayedAt ? Date.parse(lastPlayedAt) : 0;
 

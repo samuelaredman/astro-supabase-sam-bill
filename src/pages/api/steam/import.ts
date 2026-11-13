@@ -373,7 +373,7 @@ export const POST: APIRoute = async (context) => {
   }
 
   const toInsert: any[] = [];
-  const toUpdatePlaytime: Array<{ game_id: string; playtime: number; appid: number | null; last_played: string | null; display_game_id: string }> = [];
+  const toUpdatePlaytime: Array<{ game_id: string; playtime: number; appid: number | null; last_played: string | null; steam_display_game_id: string }> = [];
 
   for (const [gameId, agg] of perCanonical) {
     const { playtime, appid, lastPlayed, displayGameId } = agg;
@@ -390,13 +390,13 @@ export const POST: APIRoute = async (context) => {
         steam_playtime_minutes: playtime,
         steam_appid: appid,
         steam_last_played_at: lastPlayed,
-        display_game_id: displayGameId,
+        steam_display_game_id: displayGameId,
       });
     } else {
       // Already tracked (e.g. auto-added when the user reviewed it) — refresh
       // playtime / appid / last-played / display edition without touching
       // their chosen status.
-      toUpdatePlaytime.push({ game_id: gameId, playtime, appid, last_played: lastPlayed, display_game_id: displayGameId });
+      toUpdatePlaytime.push({ game_id: gameId, playtime, appid, last_played: lastPlayed, steam_display_game_id: displayGameId });
     }
   }
 
@@ -412,7 +412,7 @@ export const POST: APIRoute = async (context) => {
   // Bulk playtime update via RPC — replaces one-at-a-time loop that would
   // timeout on large libraries (e.g. 2000 games × 1 HTTP call each = ~200s)
   if (toUpdatePlaytime.length > 0) {
-    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime, appid, last_played, display_game_id }) => ({ game_id, playtime, appid, last_played, display_game_id }));
+    const updatePayload = toUpdatePlaytime.map(({ game_id, playtime, appid, last_played, steam_display_game_id }) => ({ game_id, playtime, appid, last_played, steam_display_game_id }));
     for (const batch of chunk(updatePayload, WRITE_CHUNK)) {
       // Pass the array itself — a jsonb param. JSON.stringify(batch) arrives as a
       // jsonb *string* scalar, so jsonb_array_elements() inside the function
