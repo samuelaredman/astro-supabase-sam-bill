@@ -15,6 +15,7 @@ import { getVoteCounts, igdbImage as igdbCover } from './format';
 import { REC_SELECT, shapeRec } from './recommendationsFeed';
 import { queryLibraryPage, LIBRARY_PAGE_SIZE, type LibraryPageResult } from './libraryQuery';
 import { attachReviewVideos } from './reviewVideos';
+import { resolveCanonicalIdMap } from './games';
 
 export const LAZY_PROFILE_TABS = ['reviews', 'recommendations', 'lists', 'library', 'groups'] as const;
 export type LazyProfileTab = (typeof LAZY_PROFILE_TABS)[number];
@@ -278,13 +279,19 @@ export async function loadListsTab(ctx: ProfileTabContext) {
     savedLists = savedLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, saved.gameIdsByListId, saved.yearsByListId) }));
   }
 
-  // Per-list review metrics (avg score + total hours from the reviewer's own reviews).
+  // Per-list review metrics (avg score + total hours from the reviewer's own
+  // reviews). Reviews are keyed on canonical game ids, but list entries may be
+  // non-canonical editions — resolve each entry id to its canonical before
+  // looking up so an "Okami HD" entry still counts the review on canonical.
+  const canonicalByEntryId = await resolveCanonicalIdMap(supabase, allGameIds);
   const reviewByGameId: Record<string, { score: number; hours: number }> = {};
   for (const r of publishedReviews) {
     if (r.games?.id) reviewByGameId[r.games.id] = { score: r.score, hours: r.play_time_hours ?? 0 };
   }
   const buildListReviewMeta = (gameIds: string[]) => {
-    const reviews = gameIds.map((id) => reviewByGameId[id]).filter(Boolean);
+    const reviews = gameIds
+      .map((id) => reviewByGameId[canonicalByEntryId.get(id) ?? id])
+      .filter(Boolean);
     return {
       avgScore: reviews.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / reviews.length : null,
       totalHours: reviews.reduce((s, r) => s + r.hours, 0),
@@ -343,7 +350,7 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     const names = new Set<string>();
     for (let start = 0; ; start += CHUNK) {
       let q = db.from(junction)
-        .select(`${dimEmbed}, games!inner(user_game_status!inner(profile_id, is_hidden))`)
+        .select(`${dimEmbed}, games!inner(user_game_status!game_id!inner(profile_id, is_hidden))`)
         .eq('games.user_game_status.profile_id', reviewer.id)
         .eq('games.user_game_status.is_hidden', false);
       if (roleFilter) q = q.eq('role', roleFilter);

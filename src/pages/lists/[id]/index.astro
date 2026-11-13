@@ -6,6 +6,7 @@ import CommentThread from "../../../components/CommentThread.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 import AchievementDetailModal from "../../../components/AchievementDetailModal.astro";
 import { igdbImage, timeAgo, scoreClass } from "../../../utils/format";
+import { resolveCanonicalIdMap } from "../../../utils/games";
 import { shortGenre } from "../../../utils/groupCompare";
 import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from "../../../utils/reactions";
 import { setPageCacheHeaders } from "../../../utils/cache";
@@ -73,16 +74,24 @@ const entryList = entries ?? [];
 const isSaved = !!saveRow;
 const isOwner = currentProfile?.id === list.profiles?.id;
 
-// Fetch the list owner's published reviews for games in this list
-const _gameIds = entryList.map((e: any) => e.games?.id).filter(Boolean);
+// Fetch the list owner's published reviews for games in this list.
+// Resolve each entry to its canonical id first: a list entry might be a
+// non-canonical edition (either added before the resolve-on-insert path, or
+// its canonical_game_id was set after it was added), and user-specific stats
+// — reviews, user_game_status, achievements — are keyed on the canonical row.
+// Genre and company joins still use the entry's own id (they're attributes
+// of the actual games row we're rendering, not of the user's row).
+const _entryGameIds = entryList.map((e: any) => e.games?.id).filter(Boolean) as string[];
+const _canonicalByEntryId = await resolveCanonicalIdMap(db, _entryGameIds);
+const _canonicalGameIds = [...new Set(_entryGameIds.map((id) => _canonicalByEntryId.get(id) ?? id))];
 const reviewByGameId: Record<string, { id: string; score: number; play_time_hours: number | null; platform_played_on: string | null }> = {};
-if (_gameIds.length > 0 && list.profiles?.id) {
+if (_canonicalGameIds.length > 0 && list.profiles?.id) {
   const { data: _reviewRows } = await db
     .from('reviews')
     .select('id, game_id, score, play_time_hours, platform_played_on')
     .eq('profile_id', list.profiles.id)
     .eq('status', 'published')
-    .in('game_id', _gameIds);
+    .in('game_id', _canonicalGameIds);
   for (const r of _reviewRows ?? []) {
     reviewByGameId[r.game_id] = { id: r.id, score: r.score, play_time_hours: r.play_time_hours, platform_played_on: r.platform_played_on ?? null };
   }
@@ -99,12 +108,12 @@ if (_gameIds.length > 0 && list.profiles?.id) {
 type AchievementSource = { pct: number; sid: string };
 type AchievementStatus = { steam?: AchievementSource; psn?: AchievementSource; xbox?: AchievementSource };
 const achievementByGameId: Record<string, AchievementStatus> = {};
-if (list.show_achievements && _gameIds.length > 0 && list.profiles?.id) {
+if (list.show_achievements && _canonicalGameIds.length > 0 && list.profiles?.id) {
   const { data: _ugsRows } = await db
     .from('user_game_status')
     .select('game_id, steam_appid, psn_np_communication_id, xbox_title_id')
     .eq('profile_id', list.profiles.id)
-    .in('game_id', _gameIds);
+    .in('game_id', _canonicalGameIds);
   const ugs = (_ugsRows ?? []) as any[];
   const hasAnySrc = ugs.some((r) => r.steam_appid != null || r.psn_np_communication_id != null || r.xbox_title_id != null);
   if (hasAnySrc) {
@@ -177,20 +186,21 @@ function pickAchievementBadge(gameId: string | null | undefined):
 }
 
 // Fetch the current viewer's own owned/played status for games in this list
-// (not the list owner's — the filter and progress bars are about the person looking at the list)
+// (not the list owner's — the filter and progress bars are about the person
+// looking at the list). Keyed on canonical game id (see note above).
 const statusByGameId: Record<string, { owned: boolean; played: boolean }> = {};
 const viewerReviewedGameIds = new Set<string>();
-if (_gameIds.length > 0 && currentProfile?.id) {
+if (_canonicalGameIds.length > 0 && currentProfile?.id) {
   const [{ data: _statusRows }, { data: _viewerReviewRows }] = await Promise.all([
     db.from('user_game_status')
       .select('game_id, status, is_owned, steam_playtime_minutes')
       .eq('profile_id', currentProfile.id)
-      .in('game_id', _gameIds),
+      .in('game_id', _canonicalGameIds),
     db.from('reviews')
       .select('game_id')
       .eq('profile_id', currentProfile.id)
       .eq('status', 'published')
-      .in('game_id', _gameIds),
+      .in('game_id', _canonicalGameIds),
   ]);
   for (const r of _viewerReviewRows ?? []) viewerReviewedGameIds.add(r.game_id);
   const PLAYED_STATUSES = new Set(['completed', 'hundred_percent', 'dropped']);
@@ -208,24 +218,28 @@ if (_gameIds.length > 0 && currentProfile?.id) {
 // % of the list the current viewer owns / has played, for the sidebar progress bars
 const ownedCount = entryList.reduce((n: number, e: any) => {
   const gid = e.games?.id;
-  return n + (gid && statusByGameId[gid]?.owned ? 1 : 0);
+  if (!gid) return n;
+  const cid = _canonicalByEntryId.get(gid) ?? gid;
+  return n + (statusByGameId[cid]?.owned ? 1 : 0);
 }, 0);
 const playedCount = entryList.reduce((n: number, e: any) => {
   const gid = e.games?.id;
   if (!gid) return n;
-  const played = (statusByGameId[gid]?.played ?? false) || viewerReviewedGameIds.has(gid);
+  const cid = _canonicalByEntryId.get(gid) ?? gid;
+  const played = (statusByGameId[cid]?.played ?? false) || viewerReviewedGameIds.has(cid);
   return n + (played ? 1 : 0);
 }, 0);
 const ownedPct = entryList.length ? Math.round((ownedCount / entryList.length) * 100) : 0;
 const playedPct = entryList.length ? Math.round((playedCount / entryList.length) * 100) : 0;
 
-// Fetch genres and game companies in parallel
+// Fetch genres and game companies in parallel — these are attributes of the
+// games row being rendered, so they use the entry's own id, not the canonical.
 const [{ data: genreRows }, { data: companyRows }] = await Promise.all([
-  _gameIds.length > 0
-    ? db.from('game_genres').select('game_id, genres ( name )').in('game_id', _gameIds)
+  _entryGameIds.length > 0
+    ? db.from('game_genres').select('game_id, genres ( name )').in('game_id', _entryGameIds)
     : Promise.resolve({ data: [] }),
-  _gameIds.length > 0
-    ? db.from('game_companies').select('game_id, role, developers ( name )').in('game_id', _gameIds)
+  _entryGameIds.length > 0
+    ? db.from('game_companies').select('game_id, role, developers ( name )').in('game_id', _entryGameIds)
     : Promise.resolve({ data: [] }),
 ]);
 
@@ -1278,14 +1292,17 @@ const ogImage = list.visibility !== "private"
             <div class="entry-list" id="entry-list">
               {entryList.map((entry: any, i: number) => {
                 const cover = igdbImage(entry.games?.cover_img_url, "t_cover_big");
-                const gameReview = entry.games?.id ? reviewByGameId[entry.games.id] : null;
-                const entryGenres = entry.games?.id ? (genreNamesByGameId[entry.games.id] ?? []) : [];
-                const entryDevs = entry.games?.id ? (devNamesByGameId[entry.games.id] ?? []) : [];
+                // The entry's game may be an edition; stats are on the canonical.
+                const entryGid = entry.games?.id ?? null;
+                const canonicalGid = entryGid ? (_canonicalByEntryId.get(entryGid) ?? entryGid) : null;
+                const gameReview = canonicalGid ? reviewByGameId[canonicalGid] : null;
+                const entryGenres = entryGid ? (genreNamesByGameId[entryGid] ?? []) : [];
+                const entryDevs = entryGid ? (devNamesByGameId[entryGid] ?? []) : [];
                 const entryYear = entry.games?.date_released ? new Date(entry.games.date_released).getFullYear() : "";
-                const entryStatus = entry.games?.id ? statusByGameId[entry.games.id] : null;
+                const entryStatus = canonicalGid ? statusByGameId[canonicalGid] : null;
                 const isOwned = entryStatus?.owned ?? false;
-                const isPlayed = (entryStatus?.played ?? false) || (entry.games?.id ? viewerReviewedGameIds.has(entry.games.id) : false);
-                const achBadge = list.show_achievements ? pickAchievementBadge(entry.games?.id) : null;
+                const isPlayed = (entryStatus?.played ?? false) || (canonicalGid ? viewerReviewedGameIds.has(canonicalGid) : false);
+                const achBadge = list.show_achievements ? pickAchievementBadge(canonicalGid) : null;
                 const coverPerfectCls = achBadge?.kind === 'steam' ? ' entry-cover-perfect'
                   : achBadge?.kind === 'psn' ? ' entry-cover-platinum'
                   : achBadge?.kind === 'xbox' ? ' entry-cover-xbox'

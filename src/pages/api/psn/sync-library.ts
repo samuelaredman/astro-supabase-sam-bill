@@ -396,6 +396,9 @@ export const POST: APIRoute = async (context) => {
       psn_progress: psnEntry.progress,
       psn_playtime_minutes: playtime?.minutes ?? null,
       psn_last_played_at: lastPlayedAt,
+      // Library rendering uses this edition's title/cover; the row still keys
+      // on the canonical id for review + aggregation.
+      psn_display_game_id: match.id,
     };
     const lastPlayedTs = lastPlayedAt ? Date.parse(lastPlayedAt) : 0;
 
