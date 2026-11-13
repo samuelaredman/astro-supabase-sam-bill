@@ -86,6 +86,64 @@ export async function queryLibraryPage(
   const dev = (opts.dev ?? '').trim();
   const showHidden = !!opts.showHidden;
 
+  // Pre-resolve search to the set of canonical game_ids whose canonical title
+  // OR any platform-edition title matches. The edition titles live on separate
+  // games rows referenced by the *_display_game_id columns, so a plain ILIKE
+  // on games.title alone would miss them (user searches "HD", library has an
+  // Okami row with steam_display_game_id → "Okami HD" — the canonical title is
+  // just "Okami"). Scan the user's library's id columns first so the title
+  // search is bounded by library size, not the whole games table.
+  let searchCanonicalIds: string[] | null = null;
+  if (search) {
+    const RANGE = 1000;
+    const idToCanonical = new Map<string, Set<string>>();
+    for (let start = 0; start < 20000; start += RANGE) {
+      const { data: ugsRows, error: ugsErr } = await db
+        .from('user_game_status')
+        .select('game_id, steam_display_game_id, psn_display_game_id, xbox_display_game_id')
+        .eq('profile_id', profileId)
+        .range(start, start + RANGE - 1);
+      if (ugsErr) {
+        console.error('[library query] search scan error:', JSON.stringify(ugsErr));
+        break;
+      }
+      if (!ugsRows || ugsRows.length === 0) break;
+      for (const r of ugsRows as any[]) {
+        const gid = r.game_id as string;
+        for (const id of [r.game_id, r.steam_display_game_id, r.psn_display_game_id, r.xbox_display_game_id] as (string | null)[]) {
+          if (!id) continue;
+          const set = idToCanonical.get(id) ?? new Set<string>();
+          set.add(gid);
+          idToCanonical.set(id, set);
+        }
+      }
+      if (ugsRows.length < RANGE) break;
+    }
+
+    const matchedCanonical = new Set<string>();
+    if (idToCanonical.size > 0) {
+      const allIds = [...idToCanonical.keys()];
+      const CHUNK = 200;
+      for (let i = 0; i < allIds.length; i += CHUNK) {
+        const slice = allIds.slice(i, i + CHUNK);
+        const { data: g, error: gErr } = await db
+          .from('games')
+          .select('id')
+          .in('id', slice)
+          .ilike('title', `%${search}%`);
+        if (gErr) {
+          console.error('[library query] search match error:', JSON.stringify(gErr));
+          continue;
+        }
+        for (const r of (g ?? []) as any[]) {
+          const canonicals = idToCanonical.get(r.id as string);
+          if (canonicals) for (const c of canonicals) matchedCanonical.add(c);
+        }
+      }
+    }
+    searchCanonicalIds = [...matchedCanonical];
+  }
+
   // A top-level PostgREST query cannot ORDER BY an *embedded* resource's column
   // (it only sorts rows within the embed), so we pivot the query onto whichever
   // table actually owns the sort column.
@@ -160,7 +218,16 @@ export async function queryLibraryPage(
       qb = qb.eq(c('status'), filter);
     }
 
-    if (search) qb = qb.ilike(base === 'ugs' ? 'games.title' : 'title', `%${search}%`);
+    if (searchCanonicalIds !== null) {
+      // Pre-resolved above by scanning the user's library + edition titles.
+      // Empty set = no row matches; force a no-op match rather than skip (a
+      // skipped filter would return the unfiltered library).
+      if (searchCanonicalIds.length === 0) {
+        qb = qb.eq(base === 'ugs' ? 'game_id' : 'id', '00000000-0000-0000-0000-000000000000');
+      } else {
+        qb = qb.in(base === 'ugs' ? 'game_id' : 'id', searchCanonicalIds);
+      }
+    }
 
     return qb;
   };
