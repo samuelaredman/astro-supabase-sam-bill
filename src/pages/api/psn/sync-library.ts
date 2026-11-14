@@ -174,7 +174,13 @@ export const POST: APIRoute = async (context) => {
   for (const t of titles) {
     const platform = primaryPsnPlatform(t.trophyTitlePlatform);
     if (!platform) continue; // Vita/PSP only — not surfaced in the UI
-    const name = t.trophyTitleName?.trim();
+    // PSN's trophy API returns titles with a " Trophies" suffix for some
+    // games ("Apex Legends Trophies", "STAR WARS™ Battlefront™ II Trophies")
+    // — it's a label on the trophy set, not the game. Strip it so the IGDB
+    // auto-import search matches ("Apex Legends Trophies" → 0 IGDB hits)
+    // and so recent-played playtime (returned without the suffix) joins
+    // against the same key.
+    const name = t.trophyTitleName?.trim().replace(/\s+Trophies$/i, '').trim();
     if (!name) continue;
     const key = name.toLowerCase();
     const total =
