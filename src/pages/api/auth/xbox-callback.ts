@@ -52,8 +52,9 @@ export const GET: APIRoute = async (context) => {
     return context.redirect(`/settings?xbox=error&reason=${isTimeout ? 'fetch_timeout' : 'fetch_network'}#xbox`);
   }
   if (!res.ok) {
-    console.error('[xbox-callback] claim returned', res.status, await res.text().catch(() => ''));
-    return context.redirect('/settings?xbox=expired#xbox');
+    const body = await res.text().catch(() => '');
+    console.error('[xbox-callback] claim returned', res.status, body.slice(0, 300));
+    return context.redirect(`/settings?xbox=expired&status=${res.status}#xbox`);
   }
   const bodyText = await res.text().catch(() => '');
   try {
