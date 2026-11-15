@@ -40,7 +40,7 @@ export const GET: APIRoute = async (context) => {
   let claim: { appKey?: string; xuid?: string; gamertag?: string } | null = null;
   let res: Response;
   try {
-    res = await fetch('https://api.xbl.io/app/claim', {
+    res = await fetch('https://xbl.io/app/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ code, app_key: appKey }),
