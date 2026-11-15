@@ -22,19 +22,19 @@ export const GET: APIRoute = async (context) => {
   context.cookies.delete('xbox_oauth_state', { path: '/' });
   if (!stateCookie) {
     console.error('[xbox-callback] missing start-flow cookie');
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=no_cookie#xbox');
   }
 
   const code = (context.url.searchParams.get('code') ?? '').trim();
   if (!code) {
     console.error('[xbox-callback] missing code in callback params');
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=no_code#xbox');
   }
 
   const appKey = import.meta.env.OPENXBL_APP_KEY;
   if (!appKey) {
     console.error('[xbox-callback] OPENXBL_APP_KEY is not set');
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=no_key#xbox');
   }
 
   let claim: { appKey?: string; xuid?: string; gamertag?: string } | null = null;
@@ -52,18 +52,18 @@ export const GET: APIRoute = async (context) => {
     claim = await res.json();
   } catch (e) {
     console.error('[xbox-callback] claim fetch error:', e);
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=fetch_fail#xbox');
   }
 
   if (!claim?.appKey || !claim.xuid) {
     console.error('[xbox-callback] claim response missing appKey/xuid:', claim);
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=bad_claim#xbox');
   }
 
   const db = getSupabaseAdmin() as any;
   const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return context.redirect('/settings?xbox=error#xbox');
+  if (!profile) return context.redirect('/settings?xbox=error&reason=no_profile#xbox');
 
   const { error } = await db.from('profiles').update({
     xbox_xuid: String(claim.xuid),
@@ -76,7 +76,7 @@ export const GET: APIRoute = async (context) => {
       return context.redirect('/settings?xbox=duplicate#xbox');
     }
     console.error('[xbox-callback] profile update error:', JSON.stringify(error));
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=db_error#xbox');
   }
 
   return context.redirect('/settings?xbox=connected#xbox');
