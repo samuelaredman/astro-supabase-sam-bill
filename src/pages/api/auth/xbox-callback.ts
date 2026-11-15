@@ -37,7 +37,7 @@ export const GET: APIRoute = async (context) => {
     return context.redirect('/settings?xbox=error&reason=no_key#xbox');
   }
 
-  let claim: { appKey?: string; xuid?: string; gamertag?: string } | null = null;
+  let claim: { app_key?: string; xuid?: string; gamertag?: string } | null = null;
   let res: Response;
   try {
     res = await fetch('https://api.xbl.io/app/claim', {
@@ -64,8 +64,8 @@ export const GET: APIRoute = async (context) => {
     return context.redirect('/settings?xbox=error&reason=bad_json#xbox');
   }
 
-  if (!claim?.appKey || !claim.xuid) {
-    console.error('[xbox-callback] claim response missing appKey/xuid:', claim);
+  if (!claim?.app_key || !claim.xuid) {
+    console.error('[xbox-callback] claim response missing app_key/xuid:', claim);
     return context.redirect('/settings?xbox=error&reason=bad_claim#xbox');
   }
 
@@ -77,7 +77,7 @@ export const GET: APIRoute = async (context) => {
   const { error } = await db.from('profiles').update({
     xbox_xuid: String(claim.xuid),
     xbox_gamertag: claim.gamertag ?? null,
-    xbox_api_key: claim.appKey,
+    xbox_api_key: claim.app_key,
   }).eq('id', profile.id);
 
   if (error) {
