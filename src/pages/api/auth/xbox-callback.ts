@@ -38,21 +38,29 @@ export const GET: APIRoute = async (context) => {
   }
 
   let claim: { appKey?: string; xuid?: string; gamertag?: string } | null = null;
+  let res: Response;
   try {
-    const res = await fetch('https://api.xbl.io/app/claim', {
+    res = await fetch('https://api.xbl.io/app/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ code, app_key: appKey }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) {
-      console.error('[xbox-callback] claim returned', res.status, await res.text().catch(() => ''));
-      return context.redirect('/settings?xbox=expired#xbox');
-    }
-    claim = await res.json();
+  } catch (e: any) {
+    const isTimeout = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+    console.error('[xbox-callback] claim fetch error:', e?.name, e?.message);
+    return context.redirect(`/settings?xbox=error&reason=${isTimeout ? 'fetch_timeout' : 'fetch_network'}#xbox`);
+  }
+  if (!res.ok) {
+    console.error('[xbox-callback] claim returned', res.status, await res.text().catch(() => ''));
+    return context.redirect('/settings?xbox=expired#xbox');
+  }
+  const bodyText = await res.text().catch(() => '');
+  try {
+    claim = JSON.parse(bodyText);
   } catch (e) {
-    console.error('[xbox-callback] claim fetch error:', e);
-    return context.redirect('/settings?xbox=error&reason=fetch_fail#xbox');
+    console.error('[xbox-callback] claim body was not JSON. first 200 chars:', bodyText.slice(0, 200));
+    return context.redirect('/settings?xbox=error&reason=bad_json#xbox');
   }
 
   if (!claim?.appKey || !claim.xuid) {
