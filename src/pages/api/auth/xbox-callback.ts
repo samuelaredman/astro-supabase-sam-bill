@@ -44,7 +44,7 @@ export const GET: APIRoute = async (context) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ code, app_key: appKey }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(25_000),
     });
   } catch (e: any) {
     const isTimeout = e?.name === 'TimeoutError' || e?.name === 'AbortError';
