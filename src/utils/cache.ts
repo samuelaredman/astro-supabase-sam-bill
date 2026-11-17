@@ -36,10 +36,17 @@ export const PAGE_VARY = `query,cookie=${AUTH_COOKIE}|${AUTH_COOKIE}.0`;
  * Cache headers for SSR pages whose anonymous render is shareable. Logged-in
  * renders are personalized and never shared-cached; the browser never caches
  * either (`no-store`), so auth state changes show on the next navigation.
+ *
+ * Default anonymous TTL: 1 hour fresh + 1 day stale-while-revalidate. Chosen
+ * to minimise Netlify function invocations from bot sweeps (every cache-hit
+ * saves one full SSR render). During SWR, the edge serves the stale copy
+ * immediately and schedules at most one background refresh per cache window,
+ * so content never exceeds ~1 day stale for anon visitors. Callers that need
+ * fresher content pass an explicit shorter `maxAge` (e.g. discussions 60-120s).
  */
-export function setPageCacheHeaders(headers: Headers, isLoggedIn: boolean, maxAge = 300): void {
+export function setPageCacheHeaders(headers: Headers, isLoggedIn: boolean, maxAge = 3600): void {
   if (!isLoggedIn) {
-    headers.set('Netlify-CDN-Cache-Control', cdnCacheControl(maxAge, 600));
+    headers.set('Netlify-CDN-Cache-Control', cdnCacheControl(maxAge, 86400));
     headers.set('Cache-Control', 'no-store');
   } else {
     headers.set('Cache-Control', 'private, no-store');

@@ -98,6 +98,40 @@ Disallow: /
 User-agent: DataForSeoBot
 Disallow: /
 
+# ── SEO/backlink scrapers ───────────────────────────────────────────────────
+# Full-site sweeps for backlink graphs or SERP competitive data. Zero human
+# referrals, same bandwidth profile as the AI scrapers above. Keep
+# Googlebot/Bingbot allowed (under User-agent: *) — these don't power search.
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
+User-agent: BLEXBot
+Disallow: /
+
+User-agent: MegaIndex.ru
+Disallow: /
+
+User-agent: SeekportBot
+Disallow: /
+
+User-agent: OpenLinkProfiler
+Disallow: /
+
+User-agent: SerpstatBot
+Disallow: /
+
+User-agent: PetalBot
+Disallow: /
+
 Sitemap: https://chekpoint.gg/sitemap.xml
 `;
 
