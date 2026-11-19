@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { purgeReviewsPublicCache } from "../../../utils/cache";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
@@ -132,8 +133,12 @@ export const POST: APIRoute = async (context) => {
   }
 
   // A plain edit of an already-published review keeps the original behaviour:
-  // no re-notification, no moderation re-screen, no reveal card.
-  if (!publishing) return json({ success: true });
+  // no re-notification, no moderation re-screen, no reveal card. The cached
+  // anon render still has to go — title/score/body all changed. Non-fatal.
+  if (!publishing) {
+    await purgeReviewsPublicCache();
+    return json({ success: true });
+  }
 
   // Publishing a draft: screen the text, then run the shared publish side-effects.
   const moderationDone = classifyText(`${title}\n${reviewBody}`)
@@ -152,6 +157,11 @@ export const POST: APIRoute = async (context) => {
   });
 
   await moderationDone;
+
+  // Draft → published: this review is about to appear on the home feed, the
+  // game page, and the author's profile for the first time. Drop stale anon
+  // renders so it shows up right away instead of waiting for the TTL. Non-fatal.
+  await purgeReviewsPublicCache();
 
   return json({ success: true, status: "published", ...reveal });
 };

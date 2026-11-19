@@ -11,6 +11,14 @@ describe("cdnCacheHeaders", () => {
   it("keys the durable cache on the query string", () => {
     expect(cdnCacheHeaders(120, 300)["Netlify-Vary"]).toBe("query");
   });
+
+  it("attaches Netlify-Cache-Tag when tags are supplied", () => {
+    expect(cdnCacheHeaders(120, 300, ["reviews-public"])["Netlify-Cache-Tag"]).toBe("reviews-public");
+  });
+
+  it("omits Netlify-Cache-Tag when no tags are supplied", () => {
+    expect("Netlify-Cache-Tag" in cdnCacheHeaders(120, 300)).toBe(false);
+  });
 });
 
 describe("PAGE_VARY", () => {
@@ -47,5 +55,17 @@ describe("setPageCacheHeaders", () => {
     expect(headers.get("Netlify-CDN-Cache-Control")).toBeNull();
     expect(headers.get("Cache-Control")).toBe("private, no-store");
     expect(headers.get("Netlify-Vary")).toBe(PAGE_VARY);
+  });
+
+  it("emits Netlify-Cache-Tag on anon responses when tags are supplied", () => {
+    const headers = new Headers();
+    setPageCacheHeaders(headers, false, 3600, ["reviews-public", "games"]);
+    expect(headers.get("Netlify-Cache-Tag")).toBe("reviews-public,games");
+  });
+
+  it("omits Netlify-Cache-Tag on logged-in responses even if tags are supplied", () => {
+    const headers = new Headers();
+    setPageCacheHeaders(headers, true, 3600, ["reviews-public"]);
+    expect(headers.get("Netlify-Cache-Tag")).toBeNull();
   });
 });
