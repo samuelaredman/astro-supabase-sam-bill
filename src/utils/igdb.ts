@@ -27,22 +27,33 @@ async function getAccessToken(): Promise<string> {
   return cachedToken as string;
 }
 
-export async function igdbFetch(endpoint: string, query: string) {
+export async function igdbFetch(endpoint: string, query: string, opts?: { timeoutMs?: number }) {
   const clientId = import.meta.env.IGDB_CLIENT_ID || process.env.IGDB_CLIENT_ID;
   const token = await getAccessToken();
 
-  const res = await fetch(`${IGDB_URL}/${endpoint}`, {
-    method: 'POST',
-    headers: {
-      'Client-ID': clientId ?? '',
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'text/plain',
-    },
-    body: query,
-  });
+  // `timeoutMs` lets page renders fail fast when IGDB is slow. Netlify's SSR
+  // function budget is 10s; a hung IGDB call burns the whole budget *and*
+  // returns a 504, which is the single most expensive request shape. Callers
+  // rendering a page should pass a short timeout (~2-3s) so the page falls
+  // back to DB-only results instead of 504-ing. API routes that are an
+  // intentional user action (e.g. /api/games/import) should omit it.
+  try {
+    const res = await fetch(`${IGDB_URL}/${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Client-ID': clientId ?? '',
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'text/plain',
+      },
+      body: query,
+      signal: opts?.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined,
+    });
 
-  if (!res.ok) return null;
-  return res.json();
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
 }
 
 /**
