@@ -5,7 +5,7 @@ import { cdnCacheHeaders } from "../../../utils/cache";
 import { attachReviewVideos } from "../../../utils/reviewVideos";
 
 const REVIEW_FIELDS = `
-  id, score, title, body, play_time_hours,
+  id, score, title, body, play_time_hours, difficulty,
   contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
   games ( id, title, slug, cover_img_url, date_released, igdb_category ),

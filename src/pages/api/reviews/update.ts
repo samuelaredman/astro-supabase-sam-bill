@@ -18,6 +18,23 @@ export const POST: APIRoute = async (context) => {
 
   if (!review_id) return json({ error: "Missing review id." }, 400);
 
+  // Absent key = older client; don't touch the stored value. Explicit null or
+  // empty string clears it. A number must be an integer 1–10.
+  const difficultyKeyPresent = Object.prototype.hasOwnProperty.call(requestBody, "difficulty");
+  let difficultyColumn: { difficulty?: number | null } = {};
+  if (difficultyKeyPresent) {
+    const raw = requestBody.difficulty;
+    if (raw === null || raw === undefined || raw === "") {
+      difficultyColumn = { difficulty: null };
+    } else {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
+        return json({ error: "Difficulty must be an integer between 1 and 10." }, 400);
+      }
+      difficultyColumn = { difficulty: parsed };
+    }
+  }
+
   // Absent key (e.g. an older client) leaves the stored video untouched.
   const youtube = readYouTubeField(requestBody);
   if ("error" in youtube) return json({ error: youtube.error }, 400);
@@ -54,6 +71,7 @@ export const POST: APIRoute = async (context) => {
         platform_played_on: platform_played_on || null,
         play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
         contains_spoilers: contains_spoilers ?? false,
+        ...difficultyColumn,
         ...youtubeColumn,
         status: "draft",
       })
@@ -115,6 +133,7 @@ export const POST: APIRoute = async (context) => {
     platform_played_on: platform_played_on || null,
     play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
     contains_spoilers: contains_spoilers ?? false,
+    ...difficultyColumn,
     ...youtubeColumn,
   };
   if (publishing) {

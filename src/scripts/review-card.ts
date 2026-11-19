@@ -326,6 +326,7 @@ if (!window.__rcInit) {
           body:        d.body,
           platformId:  d.platformId,
           hours:       d.hours,
+          difficulty:  d.difficulty || null,
           spoilers:    d.spoilers === 'true',
           youtubeUrl:  d.youtubeUrl || '',
         });

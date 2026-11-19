@@ -15,6 +15,16 @@ export const POST: APIRoute = async (context) => {
   const { score, title, body: reviewBody, platform_played_on, play_time_hours, contains_spoilers } = body;
   const isDraft = body.status === "draft";
 
+  const rawDifficulty = body.difficulty;
+  let difficulty: number | null = null;
+  if (rawDifficulty !== null && rawDifficulty !== undefined && rawDifficulty !== "") {
+    const parsed = Number(rawDifficulty);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
+      return json({ error: "Difficulty must be an integer between 1 and 10." }, 400);
+    }
+    difficulty = parsed;
+  }
+
   if (!body.game_id) return json({ error: "Missing game." }, 400);
 
   // Collapse any edition id to its canonical before anything else uses it, so a
@@ -55,6 +65,7 @@ export const POST: APIRoute = async (context) => {
         platform_played_on: platform_played_on || null,
         play_time_hours: play_time_hours || null,
         contains_spoilers: contains_spoilers ?? false,
+        difficulty,
         ...youtubeColumn,
         status: "draft",
         published_at: null,
@@ -97,6 +108,7 @@ export const POST: APIRoute = async (context) => {
       platform_played_on: platform_played_on || null,
       play_time_hours: play_time_hours || null,
       contains_spoilers: contains_spoilers ?? false,
+      difficulty,
       ...youtubeColumn,
       status: "published",
       published_at: new Date().toISOString(),
