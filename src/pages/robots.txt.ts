@@ -47,6 +47,12 @@ Disallow: /signin
 Disallow: /signup
 Disallow: /forgot-password
 Disallow: /reset-password-confirm
+# /search makes two live IGDB API calls per render (see search.astro). It's an
+# interactive endpoint with no SEO value (results are already discoverable via
+# per-game pages, which ARE crawlable), and bot-driven query crawls were the
+# single most expensive request shape on the site — each slow IGDB response
+# burned the full Netlify function budget. Keep well-behaved crawlers off it.
+Disallow: /search
 
 # ── AI training / bulk-scraping crawlers ────────────────────────────────────
 # These pull full-site sweeps (every page, every image) and were behind the
