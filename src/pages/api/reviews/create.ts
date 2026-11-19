@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { purgeReviewsPublicCache } from "../../../utils/cache";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
@@ -133,6 +134,10 @@ export const POST: APIRoute = async (context) => {
   // Ensure the moderation classify+report finishes before the serverless function
   // freezes on return (it has been running concurrently with the work above).
   await moderationDone;
+
+  // Published reviews change anon-visible content; drop the CDN snapshots so
+  // feeds / game / profile pages re-render the next anon hit. Non-fatal.
+  await purgeReviewsPublicCache();
 
   return json({ success: true, ...reveal });
 };

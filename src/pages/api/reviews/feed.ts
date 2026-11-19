@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
-import { cdnCacheHeaders } from "../../../utils/cache";
+import { cdnCacheHeaders, CACHE_TAG_REVIEWS_PUBLIC } from "../../../utils/cache";
 import { attachReviewVideos } from "../../../utils/reviewVideos";
 
 const REVIEW_FIELDS = `
@@ -76,7 +76,7 @@ export const GET: APIRoute = async (context) => {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        ...cdnCacheHeaders(120, 300),
+        ...cdnCacheHeaders(120, 300, [CACHE_TAG_REVIEWS_PUBLIC]),
         "Cache-Control": "no-store",
       },
     });
