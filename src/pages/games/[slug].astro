@@ -17,6 +17,7 @@ import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed'
 import { setPageCacheHeaders } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
 import { attachReviewVideos } from '../../utils/reviewVideos';
+import { loadGameAchievements } from '../../utils/gameAchievements';
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, serverClient);
@@ -39,6 +40,7 @@ const [{ data: game }, { data: cp }] = await Promise.all([
     .select(`
       id, title, slug, game_description, cover_img_url,
       date_released, igdb_id, canonical_game_id, igdb_category,
+      psn_np_communication_id, xbox_title_id,
       game_genres(genres(id, name, slug)),
       game_platforms(platforms(id, name, slug)),
       game_companies(role, developers(id, name, slug))
@@ -418,6 +420,17 @@ const platinumEnjoymentValues: number[] = platinumReviews
 const avgPlatinumEnjoyment = platinumEnjoymentValues.length > 0
   ? platinumEnjoymentValues.reduce((s: number, n: number) => s + n, 0) / platinumEnjoymentValues.length
   : null
+
+// Achievement/trophy schemas for the Achievements tab. Loaded unconditionally
+// (the tab link is only rendered when at least one platform has data); for a
+// game with no Steam/PSN/Xbox mapping this short-circuits to an empty result.
+const achievementsData = await loadGameAchievements(db, {
+  id: game.id,
+  psn_np_communication_id: game.psn_np_communication_id ?? null,
+  xbox_title_id: game.xbox_title_id ?? null,
+});
+const hasAchievements = achievementsData.platforms.length > 0;
+const totalAchievementsCount = achievementsData.platforms.reduce((n: number, p: any) => n + p.count, 0);
 
 const developers = (game.game_companies ?? []).filter((c: any) => c.role === 'developer').map((c: any) => c.developers).filter(Boolean)
 const publishers = (game.game_companies ?? []).filter((c: any) => c.role === 'publisher').map((c: any) => c.developers).filter(Boolean)
@@ -955,6 +968,95 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .tab-panel.active{display:block}
     #reviewsList .rc{padding-left:0;padding-right:0}
 
+    /* ── Achievements tab ── ported from AchievementDetailModal.astro so the
+       in-page layout matches the library modal visually. Collapse is native
+       &lt;details&gt; so there's zero JS. */
+    .ach-platform{border:1px solid var(--border);border-radius:12px;background:var(--bg-card);margin-bottom:12px;overflow:hidden}
+    .ach-platform-head{display:flex;align-items:center;gap:12px;padding:14px 18px;cursor:pointer;list-style:none;user-select:none;transition:background .15s}
+    .ach-platform-head::-webkit-details-marker{display:none}
+    .ach-platform-head:hover{background:var(--bg-hover)}
+    .ach-platform-label{flex:1;font-size:15px;font-weight:700;color:var(--text-primary);letter-spacing:.01em}
+    .ach-platform-count{font-size:12.5px;font-weight:600;color:var(--text-tertiary)}
+    .ach-platform-body{padding:4px 10px 10px}
+    .ach-platform[open] > .ach-platform-head{border-bottom:1px solid var(--border-subtle)}
+    .ach-platform[open] > .ach-platform-head > .ach-chevron{transform:rotate(180deg)}
+    .ach-chevron{color:var(--text-tertiary);transition:transform .15s;flex-shrink:0}
+
+    .ach-group{border-top:1px solid var(--border-subtle)}
+    .ach-group:first-child{border-top:none}
+    .ach-group-head{display:flex;align-items:center;gap:10px;padding:12px 10px 8px;cursor:pointer;list-style:none;user-select:none}
+    .ach-group-head::-webkit-details-marker{display:none}
+    .ach-group-label{flex:1;font-size:13.5px;font-weight:700;color:var(--text-primary);letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ach-group-count{font-size:12px;font-weight:600;color:var(--text-primary)}
+    .ach-group[open] > .ach-group-head > .ach-chevron{transform:rotate(180deg)}
+
+    .ach-row{display:flex;align-items:center;gap:12px;padding:10px;border-bottom:1px solid var(--border-subtle)}
+    .ach-row:last-child{border-bottom:none}
+    .ach-row-icon{position:relative;width:48px;height:48px;border-radius:8px;background:var(--tag-bg);border:1px solid var(--border);flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:18px}
+    .ach-row-icon img{width:100%;height:100%;object-fit:cover;display:block}
+    .ach-row-icon--rare{overflow:visible;border-color:rgba(202,138,4,.6);box-shadow:0 0 10px rgba(202,138,4,.55),0 0 24px rgba(202,138,4,.25)}
+    .ach-row-icon--rare img{border-radius:7px}
+    .ach-row-icon--rare::before,
+    .ach-row-icon--rare::after{
+      content:'';position:absolute;inset:-20px;border-radius:50%;
+      filter:blur(4px);
+      mask:radial-gradient(circle,transparent 46%,rgba(0,0,0,.95) 53%,rgba(0,0,0,.18) 82%,transparent 100%);
+      -webkit-mask:radial-gradient(circle,transparent 46%,rgba(0,0,0,.95) 53%,rgba(0,0,0,.18) 82%,transparent 100%);
+      z-index:0;pointer-events:none;
+    }
+    .ach-row-icon--rare::before{
+      background:conic-gradient(from 0deg,
+        transparent 0deg,
+        rgba(253,224,71,0) 14deg, rgba(253,224,71,.5) 17deg, rgba(253,224,71,.95) 20deg, rgba(253,224,71,.5) 23deg, rgba(253,224,71,0) 26deg,
+        transparent 102deg,
+        rgba(234,179,8,0) 102deg, rgba(234,179,8,.5) 105deg, rgba(234,179,8,.9) 108deg, rgba(234,179,8,.5) 111deg, rgba(234,179,8,0) 114deg,
+        transparent 192deg,
+        rgba(253,224,71,0) 192deg, rgba(253,224,71,.5) 195deg, rgba(253,224,71,.88) 198deg, rgba(253,224,71,.5) 201deg, rgba(253,224,71,0) 204deg,
+        transparent 280deg,
+        rgba(234,179,8,0) 280deg, rgba(234,179,8,.5) 283deg, rgba(234,179,8,.92) 286deg, rgba(234,179,8,.5) 289deg, rgba(234,179,8,0) 292deg,
+        transparent 360deg);
+      animation:ach-sunbeam-a 12s linear infinite, ach-sunbeam-fade-a 3s ease-in-out infinite alternate;
+    }
+    .ach-row-icon--rare::after{
+      background:conic-gradient(from 0deg,
+        transparent 0deg,
+        rgba(234,179,8,0) 49deg, rgba(234,179,8,.5) 52deg, rgba(253,224,71,.8) 55deg, rgba(234,179,8,.5) 58deg, rgba(234,179,8,0) 61deg,
+        transparent 126deg,
+        rgba(253,224,71,0) 126deg, rgba(253,224,71,.5) 129deg, rgba(253,224,71,.8) 132deg, rgba(253,224,71,.5) 135deg, rgba(253,224,71,0) 138deg,
+        transparent 204deg,
+        rgba(234,179,8,0) 204deg, rgba(234,179,8,.5) 207deg, rgba(234,179,8,.82) 210deg, rgba(234,179,8,.5) 213deg, rgba(234,179,8,0) 216deg,
+        transparent 289deg,
+        rgba(253,224,71,0) 289deg, rgba(253,224,71,.5) 292deg, rgba(253,224,71,.7) 295deg, rgba(253,224,71,.5) 298deg, rgba(253,224,71,0) 301deg,
+        transparent 344deg,
+        rgba(234,179,8,0) 344deg, rgba(234,179,8,.5) 347deg, rgba(234,179,8,.75) 350deg, rgba(234,179,8,.5) 353deg, rgba(234,179,8,0) 356deg,
+        transparent 360deg);
+      animation:ach-sunbeam-b 8s linear infinite, ach-sunbeam-fade-b 4.5s ease-in-out infinite alternate;
+    }
+    .ach-row-icon--rare > *{position:relative;z-index:1}
+    .ach-row-pct-rare{color:#ca8a04}
+    .ach-row-body{flex:1;min-width:0}
+    .ach-row-name{font-size:13.5px;font-weight:600;color:var(--text-primary);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ach-row-desc{font-size:12px;color:var(--text-tertiary);line-height:1.35;margin-top:2px}
+    .ach-row-meta{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;min-width:92px}
+    .ach-row-global{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:var(--text-secondary)}
+    .ach-row-global svg{opacity:.7}
+    .ach-row-tier{font-size:10px;font-weight:700;letter-spacing:.08em;padding:2px 7px;border-radius:4px;text-transform:uppercase}
+    .ach-row-tier--platinum{background:rgba(155,123,255,.18);color:#c4b1ff}
+    .ach-row-tier--gold{background:rgba(245,181,68,.18);color:#f5c062}
+    .ach-row-tier--silver{background:rgba(196,198,205,.2);color:#d5d7dd}
+    .ach-row-tier--bronze{background:rgba(205,127,50,.18);color:#e2a06b}
+    .ach-row-gs{font-size:11px;font-weight:600;color:var(--text-secondary)}
+
+    @media(max-width:560px){
+      .ach-row-icon{width:40px;height:40px}
+      .ach-row-meta{min-width:0}
+    }
+
+    @keyframes ach-sunbeam-a      { to { transform: rotate(360deg); } }
+    @keyframes ach-sunbeam-b      { to { transform: rotate(360deg); } }
+    @keyframes ach-sunbeam-fade-a { from { opacity:.2;  } to { opacity:.9;  } }
+    @keyframes ach-sunbeam-fade-b { from { opacity:.15; } to { opacity:.75; } }
+
     /* TWO COLUMN — OVERVIEW */
     .two-col{display:grid;grid-template-columns:1fr 300px;gap:24px;align-items:start}
     @media(max-width:720px){.two-col{grid-template-columns:1fr}}
@@ -1344,6 +1446,9 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         <a href={`/games/${game.slug}?tab=dlc`} class={`tab-link ${activeTab === 'dlc' ? 'active' : ''}`} data-tab="dlc">DLC & Editions <span class="tab-count">{dlcTabCount}</span></a>
       )}
       <a href={`/games/${game.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">Stats</a>
+      {hasAchievements && (
+        <a href={`/games/${game.slug}?tab=achievements`} class={`tab-link ${activeTab === 'achievements' ? 'active' : ''}`} data-tab="achievements">Achievements <span class="tab-count">{totalAchievementsCount}</span></a>
+      )}
       <a href={`/games/${game.slug}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">Recommendations {gameRecs.length > 0 && <span class="tab-count">{gameRecs.length}</span>}</a>
     </nav>
 
@@ -1676,6 +1781,65 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         <div id="statsContent"></div>
       )}
     </div>
+
+    <!-- ── ACHIEVEMENTS TAB ── -->
+    {hasAchievements && (
+      <div class={`tab-panel ${activeTab === 'achievements' ? 'active' : ''}`} data-tab="achievements">
+        <div style="padding:4px 0 14px">
+          <div style="font-size:16px;font-weight:600;color:var(--text-primary);margin-bottom:4px">Achievements & Trophies</div>
+          <div style="font-size:13px;color:var(--text-tertiary);line-height:1.5;max-width:520px">Every achievement that exists for this game, grouped by platform and DLC. Rarity is the % of players globally who've unlocked it — the rarest ones get a glow.</div>
+        </div>
+        {achievementsData.platforms.map((platform: any) => (
+          <details class="ach-platform" open={achievementsData.platforms.length === 1}>
+            <summary class="ach-platform-head">
+              <span class="ach-platform-label">{platform.platform_label}</span>
+              <span class="ach-platform-count">{platform.count} {platform.count === 1 ? 'achievement' : 'achievements'}</span>
+              <svg class="ach-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </summary>
+            <div class="ach-platform-body">
+              {platform.groups.map((group: any, groupIdx: number) => {
+                const multi = platform.groups.length > 1;
+                const rows = group.achievements.map((a: any) => {
+                  const pct = a.rarity_percent != null ? Number(a.rarity_percent) : null;
+                  const isRare = pct != null && pct < 10;
+                  const iconEl = a.icon_url
+                    ? <img src={a.icon_url} alt="" loading="lazy" />
+                    : <span>🏆</span>;
+                  return (
+                    <div class={`ach-row ${isRare ? 'rare' : ''}`}>
+                      <div class={`ach-row-icon ${isRare ? 'ach-row-icon--rare' : ''}`}>{iconEl}</div>
+                      <div class="ach-row-body">
+                        <div class="ach-row-name">{a.name || 'Achievement'}</div>
+                        {a.description && <div class="ach-row-desc">{a.description}</div>}
+                      </div>
+                      <div class="ach-row-meta">
+                        {a.tier && <span class={`ach-row-tier ach-row-tier--${a.tier}`}>{a.tier}</span>}
+                        {a.gamerscore != null && <span class="ach-row-gs">{a.gamerscore} G</span>}
+                        <span class={`ach-row-global ${isRare ? 'ach-row-pct-rare' : ''}`}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></svg>
+                          {pct != null ? `${pct.toFixed(1)}%` : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                });
+                if (!multi) return <div class="ach-group-body">{rows}</div>;
+                return (
+                  <details class="ach-group" open={groupIdx === 0}>
+                    <summary class="ach-group-head">
+                      <span class="ach-group-label">{group.label}</span>
+                      <span class="ach-group-count">{group.achievements.length}</span>
+                      <svg class="ach-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </summary>
+                    <div class="ach-group-body">{rows}</div>
+                  </details>
+                );
+              })}
+            </div>
+          </details>
+        ))}
+      </div>
+    )}
 
     <!-- ── RECOMMENDATIONS TAB ── -->
     <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
