@@ -258,9 +258,16 @@ function normalisePsnTier(v: any): "bronze" | "silver" | "gold" | "platinum" | n
 }
 
 // ── Xbox ─────────────────────────────────────────────────────────────────
-// Base game lives on games.xbox_title_id. DLC children are separate games
-// linked via game_relationships(relation_type IN (dlc, expansion, standalone)).
-// Each DLC has its own xbox_title_id → xbox_title_schema row.
+// Base game lives on games.xbox_title_id; DLC children are separate games
+// linked via game_relationships(relation_type IN (dlc, expansion, standalone))
+// with their own xbox_title_id → xbox_title_schema row.
+//
+// games.xbox_title_id is set by whichever user synced the match first — a
+// game first matched by a Steam or PSN user leaves it NULL even when Xbox
+// users later populate user_xbox_achievements / xbox_title_schema for the
+// same Chekpoint game. So resolve the title id per game_id by unioning
+// games.xbox_title_id with the distinct xbox_title_id values observed on
+// user_xbox_achievements rows for that game_id.
 async function loadXbox(db: any, baseGameId: string): Promise<GameAchievementPlatform | null> {
   const { data: dlcRels } = await db
     .from("game_relationships")
@@ -270,15 +277,38 @@ async function loadXbox(db: any, baseGameId: string): Promise<GameAchievementPla
   const dlcIds: string[] = (dlcRels ?? []).map((r: any) => r.to_game_id);
 
   const allGameIds = [baseGameId, ...dlcIds];
-  const { data: gameRows } = await db
-    .from("games")
-    .select("id, title, xbox_title_id")
-    .in("id", allGameIds);
-  const gamesList: Array<{ id: string; title: string; xbox_title_id: string | null }> =
-    (gameRows ?? []).filter((g: any) => g.xbox_title_id);
+  const [gamesRes, userAchRes] = await Promise.all([
+    db.from("games").select("id, title, xbox_title_id").in("id", allGameIds),
+    db.from("user_xbox_achievements")
+      .select("game_id, xbox_title_id")
+      .in("game_id", allGameIds)
+      .not("xbox_title_id", "is", null),
+  ]);
+
+  // title id per game_id: prefer the games column, fall back to any value
+  // seen on user_xbox_achievements rows for that game.
+  const titleIdByGameId = new Map<string, string>();
+  for (const g of (gamesRes.data ?? []) as any[]) {
+    if (g.xbox_title_id) titleIdByGameId.set(g.id, g.xbox_title_id);
+  }
+  for (const r of (userAchRes.data ?? []) as any[]) {
+    if (r.xbox_title_id && !titleIdByGameId.has(r.game_id)) {
+      titleIdByGameId.set(r.game_id, r.xbox_title_id);
+    }
+  }
+
+  const gamesList: Array<{ id: string; title: string; xbox_title_id: string }> = (
+    (gamesRes.data ?? []) as any[]
+  )
+    .map((g: any) => ({
+      id: g.id,
+      title: g.title,
+      xbox_title_id: titleIdByGameId.get(g.id) ?? null,
+    }))
+    .filter((g: any): g is { id: string; title: string; xbox_title_id: string } => !!g.xbox_title_id);
   if (gamesList.length === 0) return null;
 
-  const titleIds = gamesList.map((g) => g.xbox_title_id!);
+  const titleIds = [...new Set(gamesList.map((g) => g.xbox_title_id))];
   const { data: schemaRows } = await db
     .from("xbox_title_schema")
     .select("xbox_title_id, achievements, no_achievements")
@@ -296,7 +326,7 @@ async function loadXbox(db: any, baseGameId: string): Promise<GameAchievementPla
   });
 
   for (const g of ordered) {
-    const schema = schemaByTitleId.get(g.xbox_title_id!);
+    const schema = schemaByTitleId.get(g.xbox_title_id);
     if (!schema || schema.no_achievements) continue;
     const achs: any[] = Array.isArray(schema.achievements) ? schema.achievements : [];
     if (achs.length === 0) continue;
