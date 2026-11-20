@@ -38,6 +38,21 @@ export interface GameAchievementPlatform {
 
 export interface GameAchievementsData {
   platforms: GameAchievementPlatform[];
+  debug?: GameAchievementsDebug;
+}
+
+export interface GameAchievementsDebug {
+  game_id: string;
+  games_psn_np_communication_id: string | null;
+  games_xbox_title_id: string | null;
+  resolved_psn_np_comm_ids: string[];
+  resolved_xbox_title_ids: string[];
+  xbox_dlc_game_ids: string[];
+  xbox_title_id_by_game_id: Record<string, string>;
+  xbox_schema_rows_found: string[];
+  psn_schema_rows_found: string[];
+  steam_appids: number[];
+  steam_schema_rows_found: number[];
 }
 
 const DLC_RELATION_TYPES = ["dlc", "expansion", "standalone_expansion"];
@@ -61,6 +76,7 @@ function sortByRarity(a: GameAchievement, b: GameAchievement): number {
 export async function loadGameAchievements(
   db: any,
   game: { id: string; psn_np_communication_id: string | null; xbox_title_id: string | null },
+  opts: { debug?: boolean } = {},
 ): Promise<GameAchievementsData> {
   const platforms: GameAchievementPlatform[] = [];
 
@@ -74,17 +90,31 @@ export async function loadGameAchievements(
     resolveAllXboxTitleIds(db, game),
   ]);
 
+  const debug: GameAchievementsDebug | undefined = opts.debug ? {
+    game_id: game.id,
+    games_psn_np_communication_id: game.psn_np_communication_id,
+    games_xbox_title_id: game.xbox_title_id,
+    resolved_psn_np_comm_ids: npCommIds,
+    resolved_xbox_title_ids: xboxTitleIds,
+    xbox_dlc_game_ids: [],
+    xbox_title_id_by_game_id: {},
+    xbox_schema_rows_found: [],
+    psn_schema_rows_found: [],
+    steam_appids: [],
+    steam_schema_rows_found: [],
+  } : undefined;
+
   const [steam, psn, xbox] = await Promise.all([
-    loadSteam(db, game.id),
-    npCommIds.length > 0 ? loadPsn(db, npCommIds) : Promise.resolve(null),
-    xboxTitleIds.length > 0 ? loadXbox(db, game.id) : Promise.resolve(null),
+    loadSteam(db, game.id, debug),
+    npCommIds.length > 0 ? loadPsn(db, npCommIds, debug) : Promise.resolve(null),
+    xboxTitleIds.length > 0 ? loadXbox(db, game.id, debug) : Promise.resolve(null),
   ]);
 
   if (steam) platforms.push(steam);
   if (psn) platforms.push(psn);
   if (xbox) platforms.push(xbox);
 
-  return { platforms };
+  return debug ? { platforms, debug } : { platforms };
 }
 
 async function resolveAllPsnNpCommIds(
@@ -137,18 +167,20 @@ async function resolveAllXboxTitleIds(
 // A game can map to multiple Steam appids via game_steam_apps (e.g. different
 // regional / deluxe SKUs). Merge them into a single "Base Game" group — Steam
 // has no DLC achievement grouping.
-async function loadSteam(db: any, gameId: string): Promise<GameAchievementPlatform | null> {
+async function loadSteam(db: any, gameId: string, debug?: GameAchievementsDebug): Promise<GameAchievementPlatform | null> {
   const { data: mappings } = await db
     .from("game_steam_apps")
     .select("steam_appid")
     .eq("game_id", gameId);
   const appids: number[] = (mappings ?? []).map((m: any) => m.steam_appid).filter((n: any) => Number.isFinite(n));
+  if (debug) debug.steam_appids = appids;
   if (appids.length === 0) return null;
 
   const { data: schemas } = await db
     .from("steam_app_schema")
     .select("steam_appid, achievements, global_percents, no_achievements")
     .in("steam_appid", appids);
+  if (debug) debug.steam_schema_rows_found = ((schemas ?? []) as any[]).map((r) => r.steam_appid);
 
   const merged: GameAchievement[] = [];
   for (const row of (schemas ?? []) as any[]) {
@@ -192,11 +224,12 @@ async function loadSteam(db: any, gameId: string): Promise<GameAchievementPlatfo
 // returns it on the per-user "earned" response). Pull distinct (trophy_id,
 // earned_rate) from user_trophies for the chosen npCommId and overlay —
 // the rate is game-wide so any synced user's row has the correct value.
-async function loadPsn(db: any, npCommIds: string[]): Promise<GameAchievementPlatform | null> {
+async function loadPsn(db: any, npCommIds: string[], debug?: GameAchievementsDebug): Promise<GameAchievementPlatform | null> {
   const { data: schemas } = await db
     .from("psn_title_schema")
     .select("np_communication_id, trophies, trophy_groups, no_trophies")
     .in("np_communication_id", npCommIds);
+  if (debug) debug.psn_schema_rows_found = ((schemas ?? []) as any[]).map((r) => r.np_communication_id);
 
   const viable = ((schemas ?? []) as any[])
     .filter((s) => !s.no_trophies && Array.isArray(s.trophies) && s.trophies.length > 0);
@@ -296,13 +329,14 @@ function normalisePsnTier(v: any): "bronze" | "silver" | "gold" | "platinum" | n
 // same Chekpoint game. So resolve the title id per game_id by unioning
 // games.xbox_title_id with the distinct xbox_title_id values observed on
 // user_xbox_achievements rows for that game_id.
-async function loadXbox(db: any, baseGameId: string): Promise<GameAchievementPlatform | null> {
+async function loadXbox(db: any, baseGameId: string, debug?: GameAchievementsDebug): Promise<GameAchievementPlatform | null> {
   const { data: dlcRels } = await db
     .from("game_relationships")
     .select("to_game_id")
     .eq("from_game_id", baseGameId)
     .in("relation_type", DLC_RELATION_TYPES);
   const dlcIds: string[] = (dlcRels ?? []).map((r: any) => r.to_game_id);
+  if (debug) debug.xbox_dlc_game_ids = dlcIds;
 
   const allGameIds = [baseGameId, ...dlcIds];
   const [gamesRes, userStatusRes, userAchRes] = await Promise.all([
@@ -347,10 +381,14 @@ async function loadXbox(db: any, baseGameId: string): Promise<GameAchievementPla
   if (gamesList.length === 0) return null;
 
   const titleIds = [...new Set(gamesList.map((g) => g.xbox_title_id))];
+  if (debug) {
+    for (const [k, v] of titleIdByGameId) debug.xbox_title_id_by_game_id[k] = v;
+  }
   const { data: schemaRows } = await db
     .from("xbox_title_schema")
     .select("xbox_title_id, achievements, no_achievements")
     .in("xbox_title_id", titleIds);
+  if (debug) debug.xbox_schema_rows_found = ((schemaRows ?? []) as any[]).map((r) => r.xbox_title_id);
   const schemaByTitleId = new Map<string, any>(
     (schemaRows ?? []).map((r: any) => [r.xbox_title_id, r]),
   );
