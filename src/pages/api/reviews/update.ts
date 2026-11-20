@@ -28,10 +28,10 @@ export const POST: APIRoute = async (context) => {
       difficultyColumn = { difficulty: null };
     } else {
       const parsed = Number(raw);
-      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
-        return json({ error: "Difficulty must be an integer between 1 and 10." }, 400);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10) {
+        return json({ error: "Difficulty must be between 1 and 10." }, 400);
       }
-      difficultyColumn = { difficulty: parsed };
+      difficultyColumn = { difficulty: Math.round(parsed * 10) / 10 };
     }
   }
 
@@ -54,20 +54,27 @@ export const POST: APIRoute = async (context) => {
     if (newStatus !== "platinum") demotingFromPlatinum = true;
   }
 
+  // platinum_hours is integer. platinum_difficulty / platinum_enjoyment are
+  // numeric(3,1), so they accept one decimal and the server snaps the value
+  // to match the column's scale.
   const parsePlatField = (
     key: "platinum_hours" | "platinum_difficulty" | "platinum_enjoyment",
     label: string,
     min: number,
     max: number,
+    decimal: boolean,
   ): { present: boolean; value: number | null } | { error: string } => {
     if (!Object.prototype.hasOwnProperty.call(requestBody, key)) return { present: false, value: null };
     const r = requestBody[key];
     if (r === null || r === undefined || r === "") return { present: true, value: null };
     const n = Number(r);
-    if (!Number.isInteger(n) || n < min || n > max) {
-      return { error: `${label} must be an integer${min === 0 ? " 0 or greater" : ` between ${min} and ${max}`}.` };
+    const invalid = decimal
+      ? !Number.isFinite(n) || n < min || n > max
+      : !Number.isInteger(n) || n < min || n > max;
+    if (invalid) {
+      return { error: `${label} must be ${decimal ? "between" : "an integer between"} ${min} and ${max}.` };
     }
-    return { present: true, value: n };
+    return { present: true, value: decimal ? Math.round(n * 10) / 10 : n };
   };
 
   if (demotingFromPlatinum) {
@@ -78,15 +85,38 @@ export const POST: APIRoute = async (context) => {
     completionColumns.platinum_difficulty = null;
     completionColumns.platinum_enjoyment = null;
   } else {
-    const ph = parsePlatField("platinum_hours", "Platinum hours", 0, 99999);
+    const ph = parsePlatField("platinum_hours", "Platinum hours", 0, 99999, false);
     if ("error" in ph) return json({ error: ph.error }, 400);
     if (ph.present) completionColumns.platinum_hours = ph.value;
-    const pd = parsePlatField("platinum_difficulty", "Platinum difficulty", 1, 10);
+    const pd = parsePlatField("platinum_difficulty", "Platinum difficulty", 1, 10, true);
     if ("error" in pd) return json({ error: pd.error }, 400);
     if (pd.present) completionColumns.platinum_difficulty = pd.value;
-    const pe = parsePlatField("platinum_enjoyment", "Platinum enjoyment", 1, 10);
+    const pe = parsePlatField("platinum_enjoyment", "Platinum score", 1, 10, true);
     if ("error" in pe) return json({ error: pe.error }, 400);
     if (pe.present) completionColumns.platinum_enjoyment = pe.value;
+  }
+
+  // completion_hours is only valid for 'main' and 'extras'. If the status is
+  // being set to anything else (dnf, platinum, null), auto-null it in the same
+  // update to satisfy the DB CHECK.
+  const statusOnThisUpdate = completionKeyPresent
+    ? (completionColumns.completion_status as "dnf" | "main" | "extras" | "platinum" | null)
+    : undefined;
+  const nullingCompletionHours =
+    completionKeyPresent && statusOnThisUpdate !== "main" && statusOnThisUpdate !== "extras";
+  if (nullingCompletionHours) {
+    completionColumns.completion_hours = null;
+  } else if (Object.prototype.hasOwnProperty.call(requestBody, "completion_hours")) {
+    const r = requestBody.completion_hours;
+    if (r === null || r === undefined || r === "") {
+      completionColumns.completion_hours = null;
+    } else {
+      const n = Number(r);
+      if (!Number.isInteger(n) || n < 0) {
+        return json({ error: "Hours to complete must be a non-negative integer." }, 400);
+      }
+      completionColumns.completion_hours = n;
+    }
   }
 
   // Absent key (e.g. an older client) leaves the stored video untouched.

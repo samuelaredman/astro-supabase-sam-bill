@@ -328,6 +328,7 @@ if (!window.__rcInit) {
           hours:       d.hours,
           difficulty:  d.difficulty || null,
           completionStatus:   d.completionStatus || '',
+          completionHours:    d.completionHours || null,
           platinumHours:      d.platinumHours || null,
           platinumDifficulty: d.platinumDifficulty || null,
           platinumEnjoyment:  d.platinumEnjoyment || null,

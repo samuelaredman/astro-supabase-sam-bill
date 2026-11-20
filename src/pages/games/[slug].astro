@@ -259,7 +259,7 @@ const [
     .select(`
       id, score, title, body, published_at, created_at,
       contains_spoilers, play_time_hours, difficulty,
-      completion_status, platinum_hours, platinum_difficulty, platinum_enjoyment,
+      completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment,
       played_on:platform_played_on ( id, name, slug ),
       profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
       review_votes ( vote, profile_id ),
@@ -275,7 +275,7 @@ const [
   currentProfileId
     ? db
         .from('reviews')
-        .select('id, score, title, body, platform_played_on, play_time_hours, difficulty, completion_status, platinum_hours, platinum_difficulty, platinum_enjoyment, contains_spoilers')
+        .select('id, score, title, body, platform_played_on, play_time_hours, difficulty, completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment, contains_spoilers')
         .eq('profile_id', currentProfileId)
         .eq('game_id', game.id)
         .eq('status', 'draft')
@@ -362,12 +362,34 @@ const totalHours = reviewList.reduce((sum: number, r: any) => sum + (r.play_time
 const avgHours = reviewList.length > 0 ? Math.round(totalHours / reviewList.length) : null
 
 // Difficulty is optional per review; aggregate only across those that supplied one.
-const difficultyValues = reviewList
+// numeric(3,1) columns come back from PostgREST as strings to preserve
+// precision — coerce before filtering so legit decimal ratings aren't dropped.
+const difficultyValues: number[] = reviewList
   .map((r: any) => r.difficulty)
-  .filter((d: any): d is number => typeof d === 'number')
+  .filter((d: any) => d != null && !Number.isNaN(Number(d)))
+  .map((d: any) => Number(d))
 const difficultyCount = difficultyValues.length
 const avgDifficulty = difficultyCount > 0
   ? difficultyValues.reduce((sum: number, d: number) => sum + d, 0) / difficultyCount
+  : null
+
+// Main-story / Main+Extras breakdown — HLTB-style averages, computed from
+// each reviewer's self-reported completion_hours grouped by the tier they
+// selected. Keyed off completion_status so a 100-hour main-story run and a
+// 100-hour platinum run don't collide in the same bucket.
+const mainStoryHours = reviewList
+  .filter((r: any) => r.completion_status === 'main')
+  .map((r: any) => r.completion_hours)
+  .filter((n: any): n is number => typeof n === 'number' && n >= 0)
+const avgMainStoryHours = mainStoryHours.length > 0
+  ? Math.round(mainStoryHours.reduce((s: number, n: number) => s + n, 0) / mainStoryHours.length)
+  : null
+const extrasHours = reviewList
+  .filter((r: any) => r.completion_status === 'extras')
+  .map((r: any) => r.completion_hours)
+  .filter((n: any): n is number => typeof n === 'number' && n >= 0)
+const avgExtrasHours = extrasHours.length > 0
+  ? Math.round(extrasHours.reduce((s: number, n: number) => s + n, 0) / extrasHours.length)
   : null
 
 // Platinum community — only the reviewers who actually earned the plat. Each
@@ -382,15 +404,17 @@ const platinumHoursValues = platinumReviews
 const avgPlatinumHours = platinumHoursValues.length > 0
   ? Math.round(platinumHoursValues.reduce((s: number, n: number) => s + n, 0) / platinumHoursValues.length)
   : null
-const platinumDifficultyValues = platinumReviews
+const platinumDifficultyValues: number[] = platinumReviews
   .map((r: any) => r.platinum_difficulty)
-  .filter((n: any): n is number => typeof n === 'number')
+  .filter((d: any) => d != null && !Number.isNaN(Number(d)))
+  .map((d: any) => Number(d))
 const avgPlatinumDifficulty = platinumDifficultyValues.length > 0
   ? platinumDifficultyValues.reduce((s: number, n: number) => s + n, 0) / platinumDifficultyValues.length
   : null
-const platinumEnjoymentValues = platinumReviews
+const platinumEnjoymentValues: number[] = platinumReviews
   .map((r: any) => r.platinum_enjoyment)
-  .filter((n: any): n is number => typeof n === 'number')
+  .filter((d: any) => d != null && !Number.isNaN(Number(d)))
+  .map((d: any) => Number(d))
 const avgPlatinumEnjoyment = platinumEnjoymentValues.length > 0
   ? platinumEnjoymentValues.reduce((s: number, n: number) => s + n, 0) / platinumEnjoymentValues.length
   : null
@@ -1045,6 +1069,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .gc-status-btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
     .gc-plat-fields{display:none}
     .gc-plat-fields[data-visible="true"]{display:flex}
+    .gc-completion-hours{display:none}
+    .gc-completion-hours[data-visible="true"]{display:flex}
 
     /* ── Composer: Main Game / DLC toggle ── */
     .gc-type-toggle{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:3px;gap:2px}
@@ -1501,10 +1527,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           <div class="details-card">
             {releaseDate && (<div class="detail-row"><span class="detail-label">Released</span><span class="detail-value">{releaseDate}</span></div>)}
             {avgDifficulty != null && (<div class="detail-row"><span class="detail-label">Difficulty</span><span class="detail-value">{avgDifficulty.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({difficultyCount})</span></span></div>)}
+            {avgMainStoryHours != null && (<div class="detail-row"><span class="detail-label">📖 Main Story</span><span class="detail-value">{avgMainStoryHours}h <span style="color:var(--text-tertiary)">({mainStoryHours.length})</span></span></div>)}
+            {avgExtrasHours != null && (<div class="detail-row"><span class="detail-label">📚 Main + Extras</span><span class="detail-value">{avgExtrasHours}h <span style="color:var(--text-tertiary)">({extrasHours.length})</span></span></div>)}
             {platinumCount > 0 && (<div class="detail-row"><span class="detail-label">🏆 Platinum</span><span class="detail-value">{platinumCount} reviewer{platinumCount === 1 ? '' : 's'}</span></div>)}
             {avgPlatinumHours != null && (<div class="detail-row"><span class="detail-label">Avg time to plat</span><span class="detail-value">{avgPlatinumHours}h <span style="color:var(--text-tertiary)">({platinumHoursValues.length})</span></span></div>)}
             {avgPlatinumDifficulty != null && (<div class="detail-row"><span class="detail-label">Plat difficulty</span><span class="detail-value">{avgPlatinumDifficulty.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({platinumDifficultyValues.length})</span></span></div>)}
-            {avgPlatinumEnjoyment != null && (<div class="detail-row"><span class="detail-label">Plat enjoyment</span><span class="detail-value">{avgPlatinumEnjoyment.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({platinumEnjoymentValues.length})</span></span></div>)}
+            {avgPlatinumEnjoyment != null && (<div class="detail-row"><span class="detail-label">Plat score</span><span class="detail-value">{avgPlatinumEnjoyment.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({platinumEnjoymentValues.length})</span></span></div>)}
             {developers.length > 0 && (<div class="detail-row"><span class="detail-label">Developer</span><span class="detail-value">{developers.map((d: any) => d.name).join(', ')}</span></div>)}
             {publishers.length > 0 && (<div class="detail-row"><span class="detail-label">Publisher</span><span class="detail-value">{publishers.map((p: any) => p.name).join(', ')}</span></div>)}
             {genres.length > 0 && (<div class="detail-row"><span class="detail-label">Genres</span><div class="tag-list">{genres.map((g: any) => <a href={`/genres/${g.slug}`} class="tag" style="transition:border-color .15s,color .15s">{g.name}</a>)}</div></div>)}
@@ -2622,6 +2650,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
       <input type="hidden" id="gcCompletionStatus" value="" />
     </div>
+    <div class="composer-field gc-completion-hours" id="gcCompletionHoursField" style="margin-top:12px">
+      <label class="composer-label" id="gcCompletionHoursLabel">Hours to complete</label>
+      <input type="number" id="gcCompletionHours" class="composer-input" placeholder="—" min="0" max="99999" step="1" style="width:160px" />
+    </div>
     <div class="composer-row gc-plat-fields" id="gcPlatFields" style="margin-top:12px">
       <div class="composer-field" style="width:140px">
         <label class="composer-label">Hours to plat</label>
@@ -2629,11 +2661,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
       <div class="composer-field" style="width:140px">
         <label class="composer-label">Plat difficulty</label>
-        <input type="number" id="gcPlatDifficulty" class="composer-input" placeholder="—" min="1" max="10" step="1" />
+        <input type="number" id="gcPlatDifficulty" class="composer-input" placeholder="—" min="1" max="10" step="0.1" />
       </div>
       <div class="composer-field" style="width:140px">
-        <label class="composer-label">Plat enjoyment</label>
-        <input type="number" id="gcPlatEnjoyment" class="composer-input" placeholder="—" min="1" max="10" step="1" />
+        <label class="composer-label">Plat score</label>
+        <input type="number" id="gcPlatEnjoyment" class="composer-input" placeholder="—" min="1" max="10" step="0.1" />
       </div>
     </div>
     <div class="composer-field" style="margin-top:12px">
@@ -2669,6 +2701,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     document.getElementById('gcYoutube').value = draftReview.youtube_video_id ? 'https://www.youtube.com/watch?v=' + draftReview.youtube_video_id : ''
     document.getElementById('gcCharCount').textContent = (draftReview.body || '').length + ' / 10000'
     _gcSetCompletion(draftReview.completion_status || '')
+    if (draftReview.completion_hours != null) document.getElementById('gcCompletionHours').value = draftReview.completion_hours
     if (draftReview.platinum_hours != null) document.getElementById('gcPlatHours').value = draftReview.platinum_hours
     if (draftReview.platinum_difficulty != null) document.getElementById('gcPlatDifficulty').value = draftReview.platinum_difficulty
     if (draftReview.platinum_enjoyment != null) document.getElementById('gcPlatEnjoyment').value = draftReview.platinum_enjoyment
@@ -2680,6 +2713,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       btn.setAttribute('aria-pressed', btn.getAttribute('data-status') === status ? 'true' : 'false')
     })
     document.getElementById('gcPlatFields').setAttribute('data-visible', status === 'platinum' ? 'true' : 'false')
+    var hoursVisible = status === 'main' || status === 'extras'
+    document.getElementById('gcCompletionHoursField').setAttribute('data-visible', hoursVisible ? 'true' : 'false')
+    var hoursLabel = document.getElementById('gcCompletionHoursLabel')
+    if (hoursLabel) hoursLabel.textContent = status === 'extras' ? 'Hours to complete main + post game' : 'Hours to complete main story'
+    if (!hoursVisible) document.getElementById('gcCompletionHours').value = ''
     if (status !== 'platinum') {
       document.getElementById('gcPlatHours').value = ''
       document.getElementById('gcPlatDifficulty').value = ''
@@ -2861,9 +2899,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     var platform = document.getElementById('gcPlatform').value
     var hours = parseInt(document.getElementById('gcHours').value) || null
     var completion = document.getElementById('gcCompletionStatus').value
+    var completionHours = (completion === 'main' || completion === 'extras') ? (parseInt(document.getElementById('gcCompletionHours').value) || null) : null
     var platHours = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatHours').value) || null) : null
-    var platDiff  = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatDifficulty').value) || null) : null
-    var platEnjoy = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatEnjoyment').value) || null) : null
+    var platDiff  = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatDifficulty').value) || null) : null
+    var platEnjoy = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatEnjoyment').value) || null) : null
     var spoilers = document.getElementById('gcSpoilers').checked
     var youtubeUrl = document.getElementById('gcYoutube').value.trim()
     var errEl = document.getElementById('gcError')
@@ -2897,6 +2936,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
               play_time_hours: hours,
               contains_spoilers: spoilers,
               completion_status: completion || null,
+              completion_hours: completionHours,
               platinum_hours: platHours,
               platinum_difficulty: platDiff,
               platinum_enjoyment: platEnjoy,
@@ -2916,6 +2956,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
               play_time_hours: hours,
               contains_spoilers: spoilers,
               completion_status: completion || null,
+              completion_hours: completionHours,
               platinum_hours: platHours,
               platinum_difficulty: platDiff,
               platinum_enjoyment: platEnjoy,
@@ -3023,9 +3064,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       var platform = document.getElementById('gcPlatform').value
       var hours = parseInt(document.getElementById('gcHours').value) || null
       var completion = document.getElementById('gcCompletionStatus').value
+      var completionHours = (completion === 'main' || completion === 'extras') ? (parseInt(document.getElementById('gcCompletionHours').value) || null) : null
       var platHours = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatHours').value) || null) : null
-      var platDiff  = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatDifficulty').value) || null) : null
-      var platEnjoy = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatEnjoyment').value) || null) : null
+      var platDiff  = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatDifficulty').value) || null) : null
+      var platEnjoy = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatEnjoyment').value) || null) : null
       var spoilers = document.getElementById('gcSpoilers').checked
       var youtubeUrl = document.getElementById('gcYoutube').value.trim()
       var errEl = document.getElementById('gcError')
@@ -3045,6 +3087,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           play_time_hours: hours,
           contains_spoilers: spoilers,
           completion_status: completion || null,
+          completion_hours: completionHours,
           platinum_hours: platHours,
           platinum_difficulty: platDiff,
           platinum_enjoyment: platEnjoy,

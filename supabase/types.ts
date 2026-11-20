@@ -3922,6 +3922,7 @@ export type Database = {
       reviews: {
         Row: {
           body: string
+          completion_hours: number | null
           completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
@@ -3949,6 +3950,7 @@ export type Database = {
         }
         Insert: {
           body: string
+          completion_hours?: number | null
           completion_status?: string | null
           contains_spoilers: boolean
           created_at?: string | null
@@ -3976,6 +3978,7 @@ export type Database = {
         }
         Update: {
           body?: string
+          completion_hours?: number | null
           completion_status?: string | null
           contains_spoilers?: boolean
           created_at?: string | null
@@ -4933,15 +4936,19 @@ export type Database = {
       game_review_stats: {
         Row: {
           avg_difficulty: number | null
+          avg_extras_hours: number | null
+          avg_main_hours: number | null
           avg_platinum_difficulty: number | null
           avg_platinum_enjoyment: number | null
           avg_platinum_hours: number | null
           avg_score: number | null
           difficulty_count: number | null
           difficulty_sum: number | null
+          extras_hours_count: number | null
           game_id: string | null
           hours_count: number | null
           hours_sum: number | null
+          main_hours_count: number | null
           platinum_count: number | null
           review_count: number | null
           score_sum: number | null
@@ -5283,6 +5290,7 @@ export type Database = {
         }
         Returns: {
           body: string
+          completion_hours: number | null
           completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
@@ -5407,6 +5415,7 @@ export type Database = {
         }
         Returns: {
           body: string
+          completion_hours: number | null
           completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null

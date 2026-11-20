@@ -15,14 +15,18 @@ export const POST: APIRoute = async (context) => {
   const { score, title, body: reviewBody, platform_played_on, play_time_hours, contains_spoilers } = body;
   const isDraft = body.status === "draft";
 
+  // 1–10 ratings accept one decimal (e.g. 8.2). Values are snapped with
+  // Math.round(n * 10) / 10 so a request posting 8.26 lands as 8.3 — matches
+  // the DB column's numeric(3,1) scale and avoids a false 400 on floats
+  // picked up from a non-:step input.
   const rawDifficulty = body.difficulty;
   let difficulty: number | null = null;
   if (rawDifficulty !== null && rawDifficulty !== undefined && rawDifficulty !== "") {
     const parsed = Number(rawDifficulty);
-    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
-      return json({ error: "Difficulty must be an integer between 1 and 10." }, 400);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10) {
+      return json({ error: "Difficulty must be between 1 and 10." }, 400);
     }
-    difficulty = parsed;
+    difficulty = Math.round(parsed * 10) / 10;
   }
 
   const rawCompletion = body.completion_status;
@@ -32,6 +36,22 @@ export const POST: APIRoute = async (context) => {
       return json({ error: "Invalid completion status." }, 400);
     }
     completion_status = rawCompletion;
+  }
+
+  // Completion-hours is only meaningful for 'main' and 'extras'. Platinum has
+  // its own platinum_hours field, so an 'completion_hours' posted on a
+  // platinum row is ignored (DB CHECK rejects it too). DNF / null status
+  // can't log a completion time either.
+  let completion_hours: number | null = null;
+  if (completion_status === "main" || completion_status === "extras") {
+    const rawCh = body.completion_hours;
+    if (rawCh !== null && rawCh !== undefined && rawCh !== "") {
+      const n = Number(rawCh);
+      if (!Number.isInteger(n) || n < 0) {
+        return json({ error: "Hours to complete must be a non-negative integer." }, 400);
+      }
+      completion_hours = n;
+    }
   }
 
   // Plat-only fields are only read when the reviewer marked the plat. Any value
@@ -52,18 +72,18 @@ export const POST: APIRoute = async (context) => {
     const rawPd = body.platinum_difficulty;
     if (rawPd !== null && rawPd !== undefined && rawPd !== "") {
       const n = Number(rawPd);
-      if (!Number.isInteger(n) || n < 1 || n > 10) {
-        return json({ error: "Platinum difficulty must be an integer between 1 and 10." }, 400);
+      if (!Number.isFinite(n) || n < 1 || n > 10) {
+        return json({ error: "Platinum difficulty must be between 1 and 10." }, 400);
       }
-      platinum_difficulty = n;
+      platinum_difficulty = Math.round(n * 10) / 10;
     }
     const rawPe = body.platinum_enjoyment;
     if (rawPe !== null && rawPe !== undefined && rawPe !== "") {
       const n = Number(rawPe);
-      if (!Number.isInteger(n) || n < 1 || n > 10) {
-        return json({ error: "Platinum enjoyment must be an integer between 1 and 10." }, 400);
+      if (!Number.isFinite(n) || n < 1 || n > 10) {
+        return json({ error: "Platinum score must be between 1 and 10." }, 400);
       }
-      platinum_enjoyment = n;
+      platinum_enjoyment = Math.round(n * 10) / 10;
     }
   }
 
@@ -109,6 +129,7 @@ export const POST: APIRoute = async (context) => {
         contains_spoilers: contains_spoilers ?? false,
         difficulty,
         completion_status,
+        completion_hours,
         platinum_hours,
         platinum_difficulty,
         platinum_enjoyment,
@@ -156,6 +177,7 @@ export const POST: APIRoute = async (context) => {
       contains_spoilers: contains_spoilers ?? false,
       difficulty,
       completion_status,
+      completion_hours,
       platinum_hours,
       platinum_difficulty,
       platinum_enjoyment,
