@@ -34,6 +34,18 @@
     background: var(--tag-bg); border: 1px solid var(--border);
     border-radius: 8px; color: var(--text-secondary);
   }
+  .em-status-group { display: flex; gap: 8px; flex-wrap: wrap; }
+  .em-status-btn {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+    padding: 7px 14px; font-size: 13px; font-family: inherit; color: var(--text-secondary);
+    cursor: pointer; transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+  .em-status-btn:hover { color: var(--text-primary); }
+  .em-status-btn[aria-pressed="true"] {
+    background: var(--accent); border-color: var(--accent); color: var(--accent-text);
+  }
+  .em-plat-fields { display: none; }
+  .em-plat-fields[data-visible="true"] { display: flex; }
 
   @media (max-width: 640px) {
     #editModal {
@@ -108,6 +120,33 @@
     </div>
   </div>
 
+  <!-- How far did you get? -->
+  <div class="em-field" style="margin-top:12px">
+    <label class="em-label">How far did you get? <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
+    <div class="em-status-group" role="group" aria-label="Completion status">
+      <button type="button" class="em-status-btn" data-status="dnf" aria-pressed="false">✖ Didn't finish</button>
+      <button type="button" class="em-status-btn" data-status="main" aria-pressed="false">📖 Finished main story</button>
+      <button type="button" class="em-status-btn" data-status="platinum" aria-pressed="false">🏆 Platinum / 100%</button>
+    </div>
+    <input type="hidden" id="editCompletionStatus" value="" />
+  </div>
+
+  <!-- Platinum-only fields (revealed when 🏆 selected) -->
+  <div class="em-row em-plat-fields" id="editPlatFields" style="margin-top:12px">
+    <div class="em-field" style="width:140px">
+      <label class="em-label">Hours to plat</label>
+      <input type="number" id="editPlatHours" class="em-input" placeholder="—" min="0" max="99999" step="1" />
+    </div>
+    <div class="em-field" style="width:140px">
+      <label class="em-label">Plat difficulty</label>
+      <input type="number" id="editPlatDifficulty" class="em-input" placeholder="—" min="1" max="10" step="1" />
+    </div>
+    <div class="em-field" style="width:140px">
+      <label class="em-label">Plat enjoyment</label>
+      <input type="number" id="editPlatEnjoyment" class="em-input" placeholder="—" min="1" max="10" step="1" />
+    </div>
+  </div>
+
   <!-- YouTube video (optional) -->
   <div class="em-field" style="margin-top:12px">
     <label class="em-label" for="editYoutube">YouTube video <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
@@ -140,6 +179,11 @@
     document.getElementById('editSpoilers').checked = data.spoilers;
     document.getElementById('editYoutube').value   = data.youtubeUrl || '';
     document.getElementById('editError').textContent = '';
+
+    _setEditCompletion(data.completionStatus || '');
+    document.getElementById('editPlatHours').value      = data.platinumHours != null ? data.platinumHours : '';
+    document.getElementById('editPlatDifficulty').value = data.platinumDifficulty != null ? data.platinumDifficulty : '';
+    document.getElementById('editPlatEnjoyment').value  = data.platinumEnjoyment != null ? data.platinumEnjoyment : '';
 
     var count = (data.body || '').length;
     var charEl = document.getElementById('editCharCount');
@@ -178,6 +222,30 @@
     }
   }
 
+  function _setEditCompletion(status) {
+    document.getElementById('editCompletionStatus').value = status || '';
+    document.querySelectorAll('#editModal .em-status-btn').forEach(function(btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-status') === status ? 'true' : 'false');
+    });
+    document.getElementById('editPlatFields').setAttribute('data-visible', status === 'platinum' ? 'true' : 'false');
+    if (status !== 'platinum') {
+      // Clear plat inputs on demote — mirrors the API's behaviour so the user
+      // doesn't see stale values the next time they open the modal.
+      document.getElementById('editPlatHours').value = '';
+      document.getElementById('editPlatDifficulty').value = '';
+      document.getElementById('editPlatEnjoyment').value = '';
+    }
+  }
+
+  document.querySelectorAll('#editModal .em-status-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var target = btn.getAttribute('data-status');
+      var current = document.getElementById('editCompletionStatus').value;
+      // Clicking the already-selected chip clears the status (status is optional).
+      _setEditCompletion(current === target ? '' : target);
+    });
+  });
+
   document.getElementById('closeEditBtn').addEventListener('click', closeEditModal);
   document.getElementById('editOverlay').addEventListener('click', closeEditModal);
 
@@ -196,6 +264,10 @@
     var platform  = document.getElementById('editPlatform').value;
     var hours     = document.getElementById('editHours').value;
     var difficultyRaw = document.getElementById('editDifficulty').value;
+    var completion = document.getElementById('editCompletionStatus').value;
+    var platHoursRaw = document.getElementById('editPlatHours').value;
+    var platDiffRaw  = document.getElementById('editPlatDifficulty').value;
+    var platEnjoyRaw = document.getElementById('editPlatEnjoyment').value;
     var spoilers  = document.getElementById('editSpoilers').checked;
     var youtube   = document.getElementById('editYoutube').value.trim();
     var errorEl   = document.getElementById('editError');
@@ -210,6 +282,17 @@
     if (body.length > 10000) { errorEl.textContent = 'Review must be at most 10000 characters.'; return; }
     if (difficultyRaw && (!Number.isInteger(Number(difficultyRaw)) || Number(difficultyRaw) < 1 || Number(difficultyRaw) > 10)) {
       errorEl.textContent = 'Difficulty must be a whole number from 1 to 10.'; return;
+    }
+    if (completion === 'platinum') {
+      if (platHoursRaw && (!Number.isInteger(Number(platHoursRaw)) || Number(platHoursRaw) < 0)) {
+        errorEl.textContent = 'Hours to plat must be a non-negative whole number.'; return;
+      }
+      if (platDiffRaw && (!Number.isInteger(Number(platDiffRaw)) || Number(platDiffRaw) < 1 || Number(platDiffRaw) > 10)) {
+        errorEl.textContent = 'Plat difficulty must be a whole number from 1 to 10.'; return;
+      }
+      if (platEnjoyRaw && (!Number.isInteger(Number(platEnjoyRaw)) || Number(platEnjoyRaw) < 1 || Number(platEnjoyRaw) > 10)) {
+        errorEl.textContent = 'Plat enjoyment must be a whole number from 1 to 10.'; return;
+      }
     }
 
     btn.disabled = true;
@@ -228,6 +311,10 @@
           play_time_hours: hours ? parseInt(hours) : null,
           contains_spoilers: spoilers,
           difficulty: difficultyRaw ? parseInt(difficultyRaw) : null,
+          completion_status: completion || null,
+          platinum_hours: completion === 'platinum' && platHoursRaw ? parseInt(platHoursRaw) : null,
+          platinum_difficulty: completion === 'platinum' && platDiffRaw ? parseInt(platDiffRaw) : null,
+          platinum_enjoyment: completion === 'platinum' && platEnjoyRaw ? parseInt(platEnjoyRaw) : null,
           youtube_url: youtube,
         }),
       });

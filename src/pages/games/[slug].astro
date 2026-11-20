@@ -259,6 +259,7 @@ const [
     .select(`
       id, score, title, body, published_at, created_at,
       contains_spoilers, play_time_hours, difficulty,
+      completion_status, platinum_hours, platinum_difficulty, platinum_enjoyment,
       played_on:platform_played_on ( id, name, slug ),
       profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
       review_votes ( vote, profile_id ),
@@ -274,7 +275,7 @@ const [
   currentProfileId
     ? db
         .from('reviews')
-        .select('id, score, title, body, platform_played_on, play_time_hours, difficulty, contains_spoilers')
+        .select('id, score, title, body, platform_played_on, play_time_hours, difficulty, completion_status, platinum_hours, platinum_difficulty, platinum_enjoyment, contains_spoilers')
         .eq('profile_id', currentProfileId)
         .eq('game_id', game.id)
         .eq('status', 'draft')
@@ -367,6 +368,31 @@ const difficultyValues = reviewList
 const difficultyCount = difficultyValues.length
 const avgDifficulty = difficultyCount > 0
   ? difficultyValues.reduce((sum: number, d: number) => sum + d, 0) / difficultyCount
+  : null
+
+// Platinum community — only the reviewers who actually earned the plat. Each
+// of the three plat metrics is independently optional (a user may have logged
+// the plat but skipped the hours/difficulty/enjoyment fields), so each
+// average is computed over the subset that supplied that specific value.
+const platinumReviews = reviewList.filter((r: any) => r.completion_status === 'platinum')
+const platinumCount = platinumReviews.length
+const platinumHoursValues = platinumReviews
+  .map((r: any) => r.platinum_hours)
+  .filter((n: any): n is number => typeof n === 'number' && n >= 0)
+const avgPlatinumHours = platinumHoursValues.length > 0
+  ? Math.round(platinumHoursValues.reduce((s: number, n: number) => s + n, 0) / platinumHoursValues.length)
+  : null
+const platinumDifficultyValues = platinumReviews
+  .map((r: any) => r.platinum_difficulty)
+  .filter((n: any): n is number => typeof n === 'number')
+const avgPlatinumDifficulty = platinumDifficultyValues.length > 0
+  ? platinumDifficultyValues.reduce((s: number, n: number) => s + n, 0) / platinumDifficultyValues.length
+  : null
+const platinumEnjoymentValues = platinumReviews
+  .map((r: any) => r.platinum_enjoyment)
+  .filter((n: any): n is number => typeof n === 'number')
+const avgPlatinumEnjoyment = platinumEnjoymentValues.length > 0
+  ? platinumEnjoymentValues.reduce((s: number, n: number) => s + n, 0) / platinumEnjoymentValues.length
   : null
 
 const developers = (game.game_companies ?? []).filter((c: any) => c.role === 'developer').map((c: any) => c.developers).filter(Boolean)
@@ -1013,6 +1039,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .composer-draft:hover:not(:disabled){background:var(--bg-hover);color:var(--text-primary);border-color:var(--accent)}
     .composer-draft:disabled{opacity:.6;cursor:default}
     .composer-error{font-size:13px;color:#c0392b;min-height:18px;margin-top:8px}
+    .gc-status-group{display:flex;gap:8px;flex-wrap:wrap}
+    .gc-status-btn{background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:7px 14px;font-size:13px;font-family:inherit;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+    .gc-status-btn:hover{color:var(--text-primary)}
+    .gc-status-btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+    .gc-plat-fields{display:none}
+    .gc-plat-fields[data-visible="true"]{display:flex}
 
     /* ── Composer: Main Game / DLC toggle ── */
     .gc-type-toggle{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:3px;gap:2px}
@@ -1469,6 +1501,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           <div class="details-card">
             {releaseDate && (<div class="detail-row"><span class="detail-label">Released</span><span class="detail-value">{releaseDate}</span></div>)}
             {avgDifficulty != null && (<div class="detail-row"><span class="detail-label">Difficulty</span><span class="detail-value">{avgDifficulty.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({difficultyCount})</span></span></div>)}
+            {platinumCount > 0 && (<div class="detail-row"><span class="detail-label">🏆 Platinum</span><span class="detail-value">{platinumCount} reviewer{platinumCount === 1 ? '' : 's'}</span></div>)}
+            {avgPlatinumHours != null && (<div class="detail-row"><span class="detail-label">Avg time to plat</span><span class="detail-value">{avgPlatinumHours}h <span style="color:var(--text-tertiary)">({platinumHoursValues.length})</span></span></div>)}
+            {avgPlatinumDifficulty != null && (<div class="detail-row"><span class="detail-label">Plat difficulty</span><span class="detail-value">{avgPlatinumDifficulty.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({platinumDifficultyValues.length})</span></span></div>)}
+            {avgPlatinumEnjoyment != null && (<div class="detail-row"><span class="detail-label">Plat enjoyment</span><span class="detail-value">{avgPlatinumEnjoyment.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({platinumEnjoymentValues.length})</span></span></div>)}
             {developers.length > 0 && (<div class="detail-row"><span class="detail-label">Developer</span><span class="detail-value">{developers.map((d: any) => d.name).join(', ')}</span></div>)}
             {publishers.length > 0 && (<div class="detail-row"><span class="detail-label">Publisher</span><span class="detail-value">{publishers.map((p: any) => p.name).join(', ')}</span></div>)}
             {genres.length > 0 && (<div class="detail-row"><span class="detail-label">Genres</span><div class="tag-list">{genres.map((g: any) => <a href={`/genres/${g.slug}`} class="tag" style="transition:border-color .15s,color .15s">{g.name}</a>)}</div></div>)}
@@ -2577,6 +2613,29 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       </div>
     </div>
     <div class="composer-field" style="margin-top:12px">
+      <label class="composer-label">How far did you get? <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
+      <div class="gc-status-group" role="group" aria-label="Completion status">
+        <button type="button" class="gc-status-btn" data-status="dnf" aria-pressed="false">✖ Didn't finish</button>
+        <button type="button" class="gc-status-btn" data-status="main" aria-pressed="false">📖 Finished main story</button>
+        <button type="button" class="gc-status-btn" data-status="platinum" aria-pressed="false">🏆 Platinum / 100%</button>
+      </div>
+      <input type="hidden" id="gcCompletionStatus" value="" />
+    </div>
+    <div class="composer-row gc-plat-fields" id="gcPlatFields" style="margin-top:12px">
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Hours to plat</label>
+        <input type="number" id="gcPlatHours" class="composer-input" placeholder="—" min="0" max="99999" step="1" />
+      </div>
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Plat difficulty</label>
+        <input type="number" id="gcPlatDifficulty" class="composer-input" placeholder="—" min="1" max="10" step="1" />
+      </div>
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Plat enjoyment</label>
+        <input type="number" id="gcPlatEnjoyment" class="composer-input" placeholder="—" min="1" max="10" step="1" />
+      </div>
+    </div>
+    <div class="composer-field" style="margin-top:12px">
       <label class="composer-label" for="gcYoutube">YouTube video <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
       <input type="url" id="gcYoutube" class="composer-input" placeholder="https://youtube.com/watch?v=..." maxlength="300" />
     </div>
@@ -2608,7 +2667,32 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     document.getElementById('gcSpoilers').checked = !!draftReview.contains_spoilers
     document.getElementById('gcYoutube').value = draftReview.youtube_video_id ? 'https://www.youtube.com/watch?v=' + draftReview.youtube_video_id : ''
     document.getElementById('gcCharCount').textContent = (draftReview.body || '').length + ' / 10000'
+    _gcSetCompletion(draftReview.completion_status || '')
+    if (draftReview.platinum_hours != null) document.getElementById('gcPlatHours').value = draftReview.platinum_hours
+    if (draftReview.platinum_difficulty != null) document.getElementById('gcPlatDifficulty').value = draftReview.platinum_difficulty
+    if (draftReview.platinum_enjoyment != null) document.getElementById('gcPlatEnjoyment').value = draftReview.platinum_enjoyment
   }
+
+  function _gcSetCompletion(status) {
+    document.getElementById('gcCompletionStatus').value = status || ''
+    document.querySelectorAll('#gcFormContent .gc-status-btn').forEach(function(btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-status') === status ? 'true' : 'false')
+    })
+    document.getElementById('gcPlatFields').setAttribute('data-visible', status === 'platinum' ? 'true' : 'false')
+    if (status !== 'platinum') {
+      document.getElementById('gcPlatHours').value = ''
+      document.getElementById('gcPlatDifficulty').value = ''
+      document.getElementById('gcPlatEnjoyment').value = ''
+    }
+  }
+
+  document.querySelectorAll('#gcFormContent .gc-status-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var target = btn.getAttribute('data-status')
+      var current = document.getElementById('gcCompletionStatus').value
+      _gcSetCompletion(current === target ? '' : target)
+    })
+  })
 
   // Main Game / DLC toggle state. selectedTargetGameId defaults to this page's
   // game.id — when the user flips to DLC and picks a child, it updates to that
@@ -2775,6 +2859,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     var body = document.getElementById('gcBody').value.trim()
     var platform = document.getElementById('gcPlatform').value
     var hours = parseInt(document.getElementById('gcHours').value) || null
+    var completion = document.getElementById('gcCompletionStatus').value
+    var platHours = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatHours').value) || null) : null
+    var platDiff  = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatDifficulty').value) || null) : null
+    var platEnjoy = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatEnjoyment').value) || null) : null
     var spoilers = document.getElementById('gcSpoilers').checked
     var youtubeUrl = document.getElementById('gcYoutube').value.trim()
     var errEl = document.getElementById('gcError')
@@ -2807,6 +2895,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
               platform_played_on: platform || null,
               play_time_hours: hours,
               contains_spoilers: spoilers,
+              completion_status: completion || null,
+              platinum_hours: platHours,
+              platinum_difficulty: platDiff,
+              platinum_enjoyment: platEnjoy,
               youtube_url: youtubeUrl,
               status: 'published',
             })
@@ -2822,6 +2914,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
               platform_played_on: platform || null,
               play_time_hours: hours,
               contains_spoilers: spoilers,
+              completion_status: completion || null,
+              platinum_hours: platHours,
+              platinum_difficulty: platDiff,
+              platinum_enjoyment: platEnjoy,
               youtube_url: youtubeUrl,
             })
           })
@@ -2925,6 +3021,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       var body = document.getElementById('gcBody').value.trim()
       var platform = document.getElementById('gcPlatform').value
       var hours = parseInt(document.getElementById('gcHours').value) || null
+      var completion = document.getElementById('gcCompletionStatus').value
+      var platHours = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatHours').value) || null) : null
+      var platDiff  = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatDifficulty').value) || null) : null
+      var platEnjoy = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatEnjoyment').value) || null) : null
       var spoilers = document.getElementById('gcSpoilers').checked
       var youtubeUrl = document.getElementById('gcYoutube').value.trim()
       var errEl = document.getElementById('gcError')
@@ -2943,6 +3043,10 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           platform_played_on: platform || null,
           play_time_hours: hours,
           contains_spoilers: spoilers,
+          completion_status: completion || null,
+          platinum_hours: platHours,
+          platinum_difficulty: platDiff,
+          platinum_enjoyment: platEnjoy,
           youtube_url: youtubeUrl,
           status: 'draft',
         }

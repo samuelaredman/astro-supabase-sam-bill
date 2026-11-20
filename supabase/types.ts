@@ -3922,6 +3922,7 @@ export type Database = {
       reviews: {
         Row: {
           body: string
+          completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
           difficulty: number | null
@@ -3929,6 +3930,9 @@ export type Database = {
           game_id: string
           id: string
           platform_played_on: string | null
+          platinum_difficulty: number | null
+          platinum_enjoyment: number | null
+          platinum_hours: number | null
           play_time_days: number | null
           play_time_hours: number | null
           play_time_months: number | null
@@ -3945,6 +3949,7 @@ export type Database = {
         }
         Insert: {
           body: string
+          completion_status?: string | null
           contains_spoilers: boolean
           created_at?: string | null
           difficulty?: number | null
@@ -3952,6 +3957,9 @@ export type Database = {
           game_id: string
           id?: string
           platform_played_on?: string | null
+          platinum_difficulty?: number | null
+          platinum_enjoyment?: number | null
+          platinum_hours?: number | null
           play_time_days?: number | null
           play_time_hours?: number | null
           play_time_months?: number | null
@@ -3968,6 +3976,7 @@ export type Database = {
         }
         Update: {
           body?: string
+          completion_status?: string | null
           contains_spoilers?: boolean
           created_at?: string | null
           difficulty?: number | null
@@ -3975,6 +3984,9 @@ export type Database = {
           game_id?: string
           id?: string
           platform_played_on?: string | null
+          platinum_difficulty?: number | null
+          platinum_enjoyment?: number | null
+          platinum_hours?: number | null
           play_time_days?: number | null
           play_time_hours?: number | null
           play_time_months?: number | null
@@ -4921,12 +4933,16 @@ export type Database = {
       game_review_stats: {
         Row: {
           avg_difficulty: number | null
+          avg_platinum_difficulty: number | null
+          avg_platinum_enjoyment: number | null
+          avg_platinum_hours: number | null
           avg_score: number | null
           difficulty_count: number | null
           difficulty_sum: number | null
           game_id: string | null
           hours_count: number | null
           hours_sum: number | null
+          platinum_count: number | null
           review_count: number | null
           score_sum: number | null
         }
@@ -5267,6 +5283,7 @@ export type Database = {
         }
         Returns: {
           body: string
+          completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
           difficulty: number | null
@@ -5274,6 +5291,9 @@ export type Database = {
           game_id: string
           id: string
           platform_played_on: string | null
+          platinum_difficulty: number | null
+          platinum_enjoyment: number | null
+          platinum_hours: number | null
           play_time_days: number | null
           play_time_hours: number | null
           play_time_months: number | null
@@ -5387,6 +5407,7 @@ export type Database = {
         }
         Returns: {
           body: string
+          completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
           difficulty: number | null
@@ -5394,6 +5415,9 @@ export type Database = {
           game_id: string
           id: string
           platform_played_on: string | null
+          platinum_difficulty: number | null
+          platinum_enjoyment: number | null
+          platinum_hours: number | null
           play_time_days: number | null
           play_time_hours: number | null
           play_time_months: number | null

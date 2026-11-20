@@ -25,6 +25,48 @@ export const POST: APIRoute = async (context) => {
     difficulty = parsed;
   }
 
+  const rawCompletion = body.completion_status;
+  let completion_status: "dnf" | "main" | "platinum" | null = null;
+  if (rawCompletion !== null && rawCompletion !== undefined && rawCompletion !== "") {
+    if (rawCompletion !== "dnf" && rawCompletion !== "main" && rawCompletion !== "platinum") {
+      return json({ error: "Invalid completion status." }, 400);
+    }
+    completion_status = rawCompletion;
+  }
+
+  // Plat-only fields are only read when the reviewer marked the plat. Any value
+  // posted alongside dnf/main is ignored here (and the DB CHECK constraint
+  // would reject it anyway).
+  let platinum_hours: number | null = null;
+  let platinum_difficulty: number | null = null;
+  let platinum_enjoyment: number | null = null;
+  if (completion_status === "platinum") {
+    const rawPh = body.platinum_hours;
+    if (rawPh !== null && rawPh !== undefined && rawPh !== "") {
+      const n = Number(rawPh);
+      if (!Number.isInteger(n) || n < 0) {
+        return json({ error: "Platinum hours must be a non-negative integer." }, 400);
+      }
+      platinum_hours = n;
+    }
+    const rawPd = body.platinum_difficulty;
+    if (rawPd !== null && rawPd !== undefined && rawPd !== "") {
+      const n = Number(rawPd);
+      if (!Number.isInteger(n) || n < 1 || n > 10) {
+        return json({ error: "Platinum difficulty must be an integer between 1 and 10." }, 400);
+      }
+      platinum_difficulty = n;
+    }
+    const rawPe = body.platinum_enjoyment;
+    if (rawPe !== null && rawPe !== undefined && rawPe !== "") {
+      const n = Number(rawPe);
+      if (!Number.isInteger(n) || n < 1 || n > 10) {
+        return json({ error: "Platinum enjoyment must be an integer between 1 and 10." }, 400);
+      }
+      platinum_enjoyment = n;
+    }
+  }
+
   if (!body.game_id) return json({ error: "Missing game." }, 400);
 
   // Collapse any edition id to its canonical before anything else uses it, so a
@@ -66,6 +108,10 @@ export const POST: APIRoute = async (context) => {
         play_time_hours: play_time_hours || null,
         contains_spoilers: contains_spoilers ?? false,
         difficulty,
+        completion_status,
+        platinum_hours,
+        platinum_difficulty,
+        platinum_enjoyment,
         ...youtubeColumn,
         status: "draft",
         published_at: null,
@@ -109,6 +155,10 @@ export const POST: APIRoute = async (context) => {
       play_time_hours: play_time_hours || null,
       contains_spoilers: contains_spoilers ?? false,
       difficulty,
+      completion_status,
+      platinum_hours,
+      platinum_difficulty,
+      platinum_enjoyment,
       ...youtubeColumn,
       status: "published",
       published_at: new Date().toISOString(),

@@ -39,6 +39,7 @@ export const FEED_FILTER_EMPTY: Record<FeedFilter, string> = {
 /** The fields a ReviewCard needs. Same shape the home feed selects. */
 export const GROUP_FEED_SELECT = `
   id, score, title, body, play_time_hours, difficulty,
+  completion_status, platinum_hours, platinum_difficulty, platinum_enjoyment,
   contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
   games ( id, title, slug, cover_img_url, date_released, igdb_category ),

@@ -35,6 +35,60 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
+  // completion_status + plat-only fields follow the same "absent key = don't
+  // touch" rule. If the status is being changed away from 'platinum', the plat
+  // fields are nulled in the same update (the DB CHECK constraint requires it).
+  const completionKeyPresent = Object.prototype.hasOwnProperty.call(requestBody, "completion_status");
+  const completionColumns: Record<string, unknown> = {};
+  let demotingFromPlatinum = false;
+  if (completionKeyPresent) {
+    const raw = requestBody.completion_status;
+    let newStatus: "dnf" | "main" | "platinum" | null = null;
+    if (raw !== null && raw !== undefined && raw !== "") {
+      if (raw !== "dnf" && raw !== "main" && raw !== "platinum") {
+        return json({ error: "Invalid completion status." }, 400);
+      }
+      newStatus = raw;
+    }
+    completionColumns.completion_status = newStatus;
+    if (newStatus !== "platinum") demotingFromPlatinum = true;
+  }
+
+  const parsePlatField = (
+    key: "platinum_hours" | "platinum_difficulty" | "platinum_enjoyment",
+    label: string,
+    min: number,
+    max: number,
+  ): { present: boolean; value: number | null } | { error: string } => {
+    if (!Object.prototype.hasOwnProperty.call(requestBody, key)) return { present: false, value: null };
+    const r = requestBody[key];
+    if (r === null || r === undefined || r === "") return { present: true, value: null };
+    const n = Number(r);
+    if (!Number.isInteger(n) || n < min || n > max) {
+      return { error: `${label} must be an integer${min === 0 ? " 0 or greater" : ` between ${min} and ${max}`}.` };
+    }
+    return { present: true, value: n };
+  };
+
+  if (demotingFromPlatinum) {
+    // Any plat value posted in the same request is ignored on a demotion —
+    // staying consistent with the CHECK constraint is more important than
+    // preserving a value the client no longer has a way to display.
+    completionColumns.platinum_hours = null;
+    completionColumns.platinum_difficulty = null;
+    completionColumns.platinum_enjoyment = null;
+  } else {
+    const ph = parsePlatField("platinum_hours", "Platinum hours", 0, 99999);
+    if ("error" in ph) return json({ error: ph.error }, 400);
+    if (ph.present) completionColumns.platinum_hours = ph.value;
+    const pd = parsePlatField("platinum_difficulty", "Platinum difficulty", 1, 10);
+    if ("error" in pd) return json({ error: pd.error }, 400);
+    if (pd.present) completionColumns.platinum_difficulty = pd.value;
+    const pe = parsePlatField("platinum_enjoyment", "Platinum enjoyment", 1, 10);
+    if ("error" in pe) return json({ error: pe.error }, 400);
+    if (pe.present) completionColumns.platinum_enjoyment = pe.value;
+  }
+
   // Absent key (e.g. an older client) leaves the stored video untouched.
   const youtube = readYouTubeField(requestBody);
   if ("error" in youtube) return json({ error: youtube.error }, 400);
@@ -72,6 +126,7 @@ export const POST: APIRoute = async (context) => {
         play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
         contains_spoilers: contains_spoilers ?? false,
         ...difficultyColumn,
+        ...completionColumns,
         ...youtubeColumn,
         status: "draft",
       })
@@ -134,6 +189,7 @@ export const POST: APIRoute = async (context) => {
     play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
     contains_spoilers: contains_spoilers ?? false,
     ...difficultyColumn,
+    ...completionColumns,
     ...youtubeColumn,
   };
   if (publishing) {
