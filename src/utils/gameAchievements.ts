@@ -110,12 +110,24 @@ async function resolveAllXboxTitleIds(
 ): Promise<string[]> {
   const ids = new Set<string>();
   if (game.xbox_title_id) ids.add(game.xbox_title_id);
-  const { data } = await db
-    .from("user_xbox_achievements")
-    .select("xbox_title_id")
-    .eq("game_id", game.id)
-    .not("xbox_title_id", "is", null);
-  for (const row of (data ?? []) as any[]) {
+  // user_game_status.xbox_title_id is populated on every Xbox library sync
+  // (sync-library.ts) — more reliably present than user_xbox_achievements,
+  // which only fills once the user also runs the achievements sync. Check
+  // both so a library-only sync still surfaces the game's achievements.
+  const [statusRes, achRes] = await Promise.all([
+    db.from("user_game_status")
+      .select("xbox_title_id")
+      .eq("game_id", game.id)
+      .not("xbox_title_id", "is", null),
+    db.from("user_xbox_achievements")
+      .select("xbox_title_id")
+      .eq("game_id", game.id)
+      .not("xbox_title_id", "is", null),
+  ]);
+  for (const row of (statusRes.data ?? []) as any[]) {
+    if (row.xbox_title_id) ids.add(row.xbox_title_id);
+  }
+  for (const row of (achRes.data ?? []) as any[]) {
     if (row.xbox_title_id) ids.add(row.xbox_title_id);
   }
   return [...ids];
@@ -293,19 +305,29 @@ async function loadXbox(db: any, baseGameId: string): Promise<GameAchievementPla
   const dlcIds: string[] = (dlcRels ?? []).map((r: any) => r.to_game_id);
 
   const allGameIds = [baseGameId, ...dlcIds];
-  const [gamesRes, userAchRes] = await Promise.all([
+  const [gamesRes, userStatusRes, userAchRes] = await Promise.all([
     db.from("games").select("id, title, xbox_title_id").in("id", allGameIds),
+    db.from("user_game_status")
+      .select("game_id, xbox_title_id")
+      .in("game_id", allGameIds)
+      .not("xbox_title_id", "is", null),
     db.from("user_xbox_achievements")
       .select("game_id, xbox_title_id")
       .in("game_id", allGameIds)
       .not("xbox_title_id", "is", null),
   ]);
 
-  // title id per game_id: prefer the games column, fall back to any value
-  // seen on user_xbox_achievements rows for that game.
+  // title id per game_id: prefer the games column, then user_game_status
+  // (populated by the library sync), then user_xbox_achievements (populated
+  // only once achievements sync has also run).
   const titleIdByGameId = new Map<string, string>();
   for (const g of (gamesRes.data ?? []) as any[]) {
     if (g.xbox_title_id) titleIdByGameId.set(g.id, g.xbox_title_id);
+  }
+  for (const r of (userStatusRes.data ?? []) as any[]) {
+    if (r.xbox_title_id && !titleIdByGameId.has(r.game_id)) {
+      titleIdByGameId.set(r.game_id, r.xbox_title_id);
+    }
   }
   for (const r of (userAchRes.data ?? []) as any[]) {
     if (r.xbox_title_id && !titleIdByGameId.has(r.game_id)) {
