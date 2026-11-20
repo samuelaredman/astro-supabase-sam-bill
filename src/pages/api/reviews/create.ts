@@ -26,9 +26,9 @@ export const POST: APIRoute = async (context) => {
   }
 
   const rawCompletion = body.completion_status;
-  let completion_status: "dnf" | "main" | "platinum" | null = null;
+  let completion_status: "dnf" | "main" | "extras" | "platinum" | null = null;
   if (rawCompletion !== null && rawCompletion !== undefined && rawCompletion !== "") {
-    if (rawCompletion !== "dnf" && rawCompletion !== "main" && rawCompletion !== "platinum") {
+    if (rawCompletion !== "dnf" && rawCompletion !== "main" && rawCompletion !== "extras" && rawCompletion !== "platinum") {
       return json({ error: "Invalid completion status." }, 400);
     }
     completion_status = rawCompletion;

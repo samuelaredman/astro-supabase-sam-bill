@@ -43,9 +43,9 @@ export const POST: APIRoute = async (context) => {
   let demotingFromPlatinum = false;
   if (completionKeyPresent) {
     const raw = requestBody.completion_status;
-    let newStatus: "dnf" | "main" | "platinum" | null = null;
+    let newStatus: "dnf" | "main" | "extras" | "platinum" | null = null;
     if (raw !== null && raw !== undefined && raw !== "") {
-      if (raw !== "dnf" && raw !== "main" && raw !== "platinum") {
+      if (raw !== "dnf" && raw !== "main" && raw !== "extras" && raw !== "platinum") {
         return json({ error: "Invalid completion status." }, 400);
       }
       newStatus = raw;
