@@ -275,133 +275,110 @@ async function loadSteam(
 }
 
 // ── PSN ──────────────────────────────────────────────────────────────────
+// PSN trophy lists are per-title and generally mirror each other across
+// editions of the same game (PS4 + PS5 + Remastered + Director's Cut usually
+// all ship similar trophy sets). Rendering each sibling's schema as a
+// separate section produces visible duplicates, so collapse: pool every
+// npCommId across every sibling into one list and pick the single best
+// schema (most trophy_groups → biggest trophy list). One "PlayStation"
+// section per canonical game. Per-edition labels only make sense here if
+// the trophies actually diverge; in practice they don't.
 async function loadPsn(
   db: any,
   siblings: Sibling[],
   canonicalId: string,
   debug?: GameAchievementsDebug,
 ): Promise<GameAchievementPlatform | null> {
-  // All npCommIds across all siblings, resolved per sibling so we can label
-  // groups with the originating edition title.
-  const npCommIdsBySibling = new Map<string, Set<string>>();
+  const allNpCommIds = new Set<string>();
   for (const s of siblings) {
-    const ids = new Set<string>();
-    if (s.psn_np_communication_id) ids.add(s.psn_np_communication_id);
-    npCommIdsBySibling.set(s.id, ids);
+    if (s.psn_np_communication_id) allNpCommIds.add(s.psn_np_communication_id);
   }
   const { data: statusRows } = await db
     .from("user_game_status")
-    .select("game_id, psn_np_communication_id")
+    .select("psn_np_communication_id")
     .in("game_id", siblings.map((s) => s.id))
     .not("psn_np_communication_id", "is", null);
   for (const r of ((statusRows ?? []) as any[])) {
-    if (!r.psn_np_communication_id) continue;
-    if (!npCommIdsBySibling.has(r.game_id)) npCommIdsBySibling.set(r.game_id, new Set());
-    npCommIdsBySibling.get(r.game_id)!.add(r.psn_np_communication_id);
+    if (r.psn_np_communication_id) allNpCommIds.add(r.psn_np_communication_id);
   }
 
-  const allNpCommIds = [...new Set([...npCommIdsBySibling.values()].flatMap((s) => [...s]))];
-  if (debug) debug.resolved_psn_np_comm_ids = allNpCommIds;
-  if (allNpCommIds.length === 0) return null;
+  const npCommIds = [...allNpCommIds];
+  if (debug) debug.resolved_psn_np_comm_ids = npCommIds;
+  if (npCommIds.length === 0) return null;
 
   const { data: schemas } = await db
     .from("psn_title_schema")
     .select("np_communication_id, trophies, trophy_groups, no_trophies")
-    .in("np_communication_id", allNpCommIds);
+    .in("np_communication_id", npCommIds);
   if (debug) debug.psn_schema_rows_found = ((schemas ?? []) as any[]).map((r) => r.np_communication_id);
-  const schemaByNpCommId = new Map<string, any>(((schemas ?? []) as any[]).map((r) => [r.np_communication_id, r]));
 
-  // Rarity overlay from user_trophies across every npCommId we care about.
+  const viable = ((schemas ?? []) as any[])
+    .filter((s) => !s.no_trophies && Array.isArray(s.trophies) && s.trophies.length > 0);
+  if (viable.length === 0) return null;
+
+  viable.sort((a: any, b: any) => {
+    const aGroups = Array.isArray(a.trophy_groups) ? a.trophy_groups.length : 0;
+    const bGroups = Array.isArray(b.trophy_groups) ? b.trophy_groups.length : 0;
+    if (aGroups !== bGroups) return bGroups - aGroups;
+    return (b.trophies?.length ?? 0) - (a.trophies?.length ?? 0);
+  });
+  const schema = viable[0];
+  const chosenNpCommId: string = schema.np_communication_id;
+
+  // Rarity overlay from user_trophies scoped to the chosen npCommId.
   const { data: rateRows } = await db
     .from("user_trophies")
-    .select("np_communication_id, trophy_group_id, trophy_id, earned_rate")
-    .in("np_communication_id", allNpCommIds)
+    .select("trophy_group_id, trophy_id, earned_rate")
+    .eq("np_communication_id", chosenNpCommId)
     .not("earned_rate", "is", null);
-  const rateByKey = new Map<string, number>(); // `${npCommId}:${gid}:${tid}` → rate
+  const rateByKey = new Map<string, number>();
   for (const r of ((rateRows ?? []) as any[])) {
     const gid = r.trophy_group_id ?? "default";
-    const key = `${r.np_communication_id}:${gid}:${r.trophy_id}`;
+    const key = `${gid}:${r.trophy_id}`;
     if (!rateByKey.has(key) && typeof r.earned_rate === "number") {
       rateByKey.set(key, r.earned_rate);
     }
   }
 
-  // Per sibling, pick the best schema from its npCommId set (prefer schemas
-  // with trophy_groups populated, then largest). Produces at most ONE
-  // schema-worth of trophy groups per sibling — avoids the PS4/PS5
-  // re-release doubling that merging every npCommId would cause.
-  const perSiblingGroups: Array<{ sibling: Sibling; groups: GameAchievementGroup[]; npCommId: string }> = [];
-  for (const sibling of siblings) {
-    const ids = [...(npCommIdsBySibling.get(sibling.id) ?? [])];
-    const viable = ids
-      .map((id) => schemaByNpCommId.get(id))
-      .filter((s) => s && !s.no_trophies && Array.isArray(s.trophies) && s.trophies.length > 0);
-    if (viable.length === 0) continue;
-    viable.sort((a: any, b: any) => {
-      const aGroups = Array.isArray(a.trophy_groups) ? a.trophy_groups.length : 0;
-      const bGroups = Array.isArray(b.trophy_groups) ? b.trophy_groups.length : 0;
-      if (aGroups !== bGroups) return bGroups - aGroups;
-      return (b.trophies?.length ?? 0) - (a.trophies?.length ?? 0);
-    });
-    const schema = viable[0];
-    const chosenNpCommId: string = schema.np_communication_id;
-
-    const labelById = new Map<string, string>();
-    for (const g of (schema.trophy_groups ?? []) as any[]) {
-      if (g?.trophyGroupId) labelById.set(g.trophyGroupId, g.name ?? g.trophyGroupId);
-    }
-
-    const byGroup = new Map<string, GameAchievement[]>();
-    for (const t of schema.trophies as any[]) {
-      const gid = t.trophyGroupId ?? "default";
-      if (!byGroup.has(gid)) byGroup.set(gid, []);
-      const schemaRate = typeof t.trophyEarnedRate === "number"
-        ? t.trophyEarnedRate
-        : (typeof t.trophyEarnedRate === "string" ? Number(t.trophyEarnedRate) : null);
-      const rarity = schemaRate != null && Number.isFinite(schemaRate)
-        ? schemaRate
-        : (rateByKey.get(`${chosenNpCommId}:${gid}:${t.trophyId}`) ?? null);
-      byGroup.get(gid)!.push({
-        name: t.trophyName ?? null,
-        description: t.trophyDetail ?? null,
-        icon_url: t.trophyIconUrl ?? null,
-        tier: normalisePsnTier(t.trophyType),
-        gamerscore: null,
-        rarity_percent: rarity,
-        hidden: t.trophyHidden === true || t.trophyHidden === "true",
-      });
-    }
-
-    const ids2 = [...byGroup.keys()].sort((a, b) => {
-      if (a === "default") return -1;
-      if (b === "default") return 1;
-      return a.localeCompare(b, undefined, { numeric: true });
-    });
-
-    const groups: GameAchievementGroup[] = ids2.map((gid) => ({
-      key: gid === "default"
-        ? (sibling.id === canonicalId ? "base" : `psn:${sibling.id}:base`)
-        : `psn:${sibling.id}:${gid}`,
-      label: gid === "default" ? "Base Game" : (labelById.get(gid) ?? `DLC ${gid}`),
-      achievements: byGroup.get(gid)!.sort(sortByRarity),
-    }));
-
-    perSiblingGroups.push({ sibling, groups, npCommId: chosenNpCommId });
+  const labelById = new Map<string, string>();
+  for (const g of (schema.trophy_groups ?? []) as any[]) {
+    if (g?.trophyGroupId) labelById.set(g.trophyGroupId, g.name ?? g.trophyGroupId);
   }
 
-  if (perSiblingGroups.length === 0) return null;
-  const multi = perSiblingGroups.length > 1;
-
-  // Flatten, decorating labels with the sibling title when multiple
-  // contributed. "Base Game" becomes just the title; DLC labels get prefixed.
-  const flat: GameAchievementGroup[] = [];
-  for (const { sibling, groups } of perSiblingGroups) {
-    for (const g of groups) {
-      flat.push({ ...g, label: decorateLabel(g.label, sibling.title, multi) });
-    }
+  const byGroup = new Map<string, GameAchievement[]>();
+  for (const t of schema.trophies as any[]) {
+    const gid = t.trophyGroupId ?? "default";
+    if (!byGroup.has(gid)) byGroup.set(gid, []);
+    const schemaRate = typeof t.trophyEarnedRate === "number"
+      ? t.trophyEarnedRate
+      : (typeof t.trophyEarnedRate === "string" ? Number(t.trophyEarnedRate) : null);
+    const rarity = schemaRate != null && Number.isFinite(schemaRate)
+      ? schemaRate
+      : (rateByKey.get(`${gid}:${t.trophyId}`) ?? null);
+    byGroup.get(gid)!.push({
+      name: t.trophyName ?? null,
+      description: t.trophyDetail ?? null,
+      icon_url: t.trophyIconUrl ?? null,
+      tier: normalisePsnTier(t.trophyType),
+      gamerscore: null,
+      rarity_percent: rarity,
+      hidden: t.trophyHidden === true || t.trophyHidden === "true",
+    });
   }
 
-  return { source: "psn", platform_label: "PlayStation", count: flat.reduce((n, g) => n + g.achievements.length, 0), groups: flat };
+  const ids = [...byGroup.keys()].sort((a, b) => {
+    if (a === "default") return -1;
+    if (b === "default") return 1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+
+  const groups: GameAchievementGroup[] = ids.map((gid) => ({
+    key: gid === "default" ? "base" : `psn:${gid}`,
+    label: gid === "default" ? "Base Game" : (labelById.get(gid) ?? `DLC ${gid}`),
+    achievements: byGroup.get(gid)!.sort(sortByRarity),
+  }));
+
+  return { source: "psn", platform_label: "PlayStation", count: groups.reduce((n, g) => n + g.achievements.length, 0), groups };
 }
 
 // ── Xbox ─────────────────────────────────────────────────────────────────
