@@ -421,6 +421,44 @@ const avgPlatinumEnjoyment = platinumEnjoymentValues.length > 0
   ? platinumEnjoymentValues.reduce((s: number, n: number) => s + n, 0) / platinumEnjoymentValues.length
   : null
 
+// Per-platform platinum aggregates — the Achievements tab wants separate
+// community stats per section (PSN section = only reviewers who platted on a
+// PlayStation, Xbox = only Xbox, Steam = PC/Linux/Mac/Steam Deck + anyone who
+// didn't pick a platform). Platforms outside those three families
+// (Switch, 3DS, N64, etc.) don't contribute to any bucket because none of
+// the three schema sources cover them.
+function platformFamily(slug: string | null | undefined): 'steam' | 'psn' | 'xbox' | null {
+  if (!slug) return 'steam'
+  const s = String(slug).toLowerCase()
+  if (s.includes('xbox')) return 'xbox'
+  if (/^ps\b|^ps[1-5]\b|^playstation|^psp|vita|psvr/.test(s)) return 'psn'
+  if (/^win|^mac|^linux|^steam|^pc(?!-|\w)/.test(s) || s === 'win' || s === 'mac' || s === 'linux') return 'steam'
+  return null
+}
+
+type PlatformAgg = { hours: number | null; difficulty: number | null; enjoyment: number | null; count: number }
+function emptyAgg(): PlatformAgg { return { hours: null, difficulty: null, enjoyment: null, count: 0 } }
+const platinumAggByFamily: Record<'steam' | 'psn' | 'xbox', PlatformAgg> = {
+  steam: emptyAgg(), psn: emptyAgg(), xbox: emptyAgg(),
+}
+const bucketed: Record<'steam' | 'psn' | 'xbox', any[]> = { steam: [], psn: [], xbox: [] }
+for (const r of platinumReviews) {
+  const fam = platformFamily(r.played_on?.slug)
+  if (fam) bucketed[fam].push(r)
+}
+for (const fam of ['steam', 'psn', 'xbox'] as const) {
+  const rs = bucketed[fam]
+  const h = rs.map((r: any) => r.platinum_hours).filter((n: any) => typeof n === 'number' && n >= 0) as number[]
+  const d = rs.map((r: any) => r.platinum_difficulty).filter((v: any) => v != null && !Number.isNaN(Number(v))).map(Number)
+  const e = rs.map((r: any) => r.platinum_enjoyment).filter((v: any) => v != null && !Number.isNaN(Number(v))).map(Number)
+  platinumAggByFamily[fam] = {
+    count: rs.length,
+    hours: h.length ? Math.round(h.reduce((s, n) => s + n, 0) / h.length) : null,
+    difficulty: d.length ? d.reduce((s, n) => s + n, 0) / d.length : null,
+    enjoyment: e.length ? e.reduce((s, n) => s + n, 0) / e.length : null,
+  }
+}
+
 // Achievement/trophy schemas for the Achievements tab. Loaded unconditionally
 // (the tab link is only rendered when at least one platform has data); for a
 // game with no Steam/PSN/Xbox mapping this short-circuits to an empty result.
@@ -1829,15 +1867,22 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
               </span>
               <span class="ach-platform-label">{platform.platform_label}</span>
               <span class="ach-platform-stats">
-                {avgPlatinumHours != null && (
-                  <span class="ach-platform-stat"><b>{avgPlatinumHours}h</b> <span>to 100%</span></span>
-                )}
-                {avgPlatinumDifficulty != null && (
-                  <span class="ach-platform-stat"><b>{avgPlatinumDifficulty.toFixed(1)}</b> <span>Difficulty</span></span>
-                )}
-                {avgPlatinumEnjoyment != null && (
-                  <span class="ach-platform-stat"><b>{avgPlatinumEnjoyment.toFixed(1)}</b> <span>Score</span></span>
-                )}
+                {(() => {
+                  const agg = platinumAggByFamily[platform.source as 'steam' | 'psn' | 'xbox']
+                  return (
+                    <>
+                      {agg?.hours != null && (
+                        <span class="ach-platform-stat"><b>{agg.hours}h</b> <span>to 100%</span></span>
+                      )}
+                      {agg?.difficulty != null && (
+                        <span class="ach-platform-stat"><b>{agg.difficulty.toFixed(1)}</b> <span>Difficulty</span></span>
+                      )}
+                      {agg?.enjoyment != null && (
+                        <span class="ach-platform-stat"><b>{agg.enjoyment.toFixed(1)}</b> <span>Score</span></span>
+                      )}
+                    </>
+                  )
+                })()}
               </span>
               <span class="ach-platform-count">{platform.count} {platform.count === 1 ? 'achievement' : 'achievements'}</span>
               <svg class="ach-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
