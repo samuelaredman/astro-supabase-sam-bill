@@ -363,7 +363,9 @@ function wrap(
   };
 }
 
-// Unlocked first (most recent unlock on top), then locked by rarity.
+// Unlocked first (most recent unlock on top), then locked sorted by rarity
+// descending — most-attained-of-the-locked-ones first, rarest at the bottom.
+// Unknown rarity rows (-Infinity) sink to the bottom of the locked section.
 function sortAchievements(a: Achievement, b: Achievement): number {
   if (a.unlocked !== b.unlocked) return a.unlocked ? -1 : 1;
   if (a.unlocked) {
@@ -371,7 +373,7 @@ function sortAchievements(a: Achievement, b: Achievement): number {
     const bt = b.unlock_time ? new Date(b.unlock_time).getTime() : 0;
     return bt - at;
   }
-  const ap = a.global_percent ?? -1;
-  const bp = b.global_percent ?? -1;
+  const ap = a.global_percent ?? -Infinity;
+  const bp = b.global_percent ?? -Infinity;
   return bp - ap;
 }

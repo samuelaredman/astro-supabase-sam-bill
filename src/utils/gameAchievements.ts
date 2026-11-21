@@ -66,11 +66,12 @@ function steamIconUrl(icon: string | null | undefined, appid: number): string | 
   return `https://shared.fastly.steamstatic.com/community_assets/images/apps/${appid}/${filename}`;
 }
 
-// Locked rarity-ascending sort so rarest-first bubbles the sunshine rows up.
+// Sort by rarity descending — most-attained first, rarest at the bottom.
+// Nulls go last.
 function sortByRarity(a: GameAchievement, b: GameAchievement): number {
-  const ap = a.rarity_percent ?? 101;
-  const bp = b.rarity_percent ?? 101;
-  return ap - bp;
+  const ap = a.rarity_percent ?? -Infinity;
+  const bp = b.rarity_percent ?? -Infinity;
+  return bp - ap;
 }
 
 export async function loadGameAchievements(
