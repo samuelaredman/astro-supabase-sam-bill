@@ -1,0 +1,498 @@
+// Game-scoped achievement loader for the game detail page's Achievements tab.
+//
+// Mirrors the per-user modal (src/pages/api/user-achievements/game.ts) but
+// reads the schema tables (steam_app_schema / psn_title_schema /
+// xbox_title_schema) instead of user_* so the tab works for anonymous visitors
+// and for games nobody has synced yet.
+//
+// Rarity lives in the schema tables for all three platforms:
+//   - Steam: steam_app_schema.global_percents (jsonb map { api_name → % })
+//   - PSN:   psn_title_schema.trophies[].trophyEarnedRate (not populated —
+//            overlaid from user_trophies.earned_rate, which is a game-wide
+//            stat Sony returns on the per-user earned payload)
+//   - Xbox:  xbox_title_schema.achievements[].rarity
+// so no per-user sampling is needed for the data itself.
+//
+// Canonical/edition handling: canonical game pages must show achievements
+// from EVERY edition that collapses into them (Okami was PS2-only but
+// Okami HD is Steam+PS, Spider-Man and Spider-Man Remastered have different
+// trophy sets, etc.). The loader therefore resolves "siblings" = canonical +
+// every row whose canonical_game_id = canonical.id, then runs each platform
+// loader across that entire set. When multiple siblings contribute,
+// group labels get prefixed with the edition title so viewers can tell
+// "Spider-Man" trophies apart from "Spider-Man Remastered" trophies.
+
+export type AchievementSource = "steam" | "psn" | "xbox";
+
+export interface GameAchievement {
+  name: string | null;
+  description: string | null;
+  icon_url: string | null;
+  tier: "bronze" | "silver" | "gold" | "platinum" | null; // PSN only
+  gamerscore: number | null;                              // Xbox only
+  rarity_percent: number | null;
+  hidden: boolean;
+}
+
+export interface GameAchievementGroup {
+  key: string;
+  label: string;
+  achievements: GameAchievement[];
+}
+
+export interface GameAchievementPlatform {
+  source: AchievementSource;
+  platform_label: string;
+  count: number;
+  groups: GameAchievementGroup[];
+}
+
+export interface GameAchievementsData {
+  platforms: GameAchievementPlatform[];
+  debug?: GameAchievementsDebug;
+}
+
+export interface GameAchievementsDebug {
+  canonical_id: string;
+  siblings: Array<{ id: string; title: string; psn_np_communication_id: string | null; xbox_title_id: string | null; isCanonical: boolean }>;
+  resolved_psn_np_comm_ids: string[];
+  resolved_xbox_title_ids: string[];
+  xbox_dlc_game_ids: string[];
+  xbox_title_id_by_game_id: Record<string, string>;
+  xbox_schema_rows_found: string[];
+  psn_schema_rows_found: string[];
+  steam_appids: number[];
+  steam_schema_rows_found: number[];
+}
+
+type Sibling = {
+  id: string;
+  title: string;
+  psn_np_communication_id: string | null;
+  xbox_title_id: string | null;
+  isCanonical: boolean;
+};
+
+const DLC_RELATION_TYPES = ["dlc", "expansion", "standalone_expansion"];
+
+// Relationships that mean "same game, different form" — remasters, ports,
+// regional releases, special editions. Chekpoint's canonical linker usually
+// collapses these into canonical via games.canonical_game_id, but not
+// always (IGDB categorization is spotty on older ports). Walk the
+// game_relationships graph too so a canonical page for Okami picks up
+// Okami HD's PSN trophies even when the HD edition never got the
+// canonical_game_id pointer.
+const SIBLING_RELATION_TYPES = ["edition", "version", "release", "remake", "remaster_merge"];
+
+function steamIconUrl(icon: string | null | undefined, appid: number): string | null {
+  if (!icon) return null;
+  const filename = icon.split("/").pop();
+  if (!filename) return null;
+  return `https://shared.fastly.steamstatic.com/community_assets/images/apps/${appid}/${filename}`;
+}
+
+function sortByRarity(a: GameAchievement, b: GameAchievement): number {
+  const ap = a.rarity_percent ?? -Infinity;
+  const bp = b.rarity_percent ?? -Infinity;
+  return bp - ap;
+}
+
+function normalisePsnTier(v: any): "bronze" | "silver" | "gold" | "platinum" | null {
+  if (v === "bronze" || v === "silver" || v === "gold" || v === "platinum") return v;
+  return null;
+}
+
+export async function loadGameAchievements(
+  db: any,
+  game: { id: string; psn_np_communication_id: string | null; xbox_title_id: string | null },
+  opts: { debug?: boolean } = {},
+): Promise<GameAchievementsData> {
+  // Canonical + every edition. Two sources:
+  //   1) games.canonical_game_id = canonical.id — the direct link set by the
+  //      canonical collapser.
+  //   2) game_relationships rows whose from_game_id = canonical.id and
+  //      relation_type is in SIBLING_RELATION_TYPES — covers ports /
+  //      remasters / re-releases that IGDB never flagged for canonical
+  //      collapse (Okami HD's PSN re-release is a real example).
+  // Fetched in parallel and merged by id so a row appearing in both doesn't
+  // get processed twice.
+  const [directRes, relRes] = await Promise.all([
+    db.from("games")
+      .select("id, title, psn_np_communication_id, xbox_title_id")
+      .or(`id.eq.${game.id},canonical_game_id.eq.${game.id}`),
+    db.from("game_relationships")
+      .select("to_game_id")
+      .eq("from_game_id", game.id)
+      .in("relation_type", SIBLING_RELATION_TYPES),
+  ]);
+
+  const byId = new Map<string, Sibling>();
+  for (const r of ((directRes.data ?? []) as any[])) {
+    byId.set(r.id, {
+      id: r.id,
+      title: r.title,
+      psn_np_communication_id: r.psn_np_communication_id,
+      xbox_title_id: r.xbox_title_id,
+      isCanonical: r.id === game.id,
+    });
+  }
+  const relatedIds = ((relRes.data ?? []) as any[])
+    .map((r: any) => r.to_game_id)
+    .filter((id: string) => !byId.has(id));
+  if (relatedIds.length > 0) {
+    const { data: extraRows } = await db
+      .from("games")
+      .select("id, title, psn_np_communication_id, xbox_title_id")
+      .in("id", relatedIds);
+    for (const r of ((extraRows ?? []) as any[])) {
+      byId.set(r.id, {
+        id: r.id,
+        title: r.title,
+        psn_np_communication_id: r.psn_np_communication_id,
+        xbox_title_id: r.xbox_title_id,
+        isCanonical: false,
+      });
+    }
+  }
+
+  const siblings: Sibling[] = byId.size > 0
+    ? [...byId.values()]
+    // Defensive fallback: if both queries somehow return nothing, treat just the canonical.
+    : [{ id: game.id, title: "", psn_np_communication_id: game.psn_np_communication_id, xbox_title_id: game.xbox_title_id, isCanonical: true }];
+
+  const canonicalId = game.id;
+
+  const debug: GameAchievementsDebug | undefined = opts.debug ? {
+    canonical_id: canonicalId,
+    siblings: siblings.map((s) => ({
+      id: s.id,
+      title: s.title,
+      psn_np_communication_id: s.psn_np_communication_id,
+      xbox_title_id: s.xbox_title_id,
+      isCanonical: s.isCanonical,
+    })),
+    resolved_psn_np_comm_ids: [],
+    resolved_xbox_title_ids: [],
+    xbox_dlc_game_ids: [],
+    xbox_title_id_by_game_id: {},
+    xbox_schema_rows_found: [],
+    psn_schema_rows_found: [],
+    steam_appids: [],
+    steam_schema_rows_found: [],
+  } : undefined;
+
+  const [steam, psn, xbox] = await Promise.all([
+    loadSteam(db, siblings, canonicalId, debug),
+    loadPsn(db, siblings, canonicalId, debug),
+    loadXbox(db, siblings, canonicalId, debug),
+  ]);
+
+  const platforms: GameAchievementPlatform[] = [];
+  if (steam) platforms.push(steam);
+  if (psn) platforms.push(psn);
+  if (xbox) platforms.push(xbox);
+
+  return debug ? { platforms, debug } : { platforms };
+}
+
+// Prefix group labels with the edition title when multiple siblings contributed
+// achievements on this platform — otherwise keep the plain "Base Game" / DLC
+// name. Avoids noisy prefixes on the common single-sibling case.
+function decorateLabel(baseLabel: string, siblingTitle: string, multiContributed: boolean): string {
+  if (!multiContributed || !siblingTitle) return baseLabel;
+  return baseLabel === "Base Game" ? siblingTitle : `${siblingTitle} — ${baseLabel}`;
+}
+
+// ── Steam ────────────────────────────────────────────────────────────────
+async function loadSteam(
+  db: any,
+  siblings: Sibling[],
+  canonicalId: string,
+  debug?: GameAchievementsDebug,
+): Promise<GameAchievementPlatform | null> {
+  const sibIds = siblings.map((s) => s.id);
+  const { data: mappings } = await db
+    .from("game_steam_apps")
+    .select("steam_appid, game_id")
+    .in("game_id", sibIds);
+  const appidsBySibling = new Map<string, number[]>();
+  for (const m of ((mappings ?? []) as any[])) {
+    const n = Number(m.steam_appid);
+    if (!Number.isFinite(n)) continue;
+    if (!appidsBySibling.has(m.game_id)) appidsBySibling.set(m.game_id, []);
+    appidsBySibling.get(m.game_id)!.push(n);
+  }
+  const allAppids = [...new Set(([...appidsBySibling.values()]).flat())];
+  if (debug) debug.steam_appids = allAppids;
+  if (allAppids.length === 0) return null;
+
+  const { data: schemas } = await db
+    .from("steam_app_schema")
+    .select("steam_appid, achievements, global_percents, no_achievements")
+    .in("steam_appid", allAppids);
+  if (debug) debug.steam_schema_rows_found = ((schemas ?? []) as any[]).map((r) => r.steam_appid);
+  const schemaByAppid = new Map<number, any>(((schemas ?? []) as any[]).map((r) => [r.steam_appid, r]));
+
+  const contributingSiblings = siblings.filter((s) => (appidsBySibling.get(s.id) ?? []).some((appid) => {
+    const sc = schemaByAppid.get(appid);
+    return sc && !sc.no_achievements && Array.isArray(sc.achievements) && sc.achievements.length > 0;
+  }));
+  if (contributingSiblings.length === 0) return null;
+  const multi = contributingSiblings.length > 1;
+
+  const groups: GameAchievementGroup[] = [];
+  for (const sibling of contributingSiblings) {
+    const appids = appidsBySibling.get(sibling.id) ?? [];
+    const merged: GameAchievement[] = [];
+    for (const appid of appids) {
+      const schema = schemaByAppid.get(appid);
+      if (!schema || schema.no_achievements) continue;
+      const globalPercents: Record<string, number> = schema.global_percents ?? {};
+      const achs: any[] = Array.isArray(schema.achievements) ? schema.achievements : [];
+      for (const a of achs) {
+        const apiName = a.name ?? null;
+        merged.push({
+          name: a.displayName ?? apiName,
+          description: a.description ?? null,
+          icon_url: steamIconUrl(a.icon || a.icongray, appid),
+          tier: null,
+          gamerscore: null,
+          rarity_percent: apiName != null && globalPercents[apiName] != null ? globalPercents[apiName] : null,
+          hidden: a.hidden === 1,
+        });
+      }
+    }
+    if (merged.length === 0) continue;
+    merged.sort(sortByRarity);
+    groups.push({
+      key: sibling.id === canonicalId ? "base" : `steam:${sibling.id}`,
+      label: decorateLabel("Base Game", sibling.title, multi),
+      achievements: merged,
+    });
+  }
+  if (groups.length === 0) return null;
+  return { source: "steam", platform_label: "Steam", count: groups.reduce((n, g) => n + g.achievements.length, 0), groups };
+}
+
+// ── PSN ──────────────────────────────────────────────────────────────────
+// PSN trophy lists are per-title and generally mirror each other across
+// editions of the same game (PS4 + PS5 + Remastered + Director's Cut usually
+// all ship similar trophy sets). Rendering each sibling's schema as a
+// separate section produces visible duplicates, so collapse: pool every
+// npCommId across every sibling into one list and pick the single best
+// schema (most trophy_groups → biggest trophy list). One "PlayStation"
+// section per canonical game. Per-edition labels only make sense here if
+// the trophies actually diverge; in practice they don't.
+async function loadPsn(
+  db: any,
+  siblings: Sibling[],
+  canonicalId: string,
+  debug?: GameAchievementsDebug,
+): Promise<GameAchievementPlatform | null> {
+  const allNpCommIds = new Set<string>();
+  for (const s of siblings) {
+    if (s.psn_np_communication_id) allNpCommIds.add(s.psn_np_communication_id);
+  }
+  const { data: statusRows } = await db
+    .from("user_game_status")
+    .select("psn_np_communication_id")
+    .in("game_id", siblings.map((s) => s.id))
+    .not("psn_np_communication_id", "is", null);
+  for (const r of ((statusRows ?? []) as any[])) {
+    if (r.psn_np_communication_id) allNpCommIds.add(r.psn_np_communication_id);
+  }
+
+  const npCommIds = [...allNpCommIds];
+  if (debug) debug.resolved_psn_np_comm_ids = npCommIds;
+  if (npCommIds.length === 0) return null;
+
+  const { data: schemas } = await db
+    .from("psn_title_schema")
+    .select("np_communication_id, trophies, trophy_groups, no_trophies")
+    .in("np_communication_id", npCommIds);
+  if (debug) debug.psn_schema_rows_found = ((schemas ?? []) as any[]).map((r) => r.np_communication_id);
+
+  const viable = ((schemas ?? []) as any[])
+    .filter((s) => !s.no_trophies && Array.isArray(s.trophies) && s.trophies.length > 0);
+  if (viable.length === 0) return null;
+
+  viable.sort((a: any, b: any) => {
+    const aGroups = Array.isArray(a.trophy_groups) ? a.trophy_groups.length : 0;
+    const bGroups = Array.isArray(b.trophy_groups) ? b.trophy_groups.length : 0;
+    if (aGroups !== bGroups) return bGroups - aGroups;
+    return (b.trophies?.length ?? 0) - (a.trophies?.length ?? 0);
+  });
+  const schema = viable[0];
+  const chosenNpCommId: string = schema.np_communication_id;
+
+  // Rarity overlay from user_trophies scoped to the chosen npCommId.
+  const { data: rateRows } = await db
+    .from("user_trophies")
+    .select("trophy_group_id, trophy_id, earned_rate")
+    .eq("np_communication_id", chosenNpCommId)
+    .not("earned_rate", "is", null);
+  const rateByKey = new Map<string, number>();
+  for (const r of ((rateRows ?? []) as any[])) {
+    const gid = r.trophy_group_id ?? "default";
+    const key = `${gid}:${r.trophy_id}`;
+    if (!rateByKey.has(key) && typeof r.earned_rate === "number") {
+      rateByKey.set(key, r.earned_rate);
+    }
+  }
+
+  const labelById = new Map<string, string>();
+  for (const g of (schema.trophy_groups ?? []) as any[]) {
+    if (g?.trophyGroupId) labelById.set(g.trophyGroupId, g.name ?? g.trophyGroupId);
+  }
+
+  const byGroup = new Map<string, GameAchievement[]>();
+  for (const t of schema.trophies as any[]) {
+    const gid = t.trophyGroupId ?? "default";
+    if (!byGroup.has(gid)) byGroup.set(gid, []);
+    const schemaRate = typeof t.trophyEarnedRate === "number"
+      ? t.trophyEarnedRate
+      : (typeof t.trophyEarnedRate === "string" ? Number(t.trophyEarnedRate) : null);
+    const rarity = schemaRate != null && Number.isFinite(schemaRate)
+      ? schemaRate
+      : (rateByKey.get(`${gid}:${t.trophyId}`) ?? null);
+    byGroup.get(gid)!.push({
+      name: t.trophyName ?? null,
+      description: t.trophyDetail ?? null,
+      icon_url: t.trophyIconUrl ?? null,
+      tier: normalisePsnTier(t.trophyType),
+      gamerscore: null,
+      rarity_percent: rarity,
+      hidden: t.trophyHidden === true || t.trophyHidden === "true",
+    });
+  }
+
+  const ids = [...byGroup.keys()].sort((a, b) => {
+    if (a === "default") return -1;
+    if (b === "default") return 1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+
+  const groups: GameAchievementGroup[] = ids.map((gid) => ({
+    key: gid === "default" ? "base" : `psn:${gid}`,
+    label: gid === "default" ? "Base Game" : (labelById.get(gid) ?? `DLC ${gid}`),
+    achievements: byGroup.get(gid)!.sort(sortByRarity),
+  }));
+
+  return { source: "psn", platform_label: "PlayStation", count: groups.reduce((n, g) => n + g.achievements.length, 0), groups };
+}
+
+// ── Xbox ─────────────────────────────────────────────────────────────────
+async function loadXbox(
+  db: any,
+  siblings: Sibling[],
+  canonicalId: string,
+  debug?: GameAchievementsDebug,
+): Promise<GameAchievementPlatform | null> {
+  // For each sibling independently, climb game_relationships to find DLC
+  // children. Multiple siblings can each have their own Xbox base + DLC
+  // chain; iterate per-sibling so we don't conflate them.
+
+  // Prefetch DLC relationships for every sibling at once.
+  const sibIds = siblings.map((s) => s.id);
+  const { data: allRels } = await db
+    .from("game_relationships")
+    .select("from_game_id, to_game_id")
+    .in("from_game_id", sibIds)
+    .in("relation_type", DLC_RELATION_TYPES);
+  const dlcIdsBySibling = new Map<string, string[]>();
+  for (const r of ((allRels ?? []) as any[])) {
+    if (!dlcIdsBySibling.has(r.from_game_id)) dlcIdsBySibling.set(r.from_game_id, []);
+    dlcIdsBySibling.get(r.from_game_id)!.push(r.to_game_id);
+  }
+  const allDlcIds = [...new Set([...dlcIdsBySibling.values()].flat())];
+  if (debug) debug.xbox_dlc_game_ids = allDlcIds;
+
+  // Prefetch titles + xbox_title_id for every sibling + every DLC child.
+  const allGameIds = [...new Set([...sibIds, ...allDlcIds])];
+  const [gamesRes, userStatusRes, userAchRes] = await Promise.all([
+    db.from("games").select("id, title, xbox_title_id").in("id", allGameIds),
+    db.from("user_game_status")
+      .select("game_id, xbox_title_id")
+      .in("game_id", allGameIds)
+      .not("xbox_title_id", "is", null),
+    db.from("user_xbox_achievements")
+      .select("game_id, xbox_title_id")
+      .in("game_id", allGameIds)
+      .not("xbox_title_id", "is", null),
+  ]);
+
+  const titleIdByGameId = new Map<string, string>();
+  const titleByGameId = new Map<string, string>();
+  for (const g of ((gamesRes.data ?? []) as any[])) {
+    titleByGameId.set(g.id, g.title);
+    if (g.xbox_title_id) titleIdByGameId.set(g.id, g.xbox_title_id);
+  }
+  for (const r of ((userStatusRes.data ?? []) as any[])) {
+    if (r.xbox_title_id && !titleIdByGameId.has(r.game_id)) titleIdByGameId.set(r.game_id, r.xbox_title_id);
+  }
+  for (const r of ((userAchRes.data ?? []) as any[])) {
+    if (r.xbox_title_id && !titleIdByGameId.has(r.game_id)) titleIdByGameId.set(r.game_id, r.xbox_title_id);
+  }
+  if (debug) {
+    for (const [k, v] of titleIdByGameId) debug.xbox_title_id_by_game_id[k] = v;
+    debug.resolved_xbox_title_ids = [...new Set([...titleIdByGameId.values()])];
+  }
+
+  const allTitleIds = [...new Set([...titleIdByGameId.values()])];
+  if (allTitleIds.length === 0) return null;
+
+  const { data: schemaRows } = await db
+    .from("xbox_title_schema")
+    .select("xbox_title_id, achievements, no_achievements")
+    .in("xbox_title_id", allTitleIds);
+  if (debug) debug.xbox_schema_rows_found = ((schemaRows ?? []) as any[]).map((r) => r.xbox_title_id);
+  const schemaByTitleId = new Map<string, any>(((schemaRows ?? []) as any[]).map((r) => [r.xbox_title_id, r]));
+
+  // Build per-sibling group lists; each has a base entry + 0..N DLC entries.
+  const perSiblingGroups: Array<{ sibling: Sibling; groups: GameAchievementGroup[] }> = [];
+  for (const sibling of siblings) {
+    const dlcIds = dlcIdsBySibling.get(sibling.id) ?? [];
+    // Order: sibling (base) first, then DLC in title order.
+    const ordered = [sibling.id, ...dlcIds.sort((a, b) => (titleByGameId.get(a) ?? "").localeCompare(titleByGameId.get(b) ?? ""))];
+    const groups: GameAchievementGroup[] = [];
+    for (const gid of ordered) {
+      const titleId = titleIdByGameId.get(gid);
+      if (!titleId) continue;
+      const schema = schemaByTitleId.get(titleId);
+      if (!schema || schema.no_achievements) continue;
+      const achs: any[] = Array.isArray(schema.achievements) ? schema.achievements : [];
+      if (achs.length === 0) continue;
+      const normalised: GameAchievement[] = achs.map((a) => ({
+        name: a.name ?? null,
+        description: a.description ?? null,
+        icon_url: a.icon_url ?? null,
+        tier: null,
+        gamerscore: typeof a.gamerscore === "number" ? a.gamerscore : null,
+        rarity_percent: typeof a.rarity === "number" ? a.rarity : null,
+        hidden: false,
+      })).sort(sortByRarity);
+
+      const isBase = gid === sibling.id;
+      groups.push({
+        key: isBase
+          ? (sibling.id === canonicalId ? "base" : `xbox:${sibling.id}:base`)
+          : `xbox:${gid}`,
+        label: isBase ? "Base Game" : (titleByGameId.get(gid) ?? "DLC"),
+        achievements: normalised,
+      });
+    }
+    if (groups.length > 0) perSiblingGroups.push({ sibling, groups });
+  }
+
+  if (perSiblingGroups.length === 0) return null;
+  const multi = perSiblingGroups.length > 1;
+
+  const flat: GameAchievementGroup[] = [];
+  for (const { sibling, groups } of perSiblingGroups) {
+    for (const g of groups) {
+      flat.push({ ...g, label: decorateLabel(g.label, sibling.title, multi) });
+    }
+  }
+
+  return { source: "xbox", platform_label: "Xbox", count: flat.reduce((n, g) => n + g.achievements.length, 0), groups: flat };
+}

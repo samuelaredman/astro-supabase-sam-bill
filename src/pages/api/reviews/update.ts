@@ -19,6 +19,107 @@ export const POST: APIRoute = async (context) => {
 
   if (!review_id) return json({ error: "Missing review id." }, 400);
 
+  // Absent key = older client; don't touch the stored value. Explicit null or
+  // empty string clears it. A number must be an integer 1–10.
+  const difficultyKeyPresent = Object.prototype.hasOwnProperty.call(requestBody, "difficulty");
+  let difficultyColumn: { difficulty?: number | null } = {};
+  if (difficultyKeyPresent) {
+    const raw = requestBody.difficulty;
+    if (raw === null || raw === undefined || raw === "") {
+      difficultyColumn = { difficulty: null };
+    } else {
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10) {
+        return json({ error: "Difficulty must be between 1 and 10." }, 400);
+      }
+      difficultyColumn = { difficulty: Math.round(parsed * 10) / 10 };
+    }
+  }
+
+  // completion_status + plat-only fields follow the same "absent key = don't
+  // touch" rule. If the status is being changed away from 'platinum', the plat
+  // fields are nulled in the same update (the DB CHECK constraint requires it).
+  const completionKeyPresent = Object.prototype.hasOwnProperty.call(requestBody, "completion_status");
+  const completionColumns: Record<string, unknown> = {};
+  let demotingFromPlatinum = false;
+  if (completionKeyPresent) {
+    const raw = requestBody.completion_status;
+    let newStatus: "dnf" | "main" | "extras" | "platinum" | null = null;
+    if (raw !== null && raw !== undefined && raw !== "") {
+      if (raw !== "dnf" && raw !== "main" && raw !== "extras" && raw !== "platinum") {
+        return json({ error: "Invalid completion status." }, 400);
+      }
+      newStatus = raw;
+    }
+    completionColumns.completion_status = newStatus;
+    if (newStatus !== "platinum") demotingFromPlatinum = true;
+  }
+
+  // platinum_hours is integer. platinum_difficulty / platinum_enjoyment are
+  // numeric(3,1), so they accept one decimal and the server snaps the value
+  // to match the column's scale.
+  const parsePlatField = (
+    key: "platinum_hours" | "platinum_difficulty" | "platinum_enjoyment",
+    label: string,
+    min: number,
+    max: number,
+    decimal: boolean,
+  ): { present: boolean; value: number | null } | { error: string } => {
+    if (!Object.prototype.hasOwnProperty.call(requestBody, key)) return { present: false, value: null };
+    const r = requestBody[key];
+    if (r === null || r === undefined || r === "") return { present: true, value: null };
+    const n = Number(r);
+    const invalid = decimal
+      ? !Number.isFinite(n) || n < min || n > max
+      : !Number.isInteger(n) || n < min || n > max;
+    if (invalid) {
+      return { error: `${label} must be ${decimal ? "between" : "an integer between"} ${min} and ${max}.` };
+    }
+    return { present: true, value: decimal ? Math.round(n * 10) / 10 : n };
+  };
+
+  if (demotingFromPlatinum) {
+    // Any plat value posted in the same request is ignored on a demotion —
+    // staying consistent with the CHECK constraint is more important than
+    // preserving a value the client no longer has a way to display.
+    completionColumns.platinum_hours = null;
+    completionColumns.platinum_difficulty = null;
+    completionColumns.platinum_enjoyment = null;
+  } else {
+    const ph = parsePlatField("platinum_hours", "Platinum hours", 0, 99999, false);
+    if ("error" in ph) return json({ error: ph.error }, 400);
+    if (ph.present) completionColumns.platinum_hours = ph.value;
+    const pd = parsePlatField("platinum_difficulty", "Platinum difficulty", 1, 10, true);
+    if ("error" in pd) return json({ error: pd.error }, 400);
+    if (pd.present) completionColumns.platinum_difficulty = pd.value;
+    const pe = parsePlatField("platinum_enjoyment", "Platinum score", 1, 10, true);
+    if ("error" in pe) return json({ error: pe.error }, 400);
+    if (pe.present) completionColumns.platinum_enjoyment = pe.value;
+  }
+
+  // completion_hours is only valid for 'main' and 'extras'. If the status is
+  // being set to anything else (dnf, platinum, null), auto-null it in the same
+  // update to satisfy the DB CHECK.
+  const statusOnThisUpdate = completionKeyPresent
+    ? (completionColumns.completion_status as "dnf" | "main" | "extras" | "platinum" | null)
+    : undefined;
+  const nullingCompletionHours =
+    completionKeyPresent && statusOnThisUpdate !== "main" && statusOnThisUpdate !== "extras";
+  if (nullingCompletionHours) {
+    completionColumns.completion_hours = null;
+  } else if (Object.prototype.hasOwnProperty.call(requestBody, "completion_hours")) {
+    const r = requestBody.completion_hours;
+    if (r === null || r === undefined || r === "") {
+      completionColumns.completion_hours = null;
+    } else {
+      const n = Number(r);
+      if (!Number.isInteger(n) || n < 0) {
+        return json({ error: "Hours to complete must be a non-negative integer." }, 400);
+      }
+      completionColumns.completion_hours = n;
+    }
+  }
+
   // Absent key (e.g. an older client) leaves the stored video untouched.
   const youtube = readYouTubeField(requestBody);
   if ("error" in youtube) return json({ error: youtube.error }, 400);
@@ -55,6 +156,8 @@ export const POST: APIRoute = async (context) => {
         platform_played_on: platform_played_on || null,
         play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
         contains_spoilers: contains_spoilers ?? false,
+        ...difficultyColumn,
+        ...completionColumns,
         ...youtubeColumn,
         status: "draft",
       })
@@ -116,6 +219,8 @@ export const POST: APIRoute = async (context) => {
     platform_played_on: platform_played_on || null,
     play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
     contains_spoilers: contains_spoilers ?? false,
+    ...difficultyColumn,
+    ...completionColumns,
     ...youtubeColumn,
   };
   if (publishing) {

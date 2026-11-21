@@ -151,6 +151,27 @@ export type Database = {
           },
         ]
       }
+      creator_youtube_cache: {
+        Row: {
+          channel: Json | null
+          fetched_at: string
+          video: Json | null
+          youtube_url: string
+        }
+        Insert: {
+          channel?: Json | null
+          fetched_at?: string
+          video?: Json | null
+          youtube_url: string
+        }
+        Update: {
+          channel?: Json | null
+          fetched_at?: string
+          video?: Json | null
+          youtube_url?: string
+        }
+        Relationships: []
+      }
       developers: {
         Row: {
           canonical_developer_id: string | null
@@ -231,6 +252,84 @@ export type Database = {
           {
             foreignKeyName: "follows_following_id_fkey"
             columns: ["following_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      forum_comment_reactions: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          profile_id: string
+          reaction_type: string
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          profile_id: string
+          reaction_type: string
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+          reaction_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "forum_comment_reactions_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "forum_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "forum_comment_reactions_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      forum_comment_votes: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          profile_id: string
+          vote: number
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          profile_id: string
+          vote: number
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+          vote?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "forum_comment_votes_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "forum_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "forum_comment_votes_profile_id_fkey"
+            columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["id"]
@@ -831,12 +930,14 @@ export type Database = {
           igdb_status: number | null
           igdb_version_parent: number | null
           parent_game_id: string | null
+          psn_np_communication_id: string | null
           search_vector: unknown
           slug: string | null
           storyline: string | null
           title: string
           title_search: unknown
           version_title: string | null
+          xbox_title_id: string | null
         }
         Insert: {
           canonical_game_id?: string | null
@@ -851,12 +952,14 @@ export type Database = {
           igdb_status?: number | null
           igdb_version_parent?: number | null
           parent_game_id?: string | null
+          psn_np_communication_id?: string | null
           search_vector?: unknown
           slug?: string | null
           storyline?: string | null
           title: string
           title_search?: unknown
           version_title?: string | null
+          xbox_title_id?: string | null
         }
         Update: {
           canonical_game_id?: string | null
@@ -871,12 +974,14 @@ export type Database = {
           igdb_status?: number | null
           igdb_version_parent?: number | null
           parent_game_id?: string | null
+          psn_np_communication_id?: string | null
           search_vector?: unknown
           slug?: string | null
           storyline?: string | null
           title?: string
           title_search?: unknown
           version_title?: string | null
+          xbox_title_id?: string | null
         }
         Relationships: [
           {
@@ -916,50 +1021,77 @@ export type Database = {
         }
         Relationships: []
       }
-      group_announcements: {
+      group_announcement_comment_reactions: {
         Row: {
-          body: string
+          comment_id: string
           created_at: string
-          group_id: string
           id: string
-          is_locked: boolean
-          pinned: boolean
           profile_id: string
-          title: string | null
-          updated_at: string | null
+          reaction_type: string
         }
         Insert: {
-          body: string
+          comment_id: string
           created_at?: string
-          group_id: string
           id?: string
-          is_locked?: boolean
-          pinned?: boolean
           profile_id: string
-          title?: string | null
-          updated_at?: string | null
+          reaction_type: string
         }
         Update: {
-          body?: string
+          comment_id?: string
           created_at?: string
-          group_id?: string
           id?: string
-          is_locked?: boolean
-          pinned?: boolean
           profile_id?: string
-          title?: string | null
-          updated_at?: string | null
+          reaction_type?: string
         }
         Relationships: [
           {
-            foreignKeyName: "group_announcements_group_id_fkey"
-            columns: ["group_id"]
+            foreignKeyName: "group_announcement_comment_reactions_comment_id_fkey"
+            columns: ["comment_id"]
             isOneToOne: false
-            referencedRelation: "groups"
+            referencedRelation: "group_announcement_comments"
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "group_announcements_profile_id_fkey"
+            foreignKeyName: "group_announcement_comment_reactions_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_announcement_comment_votes: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          profile_id: string
+          vote: number
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          profile_id: string
+          vote: number
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+          vote?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_announcement_comment_votes_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "group_announcement_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_announcement_comment_votes_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
@@ -1012,6 +1144,57 @@ export type Database = {
           },
           {
             foreignKeyName: "group_announcement_comments_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_announcements: {
+        Row: {
+          body: string
+          created_at: string
+          group_id: string
+          id: string
+          is_locked: boolean
+          pinned: boolean
+          profile_id: string
+          title: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          group_id: string
+          id?: string
+          is_locked?: boolean
+          pinned?: boolean
+          profile_id: string
+          title?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          group_id?: string
+          id?: string
+          is_locked?: boolean
+          pinned?: boolean
+          profile_id?: string
+          title?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_announcements_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_announcements_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
@@ -1126,6 +1309,187 @@ export type Database = {
             columns: ["group_id"]
             isOneToOne: false
             referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_forum_thread_comment_reactions: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          profile_id: string
+          reaction_type: string
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          profile_id: string
+          reaction_type: string
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+          reaction_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_forum_thread_comment_reactions_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "group_forum_thread_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_forum_thread_comment_reactions_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_forum_thread_comment_votes: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          profile_id: string
+          vote: number
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          profile_id: string
+          vote: number
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+          vote?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_forum_thread_comment_votes_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "group_forum_thread_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_forum_thread_comment_votes_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_forum_thread_comments: {
+        Row: {
+          body: string
+          created_at: string
+          id: string
+          parent_id: string | null
+          profile_id: string
+          thread_id: string
+          updated_at: string | null
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          id?: string
+          parent_id?: string | null
+          profile_id: string
+          thread_id: string
+          updated_at?: string | null
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          id?: string
+          parent_id?: string | null
+          profile_id?: string
+          thread_id?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_forum_thread_comments_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "group_forum_thread_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_forum_thread_comments_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_forum_thread_comments_thread_id_fkey"
+            columns: ["thread_id"]
+            isOneToOne: false
+            referencedRelation: "group_forum_threads"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_forum_threads: {
+        Row: {
+          body: string
+          created_at: string
+          group_id: string
+          id: string
+          is_locked: boolean
+          pinned: boolean
+          profile_id: string
+          title: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          group_id: string
+          id?: string
+          is_locked?: boolean
+          pinned?: boolean
+          profile_id: string
+          title?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          group_id?: string
+          id?: string
+          is_locked?: boolean
+          pinned?: boolean
+          profile_id?: string
+          title?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_forum_threads_group_id_fkey"
+            columns: ["group_id"]
+            isOneToOne: false
+            referencedRelation: "groups"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_forum_threads_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
         ]
@@ -1282,6 +1646,55 @@ export type Database = {
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      group_poll_answer_reactions: {
+        Row: {
+          answer_id: string | null
+          created_at: string
+          id: string
+          profile_id: string
+          reaction_type: string
+          reply_id: string | null
+        }
+        Insert: {
+          answer_id?: string | null
+          created_at?: string
+          id?: string
+          profile_id: string
+          reaction_type: string
+          reply_id?: string | null
+        }
+        Update: {
+          answer_id?: string | null
+          created_at?: string
+          id?: string
+          profile_id?: string
+          reaction_type?: string
+          reply_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "group_poll_answer_reactions_answer_id_fkey"
+            columns: ["answer_id"]
+            isOneToOne: false
+            referencedRelation: "group_poll_answers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answer_reactions_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "group_poll_answer_reactions_reply_id_fkey"
+            columns: ["reply_id"]
+            isOneToOne: false
+            referencedRelation: "group_poll_answer_replies"
             referencedColumns: ["id"]
           },
         ]
@@ -1742,6 +2155,7 @@ export type Database = {
           created_at: string
           created_by: string
           description: string | null
+          forums_everyone: boolean
           id: string
           invite_code: string | null
           is_site_group: boolean
@@ -1767,6 +2181,7 @@ export type Database = {
           created_at?: string
           created_by: string
           description?: string | null
+          forums_everyone?: boolean
           id?: string
           invite_code?: string | null
           is_site_group?: boolean
@@ -1792,6 +2207,7 @@ export type Database = {
           created_at?: string
           created_by?: string
           description?: string | null
+          forums_everyone?: boolean
           id?: string
           invite_code?: string | null
           is_site_group?: boolean
@@ -2334,6 +2750,47 @@ export type Database = {
           },
         ]
       }
+      marketing_campaigns: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          ends_on: string | null
+          id: string
+          kind: string
+          name: string
+          notes: string | null
+          starts_on: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          ends_on?: string | null
+          id?: string
+          kind?: string
+          name: string
+          notes?: string | null
+          starts_on: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          ends_on?: string | null
+          id?: string
+          kind?: string
+          name?: string
+          notes?: string | null
+          starts_on?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "marketing_campaigns_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       notifications: {
         Row: {
           actor_profile_id: string | null
@@ -2614,6 +3071,7 @@ export type Database = {
           showcase_order: string[]
           showcase_video_id: string | null
           showcase_video_mode: string | null
+          signup_cta: string | null
           steam_id: string | null
           steam_reviews_import_done_at: string | null
           steam_synced_at: string | null
@@ -2688,6 +3146,7 @@ export type Database = {
           showcase_order?: string[]
           showcase_video_id?: string | null
           showcase_video_mode?: string | null
+          signup_cta?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
@@ -2762,6 +3221,7 @@ export type Database = {
           showcase_order?: string[]
           showcase_video_id?: string | null
           showcase_video_mode?: string | null
+          signup_cta?: string | null
           steam_id?: string | null
           steam_reviews_import_done_at?: string | null
           steam_synced_at?: string | null
@@ -2806,6 +3266,21 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      profiles_showcase_backup_20261030: {
+        Row: {
+          id: string | null
+          showcase_games: Json | null
+        }
+        Insert: {
+          id?: string | null
+          showcase_games?: Json | null
+        }
+        Update: {
+          id?: string | null
+          showcase_games?: Json | null
+        }
+        Relationships: []
       }
       psn_service_auth: {
         Row: {
@@ -2858,6 +3333,36 @@ export type Database = {
           trophies?: Json | null
           trophy_groups?: Json | null
           trophy_set_version?: string | null
+        }
+        Relationships: []
+      }
+      psn_unmatched_titles: {
+        Row: {
+          dismissed: boolean
+          id: string
+          last_seen_at: string
+          np_communication_id: string
+          occurrences: number
+          platform: string | null
+          title: string
+        }
+        Insert: {
+          dismissed?: boolean
+          id?: string
+          last_seen_at?: string
+          np_communication_id: string
+          occurrences?: number
+          platform?: string | null
+          title: string
+        }
+        Update: {
+          dismissed?: boolean
+          id?: string
+          last_seen_at?: string
+          np_communication_id?: string
+          occurrences?: number
+          platform?: string | null
+          title?: string
         }
         Relationships: []
       }
@@ -3417,12 +3922,18 @@ export type Database = {
       reviews: {
         Row: {
           body: string
+          completion_hours: number | null
+          completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
+          difficulty: number | null
           edited: boolean | null
           game_id: string
           id: string
           platform_played_on: string | null
+          platinum_difficulty: number | null
+          platinum_enjoyment: number | null
+          platinum_hours: number | null
           play_time_days: number | null
           play_time_hours: number | null
           play_time_months: number | null
@@ -3439,12 +3950,18 @@ export type Database = {
         }
         Insert: {
           body: string
+          completion_hours?: number | null
+          completion_status?: string | null
           contains_spoilers: boolean
           created_at?: string | null
+          difficulty?: number | null
           edited?: boolean | null
           game_id: string
           id?: string
           platform_played_on?: string | null
+          platinum_difficulty?: number | null
+          platinum_enjoyment?: number | null
+          platinum_hours?: number | null
           play_time_days?: number | null
           play_time_hours?: number | null
           play_time_months?: number | null
@@ -3461,12 +3978,18 @@ export type Database = {
         }
         Update: {
           body?: string
+          completion_hours?: number | null
+          completion_status?: string | null
           contains_spoilers?: boolean
           created_at?: string | null
+          difficulty?: number | null
           edited?: boolean | null
           game_id?: string
           id?: string
           platform_played_on?: string | null
+          platinum_difficulty?: number | null
+          platinum_enjoyment?: number | null
+          platinum_hours?: number | null
           play_time_days?: number | null
           play_time_hours?: number | null
           play_time_months?: number | null
@@ -3614,6 +4137,177 @@ export type Database = {
             foreignKeyName: "site_admins_profile_id_fkey"
             columns: ["profile_id"]
             isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      site_discussion_comment_reactions: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          profile_id: string
+          reaction_type: string
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          profile_id: string
+          reaction_type: string
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+          reaction_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "site_discussion_comment_reactions_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "site_discussion_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "site_discussion_comment_reactions_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      site_discussion_comment_votes: {
+        Row: {
+          comment_id: string
+          created_at: string
+          id: string
+          profile_id: string
+          vote: number
+        }
+        Insert: {
+          comment_id: string
+          created_at?: string
+          id?: string
+          profile_id: string
+          vote: number
+        }
+        Update: {
+          comment_id?: string
+          created_at?: string
+          id?: string
+          profile_id?: string
+          vote?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "site_discussion_comment_votes_comment_id_fkey"
+            columns: ["comment_id"]
+            isOneToOne: false
+            referencedRelation: "site_discussion_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "site_discussion_comment_votes_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      site_discussion_comments: {
+        Row: {
+          body: string
+          created_at: string
+          discussion_id: string
+          id: string
+          parent_id: string | null
+          profile_id: string
+          updated_at: string | null
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          discussion_id: string
+          id?: string
+          parent_id?: string | null
+          profile_id: string
+          updated_at?: string | null
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          discussion_id?: string
+          id?: string
+          parent_id?: string | null
+          profile_id?: string
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "site_discussion_comments_discussion_id_fkey"
+            columns: ["discussion_id"]
+            isOneToOne: false
+            referencedRelation: "site_discussions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "site_discussion_comments_parent_id_fkey"
+            columns: ["parent_id"]
+            isOneToOne: false
+            referencedRelation: "site_discussion_comments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "site_discussion_comments_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      site_discussions: {
+        Row: {
+          body: string
+          created_at: string
+          id: string
+          is_locked: boolean
+          pinned: boolean
+          profile_id: string
+          title: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          body: string
+          created_at?: string
+          id?: string
+          is_locked?: boolean
+          pinned?: boolean
+          profile_id: string
+          title?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          id?: string
+          is_locked?: boolean
+          pinned?: boolean
+          profile_id?: string
+          title?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "site_discussions_profile_id_fkey"
+            columns: ["profile_id"]
+            isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
@@ -3798,19 +4492,23 @@ export type Database = {
           is_hidden: boolean
           is_owned: boolean
           profile_id: string
+          psn_display_game_id: string | null
           psn_last_played_at: string | null
           psn_np_communication_id: string | null
           psn_platform: string | null
+          psn_platinum_earned: boolean
           psn_playtime_minutes: number | null
           psn_progress: number | null
           psn_trophies_earned: number | null
           psn_trophies_total: number | null
           status: string
           steam_appid: number | null
+          steam_display_game_id: string | null
           steam_last_played_at: string | null
           steam_playtime_minutes: number | null
           updated_at: string
           xbox_current_gamerscore: number | null
+          xbox_display_game_id: string | null
           xbox_last_played_at: string | null
           xbox_max_gamerscore: number | null
           xbox_platform: string | null
@@ -3825,19 +4523,23 @@ export type Database = {
           is_hidden?: boolean
           is_owned?: boolean
           profile_id: string
+          psn_display_game_id?: string | null
           psn_last_played_at?: string | null
           psn_np_communication_id?: string | null
           psn_platform?: string | null
+          psn_platinum_earned?: boolean
           psn_playtime_minutes?: number | null
           psn_progress?: number | null
           psn_trophies_earned?: number | null
           psn_trophies_total?: number | null
           status: string
           steam_appid?: number | null
+          steam_display_game_id?: string | null
           steam_last_played_at?: string | null
           steam_playtime_minutes?: number | null
           updated_at?: string
           xbox_current_gamerscore?: number | null
+          xbox_display_game_id?: string | null
           xbox_last_played_at?: string | null
           xbox_max_gamerscore?: number | null
           xbox_platform?: string | null
@@ -3852,19 +4554,23 @@ export type Database = {
           is_hidden?: boolean
           is_owned?: boolean
           profile_id?: string
+          psn_display_game_id?: string | null
           psn_last_played_at?: string | null
           psn_np_communication_id?: string | null
           psn_platform?: string | null
+          psn_platinum_earned?: boolean
           psn_playtime_minutes?: number | null
           psn_progress?: number | null
           psn_trophies_earned?: number | null
           psn_trophies_total?: number | null
           status?: string
           steam_appid?: number | null
+          steam_display_game_id?: string | null
           steam_last_played_at?: string | null
           steam_playtime_minutes?: number | null
           updated_at?: string
           xbox_current_gamerscore?: number | null
+          xbox_display_game_id?: string | null
           xbox_last_played_at?: string | null
           xbox_max_gamerscore?: number | null
           xbox_platform?: string | null
@@ -3884,6 +4590,27 @@ export type Database = {
             columns: ["profile_id"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_game_status_psn_display_game_id_fkey"
+            columns: ["psn_display_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_game_status_steam_display_game_id_fkey"
+            columns: ["steam_display_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_game_status_xbox_display_game_id_fkey"
+            columns: ["xbox_display_game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
             referencedColumns: ["id"]
           },
         ]
@@ -4121,6 +4848,36 @@ export type Database = {
         }
         Relationships: []
       }
+      xbox_unmatched_titles: {
+        Row: {
+          dismissed: boolean
+          id: string
+          last_seen_at: string
+          occurrences: number
+          platform: string | null
+          title: string
+          xbox_title_id: string
+        }
+        Insert: {
+          dismissed?: boolean
+          id?: string
+          last_seen_at?: string
+          occurrences?: number
+          platform?: string | null
+          title: string
+          xbox_title_id: string
+        }
+        Update: {
+          dismissed?: boolean
+          id?: string
+          last_seen_at?: string
+          occurrences?: number
+          platform?: string | null
+          title?: string
+          xbox_title_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       current_reviews: {
@@ -4178,10 +4935,21 @@ export type Database = {
       }
       game_review_stats: {
         Row: {
+          avg_difficulty: number | null
+          avg_extras_hours: number | null
+          avg_main_hours: number | null
+          avg_platinum_difficulty: number | null
+          avg_platinum_enjoyment: number | null
+          avg_platinum_hours: number | null
           avg_score: number | null
+          difficulty_count: number | null
+          difficulty_sum: number | null
+          extras_hours_count: number | null
           game_id: string | null
           hours_count: number | null
           hours_sum: number | null
+          main_hours_count: number | null
+          platinum_count: number | null
           review_count: number | null
           score_sum: number | null
         }
@@ -4234,6 +5002,20 @@ export type Database = {
         Returns: {
           pct: number
           steam_appid: number
+        }[]
+      }
+      admin_campaign_cohorts: {
+        Args: { organic_days?: number }
+        Returns: {
+          campaign_id: string
+          ends_on: string
+          kind: string
+          matured: number
+          name: string
+          retained_14d: number
+          returned_1d: number
+          signups: number
+          starts_on: string
         }[]
       }
       admin_daily_activity: {
@@ -4508,12 +5290,18 @@ export type Database = {
         }
         Returns: {
           body: string
+          completion_hours: number | null
+          completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
+          difficulty: number | null
           edited: boolean | null
           game_id: string
           id: string
           platform_played_on: string | null
+          platinum_difficulty: number | null
+          platinum_enjoyment: number | null
+          platinum_hours: number | null
           play_time_days: number | null
           play_time_hours: number | null
           play_time_months: number | null
@@ -4627,12 +5415,18 @@ export type Database = {
         }
         Returns: {
           body: string
+          completion_hours: number | null
+          completion_status: string | null
           contains_spoilers: boolean
           created_at: string | null
+          difficulty: number | null
           edited: boolean | null
           game_id: string
           id: string
           platform_played_on: string | null
+          platinum_difficulty: number | null
+          platinum_enjoyment: number | null
+          platinum_hours: number | null
           play_time_days: number | null
           play_time_hours: number | null
           play_time_months: number | null
@@ -4842,6 +5636,28 @@ export type Database = {
           within_one: number
         }[]
       }
+      home_hot_takes: {
+        Args: {
+          p_limit?: number
+          p_min_deviation?: number
+          p_min_reviews?: number
+        }
+        Returns: {
+          game_avg_score: number
+          game_review_count: number
+          id: string
+        }[]
+      }
+      home_trending_games: {
+        Args: { p_limit?: number; p_since: string }
+        Returns: {
+          cover_img_url: string
+          game_id: string
+          review_count: number
+          slug: string
+          title: string
+        }[]
+      }
       hub_game_review_stats: {
         Args: {
           p_company_id?: string
@@ -4870,26 +5686,41 @@ export type Database = {
           want_to_play: number
         }[]
       }
+      log_unmatched_psn_titles: {
+        Args: { np_comm_ids: string[]; platforms: string[]; titles: string[] }
+        Returns: undefined
+      }
       log_unmatched_steam_titles: {
         Args: { titles: string[] }
         Returns: undefined
       }
+      log_unmatched_xbox_titles: {
+        Args: { platforms: string[]; title_ids: string[]; titles: string[] }
+        Returns: undefined
+      }
       match_psn_games: {
-        Args: { psn_titles: string[] }
+        Args: { psn_np_comm_ids: string[] }
         Returns: {
           id: string
-          psn_title: string
-          title: string
+          psn_np_communication_id: string
         }[]
       }
-      match_steam_games: {
-        Args: { steam_titles: string[] }
-        Returns: {
-          id: string
-          steam_title: string
-          title: string
-        }[]
-      }
+      match_steam_games:
+        | {
+            Args: { steam_appids: number[] }
+            Returns: {
+              id: string
+              steam_appid: number
+            }[]
+          }
+        | {
+            Args: { steam_titles: string[] }
+            Returns: {
+              id: string
+              steam_title: string
+              title: string
+            }[]
+          }
       match_xbox_games: {
         Args: { xbox_titles: string[] }
         Returns: {
@@ -4897,6 +5728,17 @@ export type Database = {
           title: string
           xbox_title: string
         }[]
+      }
+      match_xbox_games_by_title_id: {
+        Args: { xbox_title_ids: string[] }
+        Returns: {
+          id: string
+          xbox_title_id: string
+        }[]
+      }
+      merge_developer: {
+        Args: { p_canonical: string; p_duplicate: string }
+        Returns: number
       }
       most_reviewed_games: {
         Args: {
@@ -4920,6 +5762,15 @@ export type Database = {
           hours_count: number
           hours_sum: number
           review_count: number
+        }[]
+      }
+      profile_review_type_counts: {
+        Args: { p_profile_id: string }
+        Returns: {
+          dlc_addons: number
+          expansions: number
+          games: number
+          total: number
         }[]
       }
       profile_vote_totals: {

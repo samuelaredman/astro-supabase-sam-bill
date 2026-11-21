@@ -326,6 +326,12 @@ if (!window.__rcInit) {
           body:        d.body,
           platformId:  d.platformId,
           hours:       d.hours,
+          difficulty:  d.difficulty || null,
+          completionStatus:   d.completionStatus || '',
+          completionHours:    d.completionHours || null,
+          platinumHours:      d.platinumHours || null,
+          platinumDifficulty: d.platinumDifficulty || null,
+          platinumEnjoyment:  d.platinumEnjoyment || null,
           spoilers:    d.spoilers === 'true',
           youtubeUrl:  d.youtubeUrl || '',
         });
