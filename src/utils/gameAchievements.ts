@@ -75,6 +75,15 @@ type Sibling = {
 
 const DLC_RELATION_TYPES = ["dlc", "expansion", "standalone_expansion"];
 
+// Relationships that mean "same game, different form" — remasters, ports,
+// regional releases, special editions. Chekpoint's canonical linker usually
+// collapses these into canonical via games.canonical_game_id, but not
+// always (IGDB categorization is spotty on older ports). Walk the
+// game_relationships graph too so a canonical page for Okami picks up
+// Okami HD's PSN trophies even when the HD edition never got the
+// canonical_game_id pointer.
+const SIBLING_RELATION_TYPES = ["edition", "version", "release", "remake", "remaster_merge"];
+
 function steamIconUrl(icon: string | null | undefined, appid: number): string | null {
   if (!icon) return null;
   const filename = icon.split("/").pop();
@@ -98,23 +107,57 @@ export async function loadGameAchievements(
   game: { id: string; psn_np_communication_id: string | null; xbox_title_id: string | null },
   opts: { debug?: boolean } = {},
 ): Promise<GameAchievementsData> {
-  // Canonical + every edition that collapses into it. Both lookups happen in
-  // one query via the OR filter.
-  const { data: siblingRows } = await db
-    .from("games")
-    .select("id, title, psn_np_communication_id, xbox_title_id")
-    .or(`id.eq.${game.id},canonical_game_id.eq.${game.id}`);
+  // Canonical + every edition. Two sources:
+  //   1) games.canonical_game_id = canonical.id — the direct link set by the
+  //      canonical collapser.
+  //   2) game_relationships rows whose from_game_id = canonical.id and
+  //      relation_type is in SIBLING_RELATION_TYPES — covers ports /
+  //      remasters / re-releases that IGDB never flagged for canonical
+  //      collapse (Okami HD's PSN re-release is a real example).
+  // Fetched in parallel and merged by id so a row appearing in both doesn't
+  // get processed twice.
+  const [directRes, relRes] = await Promise.all([
+    db.from("games")
+      .select("id, title, psn_np_communication_id, xbox_title_id")
+      .or(`id.eq.${game.id},canonical_game_id.eq.${game.id}`),
+    db.from("game_relationships")
+      .select("to_game_id")
+      .eq("from_game_id", game.id)
+      .in("relation_type", SIBLING_RELATION_TYPES),
+  ]);
 
-  const rawSiblings = (siblingRows ?? []) as any[];
-  const siblings: Sibling[] = rawSiblings.length > 0
-    ? rawSiblings.map((r) => ({
+  const byId = new Map<string, Sibling>();
+  for (const r of ((directRes.data ?? []) as any[])) {
+    byId.set(r.id, {
+      id: r.id,
+      title: r.title,
+      psn_np_communication_id: r.psn_np_communication_id,
+      xbox_title_id: r.xbox_title_id,
+      isCanonical: r.id === game.id,
+    });
+  }
+  const relatedIds = ((relRes.data ?? []) as any[])
+    .map((r: any) => r.to_game_id)
+    .filter((id: string) => !byId.has(id));
+  if (relatedIds.length > 0) {
+    const { data: extraRows } = await db
+      .from("games")
+      .select("id, title, psn_np_communication_id, xbox_title_id")
+      .in("id", relatedIds);
+    for (const r of ((extraRows ?? []) as any[])) {
+      byId.set(r.id, {
         id: r.id,
         title: r.title,
         psn_np_communication_id: r.psn_np_communication_id,
         xbox_title_id: r.xbox_title_id,
-        isCanonical: r.id === game.id,
-      }))
-    // Defensive fallback: if the query somehow misses, treat just the canonical.
+        isCanonical: false,
+      });
+    }
+  }
+
+  const siblings: Sibling[] = byId.size > 0
+    ? [...byId.values()]
+    // Defensive fallback: if both queries somehow return nothing, treat just the canonical.
     : [{ id: game.id, title: "", psn_np_communication_id: game.psn_np_communication_id, xbox_title_id: game.xbox_title_id, isCanonical: true }];
 
   const canonicalId = game.id;
