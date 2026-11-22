@@ -1,41 +1,55 @@
 ---
 // Global onboarding tour host. Mounted once (in Layout.astro) for logged-in users.
 // Exposes window.startTour(name) and auto-starts from a ?tour=<name> URL param.
-// Tours are driven by driver.js. Username is passed via a data-attribute because a
+// Tours are driven by driver.js. Values are passed via data-attributes because a
 // bundled module <script> (needed for `import`) can't use Astro's define:vars.
-interface Props { username?: string | null }
-const { username = null } = Astro.props;
+//
+// `completedSteps` is a comma-separated list of completion keys the user has
+// already satisfied (avatar, favorite, showcase, library-synced). Steps whose
+// completionKey is in that set are auto-skipped on resume, so a user who
+// closed the tour partway through doesn't get re-stopped on the avatar they
+// already uploaded.
+interface Props { username?: string | null; completedSteps?: string }
+const { username = null, completedSteps = '' } = Astro.props;
 ---
 
-<div id="ck-tour-root" data-username={username ?? ''} hidden></div>
+<div id="ck-tour-root" data-username={username ?? ''} data-completed-steps={completedSteps} hidden></div>
 
 <script>
   import { driver } from 'driver.js';
   import 'driver.js/dist/driver.css';
 
-  const me = document.getElementById('ck-tour-root')?.dataset.username || '';
+  const root = document.getElementById('ck-tour-root');
+  const me = root?.dataset.username || '';
   const profilePath = me ? `/reviewers/${me}` : '/';
+  const completedKeys = new Set(
+    (root?.dataset.completedSteps || '').split(',').map((s) => s.trim()).filter(Boolean),
+  );
 
-  // Each tour is an array of steps. step = { selector?, reveal?, page, popover }.
+  // Each tour is an array of steps. step = { selector?, reveal?, page, popover, completionKey? }.
   // No selector ⇒ centered "concept" popover. `reveal` is for a target that isn't in
   // the DOM until something happens (e.g. a lazily-loaded profile tab): it runs when
   // the user clicks Next on the previous step, and the tour waits for `selector` to
-  // appear before moving on.
-  type Step = { selector?: string; reveal?: () => void; page: string; popover: any };
+  // appear before moving on. `completionKey` lets a resumed tour skip steps whose
+  // state is already satisfied on the server (e.g. avatar already uploaded) — the
+  // Layout passes the set of satisfied keys in `data-completed-steps`.
+  type Step = { selector?: string; reveal?: () => void; page: string; popover: any; completionKey?: string };
   const TOURS: Record<string, Step[]> = {
     // One guided sequence covering the whole profile setup.
     profile: [
       { selector: '#editProfileBtn', page: profilePath, popover: { title: 'Edit your profile', description: 'This is how you edit all the elements of your profile — click it to make changes, then Save when you’re done.' } },
-      { selector: '.avatar-container', page: profilePath, popover: { title: 'Your profile picture', description: 'Add a photo so other reviewers recognize you — hover your avatar and click to upload and crop it.' } },
+      { selector: '.avatar-container', page: profilePath, completionKey: 'avatar', popover: { title: 'Your profile picture', description: 'Add a photo so other reviewers recognize you — hover your avatar and click to upload and crop it.' } },
       { selector: '.profile-banner', page: profilePath, popover: { title: 'Your banner', description: 'Add a wide image up top to make your profile stand out — hover it and click to upload.' } },
       { selector: '.profile-bio-wrap', page: profilePath, popover: { title: 'Your bio', description: 'Add a line or two about the games and genres you love so people know your taste.' } },
-      { selector: '.fav-empty, .fav-game-card', page: profilePath, popover: { title: 'Your favorite game', description: 'Set the game that defines your taste — click the card to search and choose it.' } },
+      { selector: '.fav-empty, .fav-game-card', page: profilePath, completionKey: 'favorite', popover: { title: 'Your favorite game', description: 'Set the game that defines your taste — click the card to search and choose it.' } },
+      { selector: '#showcaseGrid', page: profilePath, completionKey: 'showcase', popover: { title: 'Your game showcase', description: 'Feature three games you love at the top of your profile — click a slot to pick one.' } },
       { selector: 'a[href$="?tab=library"]', page: profilePath, popover: { title: 'Your library', description: 'You can track and manage all the games you have played, are currently playing, and want to play — click the Library tab to check it out.' } },
       {
         selector: '.steam-cta-btn, .lib-sync-trigger',
         // Lives in the Library tab, which loads on first open — click the tab, then wait.
         reveal: () => { (document.querySelector('a[href$="?tab=library"]') as HTMLElement | null)?.click(); },
         page: profilePath,
+        completionKey: 'library-synced',
         popover: { title: 'Import from Steam', description: 'Already have a Steam library? Click Connect Steam to automatically bring in your owned games and playtime. Before importing, make sure Profile and Game Details are set to public and "Always keep my total playtime private" is unchecked under Privacy Settings — you can switch them back right after.' },
       },
     ],
@@ -43,7 +57,7 @@ const { username = null } = Astro.props;
       { selector: 'a[href="/discover"]', page: '/', popover: { title: 'Need a game to review?', description: 'Stuck on what to review? Discover surfaces games reviewed by people with similar taste — and the more you review, the sharper it gets.' } },
       { selector: '#ck-widget-lists', page: '/', popover: { title: 'Browse lists', description: 'Check out lists other players have made — anything from “my favorite games” to “ranking every Mario title.” A great way to find something to play and review.' } },
       { selector: '#ck-widget-recs', page: '/', popover: { title: 'See recommendations', description: 'Love a specific game? See what others recommend playing next — insights into similar gameplay, story, and mechanics, not just a score.' } },
-      { selector: '#postMenuBtn', page: '/', popover: { title: 'Write your first review', description: 'Found one? Click here, choose “Write a review,” and score it 1–10 with your take.' } },
+      { selector: '#postMenuBtn', page: '/', popover: { title: 'Write your first review', description: 'When you\'re ready, click here and choose “Write a review” to score a game 1–10 with your take. No pressure — write one whenever you\'re ready.' } },
     ],
   };
 
@@ -71,25 +85,26 @@ const { username = null } = Astro.props;
     });
   }
 
-  // The onboarding wizard is a full-screen overlay; a tour driven underneath it
-  // would block clicks to the wizard while highlighting elements the wizard
-  // covers. The wizard removes itself and then starts the tour on completion,
-  // so any tour that would start while it's still mounted is dropped.
-  const onboardingOpen = () => !!document.getElementById('ck-onboarding');
-
   // The tour's steps that can run here. A tour only runs on its own page — the
   // profile tour's targets (avatar, banner, Library tab…) exist on every profile,
   // so without the page check it would tour someone else's profile as "yours".
   // Steps whose target isn't visible are dropped, except `reveal` steps, whose
-  // target only appears once revealed.
+  // target only appears once revealed. Resume-safe: any step whose completionKey
+  // the user has already satisfied (data-completed-steps) is also dropped, so a
+  // partially-finished tour doesn't re-stop on things already done.
   function existingSteps(name: string): Step[] {
     return (TOURS[name] || []).filter((s) =>
-      onPage(s) && (!s.selector || s.reveal || visibleMatch(s.selector)),
+      onPage(s)
+      && (!s.completionKey || !completedKeys.has(s.completionKey))
+      && (!s.selector || s.reveal || visibleMatch(s.selector)),
     );
   }
 
+  function markTourCompleted() {
+    fetch('/api/profile/tour-completed', { method: 'POST', keepalive: true }).catch(() => {});
+  }
+
   function drive(tourSteps: Step[], onDone?: () => void) {
-    if (onboardingOpen()) return;
     if (!tourSteps.length) { onDone?.(); return; }
     // Chain to the next tour only if this one was finished, not closed early —
     // closing the profile tour shouldn't then navigate to the home page.
@@ -128,7 +143,6 @@ const { username = null } = Astro.props;
         dd.destroy();
       },
       onDestroyed: () => {
-        try { localStorage.setItem('ck_tour_done', '1'); } catch (e) {}
         if (finished) onDone?.();
       },
     });
@@ -139,10 +153,14 @@ const { username = null } = Astro.props;
   // `name`'s steps aren't on this page and it has to be skipped) — including
   // across the page navigation `startTour` does when a tour's steps live
   // elsewhere, via the `&next=` URL param handled in the auto-start block below.
+  // When the terminal tour finishes (no `next`), mark onboarding complete on
+  // the server so the "Finish setup" chip in the sidebar goes away.
   (window as any).startTour = function (name: string, next?: string) {
     const tour = TOURS[name];
-    const chain = next ? () => (window as any).startTour(next) : undefined;
-    if (!tour) { chain?.(); return; }
+    const chain = next
+      ? () => (window as any).startTour(next)
+      : markTourCompleted;
+    if (!tour) { chain(); return; }
     // If any of the tour's target elements are on this page, drive it now;
     // otherwise navigate to the tour's page with ?tour= so it auto-starts there.
     const here = existingSteps(name);
@@ -155,11 +173,13 @@ const { username = null } = Astro.props;
   };
 
   // Delegated launcher: any [data-start-tour="<name>"] button starts that tour.
+  // Add `data-start-tour-next="<name>"` to chain a follow-up tour. The sidebar
+  // "Finish setup" chip uses this with profile→review.
   document.addEventListener('click', function (e) {
     const btn = (e.target as HTMLElement)?.closest?.('[data-start-tour]') as HTMLElement | null;
     if (!btn) return;
     e.preventDefault();
-    (window as any).startTour(btn.dataset.startTour);
+    (window as any).startTour(btn.dataset.startTour, btn.dataset.startTourNext);
   });
 
   // Auto-start from ?tour= (strip the param first so refresh/back won't re-trigger).
@@ -172,7 +192,9 @@ const { username = null } = Astro.props;
     params.delete('next');
     const qs = params.toString();
     history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash);
-    const chain = autoNext ? () => (window as any).startTour(autoNext) : undefined;
+    const chain = autoNext
+      ? () => (window as any).startTour(autoNext)
+      : markTourCompleted;
     setTimeout(() => drive(existingSteps(auto), chain), 400);
   }
 </script>
