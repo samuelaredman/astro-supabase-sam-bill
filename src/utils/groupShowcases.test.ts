@@ -14,8 +14,12 @@ describe("readGroupShowcaseKeys", () => {
     expect(readGroupShowcaseKeys([])).toEqual([]);
   });
 
-  it("refuses anything that isn't a list of known keys", () => {
-    expect(readGroupShowcaseKeys(["video", "nope"])).toBeNull();
+  it("drops unknown keys and maps legacy ones onto verdict_board", () => {
+    expect(readGroupShowcaseKeys(["video", "nope"])).toEqual(["video"]);
+    expect(readGroupShowcaseKeys(["hot_take", "agreement"])).toEqual(["verdict_board"]);
+  });
+
+  it("refuses anything that isn't a list of strings", () => {
     expect(readGroupShowcaseKeys("video")).toBeNull();
     expect(readGroupShowcaseKeys([1])).toBeNull();
     expect(readGroupShowcaseKeys(null)).toBeNull();
