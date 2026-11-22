@@ -85,6 +85,8 @@ export type Samples = {
   genre: string;
   platform: string;
   studio: string;
+  /** A group poll page — null when no public group shows a poll to visitors. */
+  poll: string | null;
 };
 
 let samplesPromise: Promise<Samples> | null = null;
@@ -108,12 +110,23 @@ function firstLink(source: string, prefix: string, label: string): string {
   return m[1];
 }
 
+/** First poll page linked from any group on /groups (polls are optional content). */
+async function findPoll(request: APIRequestContext): Promise<string | null> {
+  const groups = [...new Set((await html(request, '/groups')).match(/\/groups\/[0-9a-f-]{36}(?=")/g) ?? [])];
+  for (const group of groups) {
+    const m = (await html(request, group)).match(new RegExp(`href="(${group}/polls/[0-9a-f-]{36})"`));
+    if (m) return m[1];
+  }
+  return null;
+}
+
 async function findSamples(request: APIRequestContext): Promise<Samples> {
   const home = await html(request, '/');
   const updates = await html(request, '/updates');
   const game = firstLink(home, '/games', 'game');
   const gamePage = await html(request, game);
   return {
+    poll: await findPoll(request),
     game,
     reviewer: firstLink(home, '/reviewers', 'reviewer'),
     review: firstLink(home, '/reviews', 'review'),

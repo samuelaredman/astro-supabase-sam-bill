@@ -3,6 +3,7 @@ import {
   buildFeaturedStats,
   formatHours,
   normalizeScoreCounts,
+  POLL_ANSWER_MAX,
   readFeaturedNote,
   readFeaturedPoll,
   readPollAnswer,
@@ -130,7 +131,8 @@ describe("readPollAnswer", () => {
   });
 
   it("refuses an answer that's too long or not text", () => {
-    expect(readPollAnswer("x".repeat(501))).toHaveProperty("error");
+    expect(readPollAnswer("x".repeat(POLL_ANSWER_MAX))).toEqual({ body: "x".repeat(POLL_ANSWER_MAX) });
+    expect(readPollAnswer("x".repeat(POLL_ANSWER_MAX + 1))).toHaveProperty("error");
     expect(readPollAnswer(42)).toHaveProperty("error");
   });
 });

@@ -9,7 +9,6 @@ const SIGNED_IN_ONLY = [
   '/settings',
   '/drafts',
   '/notifications',
-  '/groups',
   '/groups/create',
 ];
 

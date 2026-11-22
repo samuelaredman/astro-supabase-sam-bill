@@ -13,6 +13,7 @@ const PUBLIC_PAGES = [
   '/recommendations',
   '/lists',
   '/updates',
+  '/groups', // public since 1e271a6 ("/groups is viewable while signed out")
   '/following',
   '/about',
   '/terms',
@@ -93,4 +94,28 @@ for (const [name, pathOf] of PARTIALS) {
 test('unknown URL returns the 404 page', async ({ page }) => {
   const res = await page.goto('/this-page-does-not-exist-smoke-test');
   expect(res?.status()).toBe(404);
+  await expect(page.getByText("We couldn't find that page.")).toBeVisible();
+});
+
+// Browsers request /favicon.ico on their own; without the file every request
+// rendered the 404 through the SSR function.
+test('favicon.ico is a static file', async ({ request }) => {
+  const res = await request.get('/favicon.ico');
+  expect(res.status()).toBe(200);
+  expect(res.headers()['content-type']).toContain('icon');
+});
+
+// Sidebar chips must link to one filter each. Hrefs that carried every current
+// filter let scrapers walk genre × platform × sort, one function render per URL.
+test('search sidebar chips link to a single filter', async ({ page }) => {
+  await page.goto('/search?tab=games&sort=highest');
+  const hrefs = await page.locator('a.facet-chip').evaluateAll((els) =>
+    els.map((el) => el.getAttribute('href') ?? ''),
+  );
+  expect(hrefs.length).toBeGreaterThan(0);
+  for (const href of hrefs) {
+    const params = new URLSearchParams(href.split('?')[1] ?? '');
+    const facets = ['genre', 'platform', 'sort'].filter((k) => params.has(k));
+    expect(facets, href).toHaveLength(1);
+  }
 });

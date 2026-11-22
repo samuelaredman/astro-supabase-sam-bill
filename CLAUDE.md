@@ -23,6 +23,7 @@ Read it fully before writing or modifying any code.
 | CSS | Tailwind v4 via Vite plugin — NOT PostCSS. Uses `@tailwindcss/vite` in `astro.config.ts` |
 | Language | TypeScript strict mode (`astro/tsconfigs/strict`) |
 | Site URL | https://chekpoint.gg |
+| DNS | Netlify DNS (nameservers `dns1`–`dns4.p01.nsone.net`) — add records in Netlify → Domains → chekpoint.gg → DNS settings. Auth email (Resend SMTP) records live on the root domain; don't touch them |
 
 ---
 
@@ -982,6 +983,7 @@ npm test             # Vitest unit tests
 npm run test:watch   # Vitest in watch mode
 npm run test:smoke   # Playwright smoke tests (logged-out site; SMOKE_BASE_URL to target a deploy)
 npm run check:all    # astro check + unit tests + smoke tests
+npm run test:signed-in  # Signed-in tests with two test accounts (writes data; needs TEST_USER_* in .env)
 ```
 
 ---
@@ -995,6 +997,10 @@ Full guide: `tests/README.md`.
   must answer 200 with no JS exceptions, console errors or failed same-site requests; gated
   pages redirect to `/signin`; tabs, lazy loads, search and feeds work. Read-only, so safe
   against production. Sample pages are found from live links, never hardcoded ids.
+- **Signed-in tests (Playwright)** — `tests/signed-in/`, two test accounts from `TEST_USER_A_*` /
+  `TEST_USER_B_*` (skipped when unset). Every action stays between the two accounts; usernames
+  must contain `test` or the suite refuses to run; never in CI. Nothing that publishes a review
+  runs on production: publishing notifies everyone tracking that game (`finalizePublishedReview`).
 - **CI** — `.github/workflows/checks.yml` runs `astro check` + unit tests on every PR;
   `smoke.yml` runs the smoke suite against a URL on demand.
 
@@ -1002,7 +1008,8 @@ Full guide: `tests/README.md`.
 A smoke failure is a regression unless the change meant to alter that page — then update the
 test in the same change and say why. New page → add it to `tests/smoke/pages.spec.ts`.
 
-**Not yet covered:** signed-in flows (posting, voting, commenting, following, groups admin).
+**Not yet covered:** publishing a review and what hangs off one (voting, reacting, commenting),
+lists, recommendations, groups admin.
 
 ### Utilities to extract into `src/utils/format.ts`
 
