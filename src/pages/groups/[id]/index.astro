@@ -23,6 +23,9 @@ import ShowcaseSection from '../../../components/profile/ShowcaseSection.astro';
 import CropModal from "../../../components/CropModal.astro";
 import ShareButton from "../../../components/ShareButton.astro";
 import ProfileBadge from "../../../components/ProfileBadge.astro";
+import PostComposer from "../../../components/forum/PostComposer.astro";
+import ReportModal from "../../../components/ReportModal.astro";
+import { renderPostBody, postExcerpt } from "../../../utils/richPost";
 import { readBadgeSlugs } from "../../../utils/badges";
 import { getPageUser } from "../../../utils/pageAuth";
 import "../../../styles/forum-poll.css";
@@ -51,7 +54,7 @@ let { data: group, error: groupError } = await db
   .from("groups")
   .select("id, name, description, avatar_url, banner_url, banner_position, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt, is_site_group, overview_order, overview_hidden, showcase_video_mode, showcase_video_id, accent_color, polls_everyone, polls_showcase_mode, polls_showcase_poll_id")
   .eq("id", id)
-  .single();
+  .maybeSingle();
 
 // banner_url column may not exist yet if migration hasn't been applied — fall back without it
 if (!group && groupError) {
@@ -59,7 +62,7 @@ if (!group && groupError) {
     .from("groups")
     .select("id, name, description, avatar_url, visibility, requires_approval, invite_code, slug, created_by, created_at, stats_config, join_prompt")
     .eq("id", id)
-    .single();
+    .maybeSingle();
   if (fallback) group = {
     ...fallback, banner_url: null, banner_position: 'center', is_site_group: false,
     overview_order: [], overview_hidden: null, showcase_video_mode: null, showcase_video_id: null,
@@ -265,17 +268,27 @@ const showcaseVideoId: string | null = showcaseVideoMode === "featured" ? group.
 if (activeTab === "games" && canViewContent && !showGames) return Astro.redirect(`/groups/${id}`);
 
 // ── Announcements ──
+// Public to anyone who can view the group (so logged-out visitors see a public
+// group's announcements on the Overview); only private groups hide them.
 let announcements: any[] = [];
-if (canSeeMemberContent) {
-  // Admin client: site admins moderating a group they haven't joined can't read these through RLS
+if (canViewContent) {
   const { data: ann } = await db
     .from("group_announcements")
-    .select("id, body, pinned, created_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+    .select("id, title, body, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
     .eq("group_id", id)
     .order("pinned", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(10);
   announcements = ann ?? [];
+}
+
+// Comment counts for every announcement listed on either Overview or Forums.
+let annCommentCounts: Record<string, number> = {};
+if (announcements.length > 0) {
+  const annIds = announcements.map((a: any) => a.id);
+  const { data: cc } = await db.from("group_announcement_comments")
+    .select("announcement_id").in("announcement_id", annIds);
+  for (const row of cc ?? []) annCommentCounts[row.announcement_id] = (annCommentCounts[row.announcement_id] ?? 0) + 1;
 }
 
 // ── Polls (Overview showcase: ONE poll chosen by the owner) ──
@@ -340,17 +353,25 @@ if (canSeeMemberContent) {
 const pollsShowcaseMode = ((group as any).polls_showcase_mode ?? "latest") as "latest" | "pinned" | "featured";
 const pollsShowcasePollId = (group as any).polls_showcase_poll_id ?? null;
 
-// ── Forums tab (full-list announcements + polls, including featured-game polls) ──
+// ── Forums tab (full-list announcements + polls + member-started threads) ──
 // Overview's showcases render the latest few; Forums is the full view behind "See all →".
-const forumSection: "announcements" | "polls" =
-  Astro.url.searchParams.get("section") === "polls" ? "polls" : "announcements";
+const forumSectionParam = Astro.url.searchParams.get("section");
+const forumSection: "announcements" | "polls" | "threads" =
+  forumSectionParam === "polls" ? "polls"
+  : forumSectionParam === "threads" ? "threads"
+  : "announcements";
+// Any member may start a thread by default; owner/mods can lock it to admins only.
+const forumsEveryone = (group as any).forums_everyone !== false;
+const canPostThread = isAdminOrOwner || canEditOverview || (isMember && forumsEveryone);
 let forumAnnouncements: any[] = [];
 let forumPolls: any[] = [];
+let forumThreads: any[] = [];
+let threadCommentCounts: Record<string, number> = {};
 if (canViewContent && activeTab === "forums") {
-  const [annRes, pollRowsRes] = await Promise.all([
+  const [annRes, pollRowsRes, threadRes] = await Promise.all([
     fetchAll((from, to) => db
       .from("group_announcements")
-      .select("id, body, pinned, created_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .select("id, title, body, pinned, is_locked, created_at, updated_at, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
       .eq("group_id", id)
       .order("pinned", { ascending: false })
       .order("created_at", { ascending: false })
@@ -361,8 +382,72 @@ if (canViewContent && activeTab === "forums") {
       .order("pinned", { ascending: false })
       .order("created_at", { ascending: false })
       .limit(200),
+    (db as any).from("group_forum_threads")
+      .select("id, title, body, pinned, is_locked, created_at, updated_at, profile_id, profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .eq("group_id", id)
+      .order("pinned", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(200),
   ]);
+  forumThreads = threadRes.data ?? [];
+  // Comment counts + author role tag for every thread — same pattern as announcements.
+  if (forumThreads.length > 0) {
+    const tIds = forumThreads.map((t: any) => t.id);
+    const authorIds = Array.from(new Set(forumThreads.map((t: any) => t.profile_id).filter(Boolean)));
+    const [tccRes, roleRes, staffRes] = await Promise.all([
+      (db as any).from("group_forum_thread_comments").select("thread_id").in("thread_id", tIds),
+      authorIds.length
+        ? db.from("group_members").select("profile_id, role").eq("group_id", id).in("profile_id", authorIds)
+        : Promise.resolve({ data: [] as any[] }),
+      authorIds.length
+        ? db.from("site_admins").select("profile_id").in("profile_id", authorIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+    for (const row of tccRes.data ?? []) threadCommentCounts[row.thread_id] = (threadCommentCounts[row.thread_id] ?? 0) + 1;
+    const roleMap = new Map<string, string>();
+    for (const m of (roleRes as any).data ?? []) roleMap.set(m.profile_id, m.role);
+    const staffSet = new Set<string>();
+    for (const s of (staffRes as any).data ?? []) staffSet.add(s.profile_id);
+    forumThreads = forumThreads.map((t: any) => {
+      const groupRole = t.profile_id ? roleMap.get(t.profile_id) ?? null : null;
+      const isStaff = t.profile_id ? staffSet.has(t.profile_id) : false;
+      const authorRole = groupRole === "owner" ? "Owner"
+        : groupRole === "admin" ? "Admin"
+        : isStaff ? "Staff"
+        : null;
+      return { ...t, authorRole };
+    });
+  }
   forumAnnouncements = annRes ?? [];
+  // Comment counts + author role tag ("Owner"/"Admin"/"Staff") for every
+  // announcement — same pattern as polls (see memberRoleMap above).
+  if (forumAnnouncements.length > 0) {
+    const annIds = forumAnnouncements.map((a: any) => a.id);
+    const authorIds = Array.from(new Set(forumAnnouncements.map((a: any) => a.profile_id).filter(Boolean)));
+    const [ccRes, roleRes, staffRes] = await Promise.all([
+      db.from("group_announcement_comments").select("announcement_id").in("announcement_id", annIds),
+      authorIds.length
+        ? db.from("group_members").select("profile_id, role").eq("group_id", id).in("profile_id", authorIds)
+        : Promise.resolve({ data: [] as any[] }),
+      authorIds.length
+        ? db.from("site_admins").select("profile_id").in("profile_id", authorIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+    for (const row of ccRes.data ?? []) annCommentCounts[row.announcement_id] = (annCommentCounts[row.announcement_id] ?? 0) + 1;
+    const roleMap = new Map<string, string>();
+    for (const m of (roleRes as any).data ?? []) roleMap.set(m.profile_id, m.role);
+    const staffSet = new Set<string>();
+    for (const s of (staffRes as any).data ?? []) staffSet.add(s.profile_id);
+    forumAnnouncements = forumAnnouncements.map((a: any) => {
+      const groupRole = a.profile_id ? roleMap.get(a.profile_id) ?? null : null;
+      const isStaff = a.profile_id ? staffSet.has(a.profile_id) : false;
+      const authorRole = groupRole === "owner" ? "Owner"
+        : groupRole === "admin" ? "Admin"
+        : isStaff ? "Staff"
+        : null;
+      return { ...a, authorRole };
+    });
+  }
   if (pollRowsRes.error) {
     console.error("[groups/forum-polls] query error:", JSON.stringify(pollRowsRes.error));
   }
@@ -578,7 +663,7 @@ if (canViewContent && memberProfileIds.length > 0) {
       .order("avg_score", { ascending: false }).order("review_count", { ascending: false }).order("game_id").limit(3),
     db.rpc("group_hot_take", statArgs).maybeSingle(),
     db.rpc("group_reviews", statArgs)
-      .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url ), profiles ( username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
+      .select("id, score, title, published_at, profile_id, games ( id, title, slug, cover_img_url, igdb_category ), profiles ( username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) )")
       .order("published_at", { ascending: false })
       .limit(50),
     db.rpc("group_consensus_picks", { ...statArgs, p_limit: OVERVIEW_LIST_LIMIT }),
@@ -1063,6 +1148,10 @@ const groupOgDescription = group.description
 
   /* ── Two-col layout ── */
   .two-col{display:grid;grid-template-columns:1fr 280px;gap:20px;align-items:start}
+  /* Grid cells default to min-width:auto, which lets intrinsic-width content
+     (a very long word in an announcement excerpt, a wide screenshot) push the
+     1fr cell wider than its share and shove the sidebar out of alignment. */
+  .two-col > *{min-width:0}
   @media(max-width:700px){.two-col{grid-template-columns:1fr}}
   .sidebar{display:flex;flex-direction:column;gap:14px}
   .card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px}
@@ -1133,7 +1222,87 @@ const groupOgDescription = group.description
   .wl-remove{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:16px;padding:2px;transition:color .15s}
   .wl-remove:hover{color:#f87171}
 
-  /* ── Announcements ── */
+  /* ── Announcements (list cards — mirrors /updates list) ── */
+  .ann-card-list{list-style:none;padding:0;margin:4px 0 0;display:flex;flex-direction:column;gap:12px}
+  .ann-card-list-compact{gap:10px}
+  .ann-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;transition:border-color .15s}
+  .ann-card:hover{border-color:var(--accent)}
+  .ann-card-link{display:block;padding:12px 14px;text-decoration:none;color:inherit}
+  .ann-card-full{padding:16px 18px;cursor:pointer}
+  .ann-card-full .ann-card-meta{margin-bottom:8px}
+  .ann-card-meta{display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap}
+  .ann-card-meta .badge{font-size:10px;font-weight:600;padding:2px 7px;border-radius:999px;text-transform:capitalize}
+  .ann-card-meta .badge.category{background:var(--bg-hover);color:var(--text-secondary)}
+  .ann-card-meta .badge.pinned{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
+  .ann-card-meta .badge.locked{background:var(--bg-hover);color:var(--text-tertiary)}
+  /* Staff-authored threads: a role chip in the meta row and an accent left border
+     so admin/owner threads stand out from member-started ones. */
+  .ann-card-meta .badge.staff{font-weight:700}
+  .ann-card-meta .badge.staff.staff-owner{background:#271e00;color:#fbbf24}
+  .ann-card-meta .badge.staff.staff-admin{background:var(--accent-subtle);color:var(--accent)}
+  .ann-card-meta .badge.staff.staff-staff{background:#0b2a1a;color:#4ade80}
+  .ann-card-staff{box-shadow:inset 3px 0 0 var(--accent)}
+  .ann-card-staff-owner{box-shadow:inset 3px 0 0 #fbbf24}
+  .ann-card-staff-admin{box-shadow:inset 3px 0 0 var(--accent)}
+  .ann-card-staff-staff{box-shadow:inset 3px 0 0 #4ade80}
+  .ann-card-pinned{border-color:var(--accent)}
+  .ann-card-title{font-size:15px;font-weight:600;color:var(--text-primary);margin:0 0 4px;line-height:1.35}
+  .ann-card-excerpt{font-size:13px;color:var(--text-secondary);line-height:1.55;margin:0 0 8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .ann-card-footer{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-tertiary);flex-wrap:wrap}
+  .ann-card-author{display:inline-flex;align-items:center;gap:6px}
+  .ann-card-avatar{width:18px;height:18px;border-radius:50%;background:var(--accent-subtle);display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
+  .ann-card-avatar img{width:100%;height:100%;object-fit:cover;display:block}
+  .ann-card-username{color:var(--text-secondary);font-weight:500}
+  .ann-card-role{font-size:9px;font-weight:700;padding:1px 6px;border-radius:7px;background:var(--accent-subtle);color:var(--accent);text-transform:uppercase;letter-spacing:.03em}
+  .ann-card-role-owner{background:#271e00;color:#fbbf24}
+  .ann-card-role-admin{background:var(--accent-subtle);color:var(--accent)}
+  .ann-card-role-staff{background:#0b2a1a;color:#4ade80}
+  .ann-card-list-compact .ann-card-title{font-size:14px}
+  .ann-card-list-compact .ann-card-excerpt{-webkit-line-clamp:1}
+
+  /* Overview tab: compact rows nested inside the "Announcements" card. Each
+     row = avatar + (pin tag · title) + 1-line excerpt + author · time · 💬 n.
+     No inner border, hover tints the background, whole row links out. */
+  .ann-row-list{list-style:none;padding:0;margin:4px 0 0;display:flex;flex-direction:column}
+  .ann-row+.ann-row{border-top:1px solid var(--border-subtle)}
+  .ann-row-link{display:flex;align-items:flex-start;gap:10px;padding:10px 2px;text-decoration:none;color:inherit;border-radius:8px;transition:background .12s}
+  .ann-row-link:hover{background:var(--bg-hover)}
+  .ann-row-avatar{width:28px;height:28px;border-radius:50%;background:var(--accent-subtle);display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--accent);overflow:hidden;flex-shrink:0}
+  .ann-row-avatar img{width:100%;height:100%;object-fit:cover;display:block}
+  .ann-row-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+  .ann-row-head{display:flex;align-items:center;gap:6px;min-width:0}
+  .ann-row-pin{font-size:11px;line-height:1;flex-shrink:0}
+  .ann-row-title{font-size:13px;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .ann-row-excerpt{font-size:12px;color:var(--text-secondary);line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .ann-row-excerpt-lead{font-size:13px;color:var(--text-primary);font-weight:500}
+  .ann-row-meta{font-size:11px;color:var(--text-tertiary);display:flex;gap:5px;flex-wrap:wrap;margin-top:1px}
+
+  /* Full-body cards (Forums tab): render the HTML in place, collapse very
+     long posts under a fade with a "Continue reading →" affordance. */
+  .ann-card-title-link{display:block;color:var(--text-primary);text-decoration:none;font-size:17px;font-weight:700;margin:0 0 10px;line-height:1.3}
+  .ann-card-title-link:hover{color:var(--accent)}
+  .ann-card-full-body{position:relative;max-height:520px;overflow:hidden;font-size:14px;color:var(--text-primary);line-height:1.65;margin:0 0 10px}
+  .ann-card-full.is-overflowing .ann-card-full-body{max-height:420px;mask-image:linear-gradient(to bottom,#000 72%,transparent);-webkit-mask-image:linear-gradient(to bottom,#000 72%,transparent)}
+  .ann-card-full-body p{margin:0 0 10px}
+  .ann-card-full-body p:last-child{margin-bottom:0}
+  .ann-card-full-body h2{font-size:18px;font-weight:700;color:var(--text-primary);margin:14px 0 8px}
+  .ann-card-full-body h3{font-size:15px;font-weight:600;color:var(--text-primary);margin:12px 0 6px}
+  .ann-card-full-body ul,.ann-card-full-body ol{padding-left:22px;margin:0 0 10px}
+  .ann-card-full-body li{margin-bottom:3px}
+  .ann-card-full-body blockquote{border-left:3px solid var(--accent);margin:0 0 10px;padding:3px 12px;color:var(--text-secondary);font-style:italic}
+  .ann-card-full-body img{max-width:100%;border-radius:8px;display:block;margin:10px 0}
+  .ann-card-full-body iframe,.ann-card-full-body div[data-youtube-video] iframe{width:100%;aspect-ratio:16/9;border-radius:8px;border:none;display:block;margin:10px 0}
+  .ann-card-full-body .mention{color:var(--accent)}
+  .ann-card-full-body .comment-emote{height:20px;vertical-align:middle}
+  .ann-card-readmore{display:inline-block;font-size:13px;font-weight:600;color:var(--accent);text-decoration:none;margin:-2px 0 10px}
+  .ann-card-readmore:hover{text-decoration:underline}
+  .ann-card-footer-spacer{flex:1}
+  .ann-card-discuss{color:var(--text-secondary);font-weight:600;font-size:12px;text-decoration:none;padding:4px 10px;border-radius:999px;background:var(--bg-hover);border:1px solid var(--border)}
+  .ann-card-discuss:hover{color:var(--accent);border-color:var(--accent)}
+
+  /* ── Legacy inline announcement renderer (still used by the comment body
+     renderer in CommentThread; kept because .announcement-body is also the
+     render target used by the shared renderPostBody util elsewhere). ── */
   .announcement-item{padding:12px 0;border-bottom:1px solid var(--border-subtle)}
   .announcement-item:last-child{border-bottom:none}
   .announcement-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
@@ -1142,7 +1311,20 @@ const groupOgDescription = group.description
   .announcement-author{font-size:12px;font-weight:600}
   .announcement-time{font-size:11px;color:var(--text-tertiary)}
   .announcement-pin-tag{font-size:10px;font-weight:700;color:var(--accent);background:var(--accent-subtle);padding:1px 7px;border-radius:8px;margin-left:auto}
-  .announcement-body{font-size:13px;color:var(--text-secondary);line-height:1.5;white-space:pre-wrap}
+  .announcement-body{font-size:13px;color:var(--text-secondary);line-height:1.55}
+  .announcement-body p{margin:0 0 8px}
+  .announcement-body p:last-child{margin-bottom:0}
+  .announcement-body h2{font-size:16px;font-weight:700;color:var(--text-primary);margin:12px 0 6px}
+  .announcement-body h3{font-size:14px;font-weight:600;color:var(--text-primary);margin:10px 0 4px}
+  .announcement-body ul,.announcement-body ol{padding-left:20px;margin:0 0 8px}
+  .announcement-body li{margin-bottom:3px}
+  .announcement-body blockquote{border-left:3px solid var(--accent);margin:0 0 8px;padding:2px 10px;color:var(--text-secondary);font-style:italic}
+  .announcement-body img{max-width:100%;border-radius:8px;display:block;margin:8px 0}
+  .announcement-body iframe{width:100%;aspect-ratio:16/9;border-radius:8px;border:none;display:block;margin:8px 0}
+  .announcement-body div[data-youtube-video]{margin:8px 0}
+  .announcement-body div[data-youtube-video] iframe{width:100%;aspect-ratio:16/9;border-radius:8px;border:none}
+  .announcement-body .mention{color:var(--accent)}
+  .announcement-body .comment-emote{height:18px;vertical-align:middle}
   .announcement-actions{display:flex;gap:10px;margin-top:6px}
   .announcement-action{background:none;border:none;cursor:pointer;color:var(--text-tertiary);font-size:11px;font-family:inherit;padding:0;transition:color .15s}
   .announcement-action:hover{color:var(--text-primary)}
@@ -1580,7 +1762,8 @@ const groupOgDescription = group.description
   .gf-filter-on{background:var(--accent);border-color:var(--accent);color:#fff}
   .gf-filter-on:hover{background:var(--accent);color:#fff}
   .gf-list{display:flex;flex-direction:column;gap:16px}
-  .gf-item{display:flex;flex-direction:column;gap:0}
+  .gf-item{display:flex;flex-direction:column;gap:0;padding-bottom:16px;border-bottom:1px solid var(--border-subtle)}
+  .gf-item:last-of-type{padding-bottom:0;border-bottom:none}
   /* The viewer's own score, annotating the card below it */
   .gf-compare{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--text-tertiary);border-bottom:none;border-radius:12px 12px 0 0;padding:8px 14px}
   .gf-compare-agree{border-left-color:var(--score-great)}
@@ -1768,13 +1951,9 @@ const groupOgDescription = group.description
   .gg-split-solo .gg-stage-detail{grid-column:1;grid-row:3}
   .gg-split-solo .gg-ladder{grid-column:2;grid-row:2;align-self:center}
   .gg-split-solo .gg-bottom{grid-column:2;grid-row:3}
-  /* The question beside its top answers */
-  .gg-poll{margin-top:14px;display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);border:1px solid var(--border);border-radius:12px;overflow:hidden}
-  .gg-poll-ask.poll-item{padding:12px 14px;border-bottom:none;border-right:1px solid var(--border);background:var(--bg-hover)}
-  .gg-poll-kicker{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--accent);margin-bottom:4px}
-  .gg-poll-ask .poll-question{font-size:14px;line-height:1.35;margin-bottom:8px}
-  .gg-poll-answers{padding:12px 14px;min-width:0}
-  .gg-answers-empty{margin:6px 0 0;font-size:13px;color:var(--text-tertiary)}
+  /* Forum-poll-styled question, sitting under the game's split */
+  .gg-poll{margin-top:14px}
+  .gg-poll-kicker{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--accent);margin-bottom:6px}
   .gg-answer-actions-row{display:flex;align-items:center;gap:6px;margin-top:6px}
   .gg-upvote,.gg-reply-toggle{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border-radius:12px;border:1px solid var(--border);background:none;font-family:inherit;font-size:11px;font-weight:600;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s,background .15s}
   .gg-upvote:hover:not(:disabled),.gg-reply-toggle:hover{border-color:var(--text-secondary);color:var(--text-primary)}
@@ -1808,8 +1987,6 @@ const groupOgDescription = group.description
     .gg-hero-inner{flex-wrap:wrap}
     .gg-body{padding:0 14px 14px}
     .gg-split{grid-template-columns:minmax(0,1fr)}
-    .gg-poll{grid-template-columns:minmax(0,1fr)}
-    .gg-poll-ask.poll-item{border-right:none;border-bottom:1px solid var(--border)}
     .gg-split-solo .gg-community{display:flex}
     .gg-bottom{grid-template-columns:minmax(0,1fr)}
     .gg-head{flex-direction:column}
@@ -2311,56 +2488,64 @@ const groupOgDescription = group.description
           ) :
           key === "announcements" ? (
             <ShowcaseSection section="announcements" label={groupShowcaseLabel("announcements")} hidden={overviewHidden.has("announcements")} isOwner={canEditOverview}>
-          {canSeeMemberContent && (
+          {canViewContent && (
             <div class="card">
               <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
                 <span>Announcements</span>
                 <span style="display:flex;align-items:center;gap:10px">
                   <a href={`/groups/${group.id}?tab=forums&section=announcements`} class="see-all-link">See all →</a>
                   {isAdminOrOwner && (
-                    <button onclick="toggleAnnouncementForm()" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+                    <button class="ann-new-btn" data-ann-new="overview" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
                   )}
                 </span>
               </div>
 
               {isAdminOrOwner && (
-                <div id="announcement-form" class="compose-form" style="display:none">
-                  <textarea id="announcement-body" class="compose-input" placeholder="Share an update with the group…" maxlength="2000"></textarea>
-                  <div class="compose-row">
-                    <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="postAnnouncement()">Post</button>
-                    <label class="compose-check">
-                      <input type="checkbox" id="announcement-pinned" style="accent-color:var(--accent)" />
-                      Pin to top
-                    </label>
-                  </div>
-                  <div id="announcement-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
-                </div>
+                <PostComposer
+                  composerId="group-ann-overview"
+                  createUrl="/api/groups/announcements/create"
+                  extraFields={{ group_id: group.id }}
+                  responseIdKey="id"
+                  showTitle={true}
+                  startHidden
+                  openTriggerSelector='[data-ann-new="overview"]'
+                  placeholder="Share an update with the group…"
+                  submitLabel="Post announcement"
+                  redirect="reload"
+                />
               )}
 
               {announcements.length === 0
                 ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
-                : announcements.map((a: any) => (
-                  <div class="announcement-item" data-announcement-id={a.id}>
-                    <div class="announcement-head">
-                      <div class="announcement-avatar">
-                        {a.profiles?.avatar_url
-                          ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
-                          : getInitials(a.profiles?.username ?? "?")}
-                      </div>
-                      <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
-                      {readBadgeSlugs(a.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" />)}
-                      <span class="announcement-time">· {timeAgo(a.created_at)}</span>
-                      {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
-                    </div>
-                    <div class="announcement-body">{a.body}</div>
-                    {isAdminOrOwner && (
-                      <div class="announcement-actions">
-                        <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
-                        <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
-                      </div>
-                    )}
-                  </div>
-                ))
+                : <ul class="ann-row-list">
+                    {announcements.slice(0, 3).map((a: any) => (
+                      <li class="ann-row">
+                        <a class="ann-row-link" href={`/groups/${group.id}/announcements/${a.id}`}>
+                          <span class="ann-row-avatar">
+                            {a.profiles?.avatar_url
+                              ? <img src={a.profiles.avatar_url} alt={a.profiles?.username ?? ""} loading="lazy" />
+                              : getInitials(a.profiles?.username ?? "?")}
+                          </span>
+                          <span class="ann-row-main">
+                            {(a.title?.trim() || a.pinned) && (
+                              <span class="ann-row-head">
+                                {a.pinned && <span class="ann-row-pin" title="Pinned">📌</span>}
+                                {a.title?.trim() && <span class="ann-row-title">{a.title.trim()}</span>}
+                              </span>
+                            )}
+                            <span class={`ann-row-excerpt${a.title?.trim() ? "" : " ann-row-excerpt-lead"}`}>{postExcerpt(a.body, 220)}</span>
+                            <span class="ann-row-meta">
+                              <span>{a.profiles?.username ?? "unknown"}</span>
+                              <span>·</span>
+                              <span>{timeAgo(a.created_at)}</span>
+                              <span>·</span>
+                              <span>💬 {annCommentCounts[a.id] ?? 0}</span>
+                            </span>
+                          </span>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
               }
             </div>
           )}
@@ -2686,7 +2871,7 @@ const groupOgDescription = group.description
                 ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">{pollsShowcaseMode === "featured" ? "The featured poll was removed. Pick another via Change." : "No polls yet."}</div>
                 : polls.map((p: any) => {
                   const hasVoted = !!p.myOptionId;
-                  const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+                  const canManagePoll = canEditOverview || p.profile_id === currentProfile?.id;
                   const showResults = hasVoted || p.closed;
                   return (
                     <div class="poll-item" data-poll-id={p.id}>
@@ -2848,6 +3033,11 @@ const groupOgDescription = group.description
         data-section="polls">
         Polls {forumPolls.length > 0 && <span class="tab-count">{forumPolls.length}</span>}
       </a>
+      <a href={`/groups/${group.id}?tab=forums&section=threads`}
+        class={`forums-sub-link${forumSection === "threads" ? " active" : ""}`}
+        data-section="threads">
+        Discussions {forumThreads.length > 0 && <span class="tab-count">{forumThreads.length}</span>}
+      </a>
     </nav>
 
     <!-- Announcements section -->
@@ -2856,48 +3046,64 @@ const groupOgDescription = group.description
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           <span>Announcements</span>
           {isAdminOrOwner && (
-            <button onclick="toggleAnnouncementForm('forum-')" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
+            <button class="ann-new-btn" data-ann-new="forums" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New</button>
           )}
         </div>
 
         {isAdminOrOwner && (
-          <div id="forum-announcement-form" class="compose-form" style="display:none">
-            <textarea id="forum-announcement-body" class="compose-input" placeholder="Share an update with the group…" maxlength="2000"></textarea>
-            <div class="compose-row">
-              <button class="btn-primary" style="font-size:12px;padding:6px 14px" onclick="postAnnouncement('forum-')">Post</button>
-              <label class="compose-check">
-                <input type="checkbox" id="forum-announcement-pinned" style="accent-color:var(--accent)" />
-                Pin to top
-              </label>
-            </div>
-            <div id="forum-announcement-err" style="font-size:11px;color:#f87171;margin-top:6px;display:none"></div>
-          </div>
+          <PostComposer
+            composerId="group-ann-forums"
+            createUrl="/api/groups/announcements/create"
+            extraFields={{ group_id: group.id }}
+            responseIdKey="id"
+            showTitle={true}
+            startHidden
+            openTriggerSelector='[data-ann-new="forums"]'
+            placeholder="Share an update with the group…"
+            submitLabel="Post announcement"
+            redirect="reload"
+          />
         )}
 
         {forumAnnouncements.length === 0
           ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No announcements yet.</div>
-          : forumAnnouncements.map((a: any) => (
-            <div class="announcement-item" data-announcement-id={a.id}>
-              <div class="announcement-head">
-                <div class="announcement-avatar">
-                  {a.profiles?.avatar_url
-                    ? <img src={a.profiles.avatar_url} alt={a.profiles?.username} />
-                    : getInitials(a.profiles?.username ?? "?")}
-                </div>
-                <a href={`/reviewers/${a.profiles?.username}`} class="announcement-author" style="color:inherit;text-decoration:none">@{a.profiles?.username}</a>
-                {readBadgeSlugs(a.profiles).map((slug) => <ProfileBadge slug={slug} size="sm" />)}
-                <span class="announcement-time">· {timeAgo(a.created_at)}</span>
-                {a.pinned && <span class="announcement-pin-tag">📌 Pinned</span>}
-              </div>
-              <div class="announcement-body">{a.body}</div>
-              {isAdminOrOwner && (
-                <div class="announcement-actions">
-                  <button class="announcement-action" onclick={`toggleAnnouncementPin('${a.id}', ${!a.pinned})`}>{a.pinned ? "Unpin" : "Pin"}</button>
-                  <button class="announcement-action" onclick={`deleteAnnouncement('${a.id}')`}>Delete</button>
-                </div>
-              )}
-            </div>
-          ))
+          : <ul class="ann-card-list">
+              {forumAnnouncements.map((a: any) => (
+                <li class="ann-card ann-card-full" data-ann-href={`/groups/${group.id}/announcements/${a.id}`}>
+                  <div class="ann-card-meta">
+                    {a.pinned && <span class="badge pinned">📌 Pinned</span>}
+                    <span class="badge category">announcement</span>
+                    {a.is_locked && <span class="badge locked">🔒 Locked</span>}
+                  </div>
+                  {a.title?.trim() && (
+                    <a class="ann-card-title ann-card-title-link" href={`/groups/${group.id}/announcements/${a.id}`}>
+                      {a.title.trim()}
+                    </a>
+                  )}
+                  <div class="ann-card-full-body" data-ann-body set:html={renderPostBody(a.body)} />
+                  <a class="ann-card-readmore" href={`/groups/${group.id}/announcements/${a.id}`} hidden>Continue reading →</a>
+                  <div class="ann-card-footer">
+                    <span class="ann-card-author">
+                      <span class="ann-card-avatar">
+                        {a.profiles?.avatar_url
+                          ? <img src={a.profiles.avatar_url} alt={a.profiles?.username ?? ""} loading="lazy" />
+                          : getInitials(a.profiles?.username ?? "?")}
+                      </span>
+                      <span class="ann-card-username">{a.profiles?.username ?? "unknown"}</span>
+                      {a.authorRole && (
+                        <span class={`ann-card-role ann-card-role-${a.authorRole.toLowerCase()}`}>{a.authorRole}</span>
+                      )}
+                    </span>
+                    <span>·</span>
+                    <span>{timeAgo(a.created_at)}</span>
+                    <span class="ann-card-footer-spacer"></span>
+                    <a class="ann-card-discuss" href={`/groups/${group.id}/announcements/${a.id}`}>
+                      💬 {annCommentCounts[a.id] ?? 0} {(annCommentCounts[a.id] ?? 0) === 1 ? "comment" : "comments"}
+                    </a>
+                  </div>
+                </li>
+              ))}
+            </ul>
         }
       </div>
     </div>
@@ -2949,7 +3155,7 @@ const groupOgDescription = group.description
         ? <div class="card" style="font-size:13px;color:var(--text-tertiary)">No polls yet.</div>
         : forumPolls.map((p: any) => {
           const hasVoted = !!p.myOptionId;
-          const canManagePoll = isAdminOrOwner || p.profile_id === currentProfile?.id;
+          const canManagePoll = canEditOverview || p.profile_id === currentProfile?.id;
           const showResults = hasVoted || p.closed;
           const game = p.games;
           const gameHref = p.featured_game_id
@@ -2962,9 +3168,6 @@ const groupOgDescription = group.description
             : "";
           const commentCount = (p.answers?.length ?? 0) + (p.answers?.reduce((n: number, a: any) => n + a.replies.length, 0) ?? 0);
           const gameYear = game?.date_released ? new Date(game.date_released).getFullYear() : null;
-          const voters = (p.voters ?? []) as any[];
-          const voterStrip = voters.slice(0, 6);
-          const extraVoters = Math.max(0, voters.length - voterStrip.length);
           const previewComments = (p.answers ?? []).slice(0, 1);
           const pollPageHref = `/groups/${group.id}/polls/${p.id}`;
           const slices = pieSlices(p.options, p.totalVotes);
@@ -2987,19 +3190,20 @@ const groupOgDescription = group.description
                 {p.pinned && <span class="fp-poll-chip fp-poll-chip-pin">📌 Pinned</span>}
                 {p.closed && <span class="fp-poll-chip fp-poll-chip-closed">🔒 Closed</span>}
                 {p.featured_game_id && <span class="fp-poll-chip fp-poll-chip-featured">★ Featured</span>}
-                {canManagePoll && (
-                  <span class="fp-poll-admin-actions">
-                    {canEditOverview && (
-                      <button class="announcement-action" onclick={`togglePollPinned('${p.id}', ${!p.pinned})`}>{p.pinned ? "Unpin" : "Pin"}</button>
-                    )}
-                    {!p.featured_game_id && (
-                      <>
-                        <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
-                        <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
-                      </>
-                    )}
-                  </span>
-                )}
+                <span class="fp-poll-admin-actions">
+                  {!!currentProfile && p.profile_id !== currentProfile.id && (
+                    <button class="announcement-action" onclick={`window.openReport && window.openReport('group_poll', '${p.id}')`}>Report</button>
+                  )}
+                  {canManagePoll && canEditOverview && (
+                    <button class="announcement-action" onclick={`togglePollPinned('${p.id}', ${!p.pinned})`}>{p.pinned ? "Unpin" : "Pin"}</button>
+                  )}
+                  {canManagePoll && !p.featured_game_id && (
+                    <>
+                      <button class="announcement-action" onclick={`togglePollClosed('${p.id}', ${!p.closed})`}>{p.closed ? "Reopen" : "Close"}</button>
+                      <button class="announcement-action" onclick={`deletePoll('${p.id}')`}>Delete</button>
+                    </>
+                  )}
+                </span>
               </header>
 
               <h3 class="fp-poll-question">{p.question}</h3>
@@ -3101,29 +3305,110 @@ const groupOgDescription = group.description
                   </div>
                 </a>
               </div>
-
-              <footer class="fp-poll-foot">
-                {voterStrip.length > 0
-                  ? (
-                    <div class="fp-voter-strip">
-                      {voterStrip.map((v: any) => (
-                        <a href={`/reviewers/${v.username}`} class="fp-voter" title={`@${v.username}`}>
-                          {v.avatar_url
-                            ? <img src={v.avatar_url} alt="" loading="lazy" />
-                            : (v.username ? v.username.slice(0, 2).toUpperCase() : "?")}
-                        </a>
-                      ))}
-                      {extraVoters > 0 && <span class="fp-voter fp-voter-more">+{extraVoters}</span>}
-                    </div>
-                  )
-                  : <span class="fp-no-votes">Be the first to vote</span>
-                }
-                <a href={pollPageHref} class="fp-poll-foot-btn">Open →</a>
-              </footer>
             </article>
           );
         })
       }
+    </div>
+
+    <!-- Threads section (member-created discussions) -->
+    <div class={`forums-section${forumSection === "threads" ? " active" : ""}`} data-section="threads">
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          <span>Discussions</span>
+          {canPostThread && (
+            <button class="ann-new-btn" data-ann-new="forums-threads" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;font-family:inherit;font-weight:600;padding:0">+ New discussion</button>
+          )}
+        </div>
+
+        {canPostThread && (
+          <PostComposer
+            composerId="group-forum-thread-new"
+            createUrl="/api/groups/forums/create"
+            extraFields={{ group_id: group.id }}
+            responseIdKey="id"
+            showTitle={true}
+            startHidden
+            openTriggerSelector='[data-ann-new="forums-threads"]'
+            placeholder="Start a discussion with the group…"
+            submitLabel="Post discussion"
+            redirect="reload"
+          />
+        )}
+
+        {!canPostThread && isMember && !forumsEveryone && (
+          <div style="font-size:12px;color:var(--text-tertiary);padding:4px 0 8px">Only admins can start discussions in this group.</div>
+        )}
+
+        {forumThreads.length === 0
+          ? <div style="font-size:13px;color:var(--text-tertiary);padding:8px 0">No discussions yet{canPostThread ? " — start the first one." : "."}</div>
+          : <ul class="ann-card-list">
+              {forumThreads.map((t: any) => {
+                const isOwnThread = !!currentProfile && t.profile_id === currentProfile.id;
+                const canDeleteThread = canEditOverview || isOwnThread;
+                const canReportThread = !!currentProfile && !isOwnThread;
+                // Mods (owner/admin/can_edit_group) can pin any thread; see /api/groups/forums/pin.
+                const canPinThread = canEditOverview;
+                const authorRoleKey = t.authorRole ? String(t.authorRole).toLowerCase() : null;
+                const isStaffAuthored = authorRoleKey === "owner" || authorRoleKey === "admin" || authorRoleKey === "staff";
+                return (
+                <li
+                  class={`ann-card ann-card-full${isStaffAuthored ? ` ann-card-staff ann-card-staff-${authorRoleKey}` : ""}${t.pinned ? " ann-card-pinned" : ""}`}
+                  data-ann-href={`/groups/${group.id}/forums/${t.id}`}
+                >
+                  <div class="ann-card-meta">
+                    {t.pinned && <span class="badge pinned">📌 Pinned</span>}
+                    <span class="badge category">thread</span>
+                    {t.authorRole && (
+                      <span class={`badge staff staff-${authorRoleKey}`}>{t.authorRole === "Owner" ? "👑 " : t.authorRole === "Admin" ? "★ " : ""}{t.authorRole}</span>
+                    )}
+                    {t.is_locked && <span class="badge locked">🔒 Locked</span>}
+                    {(canPinThread || canDeleteThread || canReportThread) && (
+                      <span style="margin-left:auto;display:inline-flex;gap:10px">
+                        {canPinThread && (
+                          <button type="button" class="announcement-action" data-pin-thread={t.id} data-pinned={t.pinned ? "1" : "0"}>{t.pinned ? "Unpin" : "Pin"}</button>
+                        )}
+                        {canReportThread && (
+                          <button type="button" class="announcement-action" data-report-thread={t.id}>Report</button>
+                        )}
+                        {canDeleteThread && (
+                          <button type="button" class="announcement-action" data-delete-thread={t.id}>Delete</button>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  {t.title?.trim() && (
+                    <a class="ann-card-title ann-card-title-link" href={`/groups/${group.id}/forums/${t.id}`}>
+                      {t.title.trim()}
+                    </a>
+                  )}
+                  <div class="ann-card-full-body" data-ann-body set:html={renderPostBody(t.body)} />
+                  <a class="ann-card-readmore" href={`/groups/${group.id}/forums/${t.id}`} hidden>Continue reading →</a>
+                  <div class="ann-card-footer">
+                    <span class="ann-card-author">
+                      <span class="ann-card-avatar">
+                        {t.profiles?.avatar_url
+                          ? <img src={t.profiles.avatar_url} alt={t.profiles?.username ?? ""} loading="lazy" />
+                          : getInitials(t.profiles?.username ?? "?")}
+                      </span>
+                      <span class="ann-card-username">{t.profiles?.username ?? "unknown"}</span>
+                      {t.authorRole && (
+                        <span class={`ann-card-role ann-card-role-${t.authorRole.toLowerCase()}`}>{t.authorRole}</span>
+                      )}
+                    </span>
+                    <span>·</span>
+                    <span>{timeAgo(t.created_at)}</span>
+                    <span class="ann-card-footer-spacer"></span>
+                    <a class="ann-card-discuss" href={`/groups/${group.id}/forums/${t.id}`}>
+                      💬 {threadCommentCounts[t.id] ?? 0} {(threadCommentCounts[t.id] ?? 0) === 1 ? "comment" : "comments"}
+                    </a>
+                  </div>
+                </li>
+              );
+              })}
+            </ul>
+        }
+      </div>
     </div>
   </div>
   )}
@@ -3688,32 +3973,38 @@ async function deleteSession(sessionId) {
 window.deleteSession = deleteSession;
 
 // ── Announcements ──
-function toggleAnnouncementForm(prefix) {
-  prefix = prefix || '';
-  const form = document.getElementById(prefix + 'announcement-form');
-  if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
-}
-window.toggleAnnouncementForm = toggleAnnouncementForm;
+// The composer itself (src/components/forum/PostComposer.astro) handles the
+// create flow; the "+ New" button opens it via its openTriggerSelector prop.
 
-async function postAnnouncement(prefix) {
-  prefix = prefix || '';
-  const bodyEl = document.getElementById(prefix + 'announcement-body');
-  const pinnedEl = document.getElementById(prefix + 'announcement-pinned');
-  const errEl = document.getElementById(prefix + 'announcement-err');
-  const body = bodyEl?.value?.trim();
-  if (errEl) errEl.style.display = 'none';
-  if (!body) { if (errEl) { errEl.textContent = 'Write something first'; errEl.style.display = 'block'; } return; }
-  const res = await fetch('/api/groups/announcements/create', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id: groupData.id, body, pinned: !!pinnedEl?.checked }),
+// Forums-tab cards render the full announcement body. Clicking anywhere on
+// the card (outside an inner link / image / button) jumps to the dedicated
+// page; cards whose body overflows get a fade mask + "Continue reading →".
+(function initAnnCards() {
+  const cards = document.querySelectorAll('.ann-card-full');
+  cards.forEach((card) => {
+    const body = card.querySelector('[data-ann-body]');
+    const more = card.querySelector('.ann-card-readmore');
+    if (body && more) {
+      // Delay to a frame so lazy images have initial dimensions.
+      requestAnimationFrame(() => {
+        if (body.scrollHeight > body.clientHeight + 2) {
+          card.classList.add('is-overflowing');
+          more.hidden = false;
+        }
+      });
+    }
+    card.addEventListener('click', (e) => {
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      // Let any inner anchor / button / media handle its own click.
+      if (t.closest('a, button, img, iframe, video')) return;
+      // Also ignore if the user is selecting text.
+      if (window.getSelection && window.getSelection().toString()) return;
+      const href = card.getAttribute('data-ann-href');
+      if (href) window.location.href = href;
+    });
   });
-  if (res.ok) window.location.reload();
-  else {
-    const d = await res.json();
-    if (errEl) { errEl.textContent = d.error ?? 'Error posting announcement'; errEl.style.display = 'block'; }
-  }
-}
-window.postAnnouncement = postAnnouncement;
+})();
 
 async function toggleAnnouncementPin(announcementId, pinned) {
   const res = await fetch('/api/groups/announcements/pin', {
@@ -3735,6 +4026,44 @@ async function deleteAnnouncement(announcementId) {
   else { const d = await res.json(); alert(d.error ?? 'Error'); }
 }
 window.deleteAnnouncement = deleteAnnouncement;
+
+// ── Forum threads: pin + delete + report from the Forums > Forums list card ──
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('[data-delete-thread],[data-report-thread],[data-pin-thread]');
+  if (!btn) return;
+  const delId = btn.getAttribute('data-delete-thread');
+  if (delId) {
+    e.preventDefault(); e.stopPropagation();
+    if (!confirm('Delete this thread and all its comments?')) return;
+    fetch('/api/groups/forums/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thread_id: delId }),
+    }).then(async (r) => {
+      if (r.ok) btn.closest('li')?.remove();
+      else { const d = await r.json(); alert(d.error ?? 'Error'); }
+    });
+    return;
+  }
+  const pinId = btn.getAttribute('data-pin-thread');
+  if (pinId) {
+    e.preventDefault(); e.stopPropagation();
+    const makePinned = btn.getAttribute('data-pinned') !== '1';
+    btn.disabled = true;
+    fetch('/api/groups/forums/pin', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thread_id: pinId, pinned: makePinned }),
+    }).then(async (r) => {
+      if (r.ok) window.location.reload();
+      else { const d = await r.json(); alert(d.error ?? 'Error'); btn.disabled = false; }
+    });
+    return;
+  }
+  const reportId = btn.getAttribute('data-report-thread');
+  if (reportId) {
+    e.preventDefault(); e.stopPropagation();
+    if (window.openReport) window.openReport('forum_thread', reportId);
+  }
+});
 
 // ── Polls ──
 function togglePollForm(prefix) {
@@ -4360,5 +4689,6 @@ window.deletePoll = deletePoll;
   window.savePollsShowcase = savePollsShowcase
 </script>
 <CropModal />
+<ReportModal />
 </div><!-- /#accentScope -->
 </Layout>

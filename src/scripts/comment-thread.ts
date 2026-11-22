@@ -8,6 +8,9 @@ export {};
 type TargetType =
   | "poll_answer"
   | "forum_post_comment"
+  | "announcement_comment"
+  | "forum_thread_comment"
+  | "site_discussion_comment"
   | "list_comment"
   | "recommendation_comment"
   | "review_comment";
@@ -42,6 +45,12 @@ function routeCompose(target: { type: TargetType; id: string }, body: string): R
       return { url: "/api/groups/polls/answer", body: { poll_id: target.id, body } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/create", body: { post_id: target.id, body } };
+    case "announcement_comment":
+      return { url: "/api/groups/announcements/comments/create", body: { announcement_id: target.id, body } };
+    case "forum_thread_comment":
+      return { url: "/api/groups/forums/comments/create", body: { thread_id: target.id, body } };
+    case "site_discussion_comment":
+      return { url: "/api/discussions/comments/create", body: { discussion_id: target.id, body } };
     case "list_comment":
       return { url: "/api/lists/comments/create", body: { list_id: target.id, body } };
     case "recommendation_comment":
@@ -56,6 +65,12 @@ function routeReply(target: { type: TargetType; id: string }, parentId: string, 
       return { url: "/api/groups/polls/answer-reply", body: { answer_id: parentId, body } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/create", body: { post_id: target.id, parent_id: parentId, body } };
+    case "announcement_comment":
+      return { url: "/api/groups/announcements/comments/create", body: { announcement_id: target.id, parent_id: parentId, body } };
+    case "forum_thread_comment":
+      return { url: "/api/groups/forums/comments/create", body: { thread_id: target.id, parent_id: parentId, body } };
+    case "site_discussion_comment":
+      return { url: "/api/discussions/comments/create", body: { discussion_id: target.id, parent_id: parentId, body } };
     case "list_comment":
       return { url: "/api/lists/comments/create", body: { list_id: target.id, parent_id: parentId, body } };
     case "recommendation_comment":
@@ -69,7 +84,13 @@ function routeVote(target: { type: TargetType }, commentId: string, vote: 1 | -1
     case "poll_answer":
       return { url: "/api/groups/polls/answer-vote", body: { answer_id: commentId, vote } };
     case "forum_post_comment":
-      return { url: "", body: {} }; // no vote endpoint yet
+      return { url: "/api/forum/comments/vote", body: { comment_id: commentId, vote } };
+    case "announcement_comment":
+      return { url: "/api/groups/announcements/comments/vote", body: { comment_id: commentId, vote } };
+    case "forum_thread_comment":
+      return { url: "/api/groups/forums/comments/vote", body: { comment_id: commentId, vote } };
+    case "site_discussion_comment":
+      return { url: "/api/discussions/comments/vote", body: { comment_id: commentId, vote } };
     case "list_comment":
       return { url: "/api/lists/comments/vote", body: { comment_id: commentId, vote } };
     case "recommendation_comment":
@@ -84,6 +105,12 @@ function routeDelete(target: { type: TargetType }, commentId: string): RoutedCal
       return { url: "/api/groups/polls/answer", body: { action: "delete", answer_id: commentId } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/delete", body: { comment_id: commentId } };
+    case "announcement_comment":
+      return { url: "/api/groups/announcements/comments/delete", body: { comment_id: commentId } };
+    case "forum_thread_comment":
+      return { url: "/api/groups/forums/comments/delete", body: { comment_id: commentId } };
+    case "site_discussion_comment":
+      return { url: "/api/discussions/comments/delete", body: { comment_id: commentId } };
     case "list_comment":
       return { url: "/api/lists/comments/delete", body: { comment_id: commentId } };
     case "recommendation_comment":
@@ -98,6 +125,12 @@ function routeDeleteReply(target: { type: TargetType }, replyId: string): Routed
       return { url: "/api/groups/polls/answer-reply", body: { action: "delete", reply_id: replyId } };
     case "forum_post_comment":
       return { url: "/api/forum/comments/delete", body: { comment_id: replyId } };
+    case "announcement_comment":
+      return { url: "/api/groups/announcements/comments/delete", body: { comment_id: replyId } };
+    case "forum_thread_comment":
+      return { url: "/api/groups/forums/comments/delete", body: { comment_id: replyId } };
+    case "site_discussion_comment":
+      return { url: "/api/discussions/comments/delete", body: { comment_id: replyId } };
     case "list_comment":
       return { url: "/api/lists/comments/delete", body: { comment_id: replyId } };
     case "recommendation_comment":
@@ -111,7 +144,13 @@ function routeEdit(target: { type: TargetType }, commentId: string, body: string
     case "poll_answer":
       return { url: "/api/groups/polls/answer", body: { action: "update", answer_id: commentId, body } };
     case "forum_post_comment":
-      return { url: "", body: {} }; // no edit endpoint yet
+      return { url: "/api/forum/comments/update", body: { comment_id: commentId, body } };
+    case "announcement_comment":
+      return { url: "/api/groups/announcements/comments/update", body: { comment_id: commentId, body } };
+    case "forum_thread_comment":
+      return { url: "/api/groups/forums/comments/update", body: { comment_id: commentId, body } };
+    case "site_discussion_comment":
+      return { url: "/api/discussions/comments/update", body: { comment_id: commentId, body } };
     case "list_comment":
       return { url: "/api/lists/comments/update", body: { comment_id: commentId, body } };
     case "recommendation_comment":
@@ -130,7 +169,13 @@ function routeReact(target: { type: TargetType }, commentId: string, reactionTyp
           : { answer_id: commentId, reaction_type: reactionType },
       };
     case "forum_post_comment":
-      return { url: "", body: {} }; // no reaction endpoint yet
+      return { url: "/api/forum/comments/react", body: { comment_id: commentId, reaction_type: reactionType } };
+    case "announcement_comment":
+      return { url: "/api/groups/announcements/comments/react", body: { comment_id: commentId, reaction_type: reactionType } };
+    case "forum_thread_comment":
+      return { url: "/api/groups/forums/comments/react", body: { comment_id: commentId, reaction_type: reactionType } };
+    case "site_discussion_comment":
+      return { url: "/api/discussions/comments/react", body: { comment_id: commentId, reaction_type: reactionType } };
     case "list_comment":
       return { url: "/api/lists/comments/react", body: { comment_id: commentId, reaction_type: reactionType } };
     case "recommendation_comment":
@@ -149,6 +194,9 @@ function reportKind(target: { type: TargetType }): string {
   switch (target.type) {
     case "poll_answer": return "poll_answer";
     case "forum_post_comment": return "forum_comment";
+    case "announcement_comment": return "announcement_comment";
+    case "forum_thread_comment": return "forum_thread_comment";
+    case "site_discussion_comment": return "site_discussion_comment";
     case "list_comment": return "list_comment";
     case "recommendation_comment": return "recommendation_comment";
     case "review_comment": return "comment"; // reports table uses legacy "comment" target_type

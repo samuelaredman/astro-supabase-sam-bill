@@ -12,7 +12,7 @@ import { igdbImage, timeAgo, scoreClass } from '../utils/format';
 import { getSiteStats } from '../utils/siteStats';
 import { attachReviewVideos } from '../utils/reviewVideos';
 import { REC_SELECT, shapeRec } from '../utils/recommendationsFeed';
-import { setPageCacheHeaders } from '../utils/cache';
+import { setPageCacheHeaders, CACHE_TAG_REVIEWS_PUBLIC } from '../utils/cache';
 import { getPageUser } from '../utils/pageAuth';
 import { BADGES } from '../utils/badges';
 import { fetchCreatorContent } from '../utils/youtubeChannel';
@@ -26,15 +26,16 @@ const serverClient = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, serverClient);
 const isLoggedIn = !!user;
 
-setPageCacheHeaders(Astro.response.headers, isLoggedIn);
+setPageCacheHeaders(Astro.response.headers, isLoggedIn, 3600, [CACHE_TAG_REVIEWS_PUBLIC]);
 
 const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
 const REVIEW_FIELDS = `
-  id, score, title, body, play_time_hours,
+  id, score, title, body, play_time_hours, difficulty,
+  completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment,
   contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url ),
+  games ( id, title, slug, cover_img_url, date_released, igdb_category ),
   profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   review_votes( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),
@@ -70,7 +71,7 @@ async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit:
 
   let listsQuery = adminDb
     .from('lists')
-    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, last_posted_to_feed_at, profiles(id, username, avatar_url)')
+    .select('id, title, description, is_ranked, visibility, cover_image_url, created_at, last_posted_to_feed_at, profiles(id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey(badge_slug))')
     .eq('visibility', 'public')
     .not('last_posted_to_feed_at', 'is', null)
     .order('last_posted_to_feed_at', { ascending: false })
@@ -135,6 +136,9 @@ async function fetchSharedListFeedItems(profileIdFilter: string[] | null, limit:
     ownerId: l.profiles?.id ?? null,
     ownerUsername: l.profiles?.username,
     ownerAvatar: l.profiles?.avatar_url,
+    ownerBadgeSlugs: Array.isArray(l.profiles?.profile_badges)
+      ? l.profiles.profile_badges.map((b: any) => b?.badge_slug).filter((s: any) => typeof s === 'string')
+      : [],
     coverUrls: listCoversByListId[l.id] ?? [],
     entryCount: listCountByListId[l.id] ?? 0,
     upVotes: listUpByListId[l.id] ?? 0,
@@ -170,7 +174,7 @@ const [
     .limit(30),
   currentProfile
     ? db.from('reviews')
-        .select('id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url )')
+        .select('id, score, published_at, created_at, title, games ( id, title, slug, cover_img_url, igdb_category )')
         .eq('profile_id', currentProfile.id)
         .eq('status', 'published')
         .order('published_at', { ascending: false })
@@ -202,15 +206,38 @@ type Review = {
 }
 const reviews = (rawReviewsRes.data ?? []) as Review[]
 
-// Merge all types, sort by date. Shows all SSR-fetched items in one chronological feed.
-// Infinite scroll (loadMore) continues from the oldest item's date.
+// Merge all types, sort by date. The initial per-stream fetches cover
+// mismatched date ranges (30 reviews may only reach ~24h back while 30 recs
+// stretch to months ago), so rendering every row would put old recs/lists
+// below reviews that are still younger than the next page of reviews that
+// loadMore will insert — the feed looks like it jumps from a recent review
+// to months-old posts, then a batch of day-old reviews appears below them.
+// Trim the SSR feed at the youngest stream tail (the max of each stream's
+// oldest fetched row). The trimmed items aren't lost: each stream's initial
+// cursor is set to the trim point so loadMore picks them up in order.
+const rawReviewTail = reviews.length > 0
+  ? (reviews[reviews.length - 1].published_at ?? reviews[reviews.length - 1].created_at)
+  : null;
+const rawRecTail = recentRecs.length > 0 ? recentRecs[recentRecs.length - 1].createdAt : null;
+const rawListTail = recentLists.length > 0
+  ? (recentLists[recentLists.length - 1].last_posted_to_feed_at ?? recentLists[recentLists.length - 1].created_at)
+  : null;
+const streamTails: string[] = [rawReviewTail, rawRecTail, rawListTail].filter((d): d is string => !!d);
+// Only trim when every stream contributed rows — otherwise there's no
+// mismatch to equalize, and the oldest-of-N streams would discard the lot.
+const feedCutoff: string | null = streamTails.length === 3
+  ? streamTails.reduce((a, b) => (a > b ? a : b))
+  : null;
+
 const feedItems: any[] = [
   ...reviews.map(r => ({ ...r, _isListItem: false, _date: r.published_at || r.created_at })),
   // Lists ride the feed on their last post-to-feed time (not created_at), so
   // a repost surfaces the list again instead of leaving it buried.
   ...recentLists.map((l: any) => ({ ...l, _date: l.last_posted_to_feed_at ?? l.created_at })),
   ...recentRecs,
-].sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
+]
+  .filter((item: any) => !feedCutoff || item._date >= feedCutoff)
+  .sort((a, b) => new Date(b._date).getTime() - new Date(a._date).getTime());
 
 if (trendingRes.error) console.error('[index] home_trending_games rpc error:', JSON.stringify(trendingRes.error))
 const trending: { title: string; slug: string; cover: string | null; count: number }[] =
@@ -349,11 +376,12 @@ let followingLists: any[] = []
 let hotTakes: any[] = []
 
 const HT_FIELDS = `
-  id, score, title, body, play_time_hours,
+  id, score, title, body, play_time_hours, difficulty,
+  completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment,
   contains_spoilers, status, published_at, created_at,
   game_id,
   played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url ),
+  games ( id, title, slug, cover_img_url, date_released, igdb_category ),
   profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   review_votes( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),
@@ -425,12 +453,43 @@ function formatCount(n: number): string {
   return String(n)
 }
 
-const lastRecentReview = reviews.length > 0 ? reviews[reviews.length - 1] : null
 const lastFollowingReview = followingReviews.length > 0 ? followingReviews[followingReviews.length - 1] : null
-const lastFeedItem = feedItems.length > 0 ? feedItems[feedItems.length - 1] : null
-const initialRecentCursor = lastFeedItem?._date ?? null
+// Per-stream cursors for /api/feed/recent — using a single overall "oldest
+// item" cursor silently skipped reviews between the oldest shown review and
+// the oldest shown list/rec. Each stream now continues from its own tail.
+// If a stream was trimmed by the SSR cutoff above (its tail < feedCutoff),
+// its cursor starts at the cutoff so loadMore picks up the trimmed rows in
+// chronological order rather than skipping past them.
+function initialCursorFor(rawTail: string | null): string | null {
+  if (!rawTail) return null;
+  if (feedCutoff && rawTail < feedCutoff) return feedCutoff;
+  return rawTail;
+}
+const initialRecentCursors = {
+  reviews: initialCursorFor(rawReviewTail),
+  recs:    initialCursorFor(rawRecTail),
+  lists:   initialCursorFor(rawListTail),
+}
+// Per-stream done at the point SSR finishes. A short initial batch means the
+// stream is already exhausted; the client passes `r_done=1` etc. so the
+// server doesn't silently re-fetch the newest rows for that stream.
+// Exception: if feedCutoff bumped the stream's cursor forward (its SSR tail is
+// older than the cutoff), the trimmed rows between tail and cutoff are still
+// waiting to be fetched — the stream is NOT done even if the SSR fetch was
+// short. Without this guard a site with <10 lists total and any list older
+// than the review tail would permanently hide that list.
+function initialStreamDone(fetched: number, limit: number, rawTail: string | null, cursor: string | null): boolean {
+  if (fetched >= limit) return false;
+  if (cursor !== rawTail) return false; // cursor was bumped by feedCutoff — more to fetch
+  return true;
+}
+const initialRecentStreamDone = {
+  reviews: initialStreamDone(reviews.length,     30, rawReviewTail, initialRecentCursors.reviews),
+  recs:    initialStreamDone(recentRecs.length,  30, rawRecTail,    initialRecentCursors.recs),
+  lists:   initialStreamDone(recentLists.length, 10, rawListTail,   initialRecentCursors.lists),
+}
 const initialFollowingCursor = lastFollowingReview?.published_at ?? lastFollowingReview?.created_at ?? null
-const initialRecentDone = reviews.length < 30 && recentRecs.length < 30 && recentLists.length < 10
+const initialRecentDone = initialRecentStreamDone.reviews && initialRecentStreamDone.recs && initialRecentStreamDone.lists
 const initialFollowingDone = followingReviews.length < 20
 
 const ogImage = new URL('/og/home.jpg', Astro.url.origin).toString()
@@ -718,6 +777,7 @@ const siteJsonLd = {
                 ownerId={item.ownerId}
                 ownerUsername={item.ownerUsername}
                 ownerAvatar={item.ownerAvatar ?? null}
+                ownerBadgeSlugs={item.ownerBadgeSlugs ?? []}
                 createdAt={item.created_at}
                 upVotes={item.upVotes}
                 downVotes={item.downVotes}
@@ -799,6 +859,7 @@ const siteJsonLd = {
                 ownerId={item.ownerId}
                 ownerUsername={item.ownerUsername}
                 ownerAvatar={item.ownerAvatar ?? null}
+                ownerBadgeSlugs={item.ownerBadgeSlugs ?? []}
                 createdAt={item.created_at}
                 upVotes={item.upVotes}
                 downVotes={item.downVotes}
@@ -906,6 +967,22 @@ const siteJsonLd = {
       </div>
       <input type="hidden" id="gameId" />
     </div>
+
+    <!-- Main Game / DLC toggle + picker — appears only after a base-game
+         pick that has DLCs/expansions in game_relationships. -->
+    <div id="homeTypeRow" class="composer-field" style="display:none;margin-top:12px">
+      <label class="composer-label">Reviewing</label>
+      <div class="home-type-toggle" role="tablist" aria-label="Review target">
+        <button type="button" id="homeTypeMain" class="home-type-tab active" role="tab" aria-selected="true">Main Game</button>
+        <button type="button" id="homeTypeDlc" class="home-type-tab" role="tab" aria-selected="false">DLC</button>
+      </div>
+      <div id="homeDlcPicker" style="display:none;margin-top:10px">
+        <div class="autocomplete-wrap">
+          <input type="text" id="homeDlcSearch" class="composer-input" placeholder="Pick a DLC or expansion..." autocomplete="off" />
+          <div class="autocomplete-results" id="homeDlcResults"></div>
+        </div>
+      </div>
+    </div>
     <div class="composer-field" style="margin-top:12px">
       <label class="composer-label">Score</label>
       <div style="display:flex;align-items:center;gap:8px">
@@ -919,8 +996,8 @@ const siteJsonLd = {
     </div>
     <div class="composer-field" style="margin-top:12px">
       <label class="composer-label">Review</label>
-      <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="5000"></textarea>
-      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 5000</div>
+      <textarea id="reviewBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="10000"></textarea>
+      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="charCount">0 / 10000</div>
     </div>
     <div class="composer-row" style="margin-top:12px">
       <div class="composer-field" style="flex:1">
@@ -935,6 +1012,38 @@ const siteJsonLd = {
       <div class="composer-field" style="width:120px">
         <label class="composer-label">Hours played</label>
         <input type="number" id="hoursPlayed" class="composer-input" placeholder="0" min="0" max="9999" />
+      </div>
+      <div class="composer-field" style="width:120px">
+        <label class="composer-label">Difficulty</label>
+        <input type="number" id="difficultyVal" class="composer-input" placeholder="—" min="1" max="10" step="0.1" />
+      </div>
+    </div>
+    <div class="composer-field" style="margin-top:12px">
+      <label class="composer-label">How far did you get? <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
+      <div class="gc-status-group" role="group" aria-label="Completion status">
+        <button type="button" class="gc-status-btn hc-status-btn" data-status="dnf" aria-pressed="false">✖ Didn't finish</button>
+        <button type="button" class="gc-status-btn hc-status-btn" data-status="main" aria-pressed="false">📖 Finished main story</button>
+        <button type="button" class="gc-status-btn hc-status-btn" data-status="extras" aria-pressed="false">📚 Main + Post Game</button>
+        <button type="button" class="gc-status-btn hc-status-btn" data-status="platinum" aria-pressed="false">🏆 Platinum / 100%</button>
+      </div>
+      <input type="hidden" id="hcCompletionStatus" value="" />
+    </div>
+    <div class="composer-field gc-completion-hours" id="hcCompletionHoursField" style="margin-top:12px">
+      <label class="composer-label" id="hcCompletionHoursLabel">Hours to complete</label>
+      <input type="number" id="hcCompletionHours" class="composer-input" placeholder="—" min="0" max="99999" step="1" style="width:160px" />
+    </div>
+    <div class="composer-row gc-plat-fields" id="hcPlatFields" style="margin-top:12px">
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Hours to plat</label>
+        <input type="number" id="hcPlatHours" class="composer-input" placeholder="—" min="0" max="99999" step="1" />
+      </div>
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Plat difficulty</label>
+        <input type="number" id="hcPlatDifficulty" class="composer-input" placeholder="—" min="1" max="10" step="0.1" />
+      </div>
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Plat enjoyment</label>
+        <input type="number" id="hcPlatEnjoyment" class="composer-input" placeholder="—" min="1" max="10" step="0.1" />
       </div>
     </div>
     <div class="composer-field" style="margin-top:12px">
@@ -1052,13 +1161,21 @@ const siteJsonLd = {
       document.getElementById('reviewBody').value = ''
       document.getElementById('hoursPlayed').value = ''
       document.getElementById('scoreVal').value = ''
+      document.getElementById('difficultyVal').value = ''
+      _hcSetCompletion('')
       document.getElementById('platformSelect').value = ''
       document.getElementById('spoilerCheck').checked = false
       document.getElementById('youtubeUrl').value = ''
       document.getElementById('composerError').textContent = ''
-      document.getElementById('charCount').textContent = '0 / 5000'
+      document.getElementById('charCount').textContent = '0 / 10000'
       document.getElementById('charCount').style.color = 'var(--text-tertiary)'
       document.getElementById('gameResults').classList.remove('open')
+      // Hide the DLC toggle + clear picker — next game selection will re-populate it
+      const typeRow = document.getElementById('homeTypeRow')
+      if (typeRow) typeRow.style.display = 'none'
+      const grid = document.getElementById('homeDlcGrid')
+      if (grid) grid.innerHTML = ''
+      _homeSelectedTarget = null
     }
     var postMenuBtn = document.getElementById('postMenuBtn')
     var postMenuDropdown = document.getElementById('postMenuDropdown')
@@ -1146,6 +1263,40 @@ const siteJsonLd = {
     }
 
     var typeFilterMap = { reviews: 'review', lists: 'list', recs: 'rec' };
+    // Mark the first wrapper not filtered out — CSS strips its top border.
+    // `+` would leave a stray border on the first visible card after any run
+    // of hidden ones (filtered sibling still counts as adjacent).
+    function updateRecentFirstVisible() {
+      var recentEl = document.getElementById('tab-recent');
+      if (!recentEl) return;
+      var want = null;
+      if (recentEl.classList.contains('filter-reviews')) want = 'review';
+      else if (recentEl.classList.contains('filter-lists')) want = 'list';
+      else if (recentEl.classList.contains('filter-recs')) want = 'rec';
+      var found = false;
+      recentEl.querySelectorAll(':scope > div[data-feed-type]').forEach(function (el) {
+        var match = !want || el.getAttribute('data-feed-type') === want;
+        if (match && !found) {
+          el.classList.add('feed-first-visible');
+          found = true;
+        } else {
+          el.classList.remove('feed-first-visible');
+        }
+      });
+    }
+    window.__updateRecentFirstVisible = updateRecentFirstVisible;
+    updateRecentFirstVisible();
+    // Videos tab has no type filter — the first wrapper is always first visible.
+    function updateVideosFirstVisible() {
+      var videosEl = document.getElementById('tab-videos');
+      if (!videosEl) return;
+      var found = false;
+      videosEl.querySelectorAll(':scope > div[data-feed-type]').forEach(function (el) {
+        if (!found) { el.classList.add('feed-first-visible'); found = true; }
+        else el.classList.remove('feed-first-visible');
+      });
+    }
+    window.__updateVideosFirstVisible = updateVideosFirstVisible;
     document.querySelectorAll('.feed-tab').forEach(function(btn) {
       btn.addEventListener('click', function() {
         document.querySelectorAll('.feed-tab').forEach(function(b) { b.classList.remove('active') });
@@ -1163,6 +1314,7 @@ const siteJsonLd = {
           recentEl.classList.remove('filter-reviews', 'filter-lists', 'filter-recs');
           if (isTypeFilter) recentEl.classList.add('filter-' + tab);
         }
+        updateRecentFirstVisible();
       });
     })
     // Mobile feed-filter dropdown — toggle the pill list and reflect the choice.
@@ -1198,8 +1350,8 @@ const siteJsonLd = {
     document.getElementById('reviewBody').addEventListener('input', function() {
       const count = this.value.length
       const el = document.getElementById('charCount')
-      el.textContent = count + ' / 5000'
-      el.style.color = count > 4500 ? (count >= 5000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
+      el.textContent = count + ' / 10000'
+      el.style.color = count > 9000 ? (count >= 10000 ? '#c0392b' : '#e67e22') : 'var(--text-tertiary)'
     })
     document.querySelectorAll('.review-body[data-spoiler="true"]').forEach(el => {
       el.addEventListener('click', () => el.classList.remove('spoiler-hidden'))
@@ -1264,11 +1416,13 @@ const siteJsonLd = {
                   document.getElementById('gameId').value = data.id
                   document.getElementById('composerError').textContent = ''
                   fetchGamePlatforms(data.id)
+                  fetchGameDlcs(data.id)
                 })
                 .catch(() => { document.getElementById('composerError').textContent = 'Failed to import game, try again.' })
             } else {
               document.getElementById('gameId').value = game.id
               fetchGamePlatforms(game.id)
+              fetchGameDlcs(game.id)
             }
           })
           results.appendChild(item)
@@ -1288,6 +1442,173 @@ const siteJsonLd = {
           platforms.map(p => `<option value="${p.id}">${p.name}</option>`).join('')
       }
     }
+
+    // After the user picks a base game in the game search, surface the
+    // Main Game / DLC toggle if this base has DLC/expansion children.
+    // _homeSelectedTarget is the game_id the review will actually post against —
+    // defaults to the picked base game, changes when the user picks a DLC in
+    // the toggle's grid.
+    let _homeSelectedTarget = null
+
+    function _homeEscape(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+    }
+
+    // Cached DLC list for the currently-picked base game — the search input
+    // filters client-side off this rather than refetching on every keystroke.
+    let _homeDlcList = []
+
+    function _homeSetType(type) {
+      const mainBtn = document.getElementById('homeTypeMain')
+      const dlcBtn  = document.getElementById('homeTypeDlc')
+      const picker  = document.getElementById('homeDlcPicker')
+      if (!mainBtn || !dlcBtn || !picker) return
+      if (type === 'dlc') {
+        mainBtn.classList.remove('active'); mainBtn.setAttribute('aria-selected', 'false')
+        dlcBtn.classList.add('active');     dlcBtn.setAttribute('aria-selected', 'true')
+        picker.style.display = 'block'
+        // Flip to the already-picked DLC if any; otherwise fall back to the
+        // base game id (the composer's input gate still blocks submit until
+        // a DLC is actually picked — see the saveDraft/submitReview handlers).
+        const picked = picker.querySelector('#homeDlcSearch')
+        const pickedId = picked && picked.dataset.dlcId
+        _homeSelectedTarget = pickedId || document.getElementById('gameId').value
+      } else {
+        mainBtn.classList.add('active');    mainBtn.setAttribute('aria-selected', 'true')
+        dlcBtn.classList.remove('active');  dlcBtn.setAttribute('aria-selected', 'false')
+        picker.style.display = 'none'
+        _homeSelectedTarget = document.getElementById('gameId').value
+      }
+    }
+
+    function _homeResetTypeRow() {
+      document.getElementById('homeTypeRow').style.display = 'none'
+      document.getElementById('homeDlcPicker').style.display = 'none'
+      const input = document.getElementById('homeDlcSearch')
+      if (input) { input.value = ''; delete input.dataset.dlcId }
+      const results = document.getElementById('homeDlcResults')
+      if (results) { results.innerHTML = ''; results.classList.remove('open') }
+      _homeDlcList = []
+      const main = document.getElementById('homeTypeMain'); if (main) main.classList.add('active')
+      const dlc  = document.getElementById('homeTypeDlc');  if (dlc)  dlc.classList.remove('active')
+      _homeSelectedTarget = document.getElementById('gameId').value || null
+    }
+
+    function _homeRenderDlcResults(filterText) {
+      const results = document.getElementById('homeDlcResults')
+      if (!results) return
+      const q = (filterText || '').trim().toLowerCase()
+      const matches = q
+        ? _homeDlcList.filter(d => (d.title || '').toLowerCase().includes(q))
+        : _homeDlcList
+      if (matches.length === 0) {
+        results.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-tertiary);font-size:14px">No DLCs match</div>'
+        results.classList.add('open')
+        return
+      }
+      const itemStyle = 'display:flex;align-items:center;gap:12px;padding:10px;border-radius:10px;cursor:pointer;transition:background 0.15s'
+      const coverStyle = 'width:38px;height:50px;flex-shrink:0;border-radius:6px;overflow:hidden;border:1px solid var(--border);background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:16px'
+      const imgStyle = 'width:100%;height:100%;object-fit:cover;border:none;border-radius:0'
+      const infoStyle = 'min-width:0;flex:1'
+      const titleStyle = 'font-size:14px;font-weight:500;margin-bottom:2px;color:var(--text-primary)'
+      const metaStyle = 'font-size:12px;color:#14b8a6;font-weight:600;letter-spacing:.04em;text-transform:uppercase'
+      results.innerHTML = matches.map(d => {
+        const cover = d.cover_img_url
+          ? (d.cover_img_url.startsWith('//') ? 'https:' + d.cover_img_url : d.cover_img_url).replace(/t_[a-z0-9_]+/, 't_cover_big')
+          : null
+        const badge = (d.igdb_category === 2 || d.igdb_category === 4) ? 'Expansion' : 'DLC'
+        const coverHtml = cover
+          ? '<img src="' + _homeEscape(cover) + '" alt="" style="' + imgStyle + '" />'
+          : '🎮'
+        return '<div class="autocomplete-item home-dlc-item" data-dlc-id="' + _homeEscape(d.id) + '" data-dlc-title="' + _homeEscape(d.title) + '" style="' + itemStyle + '">' +
+          '<div style="' + coverStyle + '">' + coverHtml + '</div>' +
+          '<div style="' + infoStyle + '">' +
+            '<div style="' + titleStyle + '">' + _homeEscape(d.title) + '</div>' +
+            '<div style="' + metaStyle + '">' + badge + '</div>' +
+          '</div>' +
+        '</div>'
+      }).join('')
+      results.classList.add('open')
+    }
+
+    async function fetchGameDlcs(gameId) {
+      _homeResetTypeRow()
+      _homeSelectedTarget = gameId
+      try {
+        const res = await fetch('/api/games/' + encodeURIComponent(gameId) + '/dlcs')
+        if (!res.ok) return
+        const data = await res.json()
+        const dlcs = (data.dlcs || []).filter(d => d.igdb_category === 1 || d.igdb_category === 2 || d.igdb_category === 4)
+        if (dlcs.length === 0) return
+        _homeDlcList = dlcs
+        document.getElementById('homeTypeRow').style.display = 'block'
+      } catch (e) { /* fetch failed — silently skip the toggle */ }
+    }
+
+    // Wire the toggle buttons + DLC autocomplete once on load.
+    (function _initHomeTypeToggle() {
+      const mainBtn = document.getElementById('homeTypeMain')
+      const dlcBtn  = document.getElementById('homeTypeDlc')
+      if (mainBtn) mainBtn.addEventListener('click', () => _homeSetType('main'))
+      if (dlcBtn)  dlcBtn.addEventListener('click',  () => _homeSetType('dlc'))
+      const input = document.getElementById('homeDlcSearch')
+      const results = document.getElementById('homeDlcResults')
+      if (input && results) {
+        // Open on focus / show list on input; a keystroke after a prior pick
+        // clears the previous selection so the input can't disagree with the
+        // target id on submit.
+        input.addEventListener('focus', () => _homeRenderDlcResults(input.value))
+        input.addEventListener('input', () => {
+          if (input.dataset.dlcId) {
+            delete input.dataset.dlcId
+            _homeSelectedTarget = document.getElementById('gameId').value
+          }
+          _homeRenderDlcResults(input.value)
+        })
+        results.addEventListener('mousedown', (e) => {
+          // mousedown (not click) so the input's blur handler can't close the
+          // results before the pick registers.
+          const item = e.target.closest('.home-dlc-item')
+          if (!item) return
+          e.preventDefault()
+          input.value = item.getAttribute('data-dlc-title') || ''
+          input.dataset.dlcId = item.getAttribute('data-dlc-id') || ''
+          _homeSelectedTarget = input.dataset.dlcId
+          results.classList.remove('open')
+        })
+        document.addEventListener('click', (e) => {
+          if (!e.target.closest('.autocomplete-wrap')) results.classList.remove('open')
+        })
+      }
+    })()
+    // Completion status chips on the home composer — mirrors the game-page composer.
+    function _hcSetCompletion(status) {
+      document.getElementById('hcCompletionStatus').value = status || ''
+      document.querySelectorAll('.hc-status-btn').forEach(function(btn) {
+        btn.setAttribute('aria-pressed', btn.getAttribute('data-status') === status ? 'true' : 'false')
+      })
+      document.getElementById('hcPlatFields').setAttribute('data-visible', status === 'platinum' ? 'true' : 'false')
+      var hoursVisible = status === 'main' || status === 'extras'
+      document.getElementById('hcCompletionHoursField').setAttribute('data-visible', hoursVisible ? 'true' : 'false')
+      var hoursLabel = document.getElementById('hcCompletionHoursLabel')
+      if (hoursLabel) hoursLabel.textContent = status === 'extras' ? 'Hours to complete main + post game' : 'Hours to complete main story'
+      if (!hoursVisible) document.getElementById('hcCompletionHours').value = ''
+      if (status !== 'platinum') {
+        document.getElementById('hcPlatHours').value = ''
+        document.getElementById('hcPlatDifficulty').value = ''
+        document.getElementById('hcPlatEnjoyment').value = ''
+      }
+    }
+    document.querySelectorAll('.hc-status-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var target = btn.getAttribute('data-status')
+        var current = document.getElementById('hcCompletionStatus').value
+        _hcSetCompletion(current === target ? '' : target)
+      })
+    })
+
     // ── Save draft: needs a game + review text; score/title/hours can come later. ──
     document.getElementById('saveDraftReview').addEventListener('click', async () => {
       const gameId = document.getElementById('gameId').value
@@ -1296,6 +1617,12 @@ const siteJsonLd = {
       const body = document.getElementById('reviewBody').value.trim()
       const platformId = document.getElementById('platformSelect').value
       const hours = document.getElementById('hoursPlayed').value
+      const difficultyRaw = document.getElementById('difficultyVal').value
+      const completion = document.getElementById('hcCompletionStatus').value
+      const completionHoursRaw = (completion === 'main' || completion === 'extras') ? document.getElementById('hcCompletionHours').value : ''
+      const platHoursRaw = completion === 'platinum' ? document.getElementById('hcPlatHours').value : ''
+      const platDiffRaw  = completion === 'platinum' ? document.getElementById('hcPlatDifficulty').value : ''
+      const platEnjoyRaw = completion === 'platinum' ? document.getElementById('hcPlatEnjoyment').value : ''
       const spoilers = document.getElementById('spoilerCheck').checked
       const youtubeUrl = document.getElementById('youtubeUrl').value.trim()
       const errorEl = document.getElementById('composerError')
@@ -1303,6 +1630,13 @@ const siteJsonLd = {
       if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
       if (!body) { errorEl.textContent = 'Write something before saving a draft.'; return; }
       if (scoreRaw && (parseFloat(scoreRaw) < 0.1 || parseFloat(scoreRaw) > 10)) { errorEl.textContent = 'Score must be between 0.1 and 10.'; return; }
+      if (difficultyRaw && (!Number.isInteger(Number(difficultyRaw)) || Number(difficultyRaw) < 1 || Number(difficultyRaw) > 10)) { errorEl.textContent = 'Difficulty must be a whole number from 1 to 10.'; return; }
+      // DLC toggle active without a pick: _homeSelectedTarget still equals base gameId.
+      const dlcBtnA = document.getElementById('homeTypeDlc')
+      if (dlcBtnA && dlcBtnA.classList.contains('active') && _homeSelectedTarget === gameId) {
+        errorEl.textContent = 'Pick which DLC or expansion you want to review.'; return;
+      }
+      const targetGameId = _homeSelectedTarget || gameId
       const dBtn = document.getElementById('saveDraftReview')
       dBtn.disabled = true
       dBtn.textContent = 'Saving...'
@@ -1311,13 +1645,19 @@ const siteJsonLd = {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            game_id: gameId,
+            game_id: targetGameId,
             score: scoreRaw ? parseFloat(scoreRaw) : null,
             title: title || null,
             body,
             platform_played_on: platformId || null,
             play_time_hours: hours ? parseInt(hours) : null,
             contains_spoilers: spoilers,
+            difficulty: difficultyRaw ? parseInt(difficultyRaw) : null,
+            completion_status: completion || null,
+            completion_hours: completionHoursRaw ? parseInt(completionHoursRaw) : null,
+            platinum_hours: platHoursRaw ? parseInt(platHoursRaw) : null,
+            platinum_difficulty: platDiffRaw ? parseFloat(platDiffRaw) : null,
+            platinum_enjoyment: platEnjoyRaw ? parseFloat(platEnjoyRaw) : null,
             youtube_url: youtubeUrl,
             status: 'draft',
           }),
@@ -1340,16 +1680,29 @@ const siteJsonLd = {
       const body = document.getElementById('reviewBody').value.trim()
       const platformId = document.getElementById('platformSelect').value
       const hours = document.getElementById('hoursPlayed').value
+      const difficultyRaw = document.getElementById('difficultyVal').value
+      const completion = document.getElementById('hcCompletionStatus').value
+      const completionHoursRaw = (completion === 'main' || completion === 'extras') ? document.getElementById('hcCompletionHours').value : ''
+      const platHoursRaw = completion === 'platinum' ? document.getElementById('hcPlatHours').value : ''
+      const platDiffRaw  = completion === 'platinum' ? document.getElementById('hcPlatDifficulty').value : ''
+      const platEnjoyRaw = completion === 'platinum' ? document.getElementById('hcPlatEnjoyment').value : ''
       const spoilers = document.getElementById('spoilerCheck').checked
       const youtubeUrl = document.getElementById('youtubeUrl').value.trim()
       const errorEl = document.getElementById('composerError')
       errorEl.textContent = ''
       if (!gameId) { errorEl.textContent = 'Please select a game.'; return; }
       if (!score || parseFloat(score) < 0.1 || parseFloat(score) > 10) { errorEl.textContent = 'Please enter a score between 0.1 and 10.'; return; }
+      if (difficultyRaw && (!Number.isInteger(Number(difficultyRaw)) || Number(difficultyRaw) < 1 || Number(difficultyRaw) > 10)) { errorEl.textContent = 'Difficulty must be a whole number from 1 to 10.'; return; }
       if (!title) { errorEl.textContent = 'Please add a title.'; return; }
       if (!body) { errorEl.textContent = 'Please write a review.'; return; }
-      if (body.length > 5000) { errorEl.textContent = 'Review must be at most 5000 characters.'; return; }
+      if (body.length > 10000) { errorEl.textContent = 'Review must be at most 10000 characters.'; return; }
       if (!hours || parseInt(hours) < 1 || parseInt(hours) > 25000) { errorEl.textContent = 'You must have at least 1 hour played to submit a review.'; return; }
+      // DLC toggle active without a pick: _homeSelectedTarget still equals base gameId.
+      const dlcBtnB = document.getElementById('homeTypeDlc')
+      if (dlcBtnB && dlcBtnB.classList.contains('active') && _homeSelectedTarget === gameId) {
+        errorEl.textContent = 'Pick which DLC or expansion you want to review.'; return;
+      }
+      const targetGameId = _homeSelectedTarget || gameId
       const btn = document.getElementById('submitReview')
       btn.disabled = true
       btn.textContent = 'Posting...'
@@ -1357,12 +1710,18 @@ const siteJsonLd = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          game_id: gameId,
+          game_id: targetGameId,
           score: parseFloat(score),
           title, body,
           platform_played_on: platformId || null,
           play_time_hours: hours ? parseInt(hours) : null,
           contains_spoilers: spoilers,
+          difficulty: difficultyRaw ? parseInt(difficultyRaw) : null,
+          completion_status: completion || null,
+          completion_hours: completionHoursRaw ? parseInt(completionHoursRaw) : null,
+          platinum_hours: platHoursRaw ? parseInt(platHoursRaw) : null,
+          platinum_difficulty: platDiffRaw ? parseInt(platDiffRaw) : null,
+          platinum_enjoyment: platEnjoyRaw ? parseInt(platEnjoyRaw) : null,
           youtube_url: youtubeUrl,
         }),
       })
@@ -1447,7 +1806,7 @@ const siteJsonLd = {
     })
   </script>
 
-  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursor, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
+  <script is:inline define:vars={{ isLoggedIn, currentProfileId: currentProfile?.id ?? null, initialRecentCursors, initialRecentStreamDone, initialFollowingCursor, initialRecentDone, initialFollowingDone, BADGES }}>
   (function () {
     // ── Image emote map — keep in sync with src/data/reactions.ts ─────────────
     // Add new emote keys here whenever you add them to IMAGE_EMOTES in reactions.ts
@@ -1502,6 +1861,14 @@ const siteJsonLd = {
       return clean.replace(/t_[a-z0-9_]+/, 't_thumb');
     }
     function initials(u) { return (u || '?').slice(0, 2).toUpperCase(); }
+    function isPreRelease(dateReleased, publishedAt, createdAt) {
+      if (!dateReleased) return false;
+      var reviewed = publishedAt || createdAt;
+      if (!reviewed) return false;
+      var relMs = new Date(dateReleased + 'T00:00:00Z').getTime();
+      var revMs = new Date(reviewed).getTime();
+      return isFinite(relMs) && isFinite(revMs) && revMs < relMs;
+    }
 
     // Render ProfileBadge chips next to a username. Accepts either a nested
     // profile_badges array ([{badge_slug}]) or a plain string[] of slugs so it
@@ -1567,7 +1934,7 @@ const siteJsonLd = {
          + '<span class="share-btn-toast">Link copied</span>'
          + '</button>';
       if (isLoggedIn && isOwn) {
-        h += '<button class="rc-edit-btn" data-review-id="' + esc(r.id) + '" data-game-id="' + esc(g.id||'') + '" data-game-title="' + esc(g.title||'') + '" data-score="' + esc(r.score) + '" data-review-title="' + esc(r.title||'') + '" data-body="' + esc(r.body) + '" data-platform-id="' + esc((r.played_on||{}).id||'') + '" data-hours="' + esc(r.play_time_hours||'') + '" data-spoilers="' + (r.contains_spoilers?'true':'false') + '" data-youtube-url="' + (ytId ? 'https://www.youtube.com/watch?v=' + ytId : '') + '" title="Edit review">'
+        h += '<button class="rc-edit-btn" data-review-id="' + esc(r.id) + '" data-game-id="' + esc(g.id||'') + '" data-game-title="' + esc(g.title||'') + '" data-score="' + esc(r.score) + '" data-review-title="' + esc(r.title||'') + '" data-body="' + esc(r.body) + '" data-platform-id="' + esc((r.played_on||{}).id||'') + '" data-hours="' + esc(r.play_time_hours||'') + '" data-difficulty="' + esc(r.difficulty != null ? r.difficulty : '') + '" data-completion-status="' + esc(r.completion_status || '') + '" data-completion-hours="' + esc(r.completion_hours != null ? r.completion_hours : '') + '" data-platinum-hours="' + esc(r.platinum_hours != null ? r.platinum_hours : '') + '" data-platinum-difficulty="' + esc(r.platinum_difficulty != null ? r.platinum_difficulty : '') + '" data-platinum-enjoyment="' + esc(r.platinum_enjoyment != null ? r.platinum_enjoyment : '') + '" data-spoilers="' + (r.contains_spoilers?'true':'false') + '" data-youtube-url="' + (ytId ? 'https://www.youtube.com/watch?v=' + ytId : '') + '" title="Edit review">'
            + '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>'
            + '</button>'
            + '<button class="rc-delete-btn" data-review-id="' + esc(r.id) + '" title="Delete review">'
@@ -1599,6 +1966,10 @@ const siteJsonLd = {
          + '<div class="score-badge ' + scoreClass(r.score) + '">' + esc(r.score) + '</div>'
          + '</div>';
 
+      if (isPreRelease(g.date_released, r.published_at, r.created_at)) {
+        h += '<div class="pre-release-badge">PLAYED BEFORE RELEASE</div>';
+      }
+
       if (r.contains_spoilers) h += '<div class="rc-spoiler-pill">⚠ spoilers</div>';
       if (r.title) h += '<div class="rc-title">' + esc(r.title) + '</div>';
 
@@ -1627,6 +1998,15 @@ const siteJsonLd = {
       h += '<div class="rc-footer"><div class="rc-chips">';
       if (r.played_on) h += '<span class="rc-chip">' + esc(r.played_on.name) + '</span>';
       if ((r.play_time_hours || 0) > 0) h += '<span class="rc-chip">' + esc(r.play_time_hours) + 'h</span>';
+      if (r.difficulty != null) h += '<span class="rc-chip">Difficulty ' + Number(r.difficulty).toFixed(1) + '/10</span>';
+      if (r.completion_status === 'dnf') h += '<span class="rc-chip rc-chip-status">✖ DNF</span>';
+      if (r.completion_status === 'main') h += '<span class="rc-chip rc-chip-status">📖 Main Story</span>';
+      if (r.completion_status === 'extras') h += '<span class="rc-chip rc-chip-status">📚 Main + Post Game</span>';
+      if ((r.completion_status === 'main' || r.completion_status === 'extras') && (r.completion_hours || 0) > 0) h += '<span class="rc-chip rc-chip-status">' + esc(r.completion_hours) + 'h to beat</span>';
+      if (r.completion_status === 'platinum') {
+        h += '<span class="rc-chip rc-chip-platinum">🏆 Platinum</span>';
+        if (r.platinum_enjoyment != null) h += '<span class="rc-chip rc-chip-platinum">Plat score ' + Number(r.platinum_enjoyment).toFixed(1) + '/10</span>';
+      }
       h += '</div>'
          + '<a href="/reviews/' + esc(r.id) + '" class="rc-comment-bubble">'
          + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10a2 2 0 0 1-2 2H5l-3 3V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6z"/></svg>'
@@ -1831,6 +2211,7 @@ const siteJsonLd = {
          + (avatar ? '<img src="' + esc(avatar) + '" alt="' + esc(username) + '" />' : '<span>' + esc(inits) + '</span>')
          + '</a>'
          + '<a href="/reviewers/' + esc(username) + '" class="lfc-reviewer-name">@' + esc(username) + '</a>'
+         + renderBadges(l.profiles?.profile_badges || l.ownerBadgeSlugs)
          + '<span class="lfc-action">shared a list</span>'
          + '<span class="lfc-dot">·</span>'
          + '<span class="lfc-ts">' + esc(timeAgo(ts)) + '</span>'
@@ -1896,7 +2277,10 @@ const siteJsonLd = {
 
     // ── Per-tab state ──────────────────────────────────────────────────────────
     var state = {
-      recent:    { cursor: initialRecentCursor,    loading: false, done: initialRecentDone },
+      // Recent tab tracks a cursor per stream (reviews / recs / lists). A
+      // shared cursor set to "oldest overall" silently skips reviews between
+      // the oldest shown review and the oldest shown list/rec on the next page.
+      recent:    { cursors: initialRecentCursors, streamDone: initialRecentStreamDone, loading: false, done: initialRecentDone },
       following: { cursor: initialFollowingCursor, loading: false, done: initialFollowingDone },
       videos:    { cursor: null,                   loading: false, done: false, count: 0 }
     };
@@ -1910,13 +2294,30 @@ const siteJsonLd = {
       var endEl    = document.getElementById('end-' + tab);
       if (loader) loader.style.display = 'block';
       try {
-        var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
-        var feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
-                    : tab === 'videos'    ? '/api/reviews/feed?tab=videos&limit=20' + cursorParam
-                    : '/api/feed/recent?limit=20' + cursorParam;
+        var feedUrl;
+        if (tab === 'recent') {
+          var cs = s.cursors || {};
+          var sd = s.streamDone || {};
+          var qp = [];
+          // For each stream: send either its cursor (active) or r_done=1
+          // (exhausted). Omitting both would make the server default to
+          // `now` and silently re-fetch the newest rows on every page.
+          if (sd.reviews) qp.push('r_done=1');
+          else if (cs.reviews) qp.push('r_cursor=' + encodeURIComponent(cs.reviews));
+          if (sd.recs)    qp.push('rc_done=1');
+          else if (cs.recs)    qp.push('rc_cursor=' + encodeURIComponent(cs.recs));
+          if (sd.lists)   qp.push('l_done=1');
+          else if (cs.lists)   qp.push('l_cursor=' + encodeURIComponent(cs.lists));
+          feedUrl = '/api/feed/recent?limit=20' + (qp.length ? '&' + qp.join('&') : '');
+        } else {
+          var cursorParam = s.cursor ? '&cursor=' + encodeURIComponent(s.cursor) : '';
+          feedUrl = tab === 'following' ? '/api/reviews/feed?tab=following&limit=20' + cursorParam
+                                        : '/api/reviews/feed?tab=videos&limit=20' + cursorParam;
+        }
         var res = await fetch(feedUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        var items = await res.json();
+        var payload = await res.json();
+        var items = tab === 'recent' ? (payload && payload.items) : payload;
         if (!Array.isArray(items) || items.length === 0) {
           s.done = true;
           // A tab with nothing at all gets its empty state instead of "all caught up".
@@ -1936,18 +2337,49 @@ const siteJsonLd = {
             sentinel.parentNode.insertBefore(tmp.firstChild, sentinel);
           }
         });
-        var last = items[items.length - 1];
-        s.cursor = last._date || last.published_at || last.created_at;
-        if (items.length < 20) {
-          s.done = true;
-          if (endEl) endEl.style.display = 'block';
-          if (sentinel) sentinel.remove();
+        if (tab === 'recent') {
+          if (window.__updateRecentFirstVisible) window.__updateRecentFirstVisible();
+          var nc = (payload && payload.cursors) || {};
+          // A null cursor for a stream means it's exhausted. Record that in
+          // streamDone so the next request sends `*_done=1` instead of
+          // silently defaulting the cursor back to `now`.
+          if (!s.streamDone) s.streamDone = {};
+          if (nc.reviews === null) s.streamDone.reviews = true;
+          if (nc.recs    === null) s.streamDone.recs    = true;
+          if (nc.lists   === null) s.streamDone.lists   = true;
+          s.cursors = { reviews: nc.reviews, recs: nc.recs, lists: nc.lists };
+          if (s.streamDone.reviews && s.streamDone.recs && s.streamDone.lists) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
+        } else {
+          if (tab === 'videos' && window.__updateVideosFirstVisible) window.__updateVideosFirstVisible();
+          var last = items[items.length - 1];
+          s.cursor = last._date || last.published_at || last.created_at;
+          if (items.length < 20) {
+            s.done = true;
+            if (endEl) endEl.style.display = 'block';
+            if (sentinel) sentinel.remove();
+          }
         }
       } catch (e) {
         console.error('[feed] loadMore error:', e);
       } finally {
         s.loading = false;
         if (loader) loader.style.display = 'none';
+        // IntersectionObserver only fires on state transitions. Under a type
+        // filter the loaded page is mostly display:none, so the sentinel
+        // barely moves and the observer stays silent even though it's still
+        // on-screen. If the sentinel is still in viewport after this load,
+        // keep draining until the viewport fills with visible items or the
+        // stream exhausts.
+        if (!s.done && sentinel && sentinel.isConnected) {
+          var rect = sentinel.getBoundingClientRect();
+          if (rect.top < (window.innerHeight || 0) + 300) {
+            setTimeout(function () { loadMore(tab); }, 0);
+          }
+        }
       }
     }
 
@@ -2845,17 +3277,29 @@ const siteJsonLd = {
     .feed-title { font-size: 15.5px; line-height: 1.2; }
     .feed-subtitle { font-size: 12px; line-height: 1.2; margin-top: 1px; }
   }
-  #tab-recent.filter-reviews [data-feed-type="list"],
-  #tab-recent.filter-reviews [data-feed-type="rec"] { display: none !important; }
-  #tab-recent.filter-lists [data-feed-type="review"],
-  #tab-recent.filter-lists [data-feed-type="rec"] { display: none !important; }
-  #tab-recent.filter-recs [data-feed-type="review"],
-  #tab-recent.filter-recs [data-feed-type="list"] { display: none !important; }
+  /* Scoped out of Astro's data-astro-cid attribute: items inserted by
+     loadMore via innerHTML don't carry the component scope, so the scoped
+     form of these selectors silently fails to hide them. */
+  #tab-recent.filter-reviews :global([data-feed-type="list"]),
+  #tab-recent.filter-reviews :global([data-feed-type="rec"]) { display: none !important; }
+  #tab-recent.filter-lists :global([data-feed-type="review"]),
+  #tab-recent.filter-lists :global([data-feed-type="rec"]) { display: none !important; }
+  #tab-recent.filter-recs :global([data-feed-type="review"]),
+  #tab-recent.filter-recs :global([data-feed-type="list"]) { display: none !important; }
   /* Each card on the Recent tab is wrapped in <div data-feed-type="..."> so
      the card components' own :last-child border strip wipes every border.
-     Draw separators between adjacent wrappers instead. */
-  #tab-recent > div[data-feed-type] + div[data-feed-type] {
+     Draw separators on every wrapper and strip the first one via JS when the
+     filter changes (adjacent-sibling `+` would skip hidden siblings and leave
+     stray top borders on the first visible card after a run of hidden ones).
+     :global() so loadMore-inserted wrappers (built via innerHTML, missing the
+     Astro scope attribute) also get the separator. */
+  #tab-recent > :global(div[data-feed-type]),
+  #tab-videos > :global(div[data-feed-type]) {
     border-top: 1px solid var(--border-subtle);
+  }
+  #tab-recent > :global(div[data-feed-type].feed-first-visible),
+  #tab-videos > :global(div[data-feed-type].feed-first-visible) {
+    border-top: none;
   }
   .genre-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
   .genre-pill { background: var(--tag-bg); color: var(--tag-text); font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; transition: all 0.15s; white-space: nowrap; border: 1px solid transparent; }
@@ -2924,6 +3368,22 @@ const siteJsonLd = {
   .composer-draft:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
   .composer-draft:disabled { opacity: 0.6; cursor: default; }
   .composer-error { font-size: 13px; color: #c0392b; min-height: 18px; margin-top: 8px; }
+  .gc-status-group { display: flex; gap: 8px; flex-wrap: wrap; }
+  .gc-status-btn { background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 7px 14px; font-size: 13px; font-family: inherit; color: var(--text-secondary); cursor: pointer; transition: border-color .15s, color .15s, background .15s; }
+  .gc-status-btn:hover { color: var(--text-primary); }
+  .gc-status-btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .gc-plat-fields { display: none; }
+  .gc-plat-fields[data-visible="true"] { display: flex; }
+  .gc-completion-hours { display: none; }
+  .gc-completion-hours[data-visible="true"] { display: flex; }
+
+  /* Homepage composer Main Game / DLC toggle — mirrors game-page composer styles. */
+  .home-type-toggle { display: inline-flex; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 3px; gap: 2px; }
+  .home-type-tab { background: transparent; border: none; padding: 6px 16px; font-size: 13px; font-weight: 500; color: var(--text-secondary); font-family: inherit; cursor: pointer; border-radius: 999px; transition: background .15s, color .15s; }
+  .home-type-tab:hover { color: var(--text-primary); }
+  .home-type-tab.active { background: var(--accent, #6050c8); color: white; font-weight: 600; }
+  /* DLC autocomplete reuses the game-search .autocomplete-wrap / -results /
+     -item styles — no bespoke list rules needed here. */
   .report-trigger-sm { font-size: 11px; color: var(--text-tertiary); background: none; border: none; cursor: pointer; font-family: inherit; padding: 2px 6px; border-radius: 6px; transition: color 0.15s, background 0.15s; }
   .report-trigger-sm:hover { color: #f87171; background: rgba(248,113,113,.08); }
 

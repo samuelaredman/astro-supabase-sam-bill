@@ -16,7 +16,7 @@ describe('readShowcaseKeys', () => {
 });
 
 describe('readShowcaseOrder', () => {
-  const DEFAULT = ['favorite_game', 'featured_group', 'video', 'games', 'achievements'];
+  const DEFAULT = ['favorite_game', 'video', 'games', 'achievements'];
 
   it('falls back to the default order', () => {
     expect(readShowcaseOrder([])).toEqual(DEFAULT);
@@ -24,10 +24,10 @@ describe('readShowcaseOrder', () => {
   });
 
   it('puts saved keys first, then the rest in default order', () => {
-    expect(readShowcaseOrder(['games', 'video'])).toEqual(['games', 'video', 'favorite_game', 'featured_group', 'achievements']);
+    expect(readShowcaseOrder(['games', 'video'])).toEqual(['games', 'video', 'favorite_game', 'achievements']);
   });
 
   it('ignores unknown and duplicate keys', () => {
-    expect(readShowcaseOrder(['achievements', 'bio', 'achievements', 3])).toEqual(['achievements', 'favorite_game', 'featured_group', 'video', 'games']);
+    expect(readShowcaseOrder(['achievements', 'bio', 'achievements', 3])).toEqual(['achievements', 'favorite_game', 'video', 'games']);
   });
 });

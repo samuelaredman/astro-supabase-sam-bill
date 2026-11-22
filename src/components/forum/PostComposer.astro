@@ -1,0 +1,477 @@
+---
+/**
+ * Shared rich-text post composer (Tiptap: headings, lists, quotes, resizable
+ * images, YouTube embeds). Used anywhere a forum-style post is written:
+ *   • /updates — "new post" composer on the index, "edit" composer on [id]
+ *   • /groups/[id] — announcement composer (both the Overview card and the
+ *     Forums tab's Announcements section)
+ *
+ * Multi-instance safe: everything is scoped to the root `[data-rich-composer]`
+ * element, so a page may render as many composers as it needs. Each one carries
+ * its own endpoint + payload + redirect behaviour as data-attributes.
+ */
+import { isHtmlPost } from '../../utils/richPost';
+
+interface Props {
+  /** A unique id for this composer on the page. Used to scope DOM lookups. */
+  composerId: string;
+  mode?: 'create' | 'edit';
+  postId?: string;
+  /** Seed values for edit mode. */
+  title?: string;
+  body?: string;
+  /** API routes. Defaults target the Updates forum. */
+  createUrl?: string;
+  updateUrl?: string;
+  /** Extra fields merged into the POST body (e.g. { group_id }). */
+  extraFields?: Record<string, unknown>;
+  /** Payload keys. Override when an endpoint names things differently. */
+  bodyField?: string;
+  titleField?: string;
+  pinField?: string;
+  /** Response key that holds the new post id (for `redirect: 'post-page'`). */
+  responseIdKey?: string;
+  /** UI toggles. */
+  showTitle?: boolean;
+  showPin?: boolean;
+  /** Start hidden (the "+ New" pattern). */
+  startHidden?: boolean;
+  /** External trigger that toggles the composer open. CSS selector. */
+  openTriggerSelector?: string;
+  placeholder?: string;
+  submitLabel?: string;
+  editSubmitLabel?: string;
+  /** After a successful create: reload the page, or go to `${postPagePrefix}${id}`. */
+  redirect?: 'reload' | 'post-page';
+  postPagePrefix?: string;
+}
+
+const {
+  composerId,
+  mode = 'create',
+  postId,
+  title = '',
+  body = '',
+  createUrl = '/api/forum/posts/create',
+  updateUrl = '/api/forum/posts/update',
+  extraFields,
+  bodyField = 'body',
+  titleField = 'title',
+  pinField = 'pinned',
+  responseIdKey = 'post_id',
+  showTitle = true,
+  showPin = true,
+  startHidden = false,
+  openTriggerSelector,
+  placeholder = 'Share an update, idea, or question…',
+  submitLabel = 'Post update',
+  editSubmitLabel = 'Save changes',
+  redirect = 'post-page',
+  postPagePrefix = '/updates/',
+} = Astro.props;
+
+const isEdit = mode === 'edit';
+function escHtml(t: string) {
+  return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+const initialHtml = body
+  ? (isHtmlPost(body)
+      ? body
+      : body.split(/\n{2,}/).map((para) => `<p>${escHtml(para).replace(/\n/g, '<br>')}</p>`).join(''))
+  : '';
+const hidden = isEdit || startHidden;
+---
+
+<div
+  class="rich-composer"
+  data-rich-composer
+  data-composer-id={composerId}
+  data-mode={mode}
+  data-post-id={postId ?? ''}
+  data-create-url={createUrl}
+  data-update-url={updateUrl}
+  data-extra-fields={extraFields ? JSON.stringify(extraFields) : ''}
+  data-body-field={bodyField}
+  data-title-field={titleField}
+  data-pin-field={pinField}
+  data-response-id-key={responseIdKey}
+  data-show-title={showTitle ? '1' : '0'}
+  data-show-pin={showPin ? '1' : '0'}
+  data-placeholder={placeholder}
+  data-submit-label={isEdit ? editSubmitLabel : submitLabel}
+  data-redirect={redirect}
+  data-post-page-prefix={postPagePrefix}
+  data-open-trigger={openTriggerSelector ?? ''}
+  hidden={hidden}
+>
+  {showTitle && (
+    <input type="text" class="rich-title" placeholder="Post title" maxlength="200" value={title} />
+  )}
+
+  <div class="rich-toolbar">
+    <button type="button" data-action="bold" title="Bold"><strong>B</strong></button>
+    <button type="button" data-action="italic" title="Italic"><em>I</em></button>
+    <button type="button" data-action="h2" title="Heading 2">H2</button>
+    <button type="button" data-action="h3" title="Heading 3">H3</button>
+    <div class="rich-tbsep"></div>
+    <button type="button" data-action="bullet" title="Bullet list">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="5" y1="4" x2="14" y2="4"/><line x1="5" y1="8" x2="14" y2="8"/><line x1="5" y1="12" x2="14" y2="12"/><circle cx="2" cy="4" r="1.2" fill="currentColor" stroke="none"/><circle cx="2" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="2" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>
+    </button>
+    <button type="button" data-action="ordered" title="Numbered list">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="4" x2="14" y2="4"/><line x1="6" y1="8" x2="14" y2="8"/><line x1="6" y1="12" x2="14" y2="12"/><text x="1" y="5.5" font-size="4.5" fill="currentColor" stroke="none" font-family="sans-serif">1.</text><text x="1" y="9.5" font-size="4.5" fill="currentColor" stroke="none" font-family="sans-serif">2.</text><text x="1" y="13.5" font-size="4.5" fill="currentColor" stroke="none" font-family="sans-serif">3.</text></svg>
+    </button>
+    <button type="button" data-action="blockquote" title="Blockquote">❝</button>
+    <div class="rich-tbsep"></div>
+    <button type="button" data-action="image" title="Insert image">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="14" height="12" rx="2"/><circle cx="5.5" cy="6" r="1.5"/><path d="M1 11l4-4 3 3 2-2 5 5"/></svg>
+      Image
+    </button>
+    <button type="button" data-action="youtube" title="Embed video">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="2" width="14" height="12" rx="2"/><path d="M6 5.5l5 2.5-5 2.5V5.5z" fill="currentColor" stroke="none"/></svg>
+      Video
+    </button>
+    <input type="file" class="rich-image-input" accept="image/*" style="display:none" />
+  </div>
+
+  <div class="rich-editor-body"></div>
+
+  {/* Edit mode seeds the editor from this template (HTML can be large —
+      base64 images — so it rides in the DOM rather than a data attribute).
+      Keep the explicit closing tag: a self-closing <template set:html={…} />
+      sends the Astro compiler into an infinite loop. */}
+  {isEdit && <template class="rich-seed" set:html={initialHtml}></template>}
+
+  <div class="rich-row">
+    {isEdit ? (
+      <button type="button" class="rich-cancel secondary">Cancel</button>
+    ) : showPin ? (
+      <label class="rich-pin-label"><input type="checkbox" class="rich-pin" /> Pin to top</label>
+    ) : <span />}
+    <button type="button" class="rich-submit">{isEdit ? editSubmitLabel : submitLabel}</button>
+  </div>
+  <div class="rich-error"></div>
+</div>
+
+<script>
+  // Init every composer on the page. Element lookups are scoped to each root.
+  // Guard the Tiptap import behind "any composer exists" so pages without one
+  // (every page a logged-out visitor sees) don't ship the bundle.
+  const roots = Array.from(document.querySelectorAll<HTMLElement>('[data-rich-composer]'));
+  if (roots.length) (async () => {
+    const [{ Editor }, { default: StarterKit }, { default: TiptapImage }, { default: Youtube }, { default: Placeholder }] = await Promise.all([
+      import('@tiptap/core'),
+      import('@tiptap/starter-kit'),
+      import('@tiptap/extension-image'),
+      import('@tiptap/extension-youtube'),
+      import('@tiptap/extension-placeholder'),
+    ]);
+
+    const ResizableImage = TiptapImage.extend({
+      addAttributes() {
+        return {
+          ...this.parent?.(),
+          width: {
+            default: null,
+            renderHTML: (attrs: any) =>
+              attrs.width ? { style: `width:${attrs.width};max-width:100%;height:auto` } : {},
+            parseHTML: (el: HTMLElement) => {
+              const m = (el.getAttribute('style') || '').match(/width:\s*([^;]+)/);
+              return m ? m[1].trim() : null;
+            },
+          },
+        };
+      },
+      addNodeView() {
+        return ({ node, getPos, editor: ed }: any) => {
+          const wrap = document.createElement('span');
+          wrap.className = 'img-wrap';
+          const img = document.createElement('img');
+          img.src = node.attrs.src ?? '';
+          img.alt = node.attrs.alt ?? '';
+          img.style.cssText = 'display:block;max-width:100%;height:auto;border-radius:8px;';
+          if (node.attrs.width) img.style.width = node.attrs.width;
+          const handle = document.createElement('span');
+          handle.className = 'img-resize-handle';
+          handle.title = 'Drag to resize';
+          handle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const x0 = (e as MouseEvent).clientX, w0 = img.offsetWidth;
+            const onMove = (ev: MouseEvent) => {
+              img.style.width = Math.max(60, w0 + ev.clientX - x0) + 'px';
+            };
+            const onUp = () => {
+              document.removeEventListener('mousemove', onMove);
+              document.removeEventListener('mouseup', onUp);
+              if (typeof getPos === 'function') {
+                ed.commands.updateAttributes('image', { width: img.style.width });
+              }
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+          });
+          wrap.appendChild(img);
+          wrap.appendChild(handle);
+          return {
+            dom: wrap, contentDOM: null,
+            update(n: any) {
+              if (n.type.name !== 'image') return false;
+              img.src = n.attrs.src ?? '';
+              img.alt = n.attrs.alt ?? '';
+              img.style.width = n.attrs.width ?? '';
+              return true;
+            },
+            destroy() {},
+          };
+        };
+      },
+    });
+
+    async function compressAndInsert(editor: any, file: File) {
+      const MAX = 1200;
+      let bmp: ImageBitmap;
+      try { bmp = await createImageBitmap(file); }
+      catch { alert('Could not read that image.'); return; }
+      let { width: w, height: h } = bmp;
+      if (w > MAX || h > MAX) {
+        if (w >= h) { h = Math.round(h * MAX / w); w = MAX; }
+        else        { w = Math.round(w * MAX / h); h = MAX; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d')!.drawImage(bmp, 0, 0, w, h);
+      bmp.close();
+      const isPng = file.type === 'image/png';
+      const src = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.85);
+      editor.chain().focus().setImage({ src }).run();
+    }
+
+    for (const root of roots) initComposer(root);
+
+    function initComposer(root: HTMLElement) {
+      const mode = root.dataset.mode ?? 'create';
+      const isEdit = mode === 'edit';
+      const titleEl = root.querySelector<HTMLInputElement>('.rich-title');
+      const editorEl = root.querySelector<HTMLElement>('.rich-editor-body')!;
+      const toolbarEl = root.querySelector<HTMLElement>('.rich-toolbar')!;
+      const fileInput = root.querySelector<HTMLInputElement>('.rich-image-input')!;
+      const submitBtn = root.querySelector<HTMLButtonElement>('.rich-submit')!;
+      const cancelBtn = root.querySelector<HTMLButtonElement>('.rich-cancel');
+      const pinEl = root.querySelector<HTMLInputElement>('.rich-pin');
+      const errEl = root.querySelector<HTMLElement>('.rich-error')!;
+      const seedTpl = root.querySelector<HTMLTemplateElement>('.rich-seed');
+      const initialBody = seedTpl?.innerHTML ?? '';
+
+      const editor = new Editor({
+        element: editorEl,
+        content: isEdit ? initialBody : '',
+        extensions: [
+          StarterKit,
+          ResizableImage.configure({ allowBase64: true, inline: false }),
+          Youtube.configure({ controls: true }),
+          Placeholder.configure({ placeholder: root.dataset.placeholder || 'Share an update…' }),
+        ],
+      });
+
+      editorEl.addEventListener('paste', (e: ClipboardEvent) => {
+        const item = Array.from(e.clipboardData?.items ?? []).find(i => i.type.startsWith('image/'));
+        if (item) { e.preventDefault(); e.stopPropagation(); const f = item.getAsFile(); if (f) compressAndInsert(editor, f); }
+      }, true);
+      editorEl.addEventListener('drop', (e: DragEvent) => {
+        const f = Array.from(e.dataTransfer?.files ?? []).find(f => f.type.startsWith('image/'));
+        if (f) { e.preventDefault(); compressAndInsert(editor, f); }
+      });
+
+      toolbarEl.addEventListener('click', (e) => {
+        const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+        if (!btn) return;
+        switch (btn.dataset.action) {
+          case 'bold':       editor.chain().focus().toggleBold().run(); break;
+          case 'italic':     editor.chain().focus().toggleItalic().run(); break;
+          case 'h2':         editor.chain().focus().toggleHeading({ level: 2 }).run(); break;
+          case 'h3':         editor.chain().focus().toggleHeading({ level: 3 }).run(); break;
+          case 'bullet':     editor.chain().focus().toggleBulletList().run(); break;
+          case 'ordered':    editor.chain().focus().toggleOrderedList().run(); break;
+          case 'blockquote': editor.chain().focus().toggleBlockquote().run(); break;
+          case 'image':      fileInput.click(); break;
+          case 'youtube': {
+            const url = prompt('Paste a YouTube or Vimeo URL:');
+            if (url) editor.chain().focus().setYoutubeVideo({ src: url }).run();
+            break;
+          }
+        }
+      });
+      fileInput.addEventListener('change', (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (file) { compressAndInsert(editor, file); (e.target as HTMLInputElement).value = ''; }
+      });
+
+      // Hide/show toggle. Edit mode is driven by [data-edit-hide] siblings on
+      // the page — the "Edit post" button opens the composer and hides them.
+      const hideWhileEditing = () => document.querySelectorAll<HTMLElement>('[data-edit-hide]');
+      if (isEdit) {
+        document.getElementById('post-edit-open')?.addEventListener('click', () => {
+          root.hidden = false;
+          hideWhileEditing().forEach((el) => { el.hidden = true; });
+          editor.commands.focus('end');
+          root.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      }
+      cancelBtn?.addEventListener('click', () => {
+        root.hidden = true;
+        hideWhileEditing().forEach((el) => { el.hidden = false; });
+        editor.commands.setContent(initialBody);
+        if (titleEl) titleEl.value = titleEl.defaultValue;
+        errEl.textContent = '';
+      });
+
+      // External "+ New" button toggles visibility for create mode.
+      const trigger = root.dataset.openTrigger;
+      if (!isEdit && trigger) {
+        document.querySelectorAll<HTMLElement>(trigger).forEach((btn) => {
+          btn.addEventListener('click', () => {
+            root.hidden = !root.hidden;
+            if (!root.hidden) {
+              editor.commands.focus('end');
+              root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+          });
+        });
+      }
+
+      submitBtn.addEventListener('click', async () => {
+        const showTitle = root.dataset.showTitle === '1';
+        const showPin   = root.dataset.showPin === '1';
+        const title = titleEl?.value.trim() ?? '';
+        const bodyHtml = editor.getHTML();
+        errEl.textContent = '';
+
+        if (showTitle && !title)   { errEl.textContent = 'Please add a title.'; return; }
+        if (editor.isEmpty)        { errEl.textContent = 'Please write something.'; return; }
+
+        const payload: Record<string, unknown> = {
+          [root.dataset.bodyField || 'body']: bodyHtml,
+        };
+        if (showTitle) payload[root.dataset.titleField || 'title'] = title;
+        if (!isEdit && showPin && pinEl) payload[root.dataset.pinField || 'pinned'] = pinEl.checked;
+        if (isEdit) payload.post_id = root.dataset.postId;
+        const extraRaw = root.dataset.extraFields;
+        if (extraRaw) {
+          try { Object.assign(payload, JSON.parse(extraRaw)); } catch { /* ignore */ }
+        }
+
+        submitBtn.disabled = true;
+        try {
+          const url = isEdit ? (root.dataset.updateUrl || '/api/forum/posts/update')
+                             : (root.dataset.createUrl || '/api/forum/posts/create');
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) {
+            if (isEdit || root.dataset.redirect === 'reload') {
+              window.location.reload();
+            } else {
+              const idKey = root.dataset.responseIdKey || 'post_id';
+              const id = data[idKey];
+              if (id) window.location.href = (root.dataset.postPagePrefix || '/updates/') + id;
+              else window.location.reload();
+            }
+          } else {
+            errEl.textContent = data.error || (isEdit ? 'Failed to save.' : 'Failed to post.');
+            submitBtn.disabled = false;
+          }
+        } catch {
+          errEl.textContent = 'Network error. Try again.';
+          submitBtn.disabled = false;
+        }
+      });
+    }
+  })();
+</script>
+
+<style>
+  .rich-composer {
+    margin: 12px 0 20px; padding: 16px; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .rich-composer[hidden] { display: none; }
+  .rich-title {
+    width: 100%; background: var(--bg-hover); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; color: var(--text-primary); font: inherit; font-size: 14px;
+  }
+  .rich-title:focus { outline: none; border-color: var(--accent); }
+
+  .rich-toolbar {
+    display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+    background: var(--bg-hover); border: 1px solid var(--border);
+    border-radius: 10px 10px 0 0; padding: 6px 8px;
+    border-bottom: none;
+  }
+  .rich-toolbar button {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: none; border: none; border-radius: 6px;
+    color: var(--text-secondary); font: inherit; font-size: 13px;
+    padding: 4px 8px; cursor: pointer; transition: background 0.12s, color 0.12s;
+  }
+  .rich-toolbar button:hover { background: var(--bg-card); color: var(--text-primary); }
+  .rich-toolbar button.is-active { background: rgba(96,80,200,.12); color: var(--accent); }
+  .rich-tbsep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
+
+  .rich-editor-body {
+    background: var(--bg-hover); border: 1px solid var(--border);
+    border-radius: 0 0 10px 10px; min-height: 160px; cursor: text;
+  }
+  .rich-editor-body :global(.ProseMirror) {
+    outline: none; padding: 12px 14px; min-height: 160px;
+    font-size: 14px; line-height: 1.7; color: var(--text-primary);
+  }
+  .rich-editor-body :global(.ProseMirror:focus) { border-color: var(--accent); }
+  .rich-editor-body :global(.ProseMirror p.is-editor-empty:first-child::before) {
+    content: attr(data-placeholder); float: left; color: var(--text-tertiary);
+    pointer-events: none; height: 0;
+  }
+  .rich-editor-body :global(.ProseMirror h2) { font-size: 20px; font-weight: 700; margin: 16px 0 8px; }
+  .rich-editor-body :global(.ProseMirror h3) { font-size: 17px; font-weight: 600; margin: 14px 0 6px; }
+  .rich-editor-body :global(.ProseMirror p)  { margin: 0 0 10px; }
+  .rich-editor-body :global(.ProseMirror ul), .rich-editor-body :global(.ProseMirror ol) { padding-left: 22px; margin: 0 0 10px; }
+  .rich-editor-body :global(.ProseMirror li) { margin-bottom: 4px; }
+  .rich-editor-body :global(.ProseMirror blockquote) {
+    border-left: 3px solid var(--accent); margin: 0 0 10px; padding: 4px 12px;
+    color: var(--text-secondary); font-style: italic;
+  }
+  .rich-editor-body :global(.ProseMirror img) {
+    max-width: 100%; border-radius: 8px; display: block; margin: 10px 0;
+  }
+  .rich-editor-body :global(.img-wrap) {
+    display: block; position: relative; line-height: 0; margin: 10px 0;
+  }
+  .rich-editor-body :global(.img-resize-handle) {
+    position: absolute; bottom: 4px; right: 4px;
+    width: 14px; height: 14px;
+    background: var(--accent); border-radius: 3px;
+    cursor: se-resize; opacity: 0; transition: opacity 0.15s;
+    box-shadow: 0 0 0 2px #fff;
+  }
+  .rich-editor-body :global(.img-wrap:hover .img-resize-handle) { opacity: 1; }
+  .rich-editor-body :global(.ProseMirror div[data-youtube-video]) { margin: 10px 0; }
+  .rich-editor-body :global(.ProseMirror div[data-youtube-video] iframe) {
+    width: 100%; aspect-ratio: 16/9; border-radius: 8px; border: none; display: block;
+  }
+
+  .rich-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .rich-pin-label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .rich-composer .rich-submit, .rich-composer .rich-cancel {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 9px 16px;
+    font-weight: 600; font-size: 14px; cursor: pointer;
+  }
+  .rich-composer .rich-submit:disabled { opacity: 0.6; cursor: default; }
+  .rich-error { color: var(--score-low, #e5484d); font-size: 13px; min-height: 0; }
+  .rich-error:empty { display: none; }
+  .rich-composer .rich-cancel.secondary {
+    background: var(--bg-hover); color: var(--text-secondary); border: 1px solid var(--border);
+  }
+  .rich-composer .rich-cancel.secondary:hover { color: var(--text-primary); border-color: var(--accent); }
+</style>

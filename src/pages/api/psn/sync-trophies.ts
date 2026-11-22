@@ -5,6 +5,7 @@ import {
   isPsnAuthExpired,
   fetchAllTitles,
   fetchTitleTrophySchema,
+  fetchTitleTrophyGroups,
   fetchEarnedTrophies,
   primaryPsnPlatform,
   type PsnTokens,
@@ -213,7 +214,11 @@ export const POST: APIRoute = async (context) => {
         npCommId: t.npCommunicationId,
         serviceName: t.npServiceName,
         platform,
-        name: t.trophyTitleName ?? '',
+        // Mirrors sync-library: PSN returns some trophy-set names with a
+        // " Trophies" suffix that isn't the game name. Strip it so the title
+        // stored on user_trophies / shown in the achievement modal matches
+        // the library card.
+        name: (t.trophyTitleName ?? '').replace(/\s+Trophies$/i, '').trim(),
         lastUpdated: t.lastUpdatedDateTime ?? null,
       });
     }
@@ -320,22 +325,38 @@ export const POST: APIRoute = async (context) => {
       trophyHits++;
 
       // Schema (names, descriptions, icons, rarity) is per-title, cached
-      // across users. Only fetch when missing or stale.
+      // across users. Only fetch when missing or stale. Also treat entries
+      // without trophy_groups as stale — they were cached before the groups
+      // call was wired up, and without them the achievement modal can't show
+      // proper DLC pack names.
       const cached = schemaCache.get(t.npCommId);
-      const stale = !cached || Date.now() - new Date(cached.fetched_at).getTime() > SCHEMA_TTL_MS;
+      const stale =
+        !cached ||
+        Date.now() - new Date(cached.fetched_at).getTime() > SCHEMA_TTL_MS ||
+        !cached.trophy_groups;
 
       let schemaArr: any[] = cached?.trophies ?? [];
 
       if (stale) {
-        const fresh = await fetchTitleTrophySchema(authPayload, t.npCommId, t.serviceName);
+        // Trophies (flat list, keyed by trophyGroupId+trophyId) and the group
+        // metadata (group names + icons) come from separate Sony endpoints.
+        // Fetch both — without the groups call, DLC packs would show as raw
+        // group IDs ("001") instead of proper names ("Ashes of Ariandel") in
+        // the achievement modal. The groups call is best-effort: if it fails
+        // we still cache the trophies.
+        const [fresh, groups] = await Promise.all([
+          fetchTitleTrophySchema(authPayload, t.npCommId, t.serviceName),
+          fetchTitleTrophyGroups(authPayload, t.npCommId, t.serviceName),
+        ]);
         if (fresh && fresh.length > 0) {
           schemaArr = fresh;
-          const row = {
+          const row: Record<string, unknown> = {
             np_communication_id: t.npCommId,
             np_service_name: t.serviceName,
             trophies: fresh,
             fetched_at: new Date().toISOString(),
           };
+          if (groups && groups.length > 0) row.trophy_groups = groups;
           schemaCache.set(t.npCommId, row);
           schemaUpserts.push(row);
         }
@@ -343,19 +364,42 @@ export const POST: APIRoute = async (context) => {
 
       // Trophy schema is keyed by (trophyGroupId, trophyId). Missing
       // trophyGroupId defaults to 'default' — some old titles return a null.
+      // Also build a trophyId-only lookup: psn-api's UserThinTrophy (the
+      // earned-trophies response) does NOT carry trophyGroupId, and PSN
+      // assigns trophyIds sequentially across every group within a title,
+      // so trophyId alone is enough to resolve the group via the schema.
       const schemaByKey = new Map<string, any>();
+      const groupIdByTrophyId = new Map<number, string>();
       for (const s of schemaArr) {
         const gid = s.trophyGroupId ?? 'default';
         schemaByKey.set(`${gid}:${s.trophyId}`, s);
+        groupIdByTrophyId.set(s.trophyId, gid);
+      }
+
+      // One-time cleanup for pre-fix data: DLC trophies were previously
+      // written with trophy_group_id='default' because the earned-trophies
+      // response has no trophyGroupId and the old fallback only probed the
+      // 'default' slot. Delete those mistagged rows so the upsert below
+      // rewrites them under their correct group.
+      const dlcTrophyIds = schemaArr
+        .filter((s: any) => (s.trophyGroupId ?? 'default') !== 'default')
+        .map((s: any) => s.trophyId);
+      if (dlcTrophyIds.length > 0) {
+        const { error: delErr } = await (db as any)
+          .from('user_trophies')
+          .delete()
+          .eq('profile_id', profile.id)
+          .eq('np_communication_id', t.npCommId)
+          .eq('trophy_group_id', 'default')
+          .in('trophy_id', dlcTrophyIds);
+        if (delErr) console.error(`[psn/sync-trophies] legacy group cleanup ${t.npCommId}:`, JSON.stringify(delErr));
       }
 
       const game_id = gameIdByNpComm.get(t.npCommId) ?? null;
       const now = new Date().toISOString();
 
       const rows = earned.map((ut) => {
-        // Earned response includes trophyGroupId when the request used "all";
-        // fall back to schema's group for safety.
-        const gid = (ut as any).trophyGroupId ?? schemaByKey.get(`default:${ut.trophyId}`)?.trophyGroupId ?? 'default';
+        const gid = groupIdByTrophyId.get(ut.trophyId) ?? 'default';
         const schema = schemaByKey.get(`${gid}:${ut.trophyId}`) ?? {};
         const earnedRate = typeof ut.trophyEarnedRate === 'string'
           ? Number(ut.trophyEarnedRate)

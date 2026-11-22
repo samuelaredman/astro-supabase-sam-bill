@@ -1,14 +1,15 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
-import { cdnCacheHeaders } from "../../../utils/cache";
+import { cdnCacheHeaders, CACHE_TAG_REVIEWS_PUBLIC } from "../../../utils/cache";
 import { attachReviewVideos } from "../../../utils/reviewVideos";
 
 const REVIEW_FIELDS = `
-  id, score, title, body, play_time_hours,
+  id, score, title, body, play_time_hours, difficulty,
+  completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment,
   contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url ),
+  games ( id, title, slug, cover_img_url, date_released, igdb_category ),
   profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   review_votes( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),
@@ -76,7 +77,7 @@ export const GET: APIRoute = async (context) => {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        ...cdnCacheHeaders(120, 300),
+        ...cdnCacheHeaders(120, 300, [CACHE_TAG_REVIEWS_PUBLIC]),
         "Cache-Control": "no-store",
       },
     });

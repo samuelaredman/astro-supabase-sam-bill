@@ -9,8 +9,10 @@ export const POST: APIRoute = async (context) => {
   const { group_id, body, pinned } = await context.request.json();
   if (!group_id || !body?.trim())
     return json({ error: "group_id and body are required" }, 400);
-  if (body.trim().length > 2000)
-    return json({ error: "Announcement is too long (max 2000 characters)" }, 400);
+  // Bodies are Tiptap HTML (base64 images blow past small limits); mirror the
+  // Updates forum cap in src/pages/api/forum/posts/create.ts.
+  if (body.length > 2000000)
+    return json({ error: "Announcement is too large" }, 400);
 
   const membership = await getGroupAuthority(db, group_id, profile.id);
   if (!membership) return json({ error: "Not a member of this group" }, 403);

@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { purgeReviewsPublicCache } from "../../../utils/cache";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -29,6 +30,12 @@ export const POST: APIRoute = async (context) => {
     console.error("[delete] update error:", updateError);
     return json({ error: `Failed to delete review: ${updateError.message}` }, 500);
   }
+
+  // Invalidate every anon-cached surface that renders reviews — without this,
+  // the home page / game page / profile would keep serving the deleted review
+  // from Netlify's shared cache for up to max-age + stale-while-revalidate.
+  // Non-fatal: purge failures log and swallow so the delete still returns success.
+  await purgeReviewsPublicCache();
 
   return json({ success: true });
 };

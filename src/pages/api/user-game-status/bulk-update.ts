@@ -1,6 +1,5 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
-import { resolveCanonicalGameId } from "../../../utils/games";
 
 const VALID_STATUSES = ["playing", "want_to_play", "owned", "completed", "hundred_percent", "dropped"] as const;
 
@@ -31,14 +30,12 @@ export const POST: APIRoute = async (context) => {
   if (action === "set_status" && !VALID_STATUSES.includes(status))
     return json({ error: `status must be one of: ${VALID_STATUSES.join(", ")}` }, 400);
 
-  // Resolve every id to its canonical row and de-dupe. The caller may pass a
-  // mix of canonical and edition ids (e.g. a page built before the backfill);
-  // both must act on the one canonical row rather than silently affect zero
-  // rows for the editions.
-  const resolved = await Promise.all(
-    (rawGameIds as string[]).map((id) => resolveCanonicalGameId(db, id))
-  );
-  const game_ids = [...new Set(resolved)];
+  // Operate on the exact game_ids the library grid rendered — do NOT resolve
+  // to canonical. A library row's game_id may be a non-canonical edition (an
+  // import that landed on an edition before `canonical_game_id` was set on it,
+  // or that the backfill missed). Resolving would delete / re-status the base
+  // row instead of the edition the user clicked, with the edition left behind.
+  const game_ids = [...new Set(rawGameIds as string[])];
 
   if (action === "delete") {
     for (const ids of chunk(game_ids, CHUNK_SIZE)) {

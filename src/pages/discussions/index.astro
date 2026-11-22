@@ -1,0 +1,138 @@
+---
+export const prerender = false;
+import Layout from '../../components/Layout.astro';
+import PostComposer from '../../components/forum/PostComposer.astro';
+import { getSupabaseAdmin, createSupabaseServerClientFromContext } from '../../utils/database';
+import { setPageCacheHeaders } from '../../utils/cache';
+import { getPageUser } from '../../utils/pageAuth';
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, serverClient);
+const isLoggedIn = !!user;
+
+const db = getSupabaseAdmin() as any;
+
+let currentProfile: { id: string; username: string; avatar_url: string | null } | null = null;
+if (user) {
+  const { data: cp } = await db.from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single();
+  currentProfile = cp ?? null;
+}
+
+// Pinned first, then newest. Mirrors the group forum threads sidebar order.
+const { data: threadsRaw } = await db
+  .from('site_discussions')
+  .select('id, title, body, pinned, is_locked, created_at, profiles ( username, avatar_url )')
+  .order('pinned', { ascending: false })
+  .order('created_at', { ascending: false })
+  .limit(50);
+const threads = threadsRaw ?? [];
+
+const commentCounts: Record<string, number> = {};
+if (threads.length > 0) {
+  const ids = threads.map((t: any) => t.id);
+  const { data: commentRows } = await db
+    .from('site_discussion_comments').select('discussion_id').in('discussion_id', ids);
+  for (const c of commentRows ?? []) commentCounts[c.discussion_id] = (commentCounts[c.discussion_id] ?? 0) + 1;
+}
+
+function fmtDate(s: string): string {
+  return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function excerpt(body: string, max = 220): string {
+  const clean = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return clean.length <= max ? clean : clean.slice(0, max).replace(/\s+\S*$/, '') + '…';
+}
+
+setPageCacheHeaders(Astro.response.headers, isLoggedIn, 120);
+---
+
+<Layout
+  title="Discussions — Chekpoint"
+  description="Site-wide discussions — anyone can start a thread."
+  isLoggedIn={isLoggedIn}
+  currentProfile={currentProfile}
+  activeNav="discussions"
+  variant="two-col"
+>
+  <main class="feed">
+    <div class="feed-header">
+      <div>
+        <div class="feed-title">Discussions</div>
+        <div class="feed-subtitle">Site-wide threads — anyone can start one, anyone can join in.</div>
+      </div>
+    </div>
+
+    {isLoggedIn ? (
+      <PostComposer
+        composerId="discussions-new"
+        createUrl="/api/discussions/create"
+        responseIdKey="id"
+        showPin={false}
+        placeholder="Start a discussion…"
+        submitLabel="Post discussion"
+        redirect="post-page"
+        postPagePrefix="/discussions/"
+      />
+    ) : (
+      <div class="signin-note"><a href="/signin?returnTo=/discussions">Sign in</a> to start a discussion.</div>
+    )}
+
+    {threads.length === 0 ? (
+      <div class="empty">
+        <p>No discussions yet{isLoggedIn ? ' — start the first one above.' : '. Check back soon.'}</p>
+      </div>
+    ) : (
+      <ul class="post-list">
+        {threads.map((t: any) => (
+          <li class="post-item">
+            <a class="post-link" href={`/discussions/${t.id}`}>
+              <div class="post-meta">
+                {t.pinned && <span class="badge pinned">📌 Pinned</span>}
+                <span class="badge category">discussion</span>
+                {t.is_locked && <span class="badge locked">🔒 Locked</span>}
+              </div>
+              {t.title && <h2 class="post-title">{t.title}</h2>}
+              <p class="post-excerpt">{excerpt(t.body)}</p>
+              <div class="post-footer">
+                <span>{t.profiles?.username ?? 'unknown'}</span>
+                <span>·</span>
+                <span>{fmtDate(t.created_at)}</span>
+                <span>·</span>
+                <span>{commentCounts[t.id] ?? 0} {(commentCounts[t.id] ?? 0) === 1 ? 'comment' : 'comments'}</span>
+              </div>
+            </a>
+          </li>
+        ))}
+      </ul>
+    )}
+  </main>
+</Layout>
+
+<style>
+  .feed { min-width: 0; }
+  .feed-header { padding: 20px 20px 8px; }
+  .feed-title { font-family: 'DM Serif Display', serif; font-size: 28px; color: var(--text-primary); }
+  .feed-subtitle { font-size: 14px; color: var(--text-secondary); margin-top: 4px; line-height: 1.5; }
+
+  .signin-note { padding: 14px 20px; color: var(--text-secondary); font-size: 14px; }
+  .signin-note a { color: var(--accent); font-weight: 600; }
+
+  .post-list { list-style: none; padding: 16px 20px 40px; margin: 0; display: flex; flex-direction: column; gap: 12px; }
+  .post-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; transition: border-color 0.15s; }
+  .post-item:hover { border-color: var(--accent); }
+  .post-link { display: block; padding: 16px 18px; text-decoration: none; color: inherit; }
+  .post-meta { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: capitalize; }
+  .badge.category { background: var(--bg-hover); color: var(--text-secondary); }
+  .badge.pinned { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .badge.locked { background: var(--bg-hover); color: var(--text-tertiary); }
+  .post-title { font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 0 0 6px; }
+  .post-excerpt { font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin: 0 0 10px; }
+  .post-footer { display: flex; gap: 8px; font-size: 12px; color: var(--text-tertiary); flex-wrap: wrap; }
+
+  .empty { padding: 40px 20px; text-align: center; color: var(--text-secondary); }
+
+  @media (max-width: 600px) {
+    .post-list { padding: 0 12px 40px; }
+  }
+</style>

@@ -38,10 +38,11 @@ export const FEED_FILTER_EMPTY: Record<FeedFilter, string> = {
 
 /** The fields a ReviewCard needs. Same shape the home feed selects. */
 export const GROUP_FEED_SELECT = `
-  id, score, title, body, play_time_hours,
+  id, score, title, body, play_time_hours, difficulty,
+  completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment,
   contains_spoilers, status, published_at, created_at,
   played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url ),
+  games ( id, title, slug, cover_img_url, date_released, igdb_category ),
   profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
   review_votes( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),

@@ -57,7 +57,7 @@ export const GET: APIRoute = async ({ params }) => {
       // See home.png.ts for why this is set.
       "Access-Control-Allow-Origin": "*",
       "Cache-Control": "public, max-age=3600",
-      ...cdnCacheHeaders(86400, 604800),
+      ...cdnCacheHeaders(604800, 2592000),
     },
   });
 };

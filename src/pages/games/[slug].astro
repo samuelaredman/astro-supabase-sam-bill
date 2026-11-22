@@ -14,9 +14,10 @@ import ListCard from '../../components/ListCard.astro'
 import RecommendationFeedCard from '../../components/RecommendationFeedCard.astro'
 import RecommendationComposer from '../../components/RecommendationComposer.astro'
 import { REC_SELECT, shapeRec } from '../../utils/recommendationsFeed'
-import { setPageCacheHeaders } from '../../utils/cache';
+import { setPageCacheHeaders, CACHE_TAG_REVIEWS_PUBLIC } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
 import { attachReviewVideos } from '../../utils/reviewVideos';
+import { loadGameAchievements } from '../../utils/gameAchievements';
 
 const serverClient = createSupabaseServerClientFromContext(Astro);
 const user = await getPageUser(Astro, serverClient);
@@ -38,13 +39,14 @@ const [{ data: game }, { data: cp }] = await Promise.all([
     .from('games')
     .select(`
       id, title, slug, game_description, cover_img_url,
-      date_released, igdb_id, canonical_game_id,
+      date_released, igdb_id, canonical_game_id, igdb_category,
+      psn_np_communication_id, xbox_title_id,
       game_genres(genres(id, name, slug)),
       game_platforms(platforms(id, name, slug)),
       game_companies(role, developers(id, name, slug))
     `)
     .eq('slug', slug)
-    .single(),
+    .maybeSingle(),
   user
     ? (supabase as any).from('profiles').select('id, username, avatar_url').eq('auth_user_id', user.id).single()
     : Promise.resolve({ data: null }),
@@ -258,7 +260,8 @@ const [
     .from('reviews')
     .select(`
       id, score, title, body, published_at, created_at,
-      contains_spoilers, play_time_hours,
+      contains_spoilers, play_time_hours, difficulty,
+      completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment,
       played_on:platform_played_on ( id, name, slug ),
       profiles ( id, username, avatar_url, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
       review_votes ( vote, profile_id ),
@@ -274,7 +277,7 @@ const [
   currentProfileId
     ? db
         .from('reviews')
-        .select('id, score, title, body, platform_played_on, play_time_hours, contains_spoilers')
+        .select('id, score, title, body, platform_played_on, play_time_hours, difficulty, completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment, contains_spoilers')
         .eq('profile_id', currentProfileId)
         .eq('game_id', game.id)
         .eq('status', 'draft')
@@ -326,7 +329,12 @@ const SOCIAL_STATUS_META: Record<string, { label: string; color: string }> = {
 };
 const SOCIAL_STATUS_ORDER = ['playing', 'completed', 'hundred_percent', 'want_to_play', 'owned', 'dropped'] as const;
 
-const reviewList = reviews ?? []
+// Reviews here are scoped to this game, so the query doesn't pull a `games`
+// join. Attach a minimal one so ReviewCard can show PLAYED BEFORE RELEASE.
+const reviewList = (reviews ?? []).map((r: any) => ({
+  ...r,
+  games: { id: game.id, title: game.title, slug: game.slug, cover_img_url: game.cover_img_url, date_released: game.date_released },
+}))
 const hasReviewed = currentProfileId
   ? reviewList.some((r: any) => r.profiles?.id === currentProfileId)
   : false;
@@ -354,6 +362,116 @@ const scoreDistribution = Array.from({ length: 10 }, (_, i) =>
 
 const totalHours = reviewList.reduce((sum: number, r: any) => sum + (r.play_time_hours ?? 0), 0)
 const avgHours = reviewList.length > 0 ? Math.round(totalHours / reviewList.length) : null
+
+// Difficulty is optional per review; aggregate only across those that supplied one.
+// numeric(3,1) columns come back from PostgREST as strings to preserve
+// precision — coerce before filtering so legit decimal ratings aren't dropped.
+const difficultyValues: number[] = reviewList
+  .map((r: any) => r.difficulty)
+  .filter((d: any) => d != null && !Number.isNaN(Number(d)))
+  .map((d: any) => Number(d))
+const difficultyCount = difficultyValues.length
+const avgDifficulty = difficultyCount > 0
+  ? difficultyValues.reduce((sum: number, d: number) => sum + d, 0) / difficultyCount
+  : null
+
+// Main-story / Main+Extras breakdown — HLTB-style averages, computed from
+// each reviewer's self-reported completion_hours grouped by the tier they
+// selected. Keyed off completion_status so a 100-hour main-story run and a
+// 100-hour platinum run don't collide in the same bucket.
+const mainStoryHours = reviewList
+  .filter((r: any) => r.completion_status === 'main')
+  .map((r: any) => r.completion_hours)
+  .filter((n: any): n is number => typeof n === 'number' && n >= 0)
+const avgMainStoryHours = mainStoryHours.length > 0
+  ? Math.round(mainStoryHours.reduce((s: number, n: number) => s + n, 0) / mainStoryHours.length)
+  : null
+const extrasHours = reviewList
+  .filter((r: any) => r.completion_status === 'extras')
+  .map((r: any) => r.completion_hours)
+  .filter((n: any): n is number => typeof n === 'number' && n >= 0)
+const avgExtrasHours = extrasHours.length > 0
+  ? Math.round(extrasHours.reduce((s: number, n: number) => s + n, 0) / extrasHours.length)
+  : null
+
+// Platinum community — only the reviewers who actually earned the plat. Each
+// of the three plat metrics is independently optional (a user may have logged
+// the plat but skipped the hours/difficulty/enjoyment fields), so each
+// average is computed over the subset that supplied that specific value.
+const platinumReviews = reviewList.filter((r: any) => r.completion_status === 'platinum')
+const platinumCount = platinumReviews.length
+const platinumHoursValues = platinumReviews
+  .map((r: any) => r.platinum_hours)
+  .filter((n: any): n is number => typeof n === 'number' && n >= 0)
+const avgPlatinumHours = platinumHoursValues.length > 0
+  ? Math.round(platinumHoursValues.reduce((s: number, n: number) => s + n, 0) / platinumHoursValues.length)
+  : null
+const platinumDifficultyValues: number[] = platinumReviews
+  .map((r: any) => r.platinum_difficulty)
+  .filter((d: any) => d != null && !Number.isNaN(Number(d)))
+  .map((d: any) => Number(d))
+const avgPlatinumDifficulty = platinumDifficultyValues.length > 0
+  ? platinumDifficultyValues.reduce((s: number, n: number) => s + n, 0) / platinumDifficultyValues.length
+  : null
+const platinumEnjoymentValues: number[] = platinumReviews
+  .map((r: any) => r.platinum_enjoyment)
+  .filter((d: any) => d != null && !Number.isNaN(Number(d)))
+  .map((d: any) => Number(d))
+const avgPlatinumEnjoyment = platinumEnjoymentValues.length > 0
+  ? platinumEnjoymentValues.reduce((s: number, n: number) => s + n, 0) / platinumEnjoymentValues.length
+  : null
+
+// Per-platform platinum aggregates — the Achievements tab wants separate
+// community stats per section (PSN section = only reviewers who platted on a
+// PlayStation, Xbox = only Xbox, Steam = PC/Linux/Mac/Steam Deck + anyone who
+// didn't pick a platform). Platforms outside those three families
+// (Switch, 3DS, N64, etc.) don't contribute to any bucket because none of
+// the three schema sources cover them.
+function platformFamily(slug: string | null | undefined): 'steam' | 'psn' | 'xbox' | null {
+  if (!slug) return 'steam'
+  const s = String(slug).toLowerCase()
+  if (s.includes('xbox')) return 'xbox'
+  if (/^ps\b|^ps[1-5]\b|^playstation|^psp|vita|psvr/.test(s)) return 'psn'
+  if (/^win|^mac|^linux|^steam|^pc(?!-|\w)/.test(s) || s === 'win' || s === 'mac' || s === 'linux') return 'steam'
+  return null
+}
+
+type PlatformAgg = { hours: number | null; difficulty: number | null; enjoyment: number | null; count: number }
+function emptyAgg(): PlatformAgg { return { hours: null, difficulty: null, enjoyment: null, count: 0 } }
+const platinumAggByFamily: Record<'steam' | 'psn' | 'xbox', PlatformAgg> = {
+  steam: emptyAgg(), psn: emptyAgg(), xbox: emptyAgg(),
+}
+const bucketed: Record<'steam' | 'psn' | 'xbox', any[]> = { steam: [], psn: [], xbox: [] }
+for (const r of platinumReviews) {
+  const fam = platformFamily(r.played_on?.slug)
+  if (fam) bucketed[fam].push(r)
+}
+for (const fam of ['steam', 'psn', 'xbox'] as const) {
+  const rs = bucketed[fam]
+  const h = rs.map((r: any) => r.platinum_hours).filter((n: any) => typeof n === 'number' && n >= 0) as number[]
+  const d = rs.map((r: any) => r.platinum_difficulty).filter((v: any) => v != null && !Number.isNaN(Number(v))).map(Number)
+  const e = rs.map((r: any) => r.platinum_enjoyment).filter((v: any) => v != null && !Number.isNaN(Number(v))).map(Number)
+  platinumAggByFamily[fam] = {
+    count: rs.length,
+    hours: h.length ? Math.round(h.reduce((s, n) => s + n, 0) / h.length) : null,
+    difficulty: d.length ? d.reduce((s, n) => s + n, 0) / d.length : null,
+    enjoyment: e.length ? e.reduce((s, n) => s + n, 0) / e.length : null,
+  }
+}
+
+// Achievement/trophy schemas for the Achievements tab. Loaded unconditionally
+// (the tab link is only rendered when at least one platform has data); for a
+// game with no Steam/PSN/Xbox mapping this short-circuits to an empty result.
+// ?ach_debug=1 returns a resolver-state block on the page so we can diagnose
+// why a given game shows (or doesn't show) a particular platform's trophies.
+const wantAchDebug = Astro.url.searchParams.get('ach_debug') === '1'
+const achievementsData = await loadGameAchievements(db, {
+  id: game.id,
+  psn_np_communication_id: game.psn_np_communication_id ?? null,
+  xbox_title_id: game.xbox_title_id ?? null,
+}, { debug: wantAchDebug });
+const hasAchievements = achievementsData.platforms.length > 0;
+const totalAchievementsCount = achievementsData.platforms.reduce((n: number, p: any) => n + p.count, 0);
 
 const developers = (game.game_companies ?? []).filter((c: any) => c.role === 'developer').map((c: any) => c.developers).filter(Boolean)
 const publishers = (game.game_companies ?? []).filter((c: any) => c.role === 'publisher').map((c: any) => c.developers).filter(Boolean)
@@ -392,41 +510,209 @@ const rankStats = rankRows?.[0] ?? null
 const allTimeRank: number = rankStats?.all_time_rank ?? 0
 const allTimeTotal: number = rankStats?.all_time_total ?? 0
 
-// ── Children: collapsed editions/versions + related franchise content ──
-// Rendered below "Similar games" in the same card style.
-const { data: editionsRaw } = await (supabase as any)
-  .from('games')
-  .select('id, title, slug, cover_img_url, date_released')
-  .eq('canonical_game_id', game.id)
-  .order('date_released', { ascending: true })
-const editions = editionsRaw ?? []
+// ── Children: DLCs/expansions, editions, remakes, remasters, updates, etc. ──
+// Everything feeding the "DLC & Editions" tab is gathered here and bucketed into
+// labeled sections below. Franchise-level siblings (sequels, series, similar)
+// stay in the Overview's "Related games" section.
 
-const { data: relRows } = await (supabase as any)
+// Collapse per-game platforms into display-group labels (PS4 + PS4 Pro → "PlayStation 4"),
+// preserving the display_order sort. Mirrors the collapse logic in
+// src/pages/api/games/platforms.ts — used here to label DLC cards compactly.
+function dedupePlatforms(gps: any): Array<{ id: string; name: string }> {
+  const seen = new Set<string>()
+  return (gps ?? [])
+    .map((gp: any) => gp.platforms)
+    .filter((p: any) => p && (p.display_group || p.name))
+    .sort((a: any, b: any) => (a.display_order ?? 99) - (b.display_order ?? 99))
+    .filter((p: any) => {
+      const key = p.display_group ?? p.name
+      if (seen.has(key)) return false
+      seen.add(key); return true
+    })
+    .map((p: any) => ({ id: p.id, name: p.display_group ?? p.name }))
+}
+
+function formatDlcDate(d: string | null): string | null {
+  if (!d) return null
+  const dt = new Date(d)
+  if (isNaN(dt.getTime())) return null
+  return dt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+// If this game IS a DLC/expansion, resolve its parent for the "DLC for [parent]" chip.
+// Parent edges are stored as (from_game_id=parent, to_game_id=this), so we query the
+// reverse direction and filter to DLC-ish relation types.
+const isDlcPage = game.igdb_category === 1 || game.igdb_category === 2 || game.igdb_category === 4
+let parentGame: { id: string; title: string; slug: string | null } | null = null
+if (isDlcPage) {
+  const { data: parentRelRow } = await (supabase as any)
+    .from('game_relationships')
+    .select('from_game_id')
+    .eq('to_game_id', game.id)
+    .in('relation_type', ['dlc', 'expansion', 'standalone_expansion'])
+    .limit(1)
+    .maybeSingle()
+  if (parentRelRow?.from_game_id) {
+    const { data: parentRow } = await (supabase as any)
+      .from('games')
+      .select('id, title, slug')
+      .eq('id', parentRelRow.from_game_id)
+      .maybeSingle()
+    if (parentRow) parentGame = parentRow
+  }
+}
+const parentChipLabel = game.igdb_category === 2 || game.igdb_category === 4 ? 'Expansion for' : 'DLC for'
+
+// Which relationship types this tab surfaces. 'sequel', 'series_sibling',
+// 'similar' stay in the Overview's "Related games" section.
+const TAB_RELATION_TYPES = ['dlc', 'expansion', 'standalone_expansion', 'remake', 'expanded_game']
+
+// Fetch every potential tab entry in parallel, then de-duplicate + bucket.
+// Three disjoint sources — each contributes different parts of the DLC graph:
+//   (a) canonical children: rows with canonical_game_id = this. GOTY/Deluxe/
+//       Anniversary editions, plus collapsed remasters/ports/packs.
+//   (b) relationship children: rows the graph points at (DLC, expansions,
+//       remakes, expanded editions).
+//   (c) update children: cat=14 rows whose IGDB-side parent_game points at
+//       this game. These never make it into game_relationships because the
+//       IGDB importer's relationTypeForChildCategory doesn't map category 14
+//       (treated as "update/patch" rather than a reviewable relationship).
+const CHILD_SELECT = 'id, title, slug, version_title, cover_img_url, date_released, igdb_category, game_description, game_platforms(platforms(id, name, display_group, display_order))'
+const [{ data: canonicalChildrenRaw }, { data: relRows }, { data: updateChildrenRaw }] = await Promise.all([
+  (supabase as any)
+    .from('games')
+    .select(CHILD_SELECT)
+    .eq('canonical_game_id', game.id)
+    .order('date_released', { ascending: true }),
+  (supabase as any)
+    .from('game_relationships')
+    .select('to_game_id, relation_type')
+    .eq('from_game_id', game.id)
+    .in('relation_type', TAB_RELATION_TYPES),
+  game.igdb_id
+    ? (supabase as any)
+        .from('games')
+        .select(CHILD_SELECT)
+        .eq('igdb_parent_game', game.igdb_id)
+        .eq('igdb_category', 14)
+        .is('canonical_game_id', null)
+    : Promise.resolve({ data: [] }),
+])
+
+// Related games (Overview) — unchanged behavior. Pulled separately so it only
+// gets sequels/siblings/similar (not the types moving into the tab).
+const { data: relatedRelRows } = await (supabase as any)
   .from('game_relationships')
   .select('to_game_id, relation_type')
   .eq('from_game_id', game.id)
-const relTypeById = new Map<string, string>((relRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
-const relIds = [...relTypeById.keys()]
+  .in('relation_type', ['sequel', 'series_sibling', 'similar'])
+const relatedTypeById = new Map<string, string>((relatedRelRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
+const relatedIds = [...relatedTypeById.keys()]
 let relatedChildren: any[] = []
-if (relIds.length > 0) {
-  const { data: relGames } = await (supabase as any)
-    .from('games')
-    .select('id, title, slug, cover_img_url, date_released')
-    .in('id', relIds)
-    .is('canonical_game_id', null)   // only related nodes that are themselves canonical
-  relatedChildren = (relGames ?? []).map((g: any) => ({ ...g, relation_type: relTypeById.get(g.id) }))
+if (relatedIds.length > 0) {
+  const { data: rg } = await (supabase as any)
+    .from('games').select('id, title, slug, cover_img_url, date_released').in('id', relatedIds).is('canonical_game_id', null)
+  relatedChildren = (rg ?? []).map((g: any) => ({ ...g, relation_type: relatedTypeById.get(g.id) }))
 }
 
-// Avg score per child, read from the game_review_stats view (not every review).
-const childIds = [...editions.map((e: any) => e.id), ...relatedChildren.map((r: any) => r.id)]
+// Shape + dedupe the tab's candidate children (same id can appear via multiple sources).
+const relTypeByChildId = new Map<string, string>((relRows ?? []).map((r: any) => [r.to_game_id, r.relation_type]))
+const relChildIds = [...relTypeByChildId.keys()]
+const { data: relGamesRaw } = relChildIds.length > 0
+  ? await (supabase as any)
+      .from('games')
+      .select(CHILD_SELECT)
+      .in('id', relChildIds)
+      .is('canonical_game_id', null)
+  : { data: [] }
+
+const tabChildrenById = new Map<string, any>()
+function addTabChild(g: any, relation_type: string | null): void {
+  if (!g || tabChildrenById.has(g.id)) return
+  tabChildrenById.set(g.id, {
+    ...g,
+    relation_type,
+    platform_labels: dedupePlatforms(g.game_platforms),
+  })
+}
+for (const g of (relGamesRaw ?? [])) addTabChild(g, relTypeByChildId.get(g.id) ?? null)
+for (const g of (canonicalChildrenRaw ?? [])) addTabChild(g, null)
+for (const g of (updateChildrenRaw ?? [])) addTabChild(g, null)
+const tabChildren = [...tabChildrenById.values()]
+
+// Avg score + review count per child, read from the game_review_stats view (not every review).
+const childIds = [
+  ...tabChildren.map((c: any) => c.id),
+  ...relatedChildren.map((r: any) => r.id),
+]
 const childScores: Record<string, number> = {}
+const childReviewCounts: Record<string, number> = {}
 if (childIds.length > 0) {
   const { data: childAvgRows } = await db
-    .from('game_review_stats').select('game_id, avg_score').in('game_id', childIds)
+    .from('game_review_stats').select('game_id, avg_score, review_count').in('game_id', childIds)
   for (const row of (childAvgRows ?? []) as any[]) {
     if (row.avg_score != null) childScores[row.game_id] = row.avg_score
+    if (row.review_count != null) childReviewCounts[row.game_id] = row.review_count
   }
 }
+
+// Section definitions for the DLC & Editions tab. Each entry lands in the
+// FIRST matching section (order matters). Only sections with entries render.
+// The final "Rereleases & Editions" catches anything that didn't match a
+// specific category — GOTY / Deluxe / Anniversary, cat=0 with version_title,
+// etc. — so nothing is dropped silently.
+const TAB_DLC_RELATIONS = new Set(['dlc', 'expansion', 'standalone_expansion'])
+interface TabSectionDef { key: string; label: string; match: (c: any) => boolean }
+const TAB_SECTION_DEFS: TabSectionDef[] = [
+  { key: 'dlc-exp',      label: 'DLC & Expansions',      match: (c) => TAB_DLC_RELATIONS.has(c.relation_type) },
+  { key: 'enhanced',     label: 'Enhanced Editions',     match: (c) => c.relation_type === 'expanded_game' || c.igdb_category === 10 },
+  { key: 'remakes',      label: 'Remakes',               match: (c) => c.relation_type === 'remake' || c.igdb_category === 8 },
+  { key: 'remasters',    label: 'Remasters',             match: (c) => c.igdb_category === 9 },
+  { key: 'updates',      label: 'Updates & Patches',     match: (c) => c.igdb_category === 14 },
+  { key: 'ports',        label: 'Ports',                 match: (c) => c.igdb_category === 11 },
+  { key: 'bundles',      label: 'Bundles & Packs',       match: (c) => c.igdb_category === 3 || c.igdb_category === 13 },
+  { key: 'rereleases',   label: 'Rereleases & Editions', match: () => true },
+]
+const tabSections = TAB_SECTION_DEFS.map((d) => ({ ...d, entries: [] as any[] }))
+for (const child of tabChildren) {
+  const section = tabSections.find((s) => s.match(child))
+  if (section) section.entries.push(child)
+}
+for (const s of tabSections) {
+  s.entries.sort((a, b) => {
+    if (!a.date_released && !b.date_released) return 0
+    if (!a.date_released) return 1
+    if (!b.date_released) return -1
+    return String(a.date_released).localeCompare(String(b.date_released))
+  })
+}
+const visibleTabSections = tabSections.filter((s) => s.entries.length > 0)
+
+// Label a card for the type chip when the section it sits in is heterogeneous
+// (i.e., DLC & Expansions mixes category 1 and 2/4). Other sections are
+// uniform, so the section header does the labeling — no chip needed.
+function dlcBadgeLabel(c: any): string {
+  return c.igdb_category === 2 || c.igdb_category === 4 ? 'Expansion' : 'DLC'
+}
+
+const dlcTabCount = tabChildren.length
+
+// DLCs offered in the write-review composer's "DLC" toggle target picker.
+// Only populated when the current page is a base game (cat 0/null) with
+// at least one DLC-or-expansion child — otherwise the composer just targets
+// the current page directly.
+const composerIsBasePage = game.igdb_category == null || game.igdb_category === 0
+const composerDlcList = composerIsBasePage
+  ? (tabSections.find((s: any) => s.key === 'dlc-exp')?.entries ?? []).map((d: any) => ({
+      id: d.id,
+      title: d.title,
+      slug: d.slug,
+      cover_img_url: d.cover_img_url,
+      igdb_category: d.igdb_category,
+      date_released: d.date_released,
+    }))
+  : []
+const composerShowDlcToggle = composerDlcList.length > 0
 const allTimePct = allTimeTotal > 0 ? Math.round(((allTimeTotal - allTimeRank) / allTimeTotal) * 100) : 0
 const genreRank: number = rankStats?.genre_rank ?? 0
 const genreTotal: number = rankStats?.genre_total ?? 0
@@ -564,7 +850,7 @@ const statsJson = JSON.stringify({
 })
 
 // CDN cache — anonymous visitors share a cached response; auth users get a fresh render
-setPageCacheHeaders(Astro.response.headers, isLoggedIn);
+setPageCacheHeaders(Astro.response.headers, isLoggedIn, 3600, [CACHE_TAG_REVIEWS_PUBLIC]);
 ---
 
 <Layout title={`${game.title} — Chekpoint`} description={gameDescription} ogImage={ogImageUrl} variant="fullwidth" noindex={reviewList.length < 1}>
@@ -645,6 +931,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .cover-placeholder{width:130px;height:173px;border-radius:12px;background:var(--bg-card);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0}
     .game-info{flex:1;min-width:0;padding-bottom:4px}
     .game-title{font-family:'Cinzel',serif;font-size:32px;line-height:1.1;letter-spacing:.04em;margin-bottom:8px;font-weight:600;text-shadow:0 2px 20px rgba(0,0,0,.6)}
+    /* "DLC for" / "Expansion for" chip on a DLC page linking to its parent —
+       teal to stay in family with the other DLC/Expansion badges. */
+    .parent-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;margin-bottom:10px;border-radius:999px;background:rgba(20,184,166,.14);border:1px solid rgba(20,184,166,.45);text-decoration:none;font-size:12px;color:var(--text-secondary);transition:background .15s,border-color .15s}
+    .parent-chip:hover{background:rgba(20,184,166,.22);border-color:rgba(20,184,166,.65)}
+    .parent-chip-label{text-transform:uppercase;letter-spacing:.06em;font-weight:600;color:#14b8a6;font-size:10px}
+    .parent-chip-title{color:var(--text-primary);font-weight:500}
     .meta-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
     .meta-tag{font-size:13px;color:var(--text-secondary)}
     .meta-sep{color:var(--text-tertiary);font-size:10px}
@@ -717,6 +1009,113 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .tab-panel.active{display:block}
     #reviewsList .rc{padding-left:0;padding-right:0}
 
+    /* ── Achievements tab ── ported from AchievementDetailModal.astro so the
+       in-page layout matches the library modal visually. Collapse is native
+       &lt;details&gt; so there's zero JS. */
+    .ach-platform{border:1px solid var(--border);border-radius:12px;background:var(--bg-card);margin-bottom:12px;overflow:hidden}
+    .ach-platform-head{display:flex;align-items:center;gap:12px;padding:14px 18px;cursor:pointer;list-style:none;user-select:none;transition:background .15s}
+    .ach-platform-head::-webkit-details-marker{display:none}
+    .ach-platform-head:hover{background:var(--bg-hover)}
+    .ach-platform-logo{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:28px;height:28px}
+    .ach-platform-logo--steam{color:#66c0f4}
+    .ach-platform-logo--psn{color:#0070d1}
+    .ach-platform-logo--xbox{color:#107c10}
+    .ach-platform-label{flex:1;font-size:15px;font-weight:700;color:var(--text-primary);letter-spacing:.01em}
+    /* Community rollup — hidden when the platform details is open, so the
+       stats only show in the collapsed header as a scannable summary. */
+    .ach-platform-stats{display:inline-flex;align-items:center;gap:10px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap}
+    .ach-platform[open] > .ach-platform-head > .ach-platform-stats{display:none}
+    .ach-platform-stat{display:inline-flex;align-items:baseline;gap:3px;font-variant-numeric:tabular-nums}
+    .ach-platform-stat b{color:var(--text-primary);font-weight:700;font-size:13px}
+    .ach-platform-stat span{color:var(--text-tertiary);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+    .ach-platform-count{font-size:12.5px;font-weight:600;color:var(--text-tertiary)}
+    .ach-platform-body{padding:4px 10px 10px}
+    .ach-platform[open] > .ach-platform-head{border-bottom:1px solid var(--border-subtle)}
+    .ach-platform[open] > .ach-platform-head > .ach-chevron{transform:rotate(180deg)}
+    .ach-chevron{color:var(--text-tertiary);transition:transform .15s;flex-shrink:0}
+
+    .ach-group{border-top:1px solid var(--border-subtle)}
+    .ach-group:first-child{border-top:none}
+    .ach-group-head{display:flex;align-items:center;gap:10px;padding:12px 10px 8px;cursor:pointer;list-style:none;user-select:none}
+    .ach-group-head::-webkit-details-marker{display:none}
+    .ach-group-label{flex:1;font-size:13.5px;font-weight:700;color:var(--text-primary);letter-spacing:.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ach-group-count{font-size:12px;font-weight:600;color:var(--text-primary)}
+    .ach-group[open] > .ach-group-head > .ach-chevron{transform:rotate(180deg)}
+
+    .ach-row{position:relative;overflow:hidden;display:flex;align-items:center;gap:14px;padding:12px 14px;border-bottom:1px solid var(--border-subtle);transition:background .1s}
+    .ach-row:last-child{border-bottom:none}
+    .ach-row:hover{background:var(--bg-hover)}
+    /* Subtle global-% fill behind the row. Width is inlined per row via
+       --ach-pct so the Steam-like progress bar stays declarative. */
+    .ach-row::before{content:'';position:absolute;inset:0 auto 0 0;width:var(--ach-pct, 0);background:rgba(255,255,255,.05);pointer-events:none;z-index:0}
+    .ach-row > *{position:relative;z-index:1}
+    .ach-row-icon{position:relative;width:52px;height:52px;border-radius:10px;background:var(--tag-bg);border:1px solid var(--border);flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:20px}
+    .ach-row-icon img{width:100%;height:100%;object-fit:cover;display:block}
+    .ach-row-icon--rare{overflow:visible;border-color:rgba(202,138,4,.6);box-shadow:0 0 10px rgba(202,138,4,.55),0 0 24px rgba(202,138,4,.25)}
+    .ach-row-icon--rare img{border-radius:7px}
+    .ach-row-icon--rare::before,
+    .ach-row-icon--rare::after{
+      content:'';position:absolute;inset:-20px;border-radius:50%;
+      filter:blur(4px);
+      mask:radial-gradient(circle,transparent 46%,rgba(0,0,0,.95) 53%,rgba(0,0,0,.18) 82%,transparent 100%);
+      -webkit-mask:radial-gradient(circle,transparent 46%,rgba(0,0,0,.95) 53%,rgba(0,0,0,.18) 82%,transparent 100%);
+      z-index:0;pointer-events:none;
+    }
+    .ach-row-icon--rare::before{
+      background:conic-gradient(from 0deg,
+        transparent 0deg,
+        rgba(253,224,71,0) 14deg, rgba(253,224,71,.5) 17deg, rgba(253,224,71,.95) 20deg, rgba(253,224,71,.5) 23deg, rgba(253,224,71,0) 26deg,
+        transparent 102deg,
+        rgba(234,179,8,0) 102deg, rgba(234,179,8,.5) 105deg, rgba(234,179,8,.9) 108deg, rgba(234,179,8,.5) 111deg, rgba(234,179,8,0) 114deg,
+        transparent 192deg,
+        rgba(253,224,71,0) 192deg, rgba(253,224,71,.5) 195deg, rgba(253,224,71,.88) 198deg, rgba(253,224,71,.5) 201deg, rgba(253,224,71,0) 204deg,
+        transparent 280deg,
+        rgba(234,179,8,0) 280deg, rgba(234,179,8,.5) 283deg, rgba(234,179,8,.92) 286deg, rgba(234,179,8,.5) 289deg, rgba(234,179,8,0) 292deg,
+        transparent 360deg);
+      animation:ach-sunbeam-a 12s linear infinite, ach-sunbeam-fade-a 3s ease-in-out infinite alternate;
+    }
+    .ach-row-icon--rare::after{
+      background:conic-gradient(from 0deg,
+        transparent 0deg,
+        rgba(234,179,8,0) 49deg, rgba(234,179,8,.5) 52deg, rgba(253,224,71,.8) 55deg, rgba(234,179,8,.5) 58deg, rgba(234,179,8,0) 61deg,
+        transparent 126deg,
+        rgba(253,224,71,0) 126deg, rgba(253,224,71,.5) 129deg, rgba(253,224,71,.8) 132deg, rgba(253,224,71,.5) 135deg, rgba(253,224,71,0) 138deg,
+        transparent 204deg,
+        rgba(234,179,8,0) 204deg, rgba(234,179,8,.5) 207deg, rgba(234,179,8,.82) 210deg, rgba(234,179,8,.5) 213deg, rgba(234,179,8,0) 216deg,
+        transparent 289deg,
+        rgba(253,224,71,0) 289deg, rgba(253,224,71,.5) 292deg, rgba(253,224,71,.7) 295deg, rgba(253,224,71,.5) 298deg, rgba(253,224,71,0) 301deg,
+        transparent 344deg,
+        rgba(234,179,8,0) 344deg, rgba(234,179,8,.5) 347deg, rgba(234,179,8,.75) 350deg, rgba(234,179,8,.5) 353deg, rgba(234,179,8,0) 356deg,
+        transparent 360deg);
+      animation:ach-sunbeam-b 8s linear infinite, ach-sunbeam-fade-b 4.5s ease-in-out infinite alternate;
+    }
+    .ach-row-icon--rare > *{position:relative;z-index:1}
+    .ach-row-pct-rare{color:#ca8a04}
+    .ach-row-body{flex:1;min-width:0}
+    .ach-row-name{font-size:14.5px;font-weight:600;color:var(--text-primary);line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.005em}
+    .ach-row-desc{font-size:12.5px;color:var(--text-tertiary);line-height:1.4;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ach-row-meta{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;min-width:100px}
+    .ach-row-global{display:inline-flex;align-items:baseline;gap:4px;font-size:15px;font-weight:700;color:var(--text-primary);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+    .ach-row-global-pct-unit{font-size:11px;font-weight:600;color:var(--text-tertiary);margin-left:1px}
+    .ach-row-tier{font-size:10px;font-weight:700;letter-spacing:.08em;padding:2.5px 8px;border-radius:999px;text-transform:uppercase}
+    .ach-row-tier--platinum{background:rgba(155,123,255,.18);color:#c4b1ff}
+    .ach-row-tier--gold{background:rgba(245,181,68,.18);color:#f5c062}
+    .ach-row-tier--silver{background:rgba(196,198,205,.2);color:#d5d7dd}
+    .ach-row-tier--bronze{background:rgba(205,127,50,.18);color:#e2a06b}
+    .ach-row-gs{font-size:11.5px;font-weight:600;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+
+    @media(max-width:560px){
+      .ach-row{gap:10px;padding:10px}
+      .ach-row-icon{width:44px;height:44px}
+      .ach-row-meta{min-width:0}
+      .ach-row-global{font-size:14px}
+    }
+
+    @keyframes ach-sunbeam-a      { to { transform: rotate(360deg); } }
+    @keyframes ach-sunbeam-b      { to { transform: rotate(360deg); } }
+    @keyframes ach-sunbeam-fade-a { from { opacity:.2;  } to { opacity:.9;  } }
+    @keyframes ach-sunbeam-fade-b { from { opacity:.15; } to { opacity:.75; } }
+
     /* TWO COLUMN — OVERVIEW */
     .two-col{display:grid;grid-template-columns:1fr 300px;gap:24px;align-items:start}
     @media(max-width:720px){.two-col{grid-template-columns:1fr}}
@@ -758,6 +1157,31 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .similar-score-badge.score-low{background:rgba(48,14,14,.88);color:#f87171;border:1px solid rgba(248,113,113,.4)}
     .similar-info{padding:6px 8px 8px}
     .similar-title{font-size:10px;font-weight:500;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--text-secondary)}
+    .similar-sub{font-size:9px;color:var(--text-tertiary);margin-top:2px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+
+    /* DLC & Editions tab cards — larger than similar-card since DLC content is primary */
+    .dlc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+    .dlc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:transform .15s,border-color .15s;display:flex;flex-direction:column;text-decoration:none;color:inherit}
+    .dlc-card:hover{transform:translateY(-3px);border-color:var(--game-accent)}
+    .dlc-cover{aspect-ratio:3/4;background:var(--tag-bg);overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:32px;position:relative}
+    .dlc-cover img{width:100%;height:100%;object-fit:cover}
+    /* The shared .similar-score-badge is sized for 100px-wide similar-card thumbnails.
+       DLC cards are 220px+ wide, so override position + dims here (color variants
+       are still inherited from the .similar-score-badge.score-* rules). */
+    .dlc-cover .similar-score-badge{bottom:8px;right:8px;min-width:44px;height:32px;padding:0 10px;border-radius:6px;font-size:18px}
+    .dlc-info{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px}
+    .dlc-badge-row{display:flex;align-items:center;gap:8px}
+    /* Teal — distinct from the site's purple accent; DLC and Expansion share
+       the same color (the chip's label text carries the distinction). */
+    .dlc-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;background:rgba(20,184,166,.14);color:#14b8a6;border:1px solid rgba(20,184,166,.45)}
+    .dlc-year{font-size:11px;color:var(--text-tertiary)}
+    .dlc-title{font-size:14px;font-weight:600;line-height:1.3;color:var(--text-primary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .dlc-version-sub{font-size:11px;color:var(--text-tertiary);margin-top:-2px;font-style:italic}
+    .dlc-desc{font-size:11.5px;color:var(--text-secondary);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .dlc-platforms{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+    .dlc-platform-chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:4px;background:var(--tag-bg);border:1px solid var(--border-subtle);font-size:10px;font-weight:500;color:var(--text-secondary);white-space:nowrap}
+    .dlc-platform-more{display:inline-flex;align-items:center;padding:1px 5px;font-size:10px;font-weight:500;color:var(--text-tertiary)}
+    .dlc-meta{font-size:11px;color:var(--text-tertiary);margin-top:2px}
 
     /* SIDEBAR */
     .desc-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:16px}
@@ -800,6 +1224,34 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     .composer-draft:hover:not(:disabled){background:var(--bg-hover);color:var(--text-primary);border-color:var(--accent)}
     .composer-draft:disabled{opacity:.6;cursor:default}
     .composer-error{font-size:13px;color:#c0392b;min-height:18px;margin-top:8px}
+    .gc-status-group{display:flex;gap:8px;flex-wrap:wrap}
+    .gc-status-btn{background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:7px 14px;font-size:13px;font-family:inherit;color:var(--text-secondary);cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+    .gc-status-btn:hover{color:var(--text-primary)}
+    .gc-status-btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+    .gc-plat-fields{display:none}
+    .gc-plat-fields[data-visible="true"]{display:flex}
+    .gc-completion-hours{display:none}
+    .gc-completion-hours[data-visible="true"]{display:flex}
+
+    /* ── Composer: Main Game / DLC toggle ── */
+    .gc-type-toggle{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:3px;gap:2px}
+    .gc-type-tab{background:transparent;border:none;padding:6px 16px;font-size:13px;font-weight:500;color:var(--text-secondary);font-family:inherit;cursor:pointer;border-radius:999px;transition:background .15s,color .15s}
+    .gc-type-tab:hover{color:var(--text-primary)}
+    .gc-type-tab.active{background:var(--game-accent,#6050c8);color:white;font-weight:600}
+    /* DLC autocomplete — click/focus the input to drop the list down, type to
+       filter, click an option to fill the input with the DLC's title. Same
+       shape as the game-search autocomplete on the homepage composer. */
+    .gc-dlc-autocomplete{position:relative}
+    .gc-dlc-results{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;z-index:100;max-height:420px;overflow-y:auto;display:none;box-shadow:var(--shadow-md);padding:4px}
+    .gc-dlc-results.open{display:block}
+    .gc-dlc-item{display:flex;align-items:center;gap:12px;padding:10px;border-radius:10px;cursor:pointer;transition:background .15s}
+    .gc-dlc-item:hover{background:var(--bg-hover)}
+    .gc-dlc-item-cover{width:38px;height:50px;flex-shrink:0;border-radius:6px;overflow:hidden;border:1px solid var(--border);background:var(--tag-bg);display:flex;align-items:center;justify-content:center;font-size:16px}
+    .gc-dlc-item-cover img{width:100%;height:100%;object-fit:cover}
+    .gc-dlc-item-info{min-width:0;flex:1}
+    .gc-dlc-item-title{font-size:14px;font-weight:500;color:var(--text-primary);margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .gc-dlc-item-badge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#14b8a6}
+    .gc-dlc-empty{padding:24px;text-align:center;color:var(--text-tertiary);font-size:14px}
 
     @media (max-width: 640px) {
       #gameComposer {
@@ -1000,6 +1452,12 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         : <div class="cover-placeholder">🎮</div>
       }
       <div class="game-info">
+        {parentGame && (
+          <a href={`/games/${parentGame.slug}`} class="parent-chip">
+            <span class="parent-chip-label">{parentChipLabel}</span>
+            <span class="parent-chip-title">{parentGame.title}</span>
+          </a>
+        )}
         <h1 class="game-title">{game.title}</h1>
         <div class="meta-row">
           {releaseYear && <span class="meta-tag">{releaseYear}</span>}
@@ -1043,7 +1501,13 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     <nav class="tab-nav">
       <a href={`/games/${game.slug}?tab=overview`} class={`tab-link ${activeTab === 'overview' ? 'active' : ''}`} data-tab="overview">Overview</a>
       <a href={`/games/${game.slug}?tab=reviews`} class={`tab-link ${activeTab === 'reviews' ? 'active' : ''}`} data-tab="reviews">Reviews {reviewList.length > 0 && <span class="tab-count">{reviewList.length}</span>}</a>
+      {dlcTabCount > 0 && (
+        <a href={`/games/${game.slug}?tab=dlc`} class={`tab-link ${activeTab === 'dlc' ? 'active' : ''}`} data-tab="dlc">DLC & Editions <span class="tab-count">{dlcTabCount}</span></a>
+      )}
       <a href={`/games/${game.slug}?tab=stats`} class={`tab-link ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">Stats</a>
+      {(hasAchievements || wantAchDebug) && (
+        <a href={`/games/${game.slug}?tab=achievements${wantAchDebug ? '&ach_debug=1' : ''}`} class={`tab-link ${activeTab === 'achievements' ? 'active' : ''}`} data-tab="achievements">Achievements</a>
+      )}
       <a href={`/games/${game.slug}?tab=recommendations`} class={`tab-link ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">Recommendations {gameRecs.length > 0 && <span class="tab-count">{gameRecs.length}</span>}</a>
     </nav>
 
@@ -1096,29 +1560,6 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
                         {coverUrl ? <img src={coverUrl ?? ''} alt={g.title} loading="lazy" /> : '🎮'}
                         {g.chekpointScore != null && (
                           <div class={`similar-score-badge ${scoreClass(g.chekpointScore)}`}>{g.chekpointScore.toFixed(1)}</div>
-                        )}
-                      </div>
-                      <div class="similar-info"><div class="similar-title">{g.title}</div></div>
-                    </a>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {editions.length > 0 && (
-            <div class="section">
-              <div class="section-header"><span class="section-title">Editions & versions</span></div>
-              <div class="similar-scroll">
-                {editions.map((g: any) => {
-                  const cover = igdbImage(g.cover_img_url, 't_cover_big')
-                  const sc = childScores[g.id]
-                  return (
-                    <a href={`/games/${g.slug}`} class="similar-card">
-                      <div class="similar-cover">
-                        {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
-                        {sc != null && (
-                          <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
                         )}
                       </div>
                       <div class="similar-info"><div class="similar-title">{g.title}</div></div>
@@ -1249,6 +1690,13 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           )}
           <div class="details-card">
             {releaseDate && (<div class="detail-row"><span class="detail-label">Released</span><span class="detail-value">{releaseDate}</span></div>)}
+            {avgDifficulty != null && (<div class="detail-row"><span class="detail-label">Difficulty</span><span class="detail-value">{avgDifficulty.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({difficultyCount})</span></span></div>)}
+            {avgMainStoryHours != null && (<div class="detail-row"><span class="detail-label">📖 Main Story</span><span class="detail-value">{avgMainStoryHours}h <span style="color:var(--text-tertiary)">({mainStoryHours.length})</span></span></div>)}
+            {avgExtrasHours != null && (<div class="detail-row"><span class="detail-label">📚 Main + Extras</span><span class="detail-value">{avgExtrasHours}h <span style="color:var(--text-tertiary)">({extrasHours.length})</span></span></div>)}
+            {platinumCount > 0 && (<div class="detail-row"><span class="detail-label">🏆 Platinum</span><span class="detail-value">{platinumCount} reviewer{platinumCount === 1 ? '' : 's'}</span></div>)}
+            {avgPlatinumHours != null && (<div class="detail-row"><span class="detail-label">Avg time to plat</span><span class="detail-value">{avgPlatinumHours}h <span style="color:var(--text-tertiary)">({platinumHoursValues.length})</span></span></div>)}
+            {avgPlatinumDifficulty != null && (<div class="detail-row"><span class="detail-label">Plat difficulty</span><span class="detail-value">{avgPlatinumDifficulty.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({platinumDifficultyValues.length})</span></span></div>)}
+            {avgPlatinumEnjoyment != null && (<div class="detail-row"><span class="detail-label">Plat score</span><span class="detail-value">{avgPlatinumEnjoyment.toFixed(1)} / 10 <span style="color:var(--text-tertiary)">({platinumEnjoymentValues.length})</span></span></div>)}
             {developers.length > 0 && (<div class="detail-row"><span class="detail-label">Developer</span><span class="detail-value">{developers.map((d: any) => d.name).join(', ')}</span></div>)}
             {publishers.length > 0 && (<div class="detail-row"><span class="detail-label">Publisher</span><span class="detail-value">{publishers.map((p: any) => p.name).join(', ')}</span></div>)}
             {genres.length > 0 && (<div class="detail-row"><span class="detail-label">Genres</span><div class="tag-list">{genres.map((g: any) => <a href={`/genres/${g.slug}`} class="tag" style="transition:border-color .15s,color .15s">{g.name}</a>)}</div></div>)}
@@ -1319,6 +1767,68 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       )}
     </div>
 
+    <!-- ── DLC & EDITIONS TAB ── -->
+    {dlcTabCount > 0 && (
+      <div class={`tab-panel ${activeTab === 'dlc' ? 'active' : ''}`} data-tab="dlc">
+        {visibleTabSections.map((section) => (
+          <div class="section">
+            <div class="section-header">
+              <span class="section-title">{section.label}</span>
+              <span class="section-count">{section.entries.length}</span>
+            </div>
+            <div class="dlc-grid">
+              {section.entries.map((g: any) => {
+                const cover = igdbImage(g.cover_img_url, 't_cover_big')
+                const sc = childScores[g.id]
+                const rc = childReviewCounts[g.id] ?? 0
+                const date = formatDlcDate(g.date_released)
+                const platformLabels: any[] = g.platform_labels ?? []
+                // Only the mixed DLC & Expansions section shows the DLC/Expansion
+                // type chip — every other section's header already labels the type.
+                const showTypeChip = section.key === 'dlc-exp'
+                return (
+                  <a href={`/games/${g.slug}`} class="dlc-card">
+                    <div class="dlc-cover">
+                      {cover ? <img src={cover} alt={g.title} loading="lazy" /> : '🎮'}
+                      {sc != null && (
+                        <div class={`similar-score-badge ${scoreClass(sc)}`}>{sc.toFixed(1)}</div>
+                      )}
+                    </div>
+                    <div class="dlc-info">
+                      {(showTypeChip || date) && (
+                        <div class="dlc-badge-row">
+                          {showTypeChip && (
+                            <span class="dlc-badge">{dlcBadgeLabel(g)}</span>
+                          )}
+                          {date && <span class="dlc-year">{date}</span>}
+                        </div>
+                      )}
+                      <div class="dlc-title">{g.title}</div>
+                      {g.version_title && <div class="dlc-version-sub">{g.version_title}</div>}
+                      {g.game_description && (
+                        <div class="dlc-desc">{g.game_description}</div>
+                      )}
+                      {platformLabels.length > 0 && (
+                        <div class="dlc-platforms">
+                          {platformLabels.slice(0, 4).map((p) => (
+                            <span class="dlc-platform-chip">{p.name}</span>
+                          ))}
+                          {platformLabels.length > 4 && (
+                            <span class="dlc-platform-more">+{platformLabels.length - 4}</span>
+                          )}
+                        </div>
+                      )}
+                      {rc > 0 && <div class="dlc-meta">{rc} review{rc === 1 ? '' : 's'}</div>}
+                    </div>
+                  </a>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+
     <!-- ── STATS TAB ── -->
     <div class={`tab-panel ${activeTab === 'stats' ? 'active' : ''}`} data-tab="stats">
       {reviewList.length === 0 ? (
@@ -1330,6 +1840,100 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
         <div id="statsContent"></div>
       )}
     </div>
+
+    <!-- ── ACHIEVEMENTS TAB ── -->
+    {(hasAchievements || wantAchDebug) && (
+      <div class={`tab-panel ${activeTab === 'achievements' ? 'active' : ''}`} data-tab="achievements">
+        {wantAchDebug && achievementsData.debug && (
+          <pre style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:11px;color:var(--text-secondary);overflow:auto;margin-bottom:16px">{JSON.stringify(achievementsData.debug, null, 2)}</pre>
+        )}
+        <div style="padding:4px 0 14px">
+          <div style="font-size:16px;font-weight:600;color:var(--text-primary);margin-bottom:4px">Achievements & Trophies</div>
+          <div style="font-size:13px;color:var(--text-tertiary);line-height:1.5;max-width:520px">Every achievement that exists for this game, grouped by platform and DLC. Rarity is the % of players globally who've unlocked it — the rarest ones get a glow.</div>
+        </div>
+        {achievementsData.platforms.map((platform: any) => (
+          <details class="ach-platform" open={achievementsData.platforms.length === 1}>
+            <summary class="ach-platform-head">
+              <span class={`ach-platform-logo ach-platform-logo--${platform.source}`} aria-hidden="true">
+                {platform.source === 'steam' && (
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.297-.254-1.9-.049l1.522.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.031zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z"/></svg>
+                )}
+                {platform.source === 'psn' && (
+                  <svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor"><path d="M9.5 6.5v14.72l3.03.98V9.81c0-.57.26-.95.68-.82.55.14.66.68.66 1.25v4.72c1.89.91 3.37 0 3.37-2.41 0-2.47-.87-3.57-3.44-4.45C12.76 7.75 10.9 7.29 9.5 6.5zM13.66 20.13l4.87-1.74c.55-.2.64-.48.19-.63-.45-.15-1.27-.11-1.83.09l-3.23 1.14v-1.87l.19-.06s.93-.33 2.24-.48c1.31-.14 2.92.02 4.18.5 1.42.45 1.58 1.11 1.22 1.57-.36.46-1.25.79-1.25.79l-6.58 2.36v-1.67zM2.87 19.6c-1.46-.41-1.7-1.27-1.03-1.76.61-.46 1.66-.8 1.66-.8l4.32-1.53v1.75l-3.1 1.11c-.55.2-.64.48-.19.63.45.15 1.27.11 1.83-.09l1.46-.53v1.57l-.29.05c-1.5.24-3.09.15-4.66-.4z"/></svg>
+                )}
+                {platform.source === 'xbox' && (
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></svg>
+                )}
+              </span>
+              <span class="ach-platform-label">{platform.platform_label}</span>
+              <span class="ach-platform-stats">
+                {(() => {
+                  const agg = platinumAggByFamily[platform.source as 'steam' | 'psn' | 'xbox']
+                  return (
+                    <>
+                      {agg?.hours != null && (
+                        <span class="ach-platform-stat"><b>{agg.hours}h</b> <span>to 100%</span></span>
+                      )}
+                      {agg?.difficulty != null && (
+                        <span class="ach-platform-stat"><b>{agg.difficulty.toFixed(1)}</b> <span>Difficulty</span></span>
+                      )}
+                      {agg?.enjoyment != null && (
+                        <span class="ach-platform-stat"><b>{agg.enjoyment.toFixed(1)}</b> <span>Score</span></span>
+                      )}
+                    </>
+                  )
+                })()}
+              </span>
+              <span class="ach-platform-count">{platform.count} {platform.count === 1 ? 'achievement' : 'achievements'}</span>
+              <svg class="ach-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </summary>
+            <div class="ach-platform-body">
+              {platform.groups.map((group: any, groupIdx: number) => {
+                const multi = platform.groups.length > 1;
+                const rows = group.achievements.map((a: any) => {
+                  const pct = a.rarity_percent != null ? Number(a.rarity_percent) : null;
+                  const isRare = pct != null && pct < 10;
+                  const iconEl = a.icon_url
+                    ? <img src={a.icon_url} alt="" loading="lazy" />
+                    : <span>🏆</span>;
+                  return (
+                    <div class={`ach-row ${isRare ? 'rare' : ''}`} style={pct != null ? `--ach-pct:${pct.toFixed(2)}%` : undefined}>
+                      <div class={`ach-row-icon ${isRare ? 'ach-row-icon--rare' : ''}`}>{iconEl}</div>
+                      <div class="ach-row-body">
+                        <div class="ach-row-name">{a.name || 'Achievement'}</div>
+                        {a.description && <div class="ach-row-desc">{a.description}</div>}
+                      </div>
+                      <div class="ach-row-meta">
+                        {a.tier && <span class={`ach-row-tier ach-row-tier--${a.tier}`}>{a.tier}</span>}
+                        {a.gamerscore != null && <span class="ach-row-gs">{a.gamerscore} G</span>}
+                        <span class={`ach-row-global ${isRare ? 'ach-row-pct-rare' : ''}`} title="Percent of players who've unlocked this">
+                          {pct != null ? (
+                            <>
+                              {pct.toFixed(1)}<span class="ach-row-global-pct-unit">%</span>
+                            </>
+                          ) : '—'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                });
+                if (!multi) return <div class="ach-group-body">{rows}</div>;
+                return (
+                  <details class="ach-group" open={groupIdx === 0}>
+                    <summary class="ach-group-head">
+                      <span class="ach-group-label">{group.label}</span>
+                      <span class="ach-group-count">{group.achievements.length}</span>
+                      <svg class="ach-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </summary>
+                    <div class="ach-group-body">{rows}</div>
+                  </details>
+                );
+              })}
+            </div>
+          </details>
+        ))}
+      </div>
+    )}
 
     <!-- ── RECOMMENDATIONS TAB ── -->
     <div class={`tab-panel ${activeTab === 'recommendations' ? 'active' : ''}`} data-tab="recommendations">
@@ -2239,6 +2843,30 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
 
   <!-- Form -->
   <div id="gcFormContent">
+    {composerShowDlcToggle && (
+      <div class="composer-field" style="margin-bottom:14px">
+        <label class="composer-label">Reviewing</label>
+        <div class="gc-type-toggle" role="tablist" aria-label="Review target">
+          <button type="button" id="gcTypeMain" class="gc-type-tab active" role="tab" aria-selected="true">Main Game</button>
+          <button type="button" id="gcTypeDlc" class="gc-type-tab" role="tab" aria-selected="false">DLC</button>
+        </div>
+        <div id="gcDlcPicker" style="display:none;margin-top:10px">
+          <div class="gc-dlc-autocomplete">
+            <input type="text" id="gcDlcSearch" class="composer-input" placeholder="Pick a DLC or expansion..." autocomplete="off" />
+            <div class="gc-dlc-results" id="gcDlcResults"></div>
+          </div>
+        </div>
+        <script id="gcDlcList" type="application/json" is:inline set:html={JSON.stringify(
+          composerDlcList.map((d: any) => ({
+            id: d.id,
+            title: d.title,
+            cover_img_url: d.cover_img_url,
+            igdb_category: d.igdb_category,
+          }))
+        )}></script>
+      </div>
+    )}
+
     <div class="composer-field">
       <label class="composer-label">Score</label>
       <div style="display:flex;align-items:center;gap:8px">
@@ -2252,8 +2880,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     </div>
     <div class="composer-field" style="margin-top:12px">
       <label class="composer-label">Review</label>
-      <textarea id="gcBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="5000"></textarea>
-      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="gcCharCount">0 / 5000</div>
+      <textarea id="gcBody" class="composer-textarea" placeholder="Write your review..." rows="11" maxlength="10000"></textarea>
+      <div style="text-align:right;font-size:11px;color:var(--text-tertiary);margin-top:4px" id="gcCharCount">0 / 10000</div>
     </div>
     <div class="composer-row" style="margin-top:12px">
       <div class="composer-field" style="flex:1">
@@ -2268,6 +2896,34 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       <div class="composer-field" style="width:120px">
         <label class="composer-label">Hours played</label>
         <input type="number" id="gcHours" class="composer-input" placeholder="0" min="0" max="9999" />
+      </div>
+    </div>
+    <div class="composer-field" style="margin-top:12px">
+      <label class="composer-label">How far did you get? <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>
+      <div class="gc-status-group" role="group" aria-label="Completion status">
+        <button type="button" class="gc-status-btn" data-status="dnf" aria-pressed="false">✖ Didn't finish</button>
+        <button type="button" class="gc-status-btn" data-status="main" aria-pressed="false">📖 Finished main story</button>
+        <button type="button" class="gc-status-btn" data-status="extras" aria-pressed="false">📚 Main + Post Game</button>
+        <button type="button" class="gc-status-btn" data-status="platinum" aria-pressed="false">🏆 Platinum / 100%</button>
+      </div>
+      <input type="hidden" id="gcCompletionStatus" value="" />
+    </div>
+    <div class="composer-field gc-completion-hours" id="gcCompletionHoursField" style="margin-top:12px">
+      <label class="composer-label" id="gcCompletionHoursLabel">Hours to complete</label>
+      <input type="number" id="gcCompletionHours" class="composer-input" placeholder="—" min="0" max="99999" step="1" style="width:160px" />
+    </div>
+    <div class="composer-row gc-plat-fields" id="gcPlatFields" style="margin-top:12px">
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Hours to plat</label>
+        <input type="number" id="gcPlatHours" class="composer-input" placeholder="—" min="0" max="99999" step="1" />
+      </div>
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Plat difficulty</label>
+        <input type="number" id="gcPlatDifficulty" class="composer-input" placeholder="—" min="1" max="10" step="0.1" />
+      </div>
+      <div class="composer-field" style="width:140px">
+        <label class="composer-label">Plat enjoyment</label>
+        <input type="number" id="gcPlatEnjoyment" class="composer-input" placeholder="—" min="1" max="10" step="0.1" />
       </div>
     </div>
     <div class="composer-field" style="margin-top:12px">
@@ -2288,7 +2944,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   </div>
 </div>
 
-<script is:inline define:vars={{ isLoggedIn, gameId: game.id, gameTitle: game.title, draftReview, autoOpenDraft }}>
+<script is:inline define:vars={{ isLoggedIn, gameId: game.id, gameTitle: game.title, draftReview, autoOpenDraft, composerDlcList, composerShowDlcToggle }}>
   // Id of the draft review being resumed (set on load if one exists, or after a first save).
   var currentReviewDraftId = draftReview ? draftReview.id : null
 
@@ -2301,7 +2957,144 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     if (draftReview.play_time_hours != null) document.getElementById('gcHours').value = draftReview.play_time_hours
     document.getElementById('gcSpoilers').checked = !!draftReview.contains_spoilers
     document.getElementById('gcYoutube').value = draftReview.youtube_video_id ? 'https://www.youtube.com/watch?v=' + draftReview.youtube_video_id : ''
-    document.getElementById('gcCharCount').textContent = (draftReview.body || '').length + ' / 5000'
+    document.getElementById('gcCharCount').textContent = (draftReview.body || '').length + ' / 10000'
+    _gcSetCompletion(draftReview.completion_status || '')
+    if (draftReview.completion_hours != null) document.getElementById('gcCompletionHours').value = draftReview.completion_hours
+    if (draftReview.platinum_hours != null) document.getElementById('gcPlatHours').value = draftReview.platinum_hours
+    if (draftReview.platinum_difficulty != null) document.getElementById('gcPlatDifficulty').value = draftReview.platinum_difficulty
+    if (draftReview.platinum_enjoyment != null) document.getElementById('gcPlatEnjoyment').value = draftReview.platinum_enjoyment
+  }
+
+  function _gcSetCompletion(status) {
+    document.getElementById('gcCompletionStatus').value = status || ''
+    document.querySelectorAll('#gcFormContent .gc-status-btn').forEach(function(btn) {
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-status') === status ? 'true' : 'false')
+    })
+    document.getElementById('gcPlatFields').setAttribute('data-visible', status === 'platinum' ? 'true' : 'false')
+    var hoursVisible = status === 'main' || status === 'extras'
+    document.getElementById('gcCompletionHoursField').setAttribute('data-visible', hoursVisible ? 'true' : 'false')
+    var hoursLabel = document.getElementById('gcCompletionHoursLabel')
+    if (hoursLabel) hoursLabel.textContent = status === 'extras' ? 'Hours to complete main + post game' : 'Hours to complete main story'
+    if (!hoursVisible) document.getElementById('gcCompletionHours').value = ''
+    if (status !== 'platinum') {
+      document.getElementById('gcPlatHours').value = ''
+      document.getElementById('gcPlatDifficulty').value = ''
+      document.getElementById('gcPlatEnjoyment').value = ''
+    }
+  }
+
+  document.querySelectorAll('#gcFormContent .gc-status-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var target = btn.getAttribute('data-status')
+      var current = document.getElementById('gcCompletionStatus').value
+      _gcSetCompletion(current === target ? '' : target)
+    })
+  })
+
+  // Main Game / DLC toggle state. selectedTargetGameId defaults to this page's
+  // game.id — when the user flips to DLC and picks a child, it updates to that
+  // DLC's game_id so submit posts the review against the right target.
+  var selectedTargetGameId = gameId
+
+  // DLC list is serialized into the <script id="gcDlcList"> payload at SSR.
+  var _gcDlcList = []
+  try {
+    var _gcDlcListEl = document.getElementById('gcDlcList')
+    if (_gcDlcListEl && _gcDlcListEl.textContent) _gcDlcList = JSON.parse(_gcDlcListEl.textContent) || []
+  } catch (e) { _gcDlcList = [] }
+
+  function _gcEscape(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  function _gcSetType(type) {
+    var mainBtn = document.getElementById('gcTypeMain')
+    var dlcBtn  = document.getElementById('gcTypeDlc')
+    var picker  = document.getElementById('gcDlcPicker')
+    if (!mainBtn || !dlcBtn || !picker) return
+    if (type === 'dlc') {
+      mainBtn.classList.remove('active'); mainBtn.setAttribute('aria-selected', 'false')
+      dlcBtn.classList.add('active');     dlcBtn.setAttribute('aria-selected', 'true')
+      picker.style.display = 'block'
+      // Keep a prior pick if the user already selected one this session;
+      // otherwise fall back to the base game until they actually pick a DLC.
+      var input = document.getElementById('gcDlcSearch')
+      var pickedId = input && input.dataset.dlcId
+      selectedTargetGameId = pickedId || gameId
+    } else {
+      mainBtn.classList.add('active');    mainBtn.setAttribute('aria-selected', 'true')
+      dlcBtn.classList.remove('active');  dlcBtn.setAttribute('aria-selected', 'false')
+      picker.style.display = 'none'
+      selectedTargetGameId = gameId
+    }
+  }
+
+  function _gcRenderDlcResults(filterText) {
+    var results = document.getElementById('gcDlcResults')
+    if (!results) return
+    var q = (filterText || '').trim().toLowerCase()
+    var matches = q
+      ? _gcDlcList.filter(function(d) { return (d.title || '').toLowerCase().indexOf(q) >= 0 })
+      : _gcDlcList
+    if (matches.length === 0) {
+      results.innerHTML = '<div class="gc-dlc-empty">No DLCs match</div>'
+      results.classList.add('open')
+      return
+    }
+    results.innerHTML = matches.map(function(d) {
+      var cover = d.cover_img_url
+        ? (d.cover_img_url.indexOf('//') === 0 ? 'https:' + d.cover_img_url : d.cover_img_url).replace(/t_[a-z0-9_]+/, 't_cover_big')
+        : null
+      var badge = (d.igdb_category === 2 || d.igdb_category === 4) ? 'Expansion' : 'DLC'
+      var coverHtml = cover
+        ? '<img src="' + _gcEscape(cover) + '" alt="" loading="lazy" />'
+        : '🎮'
+      return '<div class="gc-dlc-item" data-dlc-id="' + _gcEscape(d.id) + '" data-dlc-title="' + _gcEscape(d.title) + '">' +
+        '<div class="gc-dlc-item-cover">' + coverHtml + '</div>' +
+        '<div class="gc-dlc-item-info">' +
+          '<div class="gc-dlc-item-title">' + _gcEscape(d.title) + '</div>' +
+          '<div class="gc-dlc-item-badge">' + badge + '</div>' +
+        '</div>' +
+      '</div>'
+    }).join('')
+    results.classList.add('open')
+  }
+
+  if (composerShowDlcToggle) {
+    var mainBtn = document.getElementById('gcTypeMain')
+    var dlcBtn  = document.getElementById('gcTypeDlc')
+    if (mainBtn) mainBtn.addEventListener('click', function() { _gcSetType('main') })
+    if (dlcBtn)  dlcBtn.addEventListener('click',  function() { _gcSetType('dlc') })
+    var input = document.getElementById('gcDlcSearch')
+    var results = document.getElementById('gcDlcResults')
+    if (input && results) {
+      input.addEventListener('focus', function() { _gcRenderDlcResults(input.value) })
+      input.addEventListener('input', function() {
+        // Keystroke after a prior pick clears the stored id so a stale selection
+        // can't ride through when the user retypes.
+        if (input.dataset.dlcId) {
+          delete input.dataset.dlcId
+          selectedTargetGameId = gameId
+        }
+        _gcRenderDlcResults(input.value)
+      })
+      // mousedown (not click) so the input's blur can't close the list before
+      // the pick registers.
+      results.addEventListener('mousedown', function(e) {
+        var item = e.target.closest('.gc-dlc-item')
+        if (!item) return
+        e.preventDefault()
+        input.value = item.getAttribute('data-dlc-title') || ''
+        input.dataset.dlcId = item.getAttribute('data-dlc-id') || ''
+        selectedTargetGameId = input.dataset.dlcId
+        results.classList.remove('open')
+      })
+      document.addEventListener('click', function(e) {
+        if (!e.target.closest('.gc-dlc-autocomplete')) results.classList.remove('open')
+      })
+    }
   }
 
   function openGameComposer() {
@@ -2312,6 +3105,8 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     }
     document.getElementById('gameComposer').style.display = 'block'
     document.getElementById('gameComposerOverlay').style.display = 'block'
+    // Reset toggle to Main Game each open — target the current page by default.
+    if (composerShowDlcToggle) _gcSetType('main')
     // Re-hydrate a saved draft each time the composer is opened.
     if (currentReviewDraftId) prefillReviewDraft()
     document.getElementById('gcScore').focus()
@@ -2332,7 +3127,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     document.getElementById('gcSpoilers').checked = false
     document.getElementById('gcYoutube').value = ''
     document.getElementById('gcError').textContent = ''
-    document.getElementById('gcCharCount').textContent = '0 / 5000'
+    document.getElementById('gcCharCount').textContent = '0 / 10000'
     // reset result card state so it's clean if re-opened
     var gcScoreEl = document.getElementById('gcResultUserScore')
     gcScoreEl.style.color = ''
@@ -2351,7 +3146,7 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
   })
 
   document.getElementById('gcBody').addEventListener('input', function() {
-    document.getElementById('gcCharCount').textContent = this.value.length + ' / 5000'
+    document.getElementById('gcCharCount').textContent = this.value.length + ' / 10000'
   })
 
   document.getElementById('gcSubmit').addEventListener('click', async function() {
@@ -2361,6 +3156,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     var body = document.getElementById('gcBody').value.trim()
     var platform = document.getElementById('gcPlatform').value
     var hours = parseInt(document.getElementById('gcHours').value) || null
+    var completion = document.getElementById('gcCompletionStatus').value
+    var completionHours = (completion === 'main' || completion === 'extras') ? (parseInt(document.getElementById('gcCompletionHours').value) || null) : null
+    var platHours = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatHours').value) || null) : null
+    var platDiff  = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatDifficulty').value) || null) : null
+    var platEnjoy = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatEnjoyment').value) || null) : null
     var spoilers = document.getElementById('gcSpoilers').checked
     var youtubeUrl = document.getElementById('gcYoutube').value.trim()
     var errEl = document.getElementById('gcError')
@@ -2370,6 +3170,13 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
     if (!score || score < 0.1 || score > 10) { errEl.textContent = 'Score must be between 0.1 and 10.'; return }
     if (!title) { errEl.textContent = 'Title is required.'; return }
     if (!body) { errEl.textContent = 'Review is required.'; return }
+    // DLC toggle active but no DLC picked yet: either stayed on Main Game (OK)
+    // or picked DLC without selecting one (block). selectedTargetGameId still
+    // equals gameId when nothing was picked in DLC mode.
+    var dlcBtn = document.getElementById('gcTypeDlc')
+    if (dlcBtn && dlcBtn.classList.contains('active') && selectedTargetGameId === gameId) {
+      errEl.textContent = 'Pick which DLC or expansion you want to review.'; return
+    }
 
     btn.disabled = true
     btn.textContent = 'Posting…'
@@ -2386,6 +3193,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
               platform_played_on: platform || null,
               play_time_hours: hours,
               contains_spoilers: spoilers,
+              completion_status: completion || null,
+              completion_hours: completionHours,
+              platinum_hours: platHours,
+              platinum_difficulty: platDiff,
+              platinum_enjoyment: platEnjoy,
               youtube_url: youtubeUrl,
               status: 'published',
             })
@@ -2394,13 +3206,18 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              game_id: gameId,
+              game_id: selectedTargetGameId,
               score,
               title,
               body,
               platform_played_on: platform || null,
               play_time_hours: hours,
               contains_spoilers: spoilers,
+              completion_status: completion || null,
+              completion_hours: completionHours,
+              platinum_hours: platHours,
+              platinum_difficulty: platDiff,
+              platinum_enjoyment: platEnjoy,
               youtube_url: youtubeUrl,
             })
           })
@@ -2504,6 +3321,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
       var body = document.getElementById('gcBody').value.trim()
       var platform = document.getElementById('gcPlatform').value
       var hours = parseInt(document.getElementById('gcHours').value) || null
+      var completion = document.getElementById('gcCompletionStatus').value
+      var completionHours = (completion === 'main' || completion === 'extras') ? (parseInt(document.getElementById('gcCompletionHours').value) || null) : null
+      var platHours = completion === 'platinum' ? (parseInt(document.getElementById('gcPlatHours').value) || null) : null
+      var platDiff  = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatDifficulty').value) || null) : null
+      var platEnjoy = completion === 'platinum' ? (parseFloat(document.getElementById('gcPlatEnjoyment').value) || null) : null
       var spoilers = document.getElementById('gcSpoilers').checked
       var youtubeUrl = document.getElementById('gcYoutube').value.trim()
       var errEl = document.getElementById('gcError')
@@ -2522,6 +3344,11 @@ setPageCacheHeaders(Astro.response.headers, isLoggedIn);
           platform_played_on: platform || null,
           play_time_hours: hours,
           contains_spoilers: spoilers,
+          completion_status: completion || null,
+          completion_hours: completionHours,
+          platinum_hours: platHours,
+          platinum_difficulty: platDiff,
+          platinum_enjoyment: platEnjoy,
           youtube_url: youtubeUrl,
           status: 'draft',
         }

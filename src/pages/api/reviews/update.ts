@@ -1,11 +1,12 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { purgeReviewsPublicCache } from "../../../utils/cache";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
 import { readYouTubeField } from "../../../utils/youtube";
 import { attachReviewVideos } from "../../../utils/reviewVideos";
-import { resolveCanonicalGameId } from "../../../utils/games";
+import { resolveCanonicalGameId, isReviewableGameCategory } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -17,6 +18,107 @@ export const POST: APIRoute = async (context) => {
     requestBody;
 
   if (!review_id) return json({ error: "Missing review id." }, 400);
+
+  // Absent key = older client; don't touch the stored value. Explicit null or
+  // empty string clears it. A number must be an integer 1–10.
+  const difficultyKeyPresent = Object.prototype.hasOwnProperty.call(requestBody, "difficulty");
+  let difficultyColumn: { difficulty?: number | null } = {};
+  if (difficultyKeyPresent) {
+    const raw = requestBody.difficulty;
+    if (raw === null || raw === undefined || raw === "") {
+      difficultyColumn = { difficulty: null };
+    } else {
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10) {
+        return json({ error: "Difficulty must be between 1 and 10." }, 400);
+      }
+      difficultyColumn = { difficulty: Math.round(parsed * 10) / 10 };
+    }
+  }
+
+  // completion_status + plat-only fields follow the same "absent key = don't
+  // touch" rule. If the status is being changed away from 'platinum', the plat
+  // fields are nulled in the same update (the DB CHECK constraint requires it).
+  const completionKeyPresent = Object.prototype.hasOwnProperty.call(requestBody, "completion_status");
+  const completionColumns: Record<string, unknown> = {};
+  let demotingFromPlatinum = false;
+  if (completionKeyPresent) {
+    const raw = requestBody.completion_status;
+    let newStatus: "dnf" | "main" | "extras" | "platinum" | null = null;
+    if (raw !== null && raw !== undefined && raw !== "") {
+      if (raw !== "dnf" && raw !== "main" && raw !== "extras" && raw !== "platinum") {
+        return json({ error: "Invalid completion status." }, 400);
+      }
+      newStatus = raw;
+    }
+    completionColumns.completion_status = newStatus;
+    if (newStatus !== "platinum") demotingFromPlatinum = true;
+  }
+
+  // platinum_hours is integer. platinum_difficulty / platinum_enjoyment are
+  // numeric(3,1), so they accept one decimal and the server snaps the value
+  // to match the column's scale.
+  const parsePlatField = (
+    key: "platinum_hours" | "platinum_difficulty" | "platinum_enjoyment",
+    label: string,
+    min: number,
+    max: number,
+    decimal: boolean,
+  ): { present: boolean; value: number | null } | { error: string } => {
+    if (!Object.prototype.hasOwnProperty.call(requestBody, key)) return { present: false, value: null };
+    const r = requestBody[key];
+    if (r === null || r === undefined || r === "") return { present: true, value: null };
+    const n = Number(r);
+    const invalid = decimal
+      ? !Number.isFinite(n) || n < min || n > max
+      : !Number.isInteger(n) || n < min || n > max;
+    if (invalid) {
+      return { error: `${label} must be ${decimal ? "between" : "an integer between"} ${min} and ${max}.` };
+    }
+    return { present: true, value: decimal ? Math.round(n * 10) / 10 : n };
+  };
+
+  if (demotingFromPlatinum) {
+    // Any plat value posted in the same request is ignored on a demotion —
+    // staying consistent with the CHECK constraint is more important than
+    // preserving a value the client no longer has a way to display.
+    completionColumns.platinum_hours = null;
+    completionColumns.platinum_difficulty = null;
+    completionColumns.platinum_enjoyment = null;
+  } else {
+    const ph = parsePlatField("platinum_hours", "Platinum hours", 0, 99999, false);
+    if ("error" in ph) return json({ error: ph.error }, 400);
+    if (ph.present) completionColumns.platinum_hours = ph.value;
+    const pd = parsePlatField("platinum_difficulty", "Platinum difficulty", 1, 10, true);
+    if ("error" in pd) return json({ error: pd.error }, 400);
+    if (pd.present) completionColumns.platinum_difficulty = pd.value;
+    const pe = parsePlatField("platinum_enjoyment", "Platinum score", 1, 10, true);
+    if ("error" in pe) return json({ error: pe.error }, 400);
+    if (pe.present) completionColumns.platinum_enjoyment = pe.value;
+  }
+
+  // completion_hours is only valid for 'main' and 'extras'. If the status is
+  // being set to anything else (dnf, platinum, null), auto-null it in the same
+  // update to satisfy the DB CHECK.
+  const statusOnThisUpdate = completionKeyPresent
+    ? (completionColumns.completion_status as "dnf" | "main" | "extras" | "platinum" | null)
+    : undefined;
+  const nullingCompletionHours =
+    completionKeyPresent && statusOnThisUpdate !== "main" && statusOnThisUpdate !== "extras";
+  if (nullingCompletionHours) {
+    completionColumns.completion_hours = null;
+  } else if (Object.prototype.hasOwnProperty.call(requestBody, "completion_hours")) {
+    const r = requestBody.completion_hours;
+    if (r === null || r === undefined || r === "") {
+      completionColumns.completion_hours = null;
+    } else {
+      const n = Number(r);
+      if (!Number.isInteger(n) || n < 0) {
+        return json({ error: "Hours to complete must be a non-negative integer." }, 400);
+      }
+      completionColumns.completion_hours = n;
+    }
+  }
 
   // Absent key (e.g. an older client) leaves the stored video untouched.
   const youtube = readYouTubeField(requestBody);
@@ -54,6 +156,8 @@ export const POST: APIRoute = async (context) => {
         platform_played_on: platform_played_on || null,
         play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
         contains_spoilers: contains_spoilers ?? false,
+        ...difficultyColumn,
+        ...completionColumns,
         ...youtubeColumn,
         status: "draft",
       })
@@ -71,8 +175,8 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "Missing required fields." }, 400);
   if (parseFloat(score) < 0.1 || parseFloat(score) > 10)
     return json({ error: "Score must be between 0.1 and 10." }, 400);
-  if (reviewBody.length > 5000)
-    return json({ error: "Review must be at most 5000 characters." }, 400);
+  if (reviewBody.length > 10000)
+    return json({ error: "Review must be at most 10000 characters." }, 400);
 
   const publishing = review.status !== "published";
 
@@ -83,6 +187,19 @@ export const POST: APIRoute = async (context) => {
   const canonicalGameId = publishing
     ? await resolveCanonicalGameId(db, review.game_id)
     : review.game_id;
+
+  // Defensive reviewability gate — mirrors /api/reviews/create. Blocks a draft
+  // from being published against a non-reviewable category (mod/episode/
+  // season/fork). Won't fire for ordinary edits of existing published reviews
+  // because the target can't change here.
+  if (publishing) {
+    const { data: targetGame } = await db
+      .from("games").select("igdb_category").eq("id", canonicalGameId).maybeSingle();
+    if (!targetGame) return json({ error: "Game not found." }, 404);
+    if (!isReviewableGameCategory(targetGame.igdb_category)) {
+      return json({ error: "This game can't be reviewed directly — try reviewing the base game instead." }, 400);
+    }
+  }
 
   // Enforce one published review per canonical game before flipping status
   // (friendlier than letting the reviews_one_published_per_revision unique
@@ -102,6 +219,8 @@ export const POST: APIRoute = async (context) => {
     platform_played_on: platform_played_on || null,
     play_time_hours: play_time_hours ? parseInt(play_time_hours) : null,
     contains_spoilers: contains_spoilers ?? false,
+    ...difficultyColumn,
+    ...completionColumns,
     ...youtubeColumn,
   };
   if (publishing) {
@@ -119,8 +238,12 @@ export const POST: APIRoute = async (context) => {
   }
 
   // A plain edit of an already-published review keeps the original behaviour:
-  // no re-notification, no moderation re-screen, no reveal card.
-  if (!publishing) return json({ success: true });
+  // no re-notification, no moderation re-screen, no reveal card. The cached
+  // anon render still has to go — title/score/body all changed. Non-fatal.
+  if (!publishing) {
+    await purgeReviewsPublicCache();
+    return json({ success: true });
+  }
 
   // Publishing a draft: screen the text, then run the shared publish side-effects.
   const moderationDone = classifyText(`${title}\n${reviewBody}`)
@@ -139,6 +262,11 @@ export const POST: APIRoute = async (context) => {
   });
 
   await moderationDone;
+
+  // Draft → published: this review is about to appear on the home feed, the
+  // game page, and the author's profile for the first time. Drop stale anon
+  // renders so it shows up right away instead of waiting for the TTL. Non-fatal.
+  await purgeReviewsPublicCache();
 
   return json({ success: true, status: "published", ...reveal });
 };

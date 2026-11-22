@@ -16,12 +16,19 @@ function cdnCacheControl(maxAge: number, staleWhileRevalidate: number): string {
   return `public, durable, max-age=${maxAge}, stale-while-revalidate=${staleWhileRevalidate}`;
 }
 
-/** CDN cache headers for responses that are the same for every visitor. */
-export function cdnCacheHeaders(maxAge: number, staleWhileRevalidate: number): Record<string, string> {
-  return {
+/** CDN cache headers for responses that are the same for every visitor.
+ *
+ * `tags` attaches `Netlify-Cache-Tag` so the response can be purged on demand
+ * by `purgeCache({ tags })` — see `purgeReviewsPublicCache` below. Caller is
+ * responsible for passing a tag that matches the `purgeCache` call it wants to
+ * invalidate the response with. */
+export function cdnCacheHeaders(maxAge: number, staleWhileRevalidate: number, tags?: string[]): Record<string, string> {
+  const h: Record<string, string> = {
     'Netlify-CDN-Cache-Control': cdnCacheControl(maxAge, staleWhileRevalidate),
     'Netlify-Vary': 'query',
   };
+  if (tags && tags.length) h['Netlify-Cache-Tag'] = tags.join(',');
+  return h;
 }
 
 // @supabase/ssr stores the session in this cookie — or, once the encoded
@@ -36,13 +43,41 @@ export const PAGE_VARY = `query,cookie=${AUTH_COOKIE}|${AUTH_COOKIE}.0`;
  * Cache headers for SSR pages whose anonymous render is shareable. Logged-in
  * renders are personalized and never shared-cached; the browser never caches
  * either (`no-store`), so auth state changes show on the next navigation.
+ *
+ * Default anonymous TTL: 1 hour fresh + 1 day stale-while-revalidate. Chosen
+ * to minimise Netlify function invocations from bot sweeps (every cache-hit
+ * saves one full SSR render). During SWR, the edge serves the stale copy
+ * immediately and schedules at most one background refresh per cache window,
+ * so content never exceeds ~1 day stale for anon visitors. Callers that need
+ * fresher content pass an explicit shorter `maxAge` (e.g. discussions 60-120s).
  */
-export function setPageCacheHeaders(headers: Headers, isLoggedIn: boolean, maxAge = 300): void {
+export function setPageCacheHeaders(headers: Headers, isLoggedIn: boolean, maxAge = 3600, tags?: string[]): void {
   if (!isLoggedIn) {
-    headers.set('Netlify-CDN-Cache-Control', cdnCacheControl(maxAge, 600));
+    headers.set('Netlify-CDN-Cache-Control', cdnCacheControl(maxAge, 86400));
     headers.set('Cache-Control', 'no-store');
+    // Tags are only meaningful on cacheable responses — logged-in branch is
+    // private no-store, so a tag there would never be used by a purge anyway.
+    if (tags && tags.length) headers.set('Netlify-Cache-Tag', tags.join(','));
   } else {
     headers.set('Cache-Control', 'private, no-store');
   }
   headers.set('Netlify-Vary', PAGE_VARY);
+}
+
+/** Tag constants for `purgeCache({ tags })`. One tag covers every anon-cached
+ *  surface that renders review content; a review create/update/delete purges
+ *  it and the next anon hit on any of those pages re-renders from DB. */
+export const CACHE_TAG_REVIEWS_PUBLIC = 'reviews-public';
+
+/** Purge every CDN response tagged `reviews-public`. Non-throwing; logs and
+ *  returns on failure so a mutation route doesn't fail if the purge API blips
+ *  (or we're running outside Netlify in dev/tests — `@netlify/functions`'s
+ *  purgeCache is a no-op there). */
+export async function purgeReviewsPublicCache(): Promise<void> {
+  try {
+    const { purgeCache } = await import('@netlify/functions');
+    await purgeCache({ tags: [CACHE_TAG_REVIEWS_PUBLIC] });
+  } catch (e) {
+    console.error('[cache] purgeReviewsPublicCache failed (non-fatal):', e);
+  }
 }

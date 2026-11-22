@@ -15,6 +15,7 @@ import { getVoteCounts, igdbImage as igdbCover } from './format';
 import { REC_SELECT, shapeRec } from './recommendationsFeed';
 import { queryLibraryPage, LIBRARY_PAGE_SIZE, type LibraryPageResult } from './libraryQuery';
 import { attachReviewVideos } from './reviewVideos';
+import { resolveCanonicalIdMap } from './games';
 
 export const LAZY_PROFILE_TABS = ['reviews', 'recommendations', 'lists', 'library', 'groups'] as const;
 export type LazyProfileTab = (typeof LAZY_PROFILE_TABS)[number];
@@ -26,9 +27,10 @@ export function isLazyProfileTab(tab: string): tab is LazyProfileTab {
 /** The reviewer's reviews, as the Reviews tab (cards + filters) needs them. */
 export const PROFILE_REVIEWS_SELECT = `
   id, score, title, body, published_at, created_at,
-  contains_spoilers, play_time_hours, status,
+  contains_spoilers, play_time_hours, difficulty,
+  completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment, status,
   played_on:platform_played_on ( id, name, slug ),
-  games ( id, title, slug, cover_img_url, date_released, game_genres(genres(id, name, slug)) ),
+  games ( id, title, slug, cover_img_url, date_released, igdb_category, game_genres(genres(id, name, slug)) ),
   review_votes ( vote, profile_id ),
   review_reactions( reaction_type, profile_id ),
   review_comments( id )
@@ -95,6 +97,13 @@ export async function loadReviewsTab(ctx: ProfileTabContext) {
     )] as string[];
     const devs = [...new Set(devsByGameId[r.games?.id] ?? [])] as string[];
     const votes = getVoteCounts(r.review_votes);
+    // game_type bucket for the Phase 3 Slice 4 review-type filter. base =
+    // standalone content (base game / remake / remaster / expanded_game),
+    // dlc = anything else so one chip covers expansions + DLC-addons +
+    // mods / updates / ports / bundles. Null means unknown — treat as base.
+    const cat = r.games?.igdb_category;
+    const game_type: 'base' | 'dlc' =
+      cat == null || cat === 0 || cat === 8 || cat === 9 || cat === 10 ? 'base' : 'dlc';
     return {
       review: r,
       searchText: `${r.games?.title ?? ''} ${r.title ?? ''}`.trim(),
@@ -102,6 +111,7 @@ export async function loadReviewsTab(ctx: ProfileTabContext) {
       genres,
       devs,
       platform: r.played_on?.name ?? '',
+      game_type,
       score: r.score,
       date: r.published_at ?? r.created_at,
       up: votes.up,
@@ -270,13 +280,19 @@ export async function loadListsTab(ctx: ProfileTabContext) {
     savedLists = savedLists.map((l: any) => ({ ...l, ...buildListMeta(l.id, saved.gameIdsByListId, saved.yearsByListId) }));
   }
 
-  // Per-list review metrics (avg score + total hours from the reviewer's own reviews).
+  // Per-list review metrics (avg score + total hours from the reviewer's own
+  // reviews). Reviews are keyed on canonical game ids, but list entries may be
+  // non-canonical editions — resolve each entry id to its canonical before
+  // looking up so an "Okami HD" entry still counts the review on canonical.
+  const canonicalByEntryId = await resolveCanonicalIdMap(supabase, allGameIds);
   const reviewByGameId: Record<string, { score: number; hours: number }> = {};
   for (const r of publishedReviews) {
     if (r.games?.id) reviewByGameId[r.games.id] = { score: r.score, hours: r.play_time_hours ?? 0 };
   }
   const buildListReviewMeta = (gameIds: string[]) => {
-    const reviews = gameIds.map((id) => reviewByGameId[id]).filter(Boolean);
+    const reviews = gameIds
+      .map((id) => reviewByGameId[canonicalByEntryId.get(id) ?? id])
+      .filter(Boolean);
     return {
       avgScore: reviews.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / reviews.length : null,
       totalHours: reviews.reduce((s, r) => s + r.hours, 0),
@@ -335,7 +351,7 @@ export async function loadLibraryTab(ctx: ProfileTabContext) {
     const names = new Set<string>();
     for (let start = 0; ; start += CHUNK) {
       let q = db.from(junction)
-        .select(`${dimEmbed}, games!inner(user_game_status!inner(profile_id, is_hidden))`)
+        .select(`${dimEmbed}, games!inner(user_game_status!game_id!inner(profile_id, is_hidden))`)
         .eq('games.user_game_status.profile_id', reviewer.id)
         .eq('games.user_game_status.is_hidden', false);
       if (roleFilter) q = q.eq('role', roleFilter);

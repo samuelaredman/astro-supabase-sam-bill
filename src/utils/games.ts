@@ -74,6 +74,31 @@ export function isAllowedGameCategory(
   return isNotableEdition(category, title);
 }
 
+// Categories a user can post a review against. Intentionally more permissive
+// than ALLOWED_GAME_CATEGORIES (which gates rankings/discovery): a reviewer
+// can log playing a bundle, port, DLC-addon, update, etc. — those reviews
+// stay visible on the game's own page, in the reviewer's profile, and in
+// feeds, but the Slice 1 ranking filter keeps them out of leaderboards.
+// Blocked: mods (5), episodes (6), seasons (7), forks (12) — reviewing one
+// in isolation would be weird, and typically users mean the base game.
+export const REVIEWABLE_GAME_CATEGORIES = [
+  0,  // main_game
+  1,  // dlc_addon
+  2,  // expansion
+  3,  // bundle
+  4,  // standalone_expansion
+  8,  // remake
+  9,  // remaster
+  10, // expanded_game
+  11, // port
+  13, // pack
+  14, // update
+];
+
+export function isReviewableGameCategory(category: number | null | undefined): boolean {
+  return category == null || REVIEWABLE_GAME_CATEGORIES.includes(category);
+}
+
 // PostgREST .or() filter string for direct (non-embedded) queries against `games`.
 // Mirrors isAllowedGameCategory: allowed categories, plus bundle titles matching
 // the notable-edition keyword list.
@@ -377,6 +402,38 @@ export async function resolveCanonicalGameId(db: any, gameId: string): Promise<s
     .eq('id', gameId)
     .maybeSingle();
   return (data?.canonical_game_id as string | null) ?? gameId;
+}
+
+/** Batched version. Returns Map<inputId, canonicalId>. Any id without a
+ *  canonical_game_id (or missing from the games table) maps to itself.
+ *
+ *  Use this on read paths that render a game card and look up user-specific
+ *  stats (reviews, user_game_status, achievements): the card can be an edition
+ *  (e.g. a historical list entry added before resolveCanonicalGameId was in
+ *  the add path, or a row whose canonical_game_id was set retroactively), but
+ *  all stats are stored against the canonical row. */
+export async function resolveCanonicalIdMap(db: any, gameIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(gameIds)];
+  if (unique.length === 0) return out;
+  const CHUNK = 200;
+  for (let i = 0; i < unique.length; i += CHUNK) {
+    const slice = unique.slice(i, i + CHUNK);
+    const { data, error } = await db
+      .from('games')
+      .select('id, canonical_game_id')
+      .in('id', slice);
+    if (error) {
+      console.error('[resolveCanonicalIdMap] error:', JSON.stringify(error));
+      continue;
+    }
+    for (const r of (data ?? []) as any[]) {
+      out.set(r.id as string, (r.canonical_game_id as string | null) ?? (r.id as string));
+    }
+  }
+  // Any id that wasn't returned (deleted?) falls back to itself.
+  for (const id of unique) if (!out.has(id)) out.set(id, id);
+  return out;
 }
 
 function makeGameSlug(title: string, igdbSlug?: string): string {

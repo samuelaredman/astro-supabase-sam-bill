@@ -139,9 +139,12 @@ function buildFilteredQuery(
   if (dev)   dimJoins.push('game_companies!inner(role,developers!inner(name))');
   const gamesSel = dimJoins.length ? `${gamesSelect}, ${dimJoins.join(', ')}` : gamesSelect;
 
+  // user_game_status now has four FKs to games (game_id + three per-platform
+  // display columns). Pin the embed to the canonical game_id FK on both sides
+  // so PostgREST doesn't error on the ambiguous relationship.
   let qb = base === 'ugs'
-    ? db.from('user_game_status').select(`${ugsSelect}, games!inner(${gamesSel})`).eq('profile_id', profileId)
-    : db.from('games').select(`${gamesSel}, user_game_status!inner(${ugsSelect})`).eq('user_game_status.profile_id', profileId);
+    ? db.from('user_game_status').select(`${ugsSelect}, games!game_id!inner(${gamesSel})`).eq('profile_id', profileId)
+    : db.from('games').select(`${gamesSel}, user_game_status!game_id!inner(${ugsSelect})`).eq('user_game_status.profile_id', profileId);
 
   const c = (col: string) => (base === 'ugs' ? col : `user_game_status.${col}`);
   const g = (path: string) => (base === 'ugs' ? `games.${path}` : path);

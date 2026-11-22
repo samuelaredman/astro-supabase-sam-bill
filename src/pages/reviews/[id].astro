@@ -4,12 +4,12 @@ import { getSupabase, createSupabaseServerClientFromContext } from '../../utils/
 import { IMAGE_EMOTES, IMAGE_EMOTE_MAP } from '../../utils/reactions';
 import Layout from '../../components/Layout.astro';
 import CommentThread from '../../components/CommentThread.astro';
-import { igdbImage, scoreClass, getVoteCounts } from '../../utils/format';
+import { igdbImage, scoreClass, getVoteCounts, isPreRelease } from '../../utils/format';
 import type { CommentData } from '../../utils/comments';
 import ReportModal from '../../components/ReportModal.astro';
 import EditModal from '../../components/EditModal.astro';
 import ShareButton from '../../components/ShareButton.astro';
-import { setPageCacheHeaders } from '../../utils/cache';
+import { setPageCacheHeaders, CACHE_TAG_REVIEWS_PUBLIC } from '../../utils/cache';
 import { getPageUser } from '../../utils/pageAuth';
 import { youTubeEmbedUrl, youTubeWatchUrl } from '../../utils/youtube';
 import { attachReviewVideos } from '../../utils/reviewVideos';
@@ -23,24 +23,25 @@ const isLoggedIn = !!user;
 
 // Cache the anonymous render at the CDN edge to cut function invocations under
 // crawl load; logged-in (personalized) responses are never shared-cached.
-setPageCacheHeaders(Astro.response.headers, isLoggedIn);
+setPageCacheHeaders(Astro.response.headers, isLoggedIn, 3600, [CACHE_TAG_REVIEWS_PUBLIC]);
 
 const { id } = Astro.params;
 
 const { data: review, error } = await (supabase as any)
   .from('reviews')
   .select(`
-    id, score, title, body, play_time_hours,
+    id, score, title, body, play_time_hours, difficulty,
+    completion_status, completion_hours, platinum_hours, platinum_difficulty, platinum_enjoyment,
     contains_spoilers, status, published_at, created_at,
     played_on:platform_played_on ( id, name, slug ),
-    games ( id, title, slug, cover_img_url ),
+    games ( id, title, slug, cover_img_url, date_released, igdb_category ),
     profiles ( id, username, avatar_url, search_indexable, profile_badges!profile_badges_profile_id_fkey ( badge_slug ) ),
     review_votes ( vote, profile_id ),
     review_reactions ( reaction_type, profile_id )
   `)
   .eq('id', id)
   .eq('status', 'published')
-  .single();
+  .maybeSingle();
 
 if (error || !review) return Astro.redirect('/404');
 
@@ -238,9 +239,13 @@ const { data: moreReviews } = await (supabase as any)
         </a>
         <div class="game-bar-info">
           <a href={`/games/${review.games?.slug}`} class="game-bar-title">{review.games?.title ?? 'Unknown Game'}</a>
+          {isPreRelease(review.games?.date_released, review.published_at, review.created_at) && (
+            <div class="pre-release-badge">PLAYED BEFORE RELEASE</div>
+          )}
           <div class="game-bar-meta">
             {review.played_on && <span class="meta-tag">{review.played_on.name}</span>}
             {review.play_time_hours > 0 && <span class="meta-tag">{review.play_time_hours}h played</span>}
+            {review.difficulty != null && <span class="meta-tag">Difficulty {review.difficulty}/10</span>}
             {review.contains_spoilers && <span class="meta-tag spoiler-tag">⚠ spoilers</span>}
           </div>
         </div>
@@ -322,6 +327,7 @@ const { data: moreReviews } = await (supabase as any)
                 data-body={review.body}
                 data-platform-id={review.played_on?.id ?? ''}
                 data-hours={review.play_time_hours ?? ''}
+                data-difficulty={review.difficulty ?? ''}
                 data-spoilers={review.contains_spoilers ? 'true' : 'false'}
                 data-youtube-url={review.youtube_video_id ? youTubeWatchUrl(review.youtube_video_id) : ''}
                 title="Edit review"
@@ -447,6 +453,12 @@ const { data: moreReviews } = await (supabase as any)
           body:       d.body,
           platformId: d.platformId,
           hours:      d.hours,
+          difficulty: d.difficulty || null,
+          completionStatus:   d.completionStatus || '',
+          completionHours:    d.completionHours || null,
+          platinumHours:      d.platinumHours || null,
+          platinumDifficulty: d.platinumDifficulty || null,
+          platinumEnjoyment:  d.platinumEnjoyment || null,
           spoilers:   d.spoilers === 'true',
           youtubeUrl: d.youtubeUrl || '',
         });
@@ -808,6 +820,20 @@ const { data: moreReviews } = await (supabase as any)
     line-height: 1.3;
   }
   .game-bar-title:hover { text-decoration: underline; }
+
+  .pre-release-badge {
+    display: inline-flex;
+    align-self: flex-start;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+  }
 
   .game-bar-meta {
     display: flex;

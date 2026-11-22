@@ -28,8 +28,8 @@ export const POST: APIRoute = async (context) => {
 
   if (source_game_id === target_game_id)
     return json({ error: "Pick two different games." }, 400);
-  if (body && body.trim().length > 5000)
-    return json({ error: "Recommendation must be 5000 characters or fewer." }, 400);
+  if (body && body.trim().length > 10000)
+    return json({ error: "Recommendation must be 10000 characters or fewer." }, 400);
 
   // ── Draft path: body optional, no dedupe against published, no notifications. ──
   if (isDraft) {

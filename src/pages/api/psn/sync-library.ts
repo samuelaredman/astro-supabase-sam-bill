@@ -10,15 +10,33 @@ import {
   type TrophyTitle,
 } from "../../../utils/psn";
 import { getServiceAuth } from "../../../utils/psnService";
+import { igdbFetch, escapeIgdbString } from "../../../utils/igdb";
+import { importGameByIgdbId } from "../../../utils/games";
 
 const IN_CHUNK = 100;
 const WRITE_CHUNK = 500;
 const TITLE_CHUNK = 200;
 
+// IGDB auto-import budget for the unmatched pass. Each IGDB search + import
+// takes ~300-600ms; cap per-sync work so we stay well under Netlify's 10s
+// total budget. Anything past the cap is logged for admin review (or picked
+// up on the user's next sync, since the cooldown is only 60s).
+const IGDB_AUTO_IMPORT_CAP = 10;
+
 // Platform priority when the same game exists on multiple PSN platforms. PS5
 // entries win over PS4 win over PS3, matching what a returning player is
 // probably still playing.
 const PLATFORM_RANK: Record<string, number> = { PS5: 3, PS4: 2, PS3: 1 };
+
+// PSN platform → IGDB platform id. Narrowing by platform resolves most of the
+// title-collision cases the old matcher got wrong: 2017 SW Battlefront II is
+// PS4-only (IGDB id 48), 2005 original is PS2-only; Ratchet & Clank (2016)
+// is PS4-only, prior entries are PS3/PS2. PS3 = IGDB 9, PS4 = 48, PS5 = 167.
+const IGDB_PLATFORM_BY_PSN: Record<'PS3' | 'PS4' | 'PS5', number> = {
+  PS3: 9,
+  PS4: 48,
+  PS5: 167,
+};
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -148,6 +166,7 @@ export const POST: APIRoute = async (context) => {
     platform: 'PS3' | 'PS4' | 'PS5';
     earned: number;
     total: number;
+    hasPlatinum: boolean;
     progress: number;
     lastUpdatedDateTime: string | null;
   };
@@ -155,7 +174,13 @@ export const POST: APIRoute = async (context) => {
   for (const t of titles) {
     const platform = primaryPsnPlatform(t.trophyTitlePlatform);
     if (!platform) continue; // Vita/PSP only — not surfaced in the UI
-    const name = t.trophyTitleName?.trim();
+    // PSN's trophy API returns titles with a " Trophies" suffix for some
+    // games ("Apex Legends Trophies", "STAR WARS™ Battlefront™ II Trophies")
+    // — it's a label on the trophy set, not the game. Strip it so the IGDB
+    // auto-import search matches ("Apex Legends Trophies" → 0 IGDB hits)
+    // and so recent-played playtime (returned without the suffix) joins
+    // against the same key.
+    const name = t.trophyTitleName?.trim().replace(/\s+Trophies$/i, '').trim();
     if (!name) continue;
     const key = name.toLowerCase();
     const total =
@@ -174,6 +199,10 @@ export const POST: APIRoute = async (context) => {
       platform,
       earned,
       total,
+      // Sony awards a platinum once every non-DLC trophy is earned, so this is
+      // the reliable base-game-100% signal — stored so the library badge works
+      // without a separate psn/sync-trophies pass.
+      hasPlatinum: (t.earnedTrophies?.platinum ?? 0) > 0,
       progress: t.progress ?? 0,
       lastUpdatedDateTime: t.lastUpdatedDateTime ?? null,
     };
@@ -184,29 +213,144 @@ export const POST: APIRoute = async (context) => {
   }
 
   const collapsed = Array.from(bestByName.values());
-  const psnTitles = collapsed.map((c) => c.name);
 
-  // Match by title against games — parallel RPC batches, same shape as Steam
-  // import. match_psn_games returns at most one row per input title.
+  // Match against games strictly by npCommunicationId. Previously the matcher
+  // had a fuzzy title fallback that resolved first-sight games in one shot,
+  // but it was non-deterministic for games sharing a normalized title (the
+  // 2002 PS2 vs 2016 PS4 Ratchet & Clank picked arbitrarily by `ORDER BY
+  // c.id ASC`) and the backfill cemented the wrong pick onto games.
+  // psn_np_communication_id for every future user. All first-sight seeding
+  // now happens in the IGDB auto-import pass below where we can layer
+  // deterministic filters; ambiguous cases are queued for admin review.
   const matchBatches = await Promise.all(
-    chunk(psnTitles, TITLE_CHUNK).map((titleBatch) =>
-      (db as any).rpc('match_psn_games', { psn_titles: titleBatch }),
+    chunk(collapsed, TITLE_CHUNK).map((entries) =>
+      (db as any).rpc('match_psn_games', {
+        psn_np_comm_ids: entries.map((e) => e.npCommId),
+      }),
     ),
   );
 
-  const matches: Array<{ id: string; title: string; psn_title: string }> = [];
+  type MatchRow = { id: string; psn_np_communication_id: string };
+  const matches: MatchRow[] = [];
   const seenGameIds = new Set<string>();
   for (const { data, error } of matchBatches) {
     if (error) {
       console.error('[psn/sync-library] match_psn_games error:', JSON.stringify(error));
       return json({ error: 'Failed to match games.' }, 500);
     }
-    for (const row of (data ?? []) as Array<{ id: string; title: string; psn_title: string }>) {
-      if (!seenGameIds.has(row.id)) {
-        seenGameIds.add(row.id);
-        matches.push(row);
-      }
+    for (const row of (data ?? []) as MatchRow[]) {
+      if (seenGameIds.has(row.id)) continue;
+      seenGameIds.add(row.id);
+      matches.push(row);
     }
+  }
+
+  // IGDB auto-import pass — for PSN titles not already mapped, do an IGDB
+  // `search` narrowed by three layered filters before auto-importing:
+  //   1) PSN platform (platforms contains PS3/PS4/PS5 IGDB id)
+  //   2) Allowed game types (main/expansion/standalone/remake/remaster/
+  //      expanded) — drops DLCs, bundles, and ports that would wrong-match
+  //   3) first_release_date <= the user's lastUpdatedDateTime — the user can't
+  //      have earned trophies before the game was released, so any IGDB entry
+  //      dated after that is impossible by construction. This is what kills
+  //      the remake-vs-port edge case: a hypothetical PS4 Classic port of a
+  //      PS2 game would still release at port-time, so it's included, but a
+  //      later remake with no trophies on this npCommId is excluded. IGDB's
+  //      `search` already considers alternative_names, so trademark /
+  //      capitalization variants ("STAR WARS Battlefront II" ↔ "Star Wars:
+  //      Battlefront II") resolve naturally.
+  // Only auto-import single-hit results. 0 hits or 2+ hits → admin log. We
+  // never guess — the previous "best-effort title match" approach is the very
+  // thing this PR is removing.
+  const matchedNpCommIds = new Set(matches.map((m) => m.psn_np_communication_id));
+  const unmatchedCollapsed = collapsed.filter((c) => !matchedNpCommIds.has(c.npCommId));
+
+  const autoImportCandidates = unmatchedCollapsed.slice(0, IGDB_AUTO_IMPORT_CAP);
+  const deferredUnmatched = unmatchedCollapsed.slice(IGDB_AUTO_IMPORT_CAP);
+  const toLog: typeof collapsed = [...deferredUnmatched];
+
+  for (const entry of autoImportCandidates) {
+    try {
+      const platformId = IGDB_PLATFORM_BY_PSN[entry.platform];
+      // PSN's trophyTitleName often includes ™®© ("Apex Legends™", "EA SPORTS™
+      // College Football 25"). IGDB's fuzzy `search` may not forgive those,
+      // so strip them before the query.
+      const searchName = entry.name.replace(/[™®©]/g, '').replace(/\s+/g, ' ').trim();
+      // Release upper bound from the user's own trophy-earn data. If PSN
+      // reported trophies for this title with lastUpdatedDateTime = T, the
+      // game released at some point ≤ T. Converted to IGDB's unix-seconds
+      // first_release_date. Missing timestamp → no bound (fall back to
+      // platform + type filters only).
+      const lastUpdatedUnix = entry.lastUpdatedDateTime
+        ? Math.floor(new Date(entry.lastUpdatedDateTime).getTime() / 1000)
+        : null;
+      const dateClause = Number.isFinite(lastUpdatedUnix as number)
+        ? ` & first_release_date <= ${lastUpdatedUnix}`
+        : '';
+      const rows = await igdbFetch(
+        'games',
+        `
+          search "${escapeIgdbString(searchName)}";
+          fields id, name, platforms.id, game_type, first_release_date;
+          where platforms = (${platformId}) & game_type = (0,2,4,8,9,10)${dateClause};
+          limit 5;
+        `,
+      );
+      const hits = Array.isArray(rows) ? rows : [];
+      if (hits.length !== 1) {
+        toLog.push(entry);
+        continue;
+      }
+      const igdbId = Number(hits[0]?.id);
+      if (!Number.isFinite(igdbId)) {
+        toLog.push(entry);
+        continue;
+      }
+      const result = await importGameByIgdbId(db, igdbId);
+      if (!result.ok) {
+        console.error('[psn/sync-library] auto-import failed:', entry.name, result.error);
+        toLog.push(entry);
+        continue;
+      }
+      // Seed the mapping on the imported row. The unique index on games.
+      // psn_np_communication_id prevents two games from claiming the same
+      // npCommId; the `is null` guard prevents clobbering a mapping someone
+      // else wrote concurrently.
+      const { error: mapErr } = await (db as any)
+        .from('games')
+        .update({ psn_np_communication_id: entry.npCommId })
+        .eq('id', result.game.id)
+        .is('psn_np_communication_id', null);
+      if (mapErr) {
+        console.error('[psn/sync-library] auto-import mapping write error (non-fatal):',
+          JSON.stringify(mapErr));
+      }
+      if (!seenGameIds.has(result.game.id)) {
+        seenGameIds.add(result.game.id);
+        matches.push({
+          id: result.game.id,
+          psn_np_communication_id: entry.npCommId,
+        });
+      }
+    } catch (e) {
+      console.error('[psn/sync-library] IGDB search error for', entry.name, e);
+      toLog.push(entry);
+    }
+  }
+
+  // Log the leftovers so Sam/Bill can see what the matcher + IGDB pass missed
+  // and manually import real games from an admin page. Fire-and-forget.
+  if (toLog.length > 0) {
+    (db as any).rpc('log_unmatched_psn_titles', {
+      np_comm_ids: toLog.map((e) => e.npCommId),
+      titles: toLog.map((e) => e.name),
+      platforms: toLog.map((e) => e.platform),
+    }).then(({ error }: any) => {
+      if (error) {
+        console.error('[psn/sync-library] log_unmatched_psn_titles error (non-fatal):',
+          JSON.stringify(error));
+      }
+    });
   }
 
   if (matches.length === 0) {
@@ -231,7 +375,11 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  const collapsedByLowerName = new Map(collapsed.map((c) => [c.name.toLowerCase(), c]));
+  // Match rows now carry npCommId directly (the DB match returns it; the IGDB
+  // import pass populates it from the collapsed entry), so the collapsed
+  // lookup moves from name → npCommId. Previously the title path produced
+  // rows keyed by display name, which required a lowercased-name map here.
+  const collapsedByNpCommId = new Map(collapsed.map((c) => [c.npCommId, c]));
 
   type AggRow = {
     row: Record<string, unknown>;
@@ -240,7 +388,7 @@ export const POST: APIRoute = async (context) => {
   };
   const perCanonical = new Map<string, AggRow>();
   for (const match of matches) {
-    const psnEntry = collapsedByLowerName.get((match.psn_title ?? match.title).toLowerCase().trim());
+    const psnEntry = collapsedByNpCommId.get(match.psn_np_communication_id);
     if (!psnEntry) continue;
     const canonicalId = canonicalOf.get(match.id) ?? match.id;
     const playtime = playtimeByLowerName.get(psnEntry.name.toLowerCase()) ?? null;
@@ -250,9 +398,13 @@ export const POST: APIRoute = async (context) => {
       psn_platform: psnEntry.platform,
       psn_trophies_earned: psnEntry.earned,
       psn_trophies_total: psnEntry.total,
+      psn_platinum_earned: psnEntry.hasPlatinum,
       psn_progress: psnEntry.progress,
       psn_playtime_minutes: playtime?.minutes ?? null,
       psn_last_played_at: lastPlayedAt,
+      // Library rendering uses this edition's title/cover; the row still keys
+      // on the canonical id for review + aggregation.
+      psn_display_game_id: match.id,
     };
     const lastPlayedTs = lastPlayedAt ? Date.parse(lastPlayedAt) : 0;
 

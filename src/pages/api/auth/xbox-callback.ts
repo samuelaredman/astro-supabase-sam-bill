@@ -22,53 +22,62 @@ export const GET: APIRoute = async (context) => {
   context.cookies.delete('xbox_oauth_state', { path: '/' });
   if (!stateCookie) {
     console.error('[xbox-callback] missing start-flow cookie');
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=no_cookie#xbox');
   }
 
   const code = (context.url.searchParams.get('code') ?? '').trim();
   if (!code) {
     console.error('[xbox-callback] missing code in callback params');
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=no_code#xbox');
   }
 
   const appKey = import.meta.env.OPENXBL_APP_KEY;
   if (!appKey) {
     console.error('[xbox-callback] OPENXBL_APP_KEY is not set');
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=no_key#xbox');
   }
 
-  let claim: { appKey?: string; xuid?: string; gamertag?: string } | null = null;
+  let claim: { app_key?: string; xuid?: string; gamertag?: string } | null = null;
+  let res: Response;
   try {
-    const res = await fetch('https://api.xbl.io/app/claim', {
+    res = await fetch('https://api.xbl.io/app/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify({ code, app_key: appKey }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(25_000),
     });
-    if (!res.ok) {
-      console.error('[xbox-callback] claim returned', res.status, await res.text().catch(() => ''));
-      return context.redirect('/settings?xbox=expired#xbox');
-    }
-    claim = await res.json();
+  } catch (e: any) {
+    const isTimeout = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+    console.error('[xbox-callback] claim fetch error:', e?.name, e?.message);
+    return context.redirect(`/settings?xbox=error&reason=${isTimeout ? 'fetch_timeout' : 'fetch_network'}#xbox`);
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error('[xbox-callback] claim returned', res.status, body.slice(0, 300));
+    return context.redirect(`/settings?xbox=expired&status=${res.status}#xbox`);
+  }
+  const bodyText = await res.text().catch(() => '');
+  try {
+    claim = JSON.parse(bodyText);
   } catch (e) {
-    console.error('[xbox-callback] claim fetch error:', e);
-    return context.redirect('/settings?xbox=error#xbox');
+    console.error('[xbox-callback] claim body was not JSON. first 200 chars:', bodyText.slice(0, 200));
+    return context.redirect('/settings?xbox=error&reason=bad_json#xbox');
   }
 
-  if (!claim?.appKey || !claim.xuid) {
-    console.error('[xbox-callback] claim response missing appKey/xuid:', claim);
-    return context.redirect('/settings?xbox=error#xbox');
+  if (!claim?.app_key || !claim.xuid) {
+    console.error('[xbox-callback] claim response missing app_key/xuid:', claim);
+    return context.redirect('/settings?xbox=error&reason=bad_claim#xbox');
   }
 
   const db = getSupabaseAdmin() as any;
   const { data: profile } = await db
     .from('profiles').select('id').eq('auth_user_id', user.id).single();
-  if (!profile) return context.redirect('/settings?xbox=error#xbox');
+  if (!profile) return context.redirect('/settings?xbox=error&reason=no_profile#xbox');
 
   const { error } = await db.from('profiles').update({
     xbox_xuid: String(claim.xuid),
     xbox_gamertag: claim.gamertag ?? null,
-    xbox_api_key: claim.appKey,
+    xbox_api_key: claim.app_key,
   }).eq('id', profile.id);
 
   if (error) {
@@ -76,7 +85,7 @@ export const GET: APIRoute = async (context) => {
       return context.redirect('/settings?xbox=duplicate#xbox');
     }
     console.error('[xbox-callback] profile update error:', JSON.stringify(error));
-    return context.redirect('/settings?xbox=error#xbox');
+    return context.redirect('/settings?xbox=error&reason=db_error#xbox');
   }
 
   return context.redirect('/settings?xbox=connected#xbox');

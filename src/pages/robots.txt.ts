@@ -47,6 +47,12 @@ Disallow: /signin
 Disallow: /signup
 Disallow: /forgot-password
 Disallow: /reset-password-confirm
+# /search makes two live IGDB API calls per render (see search.astro). It's an
+# interactive endpoint with no SEO value (results are already discoverable via
+# per-game pages, which ARE crawlable), and bot-driven query crawls were the
+# single most expensive request shape on the site — each slow IGDB response
+# burned the full Netlify function budget. Keep well-behaved crawlers off it.
+Disallow: /search
 
 # ── AI training / bulk-scraping crawlers ────────────────────────────────────
 # These pull full-site sweeps (every page, every image) and were behind the
@@ -96,6 +102,40 @@ User-agent: ImagesiftBot
 Disallow: /
 
 User-agent: DataForSeoBot
+Disallow: /
+
+# ── SEO/backlink scrapers ───────────────────────────────────────────────────
+# Full-site sweeps for backlink graphs or SERP competitive data. Zero human
+# referrals, same bandwidth profile as the AI scrapers above. Keep
+# Googlebot/Bingbot allowed (under User-agent: *) — these don't power search.
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
+User-agent: BLEXBot
+Disallow: /
+
+User-agent: MegaIndex.ru
+Disallow: /
+
+User-agent: SeekportBot
+Disallow: /
+
+User-agent: OpenLinkProfiler
+Disallow: /
+
+User-agent: SerpstatBot
+Disallow: /
+
+User-agent: PetalBot
 Disallow: /
 
 Sitemap: https://chekpoint.gg/sitemap.xml

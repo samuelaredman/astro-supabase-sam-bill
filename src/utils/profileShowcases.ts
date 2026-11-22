@@ -5,7 +5,6 @@
 
 export const SHOWCASE_SECTIONS = [
   { key: 'favorite_game', label: 'Favorite game' },
-  { key: 'featured_group', label: 'Join my community' },
   { key: 'video', label: 'Video' },
   { key: 'games', label: 'Game showcase' },
   { key: 'achievements', label: 'Achievement showcase' },

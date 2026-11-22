@@ -4,6 +4,7 @@ import {
   fetchAllTitles,
   isXboxAuthInvalid,
   type XboxTitleSummary,
+  type XboxConsole,
 } from "../../../utils/xbox";
 
 const IN_CHUNK = 100;
@@ -59,25 +60,76 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: 0, total: 0 });
   }
 
-  const xboxNames = titles.map((t) => t.name).filter((n): n is string => !!n && n.length > 0);
+  // Keep only titles with a usable titleId + name + platform. Drops anomalous
+  // rows (pre-360 games, dev kits) that can't thread through either match
+  // path cleanly.
+  const validTitles = titles.filter(
+    (t): t is XboxTitleSummary & { platform: XboxConsole } =>
+      !!t.titleId && !!t.name && !!t.platform,
+  );
 
-  const matchBatches = await Promise.all(
-    chunk(xboxNames, TITLE_CHUNK).map((batch) =>
-      (db as any).rpc('match_xbox_games', { xbox_titles: batch }),
+  // Step 1 — titleId fast path via games.xbox_title_id. This column is new
+  // (added by 20261111000002) and nearly empty in practice, so this match
+  // typically returns ~0 rows today. Over time, the title-fallback path below
+  // will seed it (via the PSN-style approach once we build Sony's Store
+  // lookup, or admin curation in the interim).
+  const xboxTitleIds = validTitles.map((t) => t.titleId);
+  const titleIdBatches = await Promise.all(
+    chunk(xboxTitleIds, TITLE_CHUNK).map((batch) =>
+      (db as any).rpc('match_xbox_games_by_title_id', { xbox_title_ids: batch }),
     ),
   );
 
-  const matches: Array<{ id: string; title: string; xbox_title: string }> = [];
+  type IdMatchRow = { id: string; xbox_title_id: string };
+  const matches: Array<{ id: string; xbox_title_id: string }> = [];
   const seenGameIds = new Set<string>();
-  for (const { data, error } of matchBatches) {
+  for (const { data, error } of titleIdBatches) {
     if (error) {
-      console.error('[xbox/sync-library] match_xbox_games error:', JSON.stringify(error));
+      console.error('[xbox/sync-library] titleId match error:', JSON.stringify(error));
       return json({ error: 'Failed to match games.' }, 500);
     }
-    for (const row of (data ?? []) as Array<{ id: string; title: string; xbox_title: string }>) {
+    for (const row of (data ?? []) as IdMatchRow[]) {
       if (!seenGameIds.has(row.id)) {
         seenGameIds.add(row.id);
-        matches.push(row);
+        matches.push({ id: row.id, xbox_title_id: row.xbox_title_id });
+      }
+    }
+  }
+
+  // Step 2 — title fallback for everything the titleId path didn't resolve.
+  // Uses the title-based matcher that was in place before PR #110 (restored
+  // in 20261112000000 so it coexists with match_xbox_games_by_title_id).
+  // Steam has the same two-step design; see steam/import.ts.
+  const matchedTitleIds = new Set(matches.map((m) => m.xbox_title_id));
+  const unmatchedEntries = validTitles.filter((t) => !matchedTitleIds.has(t.titleId));
+
+  if (unmatchedEntries.length > 0) {
+    const titleIdByLowerName = new Map<string, string>();
+    for (const t of unmatchedEntries) {
+      titleIdByLowerName.set(t.name.toLowerCase().trim(), t.titleId);
+    }
+    const unmatchedNames = unmatchedEntries.map((t) => t.name);
+
+    const titleBatches = await Promise.all(
+      chunk(unmatchedNames, TITLE_CHUNK).map((batch) =>
+        (db as any).rpc('match_xbox_games', { xbox_titles: batch }),
+      ),
+    );
+
+    type TitleMatchRow = { id: string; title: string; xbox_title: string };
+    for (const { data, error } of titleBatches) {
+      if (error) {
+        console.error('[xbox/sync-library] title match error:', JSON.stringify(error));
+        return json({ error: 'Failed to match games.' }, 500);
+      }
+      for (const row of (data ?? []) as TitleMatchRow[]) {
+        if (seenGameIds.has(row.id)) continue;
+        const titleId = titleIdByLowerName.get(
+          (row.xbox_title ?? row.title).toLowerCase().trim(),
+        );
+        if (!titleId) continue;
+        seenGameIds.add(row.id);
+        matches.push({ id: row.id, xbox_title_id: titleId });
       }
     }
   }
@@ -87,8 +139,10 @@ export const POST: APIRoute = async (context) => {
     return json({ matched: 0, updated: 0, unmatched: titles.length, total: titles.length });
   }
 
-  const titlesByLowerName = new Map<string, XboxTitleSummary>();
-  for (const t of titles) titlesByLowerName.set(t.name.toLowerCase().trim(), t);
+  // Map titleId → Xbox summary so the aggregate loop below can read
+  // gamerscore / lastPlayed off the source row without a second lookup.
+  const titlesByTitleId = new Map<string, XboxTitleSummary>();
+  for (const t of validTitles) titlesByTitleId.set(t.titleId, t);
 
   // Resolve matched ids to their canonical rows — a title that matches a
   // collapsed edition records ownership on the main game. Multiple editions
@@ -114,7 +168,7 @@ export const POST: APIRoute = async (context) => {
   };
   const perCanonical = new Map<string, AggRow>();
   for (const match of matches) {
-    const xt = titlesByLowerName.get((match.xbox_title ?? match.title).toLowerCase().trim());
+    const xt = titlesByTitleId.get(match.xbox_title_id);
     if (!xt) continue;
     const canonicalId = canonicalOf.get(match.id) ?? match.id;
     const progress = xt.maxGamerscore > 0
@@ -127,6 +181,9 @@ export const POST: APIRoute = async (context) => {
       xbox_max_gamerscore: xt.maxGamerscore,
       xbox_progress: progress,
       xbox_last_played_at: xt.lastPlayed,
+      // Library rendering uses this edition's title/cover; the row still keys
+      // on the canonical id for review + aggregation.
+      xbox_display_game_id: match.id,
     };
     const lastPlayedTs = xt.lastPlayed ? Date.parse(xt.lastPlayed) : 0;
 

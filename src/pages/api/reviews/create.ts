@@ -1,10 +1,11 @@
 import type { APIRoute } from "astro";
 import { requireAuth, json } from "../../../utils/api";
+import { purgeReviewsPublicCache } from "../../../utils/cache";
 import { classifyText } from "../../../utils/moderation/openaiModeration";
 import { fileAutoReport } from "../../../utils/moderation/autoReport";
 import { finalizePublishedReview } from "../../../utils/reviewPublish";
 import { readYouTubeField } from "../../../utils/youtube";
-import { resolveCanonicalGameId } from "../../../utils/games";
+import { resolveCanonicalGameId, isReviewableGameCategory } from "../../../utils/games";
 
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
@@ -15,6 +16,78 @@ export const POST: APIRoute = async (context) => {
   const { score, title, body: reviewBody, platform_played_on, play_time_hours, contains_spoilers } = body;
   const isDraft = body.status === "draft";
 
+  // 1–10 ratings accept one decimal (e.g. 8.2). Values are snapped with
+  // Math.round(n * 10) / 10 so a request posting 8.26 lands as 8.3 — matches
+  // the DB column's numeric(3,1) scale and avoids a false 400 on floats
+  // picked up from a non-:step input.
+  const rawDifficulty = body.difficulty;
+  let difficulty: number | null = null;
+  if (rawDifficulty !== null && rawDifficulty !== undefined && rawDifficulty !== "") {
+    const parsed = Number(rawDifficulty);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 10) {
+      return json({ error: "Difficulty must be between 1 and 10." }, 400);
+    }
+    difficulty = Math.round(parsed * 10) / 10;
+  }
+
+  const rawCompletion = body.completion_status;
+  let completion_status: "dnf" | "main" | "extras" | "platinum" | null = null;
+  if (rawCompletion !== null && rawCompletion !== undefined && rawCompletion !== "") {
+    if (rawCompletion !== "dnf" && rawCompletion !== "main" && rawCompletion !== "extras" && rawCompletion !== "platinum") {
+      return json({ error: "Invalid completion status." }, 400);
+    }
+    completion_status = rawCompletion;
+  }
+
+  // Completion-hours is only meaningful for 'main' and 'extras'. Platinum has
+  // its own platinum_hours field, so an 'completion_hours' posted on a
+  // platinum row is ignored (DB CHECK rejects it too). DNF / null status
+  // can't log a completion time either.
+  let completion_hours: number | null = null;
+  if (completion_status === "main" || completion_status === "extras") {
+    const rawCh = body.completion_hours;
+    if (rawCh !== null && rawCh !== undefined && rawCh !== "") {
+      const n = Number(rawCh);
+      if (!Number.isInteger(n) || n < 0) {
+        return json({ error: "Hours to complete must be a non-negative integer." }, 400);
+      }
+      completion_hours = n;
+    }
+  }
+
+  // Plat-only fields are only read when the reviewer marked the plat. Any value
+  // posted alongside dnf/main is ignored here (and the DB CHECK constraint
+  // would reject it anyway).
+  let platinum_hours: number | null = null;
+  let platinum_difficulty: number | null = null;
+  let platinum_enjoyment: number | null = null;
+  if (completion_status === "platinum") {
+    const rawPh = body.platinum_hours;
+    if (rawPh !== null && rawPh !== undefined && rawPh !== "") {
+      const n = Number(rawPh);
+      if (!Number.isInteger(n) || n < 0) {
+        return json({ error: "Platinum hours must be a non-negative integer." }, 400);
+      }
+      platinum_hours = n;
+    }
+    const rawPd = body.platinum_difficulty;
+    if (rawPd !== null && rawPd !== undefined && rawPd !== "") {
+      const n = Number(rawPd);
+      if (!Number.isFinite(n) || n < 1 || n > 10) {
+        return json({ error: "Platinum difficulty must be between 1 and 10." }, 400);
+      }
+      platinum_difficulty = Math.round(n * 10) / 10;
+    }
+    const rawPe = body.platinum_enjoyment;
+    if (rawPe !== null && rawPe !== undefined && rawPe !== "") {
+      const n = Number(rawPe);
+      if (!Number.isFinite(n) || n < 1 || n > 10) {
+        return json({ error: "Platinum score must be between 1 and 10." }, 400);
+      }
+      platinum_enjoyment = Math.round(n * 10) / 10;
+    }
+  }
+
   if (!body.game_id) return json({ error: "Missing game." }, 400);
 
   // Collapse any edition id to its canonical before anything else uses it, so a
@@ -22,6 +95,18 @@ export const POST: APIRoute = async (context) => {
   // reviewable game. All downstream code (dupe check, insert, finalize) sees the
   // canonical id.
   const game_id = await resolveCanonicalGameId(db, body.game_id);
+
+  // Defensive reviewability gate. Blocks reviews on mod / episode / season /
+  // fork rows where posting one in isolation would be nonsensical. Base games,
+  // DLC, expansions, remakes, remasters, bundles, ports, updates, packs are
+  // all allowed through — Slice 1's ranking filter keeps the non-rankable
+  // ones out of leaderboards without blocking the review itself.
+  const { data: targetGame } = await db
+    .from("games").select("igdb_category").eq("id", game_id).maybeSingle();
+  if (!targetGame) return json({ error: "Game not found." }, 404);
+  if (!isReviewableGameCategory(targetGame.igdb_category)) {
+    return json({ error: "This game can't be reviewed directly — try reviewing the base game instead." }, 400);
+  }
 
   const youtube = readYouTubeField(body);
   if ("error" in youtube) return json({ error: youtube.error }, 400);
@@ -43,6 +128,12 @@ export const POST: APIRoute = async (context) => {
         platform_played_on: platform_played_on || null,
         play_time_hours: play_time_hours || null,
         contains_spoilers: contains_spoilers ?? false,
+        difficulty,
+        completion_status,
+        completion_hours,
+        platinum_hours,
+        platinum_difficulty,
+        platinum_enjoyment,
         ...youtubeColumn,
         status: "draft",
         published_at: null,
@@ -61,6 +152,8 @@ export const POST: APIRoute = async (context) => {
   // ── Published path ──
   if (!score || !title || !reviewBody)
     return json({ error: "Missing required fields." }, 400);
+  if (reviewBody.length > 10000)
+    return json({ error: "Review must be at most 10000 characters." }, 400);
 
   const { data: existing } = await db
     .from('reviews')
@@ -83,6 +176,12 @@ export const POST: APIRoute = async (context) => {
       platform_played_on: platform_played_on || null,
       play_time_hours: play_time_hours || null,
       contains_spoilers: contains_spoilers ?? false,
+      difficulty,
+      completion_status,
+      completion_hours,
+      platinum_hours,
+      platinum_difficulty,
+      platinum_enjoyment,
       ...youtubeColumn,
       status: "published",
       published_at: new Date().toISOString(),
@@ -119,6 +218,10 @@ export const POST: APIRoute = async (context) => {
   // Ensure the moderation classify+report finishes before the serverless function
   // freezes on return (it has been running concurrently with the work above).
   await moderationDone;
+
+  // Published reviews change anon-visible content; drop the CDN snapshots so
+  // feeds / game / profile pages re-render the next anon hit. Non-fatal.
+  await purgeReviewsPublicCache();
 
   return json({ success: true, ...reveal });
 };

@@ -86,6 +86,64 @@ export async function queryLibraryPage(
   const dev = (opts.dev ?? '').trim();
   const showHidden = !!opts.showHidden;
 
+  // Pre-resolve search to the set of canonical game_ids whose canonical title
+  // OR any platform-edition title matches. The edition titles live on separate
+  // games rows referenced by the *_display_game_id columns, so a plain ILIKE
+  // on games.title alone would miss them (user searches "HD", library has an
+  // Okami row with steam_display_game_id → "Okami HD" — the canonical title is
+  // just "Okami"). Scan the user's library's id columns first so the title
+  // search is bounded by library size, not the whole games table.
+  let searchCanonicalIds: string[] | null = null;
+  if (search) {
+    const RANGE = 1000;
+    const idToCanonical = new Map<string, Set<string>>();
+    for (let start = 0; start < 20000; start += RANGE) {
+      const { data: ugsRows, error: ugsErr } = await db
+        .from('user_game_status')
+        .select('game_id, steam_display_game_id, psn_display_game_id, xbox_display_game_id')
+        .eq('profile_id', profileId)
+        .range(start, start + RANGE - 1);
+      if (ugsErr) {
+        console.error('[library query] search scan error:', JSON.stringify(ugsErr));
+        break;
+      }
+      if (!ugsRows || ugsRows.length === 0) break;
+      for (const r of ugsRows as any[]) {
+        const gid = r.game_id as string;
+        for (const id of [r.game_id, r.steam_display_game_id, r.psn_display_game_id, r.xbox_display_game_id] as (string | null)[]) {
+          if (!id) continue;
+          const set = idToCanonical.get(id) ?? new Set<string>();
+          set.add(gid);
+          idToCanonical.set(id, set);
+        }
+      }
+      if (ugsRows.length < RANGE) break;
+    }
+
+    const matchedCanonical = new Set<string>();
+    if (idToCanonical.size > 0) {
+      const allIds = [...idToCanonical.keys()];
+      const CHUNK = 200;
+      for (let i = 0; i < allIds.length; i += CHUNK) {
+        const slice = allIds.slice(i, i + CHUNK);
+        const { data: g, error: gErr } = await db
+          .from('games')
+          .select('id')
+          .in('id', slice)
+          .ilike('title', `%${search}%`);
+        if (gErr) {
+          console.error('[library query] search match error:', JSON.stringify(gErr));
+          continue;
+        }
+        for (const r of (g ?? []) as any[]) {
+          const canonicals = idToCanonical.get(r.id as string);
+          if (canonicals) for (const c of canonicals) matchedCanonical.add(c);
+        }
+      }
+    }
+    searchCanonicalIds = [...matchedCanonical];
+  }
+
   // A top-level PostgREST query cannot ORDER BY an *embedded* resource's column
   // (it only sorts rows within the embed), so we pivot the query onto whichever
   // table actually owns the sort column.
@@ -105,15 +163,18 @@ export async function queryLibraryPage(
     if (dev)   dimJoins.push('game_companies!inner(role,developers!inner(name))');
     const gamesSel = dimJoins.length ? `${gamesSelect}, ${dimJoins.join(', ')}` : gamesSelect;
 
+    // user_game_status has four FKs to games now (game_id + three per-platform
+    // display columns). PostgREST refuses to auto-embed when the relationship
+    // is ambiguous — pin it to the canonical game_id FK on both sides.
     let qb =
       base === 'ugs'
         ? db
             .from('user_game_status')
-            .select(`${ugsSelect}, games!inner(${gamesSel})`, countOpts)
+            .select(`${ugsSelect}, games!game_id!inner(${gamesSel})`, countOpts)
             .eq('profile_id', profileId)
         : db
             .from('games')
-            .select(`${gamesSel}, user_game_status!inner(${ugsSelect})`, countOpts)
+            .select(`${gamesSel}, user_game_status!game_id!inner(${ugsSelect})`, countOpts)
             .eq('user_game_status.profile_id', profileId);
 
     const c = (col: string) => (base === 'ugs' ? col : `user_game_status.${col}`);
@@ -160,13 +221,22 @@ export async function queryLibraryPage(
       qb = qb.eq(c('status'), filter);
     }
 
-    if (search) qb = qb.ilike(base === 'ugs' ? 'games.title' : 'title', `%${search}%`);
+    if (searchCanonicalIds !== null) {
+      // Pre-resolved above by scanning the user's library + edition titles.
+      // Empty set = no row matches; force a no-op match rather than skip (a
+      // skipped filter would return the unfiltered library).
+      if (searchCanonicalIds.length === 0) {
+        qb = qb.eq(base === 'ugs' ? 'game_id' : 'id', '00000000-0000-0000-0000-000000000000');
+      } else {
+        qb = qb.in(base === 'ugs' ? 'game_id' : 'id', searchCanonicalIds);
+      }
+    }
 
     return qb;
   };
 
   const SEL_GAMES = 'id, title, slug, cover_img_url';
-  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at';
+  const SEL_UGS   = 'status, is_hidden, is_owned, updated_at, steam_playtime_minutes, steam_appid, steam_last_played_at, psn_np_communication_id, psn_platform, psn_playtime_minutes, psn_last_played_at, psn_trophies_earned, psn_trophies_total, psn_platinum_earned, xbox_title_id, xbox_current_gamerscore, xbox_max_gamerscore, xbox_progress, xbox_last_played_at, steam_display_game_id, psn_display_game_id, xbox_display_game_id';
   const from = (page - 1) * LIBRARY_PAGE_SIZE;
 
   let rows: any[] | null;
@@ -279,6 +349,14 @@ export async function queryLibraryPage(
       title:     g?.title ?? '',
       slug:      g?.slug ?? '',
       cover:     g?.cover_img_url ?? null,
+      // The platform imports record the primary edition each platform's user
+      // owns (e.g. "Okami HD" vs canonical "Okami"). The library's platform
+      // split rows read the matching column so Steam / PSN / Xbox each render
+      // their own edition. Click targets, review score, and achievements still
+      // key on the canonical.
+      steamDisplayGameId: ugs?.steam_display_game_id ?? null,
+      psnDisplayGameId:   ugs?.psn_display_game_id   ?? null,
+      xboxDisplayGameId:  ugs?.xbox_display_game_id  ?? null,
       status:    ugs?.status ?? '',
       owned:     ugs?.is_owned ?? false,
       isHidden:  ugs?.is_hidden ?? false,
@@ -292,6 +370,7 @@ export async function queryLibraryPage(
       psnLastPlayed:   ugs?.psn_last_played_at ?? null,
       psnTrophiesEarned: ugs?.psn_trophies_earned ?? null,
       psnTrophiesTotal:  ugs?.psn_trophies_total ?? null,
+      psnPlatinumFromLib: ugs?.psn_platinum_earned === true,
       xboxTitleId:       ugs?.xbox_title_id ?? null,
       xboxLastPlayed:    ugs?.xbox_last_played_at ?? null,
       xboxCurrentScore:  ugs?.xbox_current_gamerscore ?? null,
@@ -301,6 +380,14 @@ export async function queryLibraryPage(
       steamAchTotal:    null as number | null,
       psnAchUnlocked:   null as number | null,
       psnAchTotal:      null as number | null,
+      // Split of the above by trophy_group_id ('default' is the base game, every
+      // other group is a DLC/expansion pack) so the UI can show base + DLC rows
+      // separately and treat base-100% as the completion milestone.
+      psnBaseAchUnlocked: null as number | null,
+      psnBaseAchTotal:    null as number | null,
+      psnDlcAchUnlocked:  null as number | null,
+      psnDlcAchTotal:     null as number | null,
+      psnHasPlatinum:   false,
       xboxAchUnlocked:  null as number | null,
       xboxAchTotal:     null as number | null,
     };
@@ -349,13 +436,14 @@ export async function queryLibraryPage(
         .map((i) => i.psnNpCommId)
         .filter((x: any): x is string => typeof x === 'string')
     )];
-    const counts = new Map<string, { earned: number; total: number }>();
+    type TrophyTally = { base: { earned: number; total: number }; dlc: { earned: number; total: number } };
+    const counts = new Map<string, TrophyTally>();
     if (npCommIds.length > 0) {
       const CHUNK = 1000;
       for (let start = 0; ; start += CHUNK) {
         const { data: tRows, error: tErr } = await db
           .from('user_trophies')
-          .select('np_communication_id, earned')
+          .select('np_communication_id, earned, trophy_group_id')
           .eq('profile_id', profileId)
           .in('np_communication_id', npCommIds)
           .range(start, start + CHUNK - 1);
@@ -365,9 +453,12 @@ export async function queryLibraryPage(
         }
         for (const row of tRows ?? []) {
           const id = (row as any).np_communication_id as string;
-          const cur = counts.get(id) ?? { earned: 0, total: 0 };
-          cur.total++;
-          if ((row as any).earned) cur.earned++;
+          const cur = counts.get(id) ?? { base: { earned: 0, total: 0 }, dlc: { earned: 0, total: 0 } };
+          // 'default' is the base game's trophy group; every other id is a DLC
+          // / expansion pack (per psn-api's TitleTrophyGroup convention).
+          const bucket = (row as any).trophy_group_id === 'default' ? cur.base : cur.dlc;
+          bucket.total++;
+          if ((row as any).earned) bucket.earned++;
           counts.set(id, cur);
         }
         if (!tRows || tRows.length < CHUNK) break;
@@ -377,11 +468,43 @@ export async function queryLibraryPage(
       if (!it.psnNpCommId) continue;
       const c = counts.get(it.psnNpCommId);
       if (c) {
-        it.psnAchUnlocked = c.earned;
-        it.psnAchTotal = c.total;
+        it.psnBaseAchUnlocked = c.base.total > 0 ? c.base.earned : null;
+        it.psnBaseAchTotal    = c.base.total > 0 ? c.base.total  : null;
+        it.psnDlcAchUnlocked  = c.dlc.total  > 0 ? c.dlc.earned  : null;
+        it.psnDlcAchTotal     = c.dlc.total  > 0 ? c.dlc.total   : null;
+        it.psnAchUnlocked = c.base.earned + c.dlc.earned;
+        it.psnAchTotal    = c.base.total  + c.dlc.total;
       } else if (typeof it.psnTrophiesTotal === 'number' && it.psnTrophiesTotal > 0) {
+        // Fallback when we have no per-trophy rows — only the aggregate from the
+        // library sync. Can't split base vs DLC here, so the single-bar UI
+        // branch handles this case (checks psnBaseAchTotal == null).
         it.psnAchUnlocked = it.psnTrophiesEarned ?? 0;
         it.psnAchTotal = it.psnTrophiesTotal;
+      }
+    }
+
+    // Per-game platinum ownership. A PSN platinum is awarded once every non-DLC
+    // trophy is earned, so an owned platinum is the base-game 100% signal — treat
+    // it as "100% complete" even when DLC trophies drag achUnlocked < achTotal.
+    // Mirrors the list-page treatment in pages/lists/[id]/index.astro.
+    if (npCommIds.length > 0) {
+      const { data: platRows, error: platErr } = await db
+        .from('user_trophies')
+        .select('np_communication_id')
+        .eq('profile_id', profileId)
+        .eq('trophy_type', 'platinum')
+        .eq('earned', true)
+        .in('np_communication_id', npCommIds);
+      if (platErr) {
+        console.error('[library query] platinum lookup error:', JSON.stringify(platErr));
+      }
+      const platSet = new Set<string>((platRows ?? []).map((r: any) => r.np_communication_id));
+      for (const it of gameItems as any[]) {
+        if (!it.psnNpCommId) continue;
+        // Either signal is enough — per-trophy sync populates platSet; the
+        // lightweight library sync populates psnPlatinumFromLib. Users who've
+        // only run the library sync still get the platinum treatment here.
+        if (platSet.has(it.psnNpCommId) || it.psnPlatinumFromLib) it.psnHasPlatinum = true;
       }
     }
   }
@@ -430,6 +553,42 @@ export async function queryLibraryPage(
     }
   }
 
+  // Each platform's split row renders the edition that platform's sync picked.
+  // Fetch one games row per distinct edition id (skipping any that equal the
+  // canonical — those render canonical and need no override) and look it up
+  // per-row below.
+  const displayById = new Map<string, { title: string | null; cover: string | null }>();
+  {
+    const extraIds = new Set<string>();
+    for (const it of gameItems as any[]) {
+      for (const id of [it.steamDisplayGameId, it.psnDisplayGameId, it.xboxDisplayGameId]) {
+        if (id && id !== it.gameId) extraIds.add(id);
+      }
+    }
+    if (extraIds.size > 0) {
+      const ids = [...extraIds];
+      const CHUNK = 500;
+      for (let start = 0; start < ids.length; start += CHUNK) {
+        const slice = ids.slice(start, start + CHUNK);
+        const { data: dRows, error: dErr } = await db
+          .from('games')
+          .select('id, title, cover_img_url')
+          .in('id', slice);
+        if (dErr) {
+          console.error('[library query] display game fetch error (non-fatal):', JSON.stringify(dErr));
+          continue;
+        }
+        for (const r of (dRows ?? []) as any[]) {
+          displayById.set(r.id as string, { title: r.title ?? null, cover: r.cover_img_url ?? null });
+        }
+      }
+    }
+  }
+  const resolveDisplay = (gameId: string, displayId: string | null): { title: string | null; cover: string | null } => {
+    if (!displayId || displayId === gameId) return { title: null, cover: null };
+    return displayById.get(displayId) ?? { title: null, cover: null };
+  };
+
   const shared = (it: any) => ({
     gameId: it.gameId, title: it.title, slug: it.slug, cover: it.cover,
     status: it.status, owned: it.owned, isHidden: it.isHidden,
@@ -441,40 +600,60 @@ export async function queryLibraryPage(
     psnPlatform: null,
     xboxTitleId: null,
   };
-  const steamRow = (it: any) => ({
-    ...shared(it),
-    ...emptyPlatformFields,
-    rowKey: `${it.gameId}:steam`,
-    sourcePlatform: 'steam' as const,
-    steamAppid: it.steamAppid,
-    playtime:    it.steamPlaytime,
-    lastPlayed:  it.steamLastPlayed,
-    achUnlocked: it.steamAchUnlocked,
-    achTotal:    it.steamAchTotal,
-  });
-  const psnRow = (it: any) => ({
-    ...shared(it),
-    ...emptyPlatformFields,
-    rowKey: `${it.gameId}:psn`,
-    sourcePlatform: 'psn' as const,
-    psnNpCommId: it.psnNpCommId,
-    psnPlatform: it.psnPlatform,
-    playtime:    it.psnPlaytime,
-    lastPlayed:  it.psnLastPlayed,
-    achUnlocked: it.psnAchUnlocked,
-    achTotal:    it.psnAchTotal,
-  });
-  const xboxRow = (it: any) => ({
-    ...shared(it),
-    ...emptyPlatformFields,
-    rowKey: `${it.gameId}:xbox`,
-    sourcePlatform: 'xbox' as const,
-    xboxTitleId: it.xboxTitleId,
-    playtime:    null,
-    lastPlayed:  it.xboxLastPlayed,
-    achUnlocked: it.xboxAchUnlocked,
-    achTotal:    it.xboxAchTotal,
-  });
+  const steamRow = (it: any) => {
+    const d = resolveDisplay(it.gameId, it.steamDisplayGameId);
+    return {
+      ...shared(it),
+      ...emptyPlatformFields,
+      displayTitle: d.title,
+      displayCover: d.cover,
+      rowKey: `${it.gameId}:steam`,
+      sourcePlatform: 'steam' as const,
+      steamAppid: it.steamAppid,
+      playtime:    it.steamPlaytime,
+      lastPlayed:  it.steamLastPlayed,
+      achUnlocked: it.steamAchUnlocked,
+      achTotal:    it.steamAchTotal,
+    };
+  };
+  const psnRow = (it: any) => {
+    const d = resolveDisplay(it.gameId, it.psnDisplayGameId);
+    return {
+      ...shared(it),
+      ...emptyPlatformFields,
+      displayTitle: d.title,
+      displayCover: d.cover,
+      rowKey: `${it.gameId}:psn`,
+      sourcePlatform: 'psn' as const,
+      psnNpCommId: it.psnNpCommId,
+      psnPlatform: it.psnPlatform,
+      playtime:    it.psnPlaytime,
+      lastPlayed:  it.psnLastPlayed,
+      achUnlocked: it.psnAchUnlocked,
+      achTotal:    it.psnAchTotal,
+      baseAchUnlocked: it.psnBaseAchUnlocked,
+      baseAchTotal:    it.psnBaseAchTotal,
+      dlcAchUnlocked:  it.psnDlcAchUnlocked,
+      dlcAchTotal:     it.psnDlcAchTotal,
+      hasPlatinum: it.psnHasPlatinum === true,
+    };
+  };
+  const xboxRow = (it: any) => {
+    const d = resolveDisplay(it.gameId, it.xboxDisplayGameId);
+    return {
+      ...shared(it),
+      ...emptyPlatformFields,
+      displayTitle: d.title,
+      displayCover: d.cover,
+      rowKey: `${it.gameId}:xbox`,
+      sourcePlatform: 'xbox' as const,
+      xboxTitleId: it.xboxTitleId,
+      playtime:    null,
+      lastPlayed:  it.xboxLastPlayed,
+      achUnlocked: it.xboxAchUnlocked,
+      achTotal:    it.xboxAchTotal,
+    };
+  };
 
   const items: any[] = [];
   for (const it of gameItems as any[]) {

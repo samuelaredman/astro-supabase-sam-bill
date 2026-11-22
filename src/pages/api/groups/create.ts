@@ -1,7 +1,7 @@
 import type { APIRoute } from "astro";
 import { createSupabaseServerClientFromContext, getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
-import { validateName } from "../../../utils/moderation/nameRules";
+import { validateGroupName } from "../../../utils/moderation/nameRules";
 
 function randomCode(len = 8) {
   return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
@@ -22,7 +22,7 @@ export const POST: APIRoute = async (context) => {
   const { name, description, visibility, join_prompt, requires_approval } = body;
 
   if (!name?.trim()) return json({ error: "Name is required" }, 400);
-  const nameCheck = validateName(name);
+  const nameCheck = validateGroupName(name);
   if (!nameCheck.ok) return json({ error: nameCheck.error }, 400);
   if (!["public", "private"].includes(visibility)) {
     return json({ error: "Invalid visibility" }, 400);
