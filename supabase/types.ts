@@ -3078,6 +3078,7 @@ export type Database = {
           steam_url: string | null
           steam_username: string | null
           tiktok_url: string | null
+          tour_completed_at: string | null
           twitch_url: string | null
           twitter_url: string | null
           updated_at: string
@@ -3090,6 +3091,7 @@ export type Database = {
           username_since: string
           want_to_play_privacy: string
           website_url: string | null
+          welcome_seen_at: string | null
           xbox_achievements_synced_at: string | null
           xbox_api_key: string | null
           xbox_gamertag: string | null
@@ -3153,6 +3155,7 @@ export type Database = {
           steam_url?: string | null
           steam_username?: string | null
           tiktok_url?: string | null
+          tour_completed_at?: string | null
           twitch_url?: string | null
           twitter_url?: string | null
           updated_at?: string
@@ -3165,6 +3168,7 @@ export type Database = {
           username_since?: string
           want_to_play_privacy?: string
           website_url?: string | null
+          welcome_seen_at?: string | null
           xbox_achievements_synced_at?: string | null
           xbox_api_key?: string | null
           xbox_gamertag?: string | null
@@ -3228,6 +3232,7 @@ export type Database = {
           steam_url?: string | null
           steam_username?: string | null
           tiktok_url?: string | null
+          tour_completed_at?: string | null
           twitch_url?: string | null
           twitter_url?: string | null
           updated_at?: string
@@ -3240,6 +3245,7 @@ export type Database = {
           username_since?: string
           want_to_play_privacy?: string
           website_url?: string | null
+          welcome_seen_at?: string | null
           xbox_achievements_synced_at?: string | null
           xbox_api_key?: string | null
           xbox_gamertag?: string | null

@@ -1,0 +1,391 @@
+---
+export const prerender = false;
+
+// Post-signup showcase landing page. Users land here via the Layout redirect
+// (any logged-in page hit while welcome_seen_at IS NULL bounces here).
+// Clicking the primary CTA or the Skip link marks welcome_seen_at via
+// /api/profile/welcome-seen, so a subsequent load goes straight to the
+// requested page.
+//
+// Deliberately shows no sidebar nav (variant="fullwidth") — the Layout
+// redirect would just bounce anything they clicked back here anyway, so
+// offering a nav that doesn't work would read as broken. The Skip link is
+// the only escape.
+
+import Layout from '../components/Layout.astro';
+import { getPageUser } from '../utils/pageAuth';
+import { createSupabaseServerClientFromContext } from '../utils/database';
+
+const serverClient = createSupabaseServerClientFromContext(Astro);
+const user = await getPageUser(Astro, serverClient);
+if (!user) return Astro.redirect('/signin');
+
+const { data: profile } = await (serverClient as any)
+  .from('profiles')
+  .select('id, username, welcome_seen_at, steam_id, steam_username')
+  .eq('auth_user_id', user.id)
+  .single();
+
+if (!profile) return Astro.redirect('/signin');
+
+// Don't re-show the welcome page to anyone who's already dismissed it — they
+// visited this URL manually, so send them home. Prevents a stuck user who
+// bookmarked /welcome from being mystified.
+if (profile.welcome_seen_at) return Astro.redirect('/');
+
+// Steam OAuth returns here with ?steam=connected|cancelled|duplicate|error.
+const steamReturn = Astro.url.searchParams.get('steam');
+const steamJustConnected = steamReturn === 'connected';
+const steamReturnError = (
+  steamReturn === 'cancelled' ? 'Steam sign-in was cancelled.' :
+  steamReturn === 'duplicate' ? 'That Steam account is already linked to another Chekpoint profile.' :
+  steamReturn === 'error' ? 'Couldn\'t connect to Steam — please try again.' :
+  null
+);
+---
+
+<Layout title="Welcome to Chekpoint" variant="fullwidth" isLoggedIn={true} currentProfile={{ id: profile.id, username: profile.username, avatar_url: null }} noindex>
+  <main class="welcome-wrap">
+    <section class="welcome-hero">
+      <div class="welcome-hero-eyebrow">Welcome</div>
+      <h1>Welcome, <span class="welcome-handle">@{profile.username}</span></h1>
+      <p class="welcome-sub">Score games, write reviews, and build your catalog — all in one place.</p>
+    </section>
+
+    <section class="welcome-section">
+      <div class="welcome-section-head">
+        <h2>Manage your catalog</h2>
+        <p>Every game, review, and trophy in one place. Here's what your library will look like once it's synced.</p>
+      </div>
+
+      <figure class="welcome-preview">
+        <img src="/onboarding/library-preview.png" alt="A preview of a Chekpoint library: a grid of game covers with reviewed badges, status filters, and sort controls." width="1600" height="900" />
+        <figcaption>Preview — your library will look like this once you've connected an account.</figcaption>
+      </figure>
+
+      <div class="welcome-sync">
+        <div class="welcome-sync-head">Sync your library</div>
+
+        {steamJustConnected && (
+          <div class="welcome-banner welcome-banner-ok">
+            ✓ Steam connected{profile.steam_username ? <> as <strong>{profile.steam_username}</strong></> : null} — click <strong>Sync now</strong> below to import your games.
+          </div>
+        )}
+        {steamReturnError && (
+          <div class="welcome-banner welcome-banner-err">{steamReturnError}</div>
+        )}
+
+        <div class="welcome-sync-grid">
+          <div class="welcome-sync-card">
+            <div class="welcome-sync-logo welcome-sync-logo--steam" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M12 2a10 10 0 00-9.82 11.9l5.4 2.23a2.83 2.83 0 013.31-.68l2.42-3.52v-.05a3.76 3.76 0 013.76-3.76 3.76 3.76 0 013.76 3.76 3.76 3.76 0 01-3.76 3.76h-.09l-3.47 2.48a2.84 2.84 0 01-5.6.78l-3.86-1.6A10 10 0 1012 2z"/></svg>
+            </div>
+            <div class="welcome-sync-body">
+              <div class="welcome-sync-title">Steam</div>
+              <div class="welcome-sync-desc">Import your owned games and playtime. Reviews can be brought in as drafts.</div>
+            </div>
+            {profile.steam_id ? (
+              <button type="button" class="welcome-sync-btn" data-steam-sync>Sync now</button>
+            ) : (
+              <a class="welcome-sync-btn" href="/api/auth/steam-connect?from=/welcome">Connect Steam</a>
+            )}
+          </div>
+
+          <div class="welcome-sync-card">
+            <div class="welcome-sync-logo welcome-sync-logo--psn" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><path d="M9.3 2v15.2l3.6 1.1V5.5c0-.6.3-1 .8-1s.7.4.7 1v7.2c2.7 1.3 4.8-.2 4.8-3.6 0-3.5-1.3-5-4.7-6.1A18 18 0 009.3 2zM3 15.8v3l5.2-1.8c1 0 1.5-.4 2-1.1l-3-1c-1.7-.6-3.1-.3-4.2.9zm18 0c-1-.6-2.6-.8-4.3-.2l-2.9 1v2L19 17c.8-.3 1.3-.7 2-1.2z"/></svg>
+            </div>
+            <div class="welcome-sync-body">
+              <div class="welcome-sync-title">PlayStation</div>
+              <div class="welcome-sync-desc">Bring over your PSN games and trophies. Set up in Settings.</div>
+            </div>
+            <a class="welcome-sync-btn" href="/settings#psn">Connect PSN</a>
+          </div>
+
+          <div class="welcome-sync-card">
+            <div class="welcome-sync-logo welcome-sync-logo--xbox" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 5.5c1.5-1 3-1.5 4-1.5s2.5.5 4 1.5a14 14 0 00-4 4 14 14 0 00-4-4zM5.5 8c-1 1.5-1.5 3-1.5 4s.5 2.5 1.5 4a20 20 0 014-4 20 20 0 01-4-4zM18.5 8a20 20 0 01-4 4 20 20 0 014 4c1-1.5 1.5-3 1.5-4s-.5-2.5-1.5-4zM8 18.5a14 14 0 004-4 14 14 0 004 4c-1.5 1-3 1.5-4 1.5s-2.5-.5-4-1.5z"/></svg>
+            </div>
+            <div class="welcome-sync-body">
+              <div class="welcome-sync-title">Xbox</div>
+              <div class="welcome-sync-desc">Import your Xbox games and achievements. Set up in Settings.</div>
+            </div>
+            <a class="welcome-sync-btn" href="/settings#xbox">Connect Xbox</a>
+          </div>
+        </div>
+
+        <div class="welcome-sync-aside">
+          More platforms (Backloggd, HowLongToBeat) are available in <a href="/settings">Settings</a>.
+        </div>
+      </div>
+    </section>
+
+    <section class="welcome-section">
+      <div class="welcome-section-head">
+        <h2>Make it yours</h2>
+        <p>Pick a profile photo, your favorite game, and a few titles to showcase. We'll walk you through it in a short guided tour — nothing's required, you can skip anything you don't want.</p>
+      </div>
+    </section>
+
+    <section class="welcome-cta">
+      <button type="button" class="welcome-primary-btn" id="welcomeStartTour">Start your tour →</button>
+      <button type="button" class="welcome-skip-btn" id="welcomeSkip">Skip for now — I'll explore myself</button>
+    </section>
+  </main>
+
+  <style is:global>
+    .welcome-wrap {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 48px 20px 80px;
+      display: flex;
+      flex-direction: column;
+      gap: 56px;
+    }
+
+    .welcome-hero { text-align: center; }
+    .welcome-hero-eyebrow {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }
+    .welcome-hero h1 {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: var(--text-primary);
+      margin: 0 0 10px;
+      line-height: 1.15;
+    }
+    .welcome-handle { color: var(--accent); }
+    .welcome-sub {
+      font-size: 16px;
+      color: var(--text-secondary);
+      max-width: 520px;
+      margin: 0 auto;
+      line-height: 1.5;
+    }
+
+    .welcome-section { display: flex; flex-direction: column; gap: 20px; }
+    .welcome-section-head h2 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      color: var(--text-primary);
+      margin: 0 0 6px;
+    }
+    .welcome-section-head p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.55;
+      margin: 0;
+      max-width: 620px;
+    }
+
+    .welcome-preview {
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: var(--bg-card);
+      padding: 10px;
+      box-shadow: 0 10px 36px rgba(0, 0, 0, 0.25);
+      overflow: hidden;
+    }
+    .welcome-preview img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 8px;
+    }
+    .welcome-preview figcaption {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      text-align: center;
+      padding: 8px 4px 2px;
+    }
+
+    .welcome-sync { display: flex; flex-direction: column; gap: 14px; }
+    .welcome-sync-head {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+    }
+
+    .welcome-banner {
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.5;
+      border: 1px solid;
+    }
+    .welcome-banner-ok {
+      background: rgba(74, 222, 128, 0.1);
+      border-color: rgba(74, 222, 128, 0.35);
+      color: var(--text-primary);
+    }
+    .welcome-banner-err {
+      background: rgba(239, 68, 68, 0.1);
+      border-color: rgba(239, 68, 68, 0.35);
+      color: var(--text-primary);
+    }
+
+    .welcome-sync-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .welcome-sync-card {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+    }
+    .welcome-sync-logo {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff;
+    }
+    .welcome-sync-logo--steam { background: linear-gradient(180deg, #2a475e, #1b2838); }
+    .welcome-sync-logo--psn { background: #003791; }
+    .welcome-sync-logo--xbox { background: #107c10; }
+    .welcome-sync-body { flex: 1; min-height: 60px; }
+    .welcome-sync-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+    .welcome-sync-desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+    .welcome-sync-btn {
+      width: 100%;
+      display: inline-block;
+      text-align: center;
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      font-family: inherit;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .welcome-sync-btn:hover { border-color: var(--accent); }
+
+    .welcome-sync-aside {
+      font-size: 13px;
+      color: var(--text-tertiary);
+      text-align: center;
+    }
+    .welcome-sync-aside a { color: var(--accent); text-decoration: none; }
+    .welcome-sync-aside a:hover { text-decoration: underline; }
+
+    .welcome-cta {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      padding-top: 8px;
+    }
+    .welcome-primary-btn {
+      min-width: 220px;
+      background: var(--accent);
+      color: var(--accent-text, #fff);
+      border: none;
+      border-radius: 24px;
+      padding: 14px 32px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: opacity 0.15s;
+    }
+    .welcome-primary-btn:hover:not(:disabled) { opacity: 0.9; }
+    .welcome-primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .welcome-skip-btn {
+      background: none;
+      border: none;
+      color: var(--text-tertiary);
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      padding: 8px 12px;
+    }
+    .welcome-skip-btn:hover { color: var(--text-secondary); }
+
+    @media (max-width: 720px) {
+      .welcome-wrap { padding: 32px 16px 64px; gap: 40px; }
+      .welcome-hero h1 { font-size: 28px; }
+      .welcome-sync-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+
+  <script is:inline define:vars={{ username: profile.username, steamJustConnected }}>
+    (function () {
+      const startBtn = document.getElementById('welcomeStartTour');
+      const skipBtn = document.getElementById('welcomeSkip');
+
+      async function markSeen() {
+        try {
+          await fetch('/api/profile/welcome-seen', { method: 'POST', keepalive: true });
+        } catch (e) { /* non-fatal — the user still gets where they're going */ }
+      }
+
+      startBtn.addEventListener('click', async function () {
+        startBtn.disabled = true;
+        startBtn.textContent = 'Starting…';
+        await markSeen();
+        // Kick off the profile tour, chaining to review when it finishes.
+        // TourManager auto-starts from ?tour=<name>&next=<name> on page load.
+        window.location.href = '/reviewers/' + encodeURIComponent(username) + '?tour=profile&next=review';
+      });
+
+      skipBtn.addEventListener('click', async function () {
+        skipBtn.disabled = true;
+        await markSeen();
+        window.location.href = '/';
+      });
+
+      // Inline Steam sync when returning from a successful connect — reuses the
+      // same /api/steam/import endpoint that Settings uses. One-shot: no
+      // progress bar; we show a short message and let the user continue.
+      const steamSyncBtn = document.querySelector('[data-steam-sync]');
+      if (steamSyncBtn) {
+        steamSyncBtn.addEventListener('click', async function () {
+          steamSyncBtn.disabled = true;
+          steamSyncBtn.textContent = 'Syncing…';
+          try {
+            const res = await fetch('/api/steam/import', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ playedOnly: false }),
+            });
+            const data = await res.json().catch(function () { return {}; });
+            if (!res.ok) throw new Error(data.error || 'Sync failed.');
+            steamSyncBtn.textContent = '✓ ' + (data.matched || 0) + ' games synced';
+          } catch (e) {
+            steamSyncBtn.disabled = false;
+            steamSyncBtn.textContent = 'Try again';
+          }
+        });
+      }
+    })();
+  </script>
+</Layout>

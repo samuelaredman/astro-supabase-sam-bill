@@ -1,6 +1,5 @@
 ---
 import TourManager from "./TourManager.astro";
-import OnboardingWizard from "./OnboardingWizard.astro";
 import { awaitOnboardingProfile, awaitIsSiteAdmin } from "../utils/pageAuth";
 import "../styles/shared.css";
 
@@ -48,25 +47,26 @@ function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase();
 }
 
-// Site-wide onboarding gate: only shown to new users (onboarding_completed_at IS NULL).
-// Existing users are grandfathered by a one-time data migration that sets
-// onboarding_completed_at on all pre-existing profiles. Queried fresh here (rather
-// than trusting whatever subset of columns the calling page's own
-// `currentProfile` happens to select) so this stays correct regardless of
-// what any given page fetches for its own purposes. getPageUser() starts this
-// lookup at the top of the page, so by the time the Layout renders it's usually
-// already resolved instead of adding a round trip after the page's queries.
+// Site-wide onboarding gate. Two independent flags: `welcome_seen_at` drives
+// the one-time /welcome redirect below; `tour_completed_at` drives the
+// "Finish setup" chip in the sidebar. Historical users were grandfathered by
+// the migration that stamps both to onboarding_completed_at, so this never
+// catches someone who was already past the old blocking wizard.
+//
+// Queried fresh here (rather than trusting whatever subset of columns the
+// calling page's own currentProfile happens to select) so it stays correct
+// regardless of what any given page fetches. getPageUser() starts this
+// lookup at the top of the page, so by the time the Layout renders it's
+// usually already resolved instead of adding a round trip after the page's
+// own queries.
 let onboardingGate: {
   hasAvatar: boolean;
   hasFavorite: boolean;
   hasShowcase: boolean;
-  hasImportedBackloggd: boolean;
   hasSteamConnected: boolean;
-  steamUsername: string | null;
-  hasImportedSteam: boolean;
-  onboardingCompletedAt: string | null;
-  existingFavorite: { id: string; title: string; cover_img_url?: string | null; slug?: string | null } | null;
-  existingShowcase: { id: string; title: string; cover_img_url?: string | null; slug?: string | null }[];
+  hasLibrarySynced: boolean;
+  welcomeSeenAt: string | null;
+  tourCompletedAt: string | null;
 } | null = null;
 
 let isSiteAdmin = false;
@@ -79,27 +79,44 @@ if (isLoggedIn && currentProfile) {
   isSiteAdmin = siteAdmin;
 
   if (onboardingProfile) {
-    // showcase_games is jsonb — an array of game snapshots written by /api/profile/update.
-    type ShowcaseGame = NonNullable<typeof onboardingGate>['existingShowcase'][number];
-    const existingShowcase = (Array.isArray(onboardingProfile.showcase_games) ? onboardingProfile.showcase_games : []).filter(Boolean) as ShowcaseGame[];
-    // Supabase types this to-one embed as an array — normalize to a single object.
-    const favoriteGameRaw = onboardingProfile.favorite_game as any;
-    const existingFavorite = Array.isArray(favoriteGameRaw) ? (favoriteGameRaw[0] ?? null) : (favoriteGameRaw ?? null);
+    const existingShowcase = (Array.isArray(onboardingProfile.showcase_games) ? onboardingProfile.showcase_games : []).filter(Boolean);
     onboardingGate = {
       hasAvatar: !!onboardingProfile.avatar_url,
       hasFavorite: !!onboardingProfile.favorite_game_id,
       hasShowcase: existingShowcase.length >= 3,
-      hasImportedBackloggd: !!onboardingProfile.backloggd_import_done_at,
       hasSteamConnected: !!onboardingProfile.steam_id,
-      steamUsername: onboardingProfile.steam_username ?? null,
-      hasImportedSteam: !!onboardingProfile.steam_reviews_import_done_at,
-      onboardingCompletedAt: onboardingProfile.onboarding_completed_at ?? null,
-      existingFavorite,
-      existingShowcase,
+      // Any library sync satisfies the library tour step. Backloggd lives in
+      // Settings now, not onboarding, but importing it still counts.
+      hasLibrarySynced: !!onboardingProfile.steam_reviews_import_done_at
+        || !!onboardingProfile.backloggd_import_done_at
+        || !!onboardingProfile.steam_id,
+      welcomeSeenAt: onboardingProfile.welcome_seen_at ?? null,
+      tourCompletedAt: onboardingProfile.tour_completed_at ?? null,
     };
   }
 }
-const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedAt;
+
+// One-shot redirect: new users land anywhere while welcome_seen_at IS NULL,
+// Layout bounces them to /welcome. Skipped on /welcome itself, on auth and
+// API paths (which must work regardless of onboarding state), and on /signout
+// so a mid-onboarding user can still sign out. After welcome_seen_at is
+// stamped (by the primary CTA or the Skip link), this redirect never fires
+// again for that user — the "Finish setup" chip in the sidebar takes over.
+const currentPath = Astro.url.pathname;
+const skipsWelcomeRedirect = currentPath === '/welcome'
+  || currentPath.startsWith('/api/')
+  || currentPath.startsWith('/auth/')
+  || currentPath === '/signin'
+  || currentPath === '/signup'
+  || currentPath === '/forgot-password'
+  || currentPath === '/reset-password-confirm';
+if (onboardingGate && !onboardingGate.welcomeSeenAt && !skipsWelcomeRedirect) {
+  return Astro.redirect('/welcome');
+}
+
+const showResumeTourChip = !!onboardingGate
+  && !!onboardingGate.welcomeSeenAt
+  && !onboardingGate.tourCompletedAt;
 ---
 
 <!DOCTYPE html>
@@ -267,6 +284,19 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
         </span>
         Search
       </a>
+
+      {showResumeTourChip && (
+        <button
+          type="button"
+          class="resume-tour-chip"
+          data-start-tour="profile"
+          data-start-tour-next="review"
+          title="Pick up where you left off"
+        >
+          <span class="resume-tour-chip-icon">✨</span>
+          <span class="resume-tour-chip-label">Finish setup</span>
+        </button>
+      )}
 
       <div class="sidebar-bottom">
         <a href="/updates" id="updatesNavItem" class={`nav-item${activeNav === 'updates' ? ' active' : ''}`}>
@@ -475,20 +505,17 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
   </div>
 </div>
 
-{isLoggedIn && currentProfile && <TourManager username={currentProfile.username} />}
-
-{needsOnboarding && currentProfile && onboardingGate && (
-  <OnboardingWizard
+{isLoggedIn && currentProfile && (
+  <TourManager
     username={currentProfile.username}
-    hasAvatar={onboardingGate.hasAvatar}
-    hasFavorite={onboardingGate.hasFavorite}
-    hasShowcase={onboardingGate.hasShowcase}
-    hasImportedBackloggd={onboardingGate.hasImportedBackloggd}
-    hasSteamConnected={onboardingGate.hasSteamConnected}
-    steamUsername={onboardingGate.steamUsername}
-    hasImportedSteam={onboardingGate.hasImportedSteam}
-    existingFavorite={onboardingGate.existingFavorite}
-    existingShowcase={onboardingGate.existingShowcase}
+    completedSteps={onboardingGate
+      ? [
+          onboardingGate.hasAvatar ? 'avatar' : '',
+          onboardingGate.hasFavorite ? 'favorite' : '',
+          onboardingGate.hasShowcase ? 'showcase' : '',
+          onboardingGate.hasLibrarySynced ? 'library-synced' : '',
+        ].filter(Boolean).join(',')
+      : ''}
   />
 )}
 
@@ -668,6 +695,35 @@ const needsOnboarding = !!onboardingGate && !onboardingGate.onboardingCompletedA
      (Windows) browsers. Page still scrolls by wheel/trackpad/keyboard/touch. */
   html { overflow-y: scroll; scrollbar-width: none; }
   html::-webkit-scrollbar { width: 0; height: 0; }
+
+  /* ── Resume-tour chip (sidebar) ──
+     Shown only while the user has seen /welcome but hasn't finished the
+     chained profile→review tour. Clicking launches the tour via TourManager's
+     delegated data-start-tour launcher. Disappears automatically once
+     /api/profile/tour-completed is called (Layout re-renders without the chip
+     on the next page load). */
+  .resume-tour-chip {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%;
+    margin: 6px 0;
+    padding: 10px 14px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .resume-tour-chip:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent);
+  }
+  .resume-tour-chip-icon { font-size: 16px; line-height: 1; }
+  .resume-tour-chip-label { flex: 1; }
 
   /* ── Updates nav highlight (unread posts) ── */
   #updatesNavItem.updates-unread {
