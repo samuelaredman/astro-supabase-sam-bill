@@ -1,37 +1,14 @@
 import { defineMiddleware } from 'astro:middleware';
 import { rewriteImageUrls } from './utils/imageCdn';
 
-// User-agent substrings for crawlers and scanners that either ignore robots.txt
-// or should never have been hitting us in the first place. Match is
-// case-insensitive substring — the SEO/AI entries intentionally duplicate names
-// already in robots.txt (src/pages/robots.txt.ts): well-behaved versions obey
-// robots.txt and never reach middleware; badly-behaved versions ignore it and
-// are caught here. The vuln-scanner entries have no legitimate reason to
-// reach us at all — they're probing for exposed creds / known CVEs.
-//
-// Short-circuiting here still costs one Netlify function invocation per blocked
-// request, but exits in <5ms (no DB, no SSR render) vs ~600-1000ms for a real
-// render — the compute-credit line item (the biggest cost) drops accordingly.
-// Full edge-level blocking would require Cloudflare or a Netlify Edge Function.
-const BLOCKED_UA_PATTERNS = [
-  // AI training / bulk scrapers
-  'GPTBot', 'ClaudeBot', 'anthropic-ai', 'Claude-Web', 'CCBot',
-  'Bytespider', 'PerplexityBot', 'Amazonbot', 'meta-externalagent',
-  'Diffbot', 'Omgilibot', 'ImagesiftBot', 'DataForSeoBot',
-  // SEO/backlink scrapers
-  'AhrefsBot', 'SemrushBot', 'MJ12bot', 'DotBot', 'BLEXBot',
-  'MegaIndex', 'SeekportBot', 'OpenLinkProfiler', 'SerpstatBot', 'PetalBot',
-  // Vulnerability scanners
-  'nikto', 'sqlmap', 'acunetix', 'nessus', 'zgrab', 'masscan',
-  'wpscan', 'dirbuster', 'gobuster', 'ZmEu', 'Nmap',
-  // Aggressive site rippers
-  'HTTrack', 'SiteSucker', 'WebCopier', 'WebReaper',
-];
+import { shouldBlockBot } from './utils/botPolicy';
 
-const BLOCKED_UA_RE = new RegExp(
-  BLOCKED_UA_PATTERNS.map((p) => p.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')).join('|'),
-  'i',
-);
+// Crawlers are refused here unless they're on the allowlist in
+// src/utils/botPolicy.ts (search engines, link previews). Short-circuiting
+// still costs one Netlify function invocation per blocked request, but exits
+// in <5ms (no DB, no SSR render) vs ~600-1000ms for a real render. Blocking
+// before the function runs at all needs Cloudflare (or a Netlify Edge
+// Function, which would itself run on every request).
 
 // The previous implementation buffered the entire HTML body with
 // `await response.text()` before shipping any bytes. That disabled Astro's
@@ -63,16 +40,15 @@ function safeSplit(s: string): number {
 }
 
 export const onRequest = defineMiddleware(async (context, next) => {
-  // Short-circuit known-bad crawlers before any SSR work runs. See the
-  // BLOCKED_UA_PATTERNS block above for the policy.
+  // Short-circuit crawlers before any SSR work runs (policy in botPolicy.ts).
   //
   // Skip for prerendered routes: at build time there's no real request, and
   // in production those routes are served statically from the CDN without
   // hitting the SSR function — no function cost to save, nothing to block.
   // Accessing headers during prerender also triggers an Astro build warning.
   if (!context.isPrerendered) {
-    const ua = context.request.headers.get('user-agent') ?? '';
-    if (ua && BLOCKED_UA_RE.test(ua)) {
+    const ua = context.request.headers.get('user-agent');
+    if (shouldBlockBot(ua, context.request.method, context.url.pathname)) {
       return new Response('Forbidden', {
         status: 403,
         headers: { 'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8' },

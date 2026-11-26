@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAdmin, json } from "../../../../utils/api";
+import { purgeCacheTags, CACHE_TAG_UPDATES } from "../../../../utils/cache";
 
 // Create a forum ("Updates") post. Restricted to site_admins via requireAdmin —
 // this is the enforcement point for "only Sam and Bill can post".
@@ -34,5 +35,6 @@ export const POST: APIRoute = async (context) => {
     return json({ error: "Failed to create post." }, 500);
   }
 
+  await purgeCacheTags([CACHE_TAG_UPDATES]);
   return json({ post_id: inserted.id });
 };

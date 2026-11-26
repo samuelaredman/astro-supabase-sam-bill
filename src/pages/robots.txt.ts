@@ -53,6 +53,12 @@ Disallow: /reset-password-confirm
 # single most expensive request shape on the site — each slow IGDB response
 # burned the full Netlify function budget. Keep well-behaved crawlers off it.
 Disallow: /search
+# Profile, game, group and hub pages render each tab at its own ?tab= URL
+# (~11 per profile), and crawlers fetched every one as a separate SSR render.
+# Every page's <link rel="canonical"> already drops the query string, so these
+# variants carry no SEO value — the base URL is what gets indexed.
+Disallow: /*?tab=
+Disallow: /*&tab=
 
 # ── AI training / bulk-scraping crawlers ────────────────────────────────────
 # These pull full-site sweeps (every page, every image) and were behind the
@@ -136,6 +142,19 @@ User-agent: SerpstatBot
 Disallow: /
 
 User-agent: PetalBot
+Disallow: /
+
+# Nov 2026 Netlify logs: SERankingBacklinksBot (one Hetzner IP) was ~51% of all
+# SSR function invocations and ShapBot (Google Cloud IPs) ~22%. KeenableBot is
+# an AI-search crawler with the same full-sweep profile. Middleware also 403s
+# these, in case they ignore this file.
+User-agent: SERankingBacklinksBot
+Disallow: /
+
+User-agent: ShapBot
+Disallow: /
+
+User-agent: KeenableBot
 Disallow: /
 
 Sitemap: https://chekpoint.gg/sitemap.xml

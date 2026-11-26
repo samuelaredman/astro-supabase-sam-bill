@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { requireAdmin, json } from "../../../../utils/api";
+import { purgeCacheTags, CACHE_TAG_UPDATES } from "../../../../utils/cache";
 
 // Edit a forum post. Restricted to site_admins; an admin may only edit their own
 // post (the .eq('profile_id') scopes the update to the author).
@@ -41,5 +42,7 @@ export const POST: APIRoute = async (context) => {
   // Say so instead of reporting a save that didn't happen.
   if (!updated?.length) return json({ error: "You can only edit your own posts." }, 403);
 
+  // Title or pinned state feeds /api/updates/latest's banner.
+  await purgeCacheTags([CACHE_TAG_UPDATES]);
   return json({ success: true });
 };

@@ -536,6 +536,14 @@ for endpoints. They add `durable` (shared cache across edge nodes) and the requi
 the durable cache ignores the query string without `query`, and the auth cookie may be chunked
 into `…-auth-token.0`, which the page vary must also list.
 
+### Crawlers are allowlisted
+
+`src/middleware.ts` 403s any user agent `isbot()` flags unless it's in `GOOD_BOTS` in
+`src/utils/botPolicy.ts` (search engines, link-preview bots, user-triggered AI fetchers).
+`/api/*`, non-GET requests and `/rss.xml`, `/sitemap.xml`, `/robots.txt`, `/og/*` are left open.
+If a wanted service stops working (an uptime monitor, a new preview bot), add it to `GOOD_BOTS` —
+don't go back to a blocklist: unlisted SEO crawlers were ~73% of function runs in Nov 2026.
+
 ### profiles.id ≠ auth.users.id
 
 Always resolve the profile before using its ID as a foreign key:

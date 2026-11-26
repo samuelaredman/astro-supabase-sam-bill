@@ -69,15 +69,23 @@ export function setPageCacheHeaders(headers: Headers, isLoggedIn: boolean, maxAg
  *  it and the next anon hit on any of those pages re-renders from DB. */
 export const CACHE_TAG_REVIEWS_PUBLIC = 'reviews-public';
 
-/** Purge every CDN response tagged `reviews-public`. Non-throwing; logs and
+/** `/api/updates/latest` — every page view fetches it for the nav badge, so it
+ *  is cached long and purged whenever a staff Updates post changes. */
+export const CACHE_TAG_UPDATES = 'updates';
+
+/** Purge every CDN response carrying any of `tags`. Non-throwing; logs and
  *  returns on failure so a mutation route doesn't fail if the purge API blips
  *  (or we're running outside Netlify in dev/tests — `@netlify/functions`'s
  *  purgeCache is a no-op there). */
-export async function purgeReviewsPublicCache(): Promise<void> {
+export async function purgeCacheTags(tags: string[]): Promise<void> {
   try {
     const { purgeCache } = await import('@netlify/functions');
-    await purgeCache({ tags: [CACHE_TAG_REVIEWS_PUBLIC] });
+    await purgeCache({ tags });
   } catch (e) {
-    console.error('[cache] purgeReviewsPublicCache failed (non-fatal):', e);
+    console.error(`[cache] purge of ${tags.join(',')} failed (non-fatal):`, e);
   }
+}
+
+export function purgeReviewsPublicCache(): Promise<void> {
+  return purgeCacheTags([CACHE_TAG_REVIEWS_PUBLIC]);
 }

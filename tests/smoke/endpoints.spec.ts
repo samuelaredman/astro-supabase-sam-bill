@@ -26,6 +26,34 @@ test('robots.txt points at the sitemap', async ({ request }) => {
   expect(await res.text()).toMatch(/Sitemap:/i);
 });
 
+// Function-cost guards (Nov 2026): ?tab= variants and the two crawlers that
+// made up ~73% of SSR invocations must stay out.
+test('robots.txt keeps crawlers off ?tab= variants and blocks cost-heavy bots', async ({ request }) => {
+  const body = await (await request.get('/robots.txt')).text();
+  expect(body).toContain('Disallow: /*?tab=');
+  for (const bot of ['SERankingBacklinksBot', 'ShapBot']) {
+    expect(body).toMatch(new RegExp(`User-agent: ${bot}\\nDisallow: /\\n`));
+  }
+});
+
+test('blocked crawlers get a 403 without a page render', async ({ request }) => {
+  const res = await request.get('/rankings', {
+    headers: { 'user-agent': 'Mozilla/5.0 (compatible; SERankingBacklinksBot/1.0; +https://seranking.com/backlinks-crawler)' },
+  });
+  expect(res.status()).toBe(403);
+});
+
+test('unlisted crawlers are refused but search engines still get pages', async ({ request }) => {
+  const unknown = await request.get('/rankings', {
+    headers: { 'user-agent': 'Mozilla/5.0 (compatible; BrandNewSeoCrawler/1.0; +https://example.com/bot)' },
+  });
+  expect(unknown.status()).toBe(403);
+  const google = await request.get('/rankings', {
+    headers: { 'user-agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' },
+  });
+  expect(google.status()).toBe(200);
+});
+
 test('home OG image renders', async ({ request }) => {
   const res = await request.get('/og/home.jpg');
   expect(res.status()).toBe(200);

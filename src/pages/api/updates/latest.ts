@@ -1,9 +1,12 @@
 import type { APIRoute } from "astro";
 import { getSupabaseAdmin } from "../../../utils/database";
 import { json } from "../../../utils/api";
-import { cdnCacheHeaders } from "../../../utils/cache";
+import { cdnCacheHeaders, CACHE_TAG_UPDATES } from "../../../utils/cache";
 
-// CDN-cached 2 min — every page checks this to decide whether to show the dot badge.
+// Every page checks this to decide whether to show the dot badge, so it was one
+// of the most-invoked functions on the site at a 2-minute TTL. Posts are rare
+// and staff-only: cache 1 h and let forum/posts/(create|update|delete) purge
+// the `updates` tag so a new post still shows up immediately.
 export const GET: APIRoute = async () => {
   const db = getSupabaseAdmin() as any;
 
@@ -30,7 +33,7 @@ export const GET: APIRoute = async () => {
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
-        ...cdnCacheHeaders(120, 300),
+        ...cdnCacheHeaders(3600, 86400, [CACHE_TAG_UPDATES]),
       },
     }
   );
