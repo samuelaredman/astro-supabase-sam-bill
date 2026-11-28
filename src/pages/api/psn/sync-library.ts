@@ -331,10 +331,21 @@ export const POST: APIRoute = async (context) => {
   // accumulates these into its `exclude` list for the next iteration.
   const triedNpCommIds = igdbCandidates.map((e) => e.npCommId);
 
+  // Unicode Roman-numeral codepoints (U+2160–U+2169) → ASCII sequences.
+  // PSN uses these in titles like "DARK SOULS Ⅱ" where IGDB stores "II".
+  // Matches the equivalent conversion in normalize_title_for_match (migration
+  // 20261128000001) so the DB fast-path and the IGDB fallback both resolve.
+  const ROMAN_NUMERAL_MAP: Record<string, string> = {
+    'Ⅰ': 'I', 'Ⅱ': 'II', 'Ⅲ': 'III', 'Ⅳ': 'IV', 'Ⅴ': 'V',
+    'Ⅵ': 'VI', 'Ⅶ': 'VII', 'Ⅷ': 'VIII', 'Ⅸ': 'IX', 'Ⅹ': 'X',
+  };
+  const romanNumeralToAscii = (s: string) =>
+    s.replace(/[Ⅰ-Ⅹ]/g, (c) => ROMAN_NUMERAL_MAP[c] ?? c);
+
   for (const entry of igdbCandidates) {
     try {
       const platformId = IGDB_PLATFORM_BY_PSN[entry.platform];
-      const searchName = entry.name
+      const searchName = romanNumeralToAscii(entry.name)
         .replace(/[™®©]/g, '')
         .replace(/[‘’‛]/g, "'")
         .replace(/[“”‟]/g, '"')
@@ -347,12 +358,19 @@ export const POST: APIRoute = async (context) => {
       const dateClause = Number.isFinite(lastUpdatedUnix as number)
         ? ` & first_release_date <= ${lastUpdatedUnix}`
         : '';
+      // game_type filter includes:
+      //   0 main_game, 2 expansion, 4 standalone_expansion,
+      //   8 remake, 9 remaster, 10 expanded_game,
+      //   11 port — added so HD re-releases and classics-ports (OKAMI HD,
+      //            Final Fantasy X/X-2 HD, Twisted Metal Classic, PS2
+      //            Classics) actually come back as hits. Previously these
+      //            were tagged type=11 in IGDB and silently filtered out.
       const rows = await igdbFetch(
         'games',
         `
           search "${escapeIgdbString(searchName)}";
           fields id, name, platforms.id, game_type, first_release_date;
-          where platforms = (${platformId}) & game_type = (0,2,4,8,9,10)${dateClause};
+          where platforms = (${platformId}) & game_type = (0,2,4,8,9,10,11)${dateClause};
           limit 5;
         `,
       );
