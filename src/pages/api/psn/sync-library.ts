@@ -83,6 +83,13 @@ export const POST: APIRoute = async (context) => {
   // same user-initiated sync, not a new action to debounce.
   const body = await context.request.json().catch(() => ({} as any));
   const isContinuation = body.continuation === true;
+  // `exclude` is the set of npCommIds the client has already asked us to
+  // try in prior iterations of the auto-loop. Prevents the server from
+  // retrying the same first-20 slice forever when IGDB consistently
+  // fails for those specific titles.
+  const excludeNpCommIds = new Set<string>(
+    Array.isArray(body.exclude) ? body.exclude.filter((x: unknown) => typeof x === 'string') : [],
+  );
 
   const { data: profileData } = await (db as any)
     .from('profiles')
@@ -295,8 +302,19 @@ export const POST: APIRoute = async (context) => {
   }
   const unmatchedCollapsed = collapsed.filter((_, i) => !matchedIndexes.has(i));
 
-  const toLog: CollapsedTitle[] = [...unmatchedCollapsed.slice(IGDB_FALLBACK_CAP)];
-  const igdbCandidates = unmatchedCollapsed.slice(0, IGDB_FALLBACK_CAP);
+  // Exclude titles the client has already asked us to try in prior
+  // iterations. Without this, the server always slices the first 20 of
+  // unmatchedCollapsed — if those consistently fail IGDB, the client's
+  // auto-loop stalls because the server returns the same 0-progress
+  // response every time. With it, each iteration processes a fresh
+  // slice until the whole tail is exhausted.
+  const fallbackEligible = unmatchedCollapsed.filter((e) => !excludeNpCommIds.has(e.npCommId));
+
+  const toLog: CollapsedTitle[] = [...fallbackEligible.slice(IGDB_FALLBACK_CAP)];
+  const igdbCandidates = fallbackEligible.slice(0, IGDB_FALLBACK_CAP);
+  // Report back every npCommId we attempted this call — the client
+  // accumulates these into its `exclude` list for the next iteration.
+  const triedNpCommIds = igdbCandidates.map((e) => e.npCommId);
 
   for (const entry of igdbCandidates) {
     try {
@@ -495,5 +513,10 @@ export const POST: APIRoute = async (context) => {
     updated: toUpdate.length,
     unmatched: titles.length - resolved.length,
     total: titles.length,
+    tried_npcommids: triedNpCommIds,
+    // Client stops auto-looping when the eligible pool is exhausted.
+    // fallbackEligible already respects the exclude list, so this is the
+    // right post-call measure of "there are still titles worth trying."
+    can_continue: fallbackEligible.length > igdbCandidates.length,
   });
 };

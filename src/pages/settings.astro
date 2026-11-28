@@ -1837,15 +1837,24 @@ async function psnSync() {
   let totalMatched = 0;
   let totalUpdated = 0;
   let total = 0;
-  const SAFETY_MAX = 20; // 20 loops × up to 20 IGDB imports = 400 cap
   let lastUnmatched: number | null = null;
+  // Server defaults to slicing the first 20 of the unmatched list for IGDB.
+  // When those 20 consistently fail, the loop would stall. We accumulate
+  // every npCommId the server tries and send it back as `exclude` so each
+  // iteration processes a fresh slice.
+  const triedNpCommIds = new Set<string>();
+  const SAFETY_MAX = 25; // 25 loops × 20 IGDB per loop = 500 titles max
 
   try {
     for (let i = 0; i < SAFETY_MAX; i++) {
+      const payload: Record<string, unknown> = i === 0
+        ? {}
+        : { continuation: true, exclude: Array.from(triedNpCommIds) };
+
       const res = await fetch('/api/psn/sync-library', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(i === 0 ? {} : { continuation: true }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
 
@@ -1866,6 +1875,15 @@ async function psnSync() {
       totalUpdated += refreshedThis;
       if (Number.isFinite(Number(data.total))) total = Number(data.total);
 
+      // Absorb every npCommId the server tried this call so we don't send
+      // it back again. Prevents the server from re-trying titles whose
+      // IGDB lookup already failed in an earlier iteration.
+      if (Array.isArray(data.tried_npcommids)) {
+        for (const npc of data.tried_npcommids) {
+          if (typeof npc === 'string') triedNpCommIds.add(npc);
+        }
+      }
+
       // Progress bar reflects how many of the library's titles are
       // resolved so far (total − unmatched). Displayed only while we're
       // still looping.
@@ -1878,15 +1896,15 @@ async function psnSync() {
       }
       msg.textContent = `Matched ${(totalMatched + totalUpdated).toLocaleString()} so far…`;
 
-      // Done when the unmatched tail is empty OR this call made no forward
-      // progress (no new inserts/updates AND unmatched didn't shrink). The
-      // no-progress case happens when the remaining tail is genuinely
-      // unresolvable (regional titles not in IGDB) — looping more wouldn't
-      // help.
-      const madeProgress = addedThis > 0 || refreshedThis > 0 ||
-                           (lastUnmatched !== null && unmatched < lastUnmatched);
-      if (unmatched === 0 || !madeProgress) break;
+      // Stop if the server says it's exhausted the eligible pool, OR the
+      // unmatched count hits zero. `can_continue` is the real signal now
+      // that exclude-tracking guarantees per-call forward coverage;
+      // "no inserts this call" isn't a stop signal because the server
+      // might have tried 20 niche titles that all failed IGDB without
+      // the tail being truly exhausted.
       lastUnmatched = unmatched;
+      if (unmatched === 0) break;
+      if (data.can_continue === false) break;
     }
 
     progressBox.style.display = 'none';
