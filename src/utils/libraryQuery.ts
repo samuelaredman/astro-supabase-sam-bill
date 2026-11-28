@@ -24,6 +24,13 @@ export type LibraryQueryOptions = {
   platform?: string;
   dev?: string;
   showHidden?: boolean;
+  // Review-status filter. 'reviewed' → only games this profile has a
+  // published review of. 'unreviewed' → only games with no published review.
+  // Omitted → no filter. Server-side so pagination + totals are correct —
+  // the client used to do this on the already-paginated items array, so
+  // "Has review" on page 1 of a big library only ever showed the reviewed
+  // games that happened to land in the first alphabetical slice.
+  reviewed?: 'reviewed' | 'unreviewed';
 };
 
 export type LibraryPageResult = {
@@ -79,12 +86,36 @@ export async function queryLibraryPage(
   } = opts;
   const page = Math.max(1, opts.page ?? 1);
   const filter = opts.filter ?? 'all';
-  const sort = opts.sort ?? 'alpha';
+  // Default to completion sort: most engaged-with games (highest trophy/
+  // achievement completion) float to the top. Alphabetical was fine for a
+  // 20-game library but useless for 500+.
+  const sort = opts.sort ?? 'completion';
   const search = (opts.search ?? '').trim();
   const genre = (opts.genre ?? '').trim();
   const platform = (opts.platform ?? '').trim();
   const dev = (opts.dev ?? '').trim();
   const showHidden = !!opts.showHidden;
+  const reviewed = opts.reviewed;
+
+  // Resolve the set of reviewed game ids once, used only if the reviewed
+  // filter is active. Bounded by the user's review count (typically well
+  // under 1000) so a single query is enough. Mirrors the shape the page
+  // already loads client-side into _reviewScores.
+  let reviewedGameIds: string[] | null = null;
+  if (reviewed === 'reviewed' || reviewed === 'unreviewed') {
+    const { data: revRows, error: revErr } = await db
+      .from('reviews')
+      .select('game_id')
+      .eq('profile_id', profileId)
+      .eq('status', 'published');
+    if (revErr) {
+      console.error('[library query] reviewed-filter lookup error:', JSON.stringify(revErr));
+    }
+    const ids = ((revRows ?? []) as Array<{ game_id: string | null }>)
+      .map((r) => r.game_id)
+      .filter((v): v is string => typeof v === 'string');
+    reviewedGameIds = Array.from(new Set(ids));
+  }
 
   // Pre-resolve search to the set of canonical game_ids whose canonical title
   // OR any platform-edition title matches. The edition titles live on separate
@@ -229,6 +260,23 @@ export async function queryLibraryPage(
         qb = qb.eq(base === 'ugs' ? 'game_id' : 'id', '00000000-0000-0000-0000-000000000000');
       } else {
         qb = qb.in(base === 'ugs' ? 'game_id' : 'id', searchCanonicalIds);
+      }
+    }
+
+    // Reviewed / unreviewed filter — runs after search so it composes with it.
+    // 'reviewed' with an empty list → no games can match (user has no reviews);
+    // 'unreviewed' with an empty list → skip, every game is unreviewed.
+    if (reviewedGameIds !== null) {
+      const idCol = base === 'ugs' ? 'game_id' : 'id';
+      if (reviewed === 'reviewed') {
+        if (reviewedGameIds.length === 0) {
+          qb = qb.eq(idCol, '00000000-0000-0000-0000-000000000000');
+        } else {
+          qb = qb.in(idCol, reviewedGameIds);
+        }
+      } else if (reviewed === 'unreviewed' && reviewedGameIds.length > 0) {
+        // PostgREST's not-in takes a parenthesized list literal.
+        qb = qb.not(idCol, 'in', `(${reviewedGameIds.join(',')})`);
       }
     }
 
