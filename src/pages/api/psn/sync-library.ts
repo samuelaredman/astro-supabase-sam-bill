@@ -272,10 +272,17 @@ export const POST: APIRoute = async (context) => {
   for (const entry of autoImportCandidates) {
     try {
       const platformId = IGDB_PLATFORM_BY_PSN[entry.platform];
-      // PSN's trophyTitleName often includes ™®© ("Apex Legends™", "EA SPORTS™
-      // College Football 25"). IGDB's fuzzy `search` may not forgive those,
-      // so strip them before the query.
-      const searchName = entry.name.replace(/[™®©]/g, '').replace(/\s+/g, ' ').trim();
+      // PSN's trophyTitleName carries noisy punctuation IGDB's fuzzy `search`
+      // sometimes chokes on: ™®© ("Apex Legends™"), curly apostrophes
+      // ("Marvel's Spider-Man", "Uncharted: Drake's Fortune"), and em/en
+      // dashes. Strip or normalize all of them before the query.
+      const searchName = entry.name
+        .replace(/[™®©]/g, '')
+        .replace(/[‘’‛]/g, "'")   // ‘ ’ ‛ → '
+        .replace(/[“”‟]/g, '"')   // “ ” ‟ → "
+        .replace(/[–—−]/g, '-')   // – — − → -
+        .replace(/\s+/g, ' ')
+        .trim();
       // Release upper bound from the user's own trophy-earn data. If PSN
       // reported trophies for this title with lastUpdatedDateTime = T, the
       // game released at some point ≤ T. Converted to IGDB's unix-seconds
@@ -296,12 +303,43 @@ export const POST: APIRoute = async (context) => {
           limit 5;
         `,
       );
-      const hits = Array.isArray(rows) ? rows : [];
-      if (hits.length !== 1) {
+      const hits = (Array.isArray(rows) ? rows : []) as Array<{
+        id?: number;
+        name?: string;
+        game_type?: number;
+        first_release_date?: number;
+      }>;
+      if (hits.length === 0) {
         toLog.push(entry);
         continue;
       }
-      const igdbId = Number(hits[0]?.id);
+      // Pick one. 1-hit cases are trivial. For 2+ hits the heuristic:
+      //   1) Prefer the most recent release ≤ lastUpdatedUnix. The WHERE
+      //      already filtered to ≤ bound, so "most recent" is the right side
+      //      of the remake-vs-port ambiguity: if the user earned trophies
+      //      after a remaster shipped, they're probably on the remaster.
+      //   2) Ties broken by preferring game_type=0 (main_game) over
+      //      expansion/remake/remaster (which are secondary choices for an
+      //      ambiguous title lookup).
+      //   3) If no hit has a usable first_release_date, we can't
+      //      disambiguate — log and move on rather than guess, matching
+      //      the fail-safe intent of the ID-only matcher migration.
+      const hitsWithDate = hits.filter((h) => Number.isFinite(h.first_release_date));
+      if (hitsWithDate.length === 0) {
+        toLog.push(entry);
+        continue;
+      }
+      hitsWithDate.sort((a, b) => {
+        const d = (b.first_release_date ?? 0) - (a.first_release_date ?? 0);
+        if (d !== 0) return d;
+        // game_type 0 (main_game) wins over everything else as the safer
+        // default choice for a title lookup.
+        const aMain = a.game_type === 0 ? 0 : 1;
+        const bMain = b.game_type === 0 ? 0 : 1;
+        return aMain - bMain;
+      });
+      const pick = hitsWithDate[0];
+      const igdbId = Number(pick.id);
       if (!Number.isFinite(igdbId)) {
         toLog.push(entry);
         continue;

@@ -196,6 +196,46 @@ export const POST: APIRoute = async (context) => {
       return json({ error: msg }, 502);
     }
 
+    // Narrow the work queue to titles already matched to a Chekpoint game.
+    // Trophies for an unmatched title have game_id=null and can't be rendered
+    // against a library card, so fetching them burns Sony API budget for data
+    // we'd never surface. A user with a 4000-title PSN library but only 6
+    // matched games should sync 6 trophy sets, not 4000.
+    //
+    // Trade-off: if library-matching improves later (more games get
+    // psn_np_communication_id mappings), the user has to re-sync trophies to
+    // pull those in. Acceptable — they can always click Sync again.
+    const matchedNpCommIds = new Set<string>();
+    {
+      const PAGE = 1000;
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await (db as any)
+          .from('user_game_status')
+          .select('psn_np_communication_id')
+          .eq('profile_id', profile.id)
+          .not('psn_np_communication_id', 'is', null)
+          .range(from, from + PAGE - 1);
+        if (error) {
+          console.error('[psn/sync-trophies] library lookup error:', JSON.stringify(error));
+          break;
+        }
+        if (!data || data.length === 0) break;
+        for (const r of data as Array<{ psn_np_communication_id: string }>) {
+          if (r.psn_np_communication_id) matchedNpCommIds.add(r.psn_np_communication_id);
+        }
+        if (data.length < PAGE) break;
+      }
+    }
+
+    if (matchedNpCommIds.size === 0) {
+      // Fresh install with zero matches — nothing useful to do. Tell the user
+      // to run library sync first instead of silently returning done=true,
+      // which would look to them like trophies finished syncing with no data.
+      return json({
+        error: "No Chekpoint games matched to your PlayStation library yet. Click \"Sync PlayStation library\" above first — then come back to sync trophies.",
+      }, 409);
+    }
+
     // Delta filter: on a resync, skip titles whose lastUpdatedDateTime hasn't
     // moved since our last sync. PSN's timestamp is reliable for this — it
     // advances on every trophy earn — unlike Steam's rtime_last_played.
@@ -206,6 +246,7 @@ export const POST: APIRoute = async (context) => {
     for (const t of allTitles) {
       const platform = primaryPsnPlatform(t.trophyTitlePlatform);
       if (!platform) continue;
+      if (!matchedNpCommIds.has(t.npCommunicationId)) continue;
       if (shouldDelta && t.lastUpdatedDateTime) {
         const updatedMs = new Date(t.lastUpdatedDateTime).getTime();
         if (Number.isFinite(updatedMs) && updatedMs <= lastSyncMs) continue;
