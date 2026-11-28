@@ -10,6 +10,7 @@ if (!profile) return Astro.redirect('/404');
 
 const url = new URL(Astro.request.url);
 const q = (url.searchParams.get('q') ?? '').trim();
+const RECENT_LIMIT = 50;
 
 const db = getSupabaseAdmin() as any;
 
@@ -17,40 +18,75 @@ interface Result {
   id: string;
   username: string;
   avatar_url: string | null;
+  created_at: string;
   review_count: number;
   reports_against: number;
 }
 
+// Two modes:
+//   - No query → show the most recently joined members (hard cap at
+//     RECENT_LIMIT so the page stays small as the user base grows).
+//   - Query ≥ 2 chars → case-insensitive ilike match on username.
+// Both paths produce the same Result[] shape and feed the same render loop
+// below, so the UI treats them identically.
 let results: Result[] = [];
-let searched = false;
+let mode: 'recent' | 'search' = 'recent';
+let errorMessage: string | null = null;
 
-if (q.length >= 2) {
-  searched = true;
-  const { data: profiles } = await db
+{
+  let baseQuery = db
     .from('profiles')
-    .select('id, username, avatar_url')
-    .ilike('username', `%${q}%`)
-    .order('username', { ascending: true })
-    .limit(50);
+    .select('id, username, avatar_url, created_at');
 
-  const profileRows = (profiles ?? []) as any[];
-  const ids = profileRows.map((p) => p.id);
+  if (q.length >= 2) {
+    mode = 'search';
+    // Escape ilike wildcards in the user's input — otherwise a query like
+    // "50%" would match the entire table.
+    const escaped = q.replace(/[\\%_]/g, (c: string) => `\\${c}`);
+    baseQuery = baseQuery
+      .ilike('username', `%${escaped}%`)
+      .order('username', { ascending: true })
+      .limit(50);
+  } else {
+    baseQuery = baseQuery
+      .order('created_at', { ascending: false, nullsFirst: false })
+      .limit(RECENT_LIMIT);
+  }
 
-  if (ids.length) {
-    const [reviewStatsRes, reportsRes] = await Promise.all([
-      db.from('profile_review_stats').select('profile_id, review_count').in('profile_id', ids),
-      db.from('reports').select('target_id', { count: 'exact', head: false }).eq('target_type', 'profile').eq('status', 'pending').in('target_id', ids),
-    ]);
-    const reviewMap = new Map<string, number>(((reviewStatsRes.data as any[]) ?? []).map((r) => [r.profile_id, r.review_count ?? 0]));
-    const reportCounts = new Map<string, number>();
-    for (const row of ((reportsRes.data as any[]) ?? [])) {
-      reportCounts.set(row.target_id, (reportCounts.get(row.target_id) ?? 0) + 1);
+  const { data: profiles, error } = await baseQuery;
+  if (error) {
+    console.error('[admin/users] profiles query error:', JSON.stringify(error));
+    errorMessage = `Failed to load users: ${error.message}`;
+  } else {
+    const profileRows = (profiles ?? []) as Array<{ id: string; username: string; avatar_url: string | null; created_at: string }>;
+    const ids = profileRows.map((p) => p.id);
+
+    // Review counts + pending-reports counts in parallel. Both are
+    // enrichments — if they fail (table missing, RLS, whatever) we still
+    // render the list with zeros rather than erroring the page.
+    let reviewMap = new Map<string, number>();
+    let reportCounts = new Map<string, number>();
+
+    if (ids.length) {
+      const [reviewStatsRes, reportsRes] = await Promise.all([
+        db.from('profile_review_stats').select('profile_id, review_count').in('profile_id', ids),
+        db.from('reports').select('target_id').eq('target_type', 'profile').eq('status', 'pending').in('target_id', ids),
+      ]);
+      if (!reviewStatsRes.error) {
+        reviewMap = new Map(((reviewStatsRes.data as any[]) ?? []).map((r) => [r.profile_id, r.review_count ?? 0]));
+      }
+      if (!reportsRes.error) {
+        for (const row of ((reportsRes.data as any[]) ?? [])) {
+          reportCounts.set(row.target_id, (reportCounts.get(row.target_id) ?? 0) + 1);
+        }
+      }
     }
 
     results = profileRows.map((p) => ({
       id: p.id,
       username: p.username,
       avatar_url: p.avatar_url,
+      created_at: p.created_at,
       review_count: reviewMap.get(p.id) ?? 0,
       reports_against: reportCounts.get(p.id) ?? 0,
     }));
@@ -59,6 +95,17 @@ if (q.length >= 2) {
 
 function getInitials(username: string): string {
   return username.slice(0, 2).toUpperCase();
+}
+
+function timeSince(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const days = Math.floor(diff / 86400000);
+  if (days < 1) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days}d ago`;
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
 }
 ---
 
@@ -70,43 +117,73 @@ function getInitials(username: string): string {
       <header class="admin-page-header">
         <div>
           <h1 class="admin-page-title">Users</h1>
-          <p class="admin-page-subtitle">Search profiles by username. Click a result to open their moderation view — badges, bans, reports.</p>
+          <p class="admin-page-subtitle">
+            Search by username, or browse the {RECENT_LIMIT} most recently joined members.
+            Click a result to open their moderation view.
+          </p>
         </div>
       </header>
 
       <form method="get" action="/admin/users" class="user-search-form">
-        <input type="text" name="q" value={q} placeholder="Search usernames…" class="admin-input user-search-input" autofocus required minlength="2" />
+        <input
+          type="text"
+          name="q"
+          value={q}
+          placeholder="Search usernames (2+ characters)…"
+          class="admin-input user-search-input"
+          autofocus
+          autocomplete="off"
+        />
         <button type="submit" class="admin-btn admin-btn-primary">Search</button>
+        {q.length > 0 && (
+          <a href="/admin/users" class="admin-btn admin-btn-ghost">Clear</a>
+        )}
       </form>
 
-      {searched && results.length === 0 && <p class="admin-empty">No users matching "{q}".</p>}
-      {!searched && <p class="admin-empty">Type at least 2 characters to search.</p>}
+      {errorMessage && <p class="admin-empty" style="color:#f87171">{errorMessage}</p>}
+
+      {!errorMessage && results.length === 0 && mode === 'search' && (
+        <p class="admin-empty">No users matching "{q}".</p>
+      )}
+
+      {!errorMessage && results.length === 0 && mode === 'recent' && (
+        <p class="admin-empty">No users yet.</p>
+      )}
 
       {results.length > 0 && (
-        <ul class="user-result-list">
-          {results.map((u) => (
-            <li class="user-result">
-              <a href={`/admin/users/${encodeURIComponent(u.username)}`} class="user-result-link">
-                <div class="user-result-avatar">
-                  {u.avatar_url
-                    ? <img src={u.avatar_url} alt={u.username} />
-                    : <span>{getInitials(u.username)}</span>
-                  }
-                </div>
-                <div class="user-result-info">
-                  <div class="user-result-name">{u.username}</div>
-                  <div class="user-result-meta">
-                    <span>{u.review_count} {u.review_count === 1 ? 'review' : 'reviews'}</span>
-                    {u.reports_against > 0 && (
-                      <span class="admin-chip admin-chip-danger">⚠ {u.reports_against} pending {u.reports_against === 1 ? 'report' : 'reports'}</span>
-                    )}
+        <>
+          <div class="user-list-meta">
+            {mode === 'search'
+              ? `${results.length} result${results.length === 1 ? '' : 's'} for "${q}"`
+              : `${results.length} most recent member${results.length === 1 ? '' : 's'}`}
+          </div>
+          <ul class="user-result-list">
+            {results.map((u) => (
+              <li class="user-result">
+                <a href={`/admin/users/${encodeURIComponent(u.username)}`} class="user-result-link">
+                  <div class="user-result-avatar">
+                    {u.avatar_url
+                      ? <img src={u.avatar_url} alt={u.username} />
+                      : <span>{getInitials(u.username)}</span>
+                    }
                   </div>
-                </div>
-                <span class="user-result-arrow" aria-hidden="true">→</span>
-              </a>
-            </li>
-          ))}
-        </ul>
+                  <div class="user-result-info">
+                    <div class="user-result-name">{u.username}</div>
+                    <div class="user-result-meta">
+                      <span>joined {timeSince(u.created_at)}</span>
+                      <span>·</span>
+                      <span>{u.review_count} {u.review_count === 1 ? 'review' : 'reviews'}</span>
+                      {u.reports_against > 0 && (
+                        <span class="admin-chip admin-chip-danger">⚠ {u.reports_against} pending {u.reports_against === 1 ? 'report' : 'reports'}</span>
+                      )}
+                    </div>
+                  </div>
+                  <span class="user-result-arrow" aria-hidden="true">→</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   </main>
@@ -117,13 +194,20 @@ function getInitials(username: string): string {
     display: flex;
     gap: 10px;
     margin: 0 0 16px;
+    align-items: center;
   }
   .user-search-input { flex: 1; }
+
+  .user-list-meta {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    margin: 20px 0 10px;
+  }
 
   .user-result-list {
     list-style: none;
     padding: 0;
-    margin: 20px 0 0;
+    margin: 0;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -163,7 +247,7 @@ function getInitials(username: string): string {
     color: var(--text-secondary);
     margin-top: 4px;
     display: flex;
-    gap: 10px;
+    gap: 8px;
     align-items: center;
     flex-wrap: wrap;
   }
