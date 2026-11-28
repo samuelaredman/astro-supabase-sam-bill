@@ -8,20 +8,36 @@ import {
   primaryPsnPlatform,
   type PsnTokens,
   type TrophyTitle,
+  type AuthorizationPayload,
 } from "../../../utils/psn";
 import { getServiceAuth } from "../../../utils/psnService";
-import { igdbFetch, escapeIgdbString } from "../../../utils/igdb";
+import { igdbMultiQuery, escapeIgdbString } from "../../../utils/igdb";
 import { importGameByIgdbId } from "../../../utils/games";
+
+// Netlify's SSR function budget is 10s. Reserve ~3s for post-processing DB
+// writes (user_game_status inserts, snapshot save). Each call drains as many
+// unmatched titles as fit in the remaining IGDB+import budget; the client
+// auto-continues via the returned cursor.
+const TIME_BUDGET_MS = 7000;
+
+// IGDB rate-limits at 4 req/s regardless of sub-query count. Batch 10 titles
+// per multiquery call to minimize HTTP overhead and stay well under the limit
+// even with a couple of serial multiquery calls per invocation.
+const MULTIQUERY_BATCH = 10;
 
 const IN_CHUNK = 100;
 const WRITE_CHUNK = 500;
 const TITLE_CHUNK = 200;
 
-// IGDB auto-import budget for the unmatched pass. Each IGDB search + import
-// takes ~300-600ms; cap per-sync work so we stay well under Netlify's 10s
-// total budget. Anything past the cap is logged for admin review (or picked
-// up on the user's next sync, since the cooldown is only 60s).
-const IGDB_AUTO_IMPORT_CAP = 10;
+// Fresh-start cooldown (same as before — protects against double-clicks). A
+// cursor-continuation call skips this since it's part of an already-running
+// sync, not a fresh request.
+const COOLDOWN_SECONDS = 60;
+
+// Snapshot lifetime — reuse the pre-filtered work queue across cursor
+// continuations of one sync run. 24h is comfortable for a human-paced sync
+// loop; anything older triggers a fresh rebuild from fetchAllTitles.
+const SNAPSHOT_TTL_MS = 24 * 3600 * 1000;
 
 // Platform priority when the same game exists on multiple PSN platforms. PS5
 // entries win over PS4 win over PS3, matching what a returning player is
@@ -38,6 +54,32 @@ const IGDB_PLATFORM_BY_PSN: Record<'PS3' | 'PS4' | 'PS5', number> = {
   PS5: 167,
 };
 
+type UnmatchedEntry = {
+  npCommId: string;
+  platform: 'PS3' | 'PS4' | 'PS5';
+  name: string;                 // trimmed, "Trophies" suffix already stripped
+  lastUpdatedDateTime: string | null;
+  earned: number;
+  total: number;
+  hasPlatinum: boolean;
+  progress: number;
+};
+
+type Snapshot = {
+  started_at: string;
+  // Unmatched work queue, sorted by npCommId so a string cursor is monotonic.
+  unmatched: UnmatchedEntry[];
+  // Lowercase-name → { minutes, lastPlayed }. Needed when writing
+  // user_game_status rows for titles newly matched in a continuation call —
+  // we can't re-call fetchRecentPlayedGames each cursor tick.
+  playtime: Record<string, { minutes: number; lastPlayed: string | null }>;
+  // Counts for the progress UI. total_titles is the full PSN library size
+  // (matched + unmatched); initial_matched is what the first call resolved
+  // via the DB fast-path.
+  total_titles: number;
+  initial_matched: number;
+};
+
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -52,14 +94,223 @@ async function persistTokens(db: SupabaseAdmin, profileId: string, tokens: PsnTo
   }).eq('id', profileId);
 }
 
+// Collapse PSN titles by display name, picking the newest-platform edition
+// when the same game ships on PS4+PS5. Same shape as the pre-cursor version.
+function collapseTitles(titles: TrophyTitle[]): UnmatchedEntry[] {
+  const bestByName = new Map<string, UnmatchedEntry>();
+  for (const t of titles) {
+    const platform = primaryPsnPlatform(t.trophyTitlePlatform);
+    if (!platform) continue;
+    const name = t.trophyTitleName?.trim().replace(/\s+Trophies$/i, '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    const total =
+      (t.definedTrophies?.bronze ?? 0) +
+      (t.definedTrophies?.silver ?? 0) +
+      (t.definedTrophies?.gold ?? 0) +
+      (t.definedTrophies?.platinum ?? 0);
+    const earned =
+      (t.earnedTrophies?.bronze ?? 0) +
+      (t.earnedTrophies?.silver ?? 0) +
+      (t.earnedTrophies?.gold ?? 0) +
+      (t.earnedTrophies?.platinum ?? 0);
+    const candidate: UnmatchedEntry = {
+      npCommId: t.npCommunicationId,
+      platform,
+      name,
+      earned,
+      total,
+      hasPlatinum: (t.earnedTrophies?.platinum ?? 0) > 0,
+      progress: t.progress ?? 0,
+      lastUpdatedDateTime: t.lastUpdatedDateTime ?? null,
+    };
+    const prev = bestByName.get(key);
+    if (!prev || PLATFORM_RANK[platform] > PLATFORM_RANK[prev.platform]) {
+      bestByName.set(key, candidate);
+    }
+  }
+  return Array.from(bestByName.values());
+}
+
+// Picks one IGDB game from the search result, matching the same disambiguation
+// rule the single-title path used before multiquery: most-recent release
+// ≤ user's lastUpdatedDateTime, with game_type=0 (main_game) as a tiebreaker.
+// Returns the IGDB id, or null if 0 hits / every hit lacks a release date.
+function pickIgdbId(hits: any[]): number | null {
+  if (!Array.isArray(hits) || hits.length === 0) return null;
+  const withDate = hits.filter((h) => Number.isFinite(h?.first_release_date));
+  if (withDate.length === 0) return null;
+  withDate.sort((a, b) => {
+    const d = (b.first_release_date ?? 0) - (a.first_release_date ?? 0);
+    if (d !== 0) return d;
+    const aMain = a.game_type === 0 ? 0 : 1;
+    const bMain = b.game_type === 0 ? 0 : 1;
+    return aMain - bMain;
+  });
+  const pick = withDate[0];
+  const id = Number(pick?.id);
+  return Number.isFinite(id) ? id : null;
+}
+
+// Build the apicalypse body for one IGDB sub-query.
+function buildIgdbSubquery(entry: UnmatchedEntry): string {
+  const platformId = IGDB_PLATFORM_BY_PSN[entry.platform];
+  const searchName = entry.name
+    .replace(/[™®©]/g, '')
+    .replace(/[‘’‛]/g, "'")
+    .replace(/[“”‟]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const lastUpdatedUnix = entry.lastUpdatedDateTime
+    ? Math.floor(new Date(entry.lastUpdatedDateTime).getTime() / 1000)
+    : null;
+  const dateClause = Number.isFinite(lastUpdatedUnix as number)
+    ? ` & first_release_date <= ${lastUpdatedUnix}`
+    : '';
+  return `
+    search "${escapeIgdbString(searchName)}";
+    fields id, name, platforms.id, game_type, first_release_date;
+    where platforms = (${platformId}) & game_type = (0,2,4,8,9,10)${dateClause};
+    limit 5;
+  `;
+}
+
+type ResolvedMatch = { entry: UnmatchedEntry; gameId: string };
+
+// Fetch user_game_status rows keyed by canonical for the given canonical ids,
+// returning the set of ids where a row already exists. Used to decide
+// insert-with-status='owned' vs update-metadata-only.
+async function loadExistingStatusGameIds(
+  db: any,
+  profileId: string,
+  canonicalIds: string[],
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const chunks = await Promise.all(
+    chunk(canonicalIds, IN_CHUNK).map((ids) =>
+      db
+        .from('user_game_status')
+        .select('game_id')
+        .eq('profile_id', profileId)
+        .in('game_id', ids),
+    ),
+  );
+  for (const { data } of chunks) {
+    for (const r of (data ?? [])) out.add(r.game_id);
+  }
+  return out;
+}
+
+// Writes user_game_status rows for the given matches. Mirrors the pre-cursor
+// "resolve matched games to canonical, pick best edition per canonical, insert
+// new / update existing" logic — just factored out so it can run on every
+// cursor-continuation batch rather than only at the end.
+async function writeMatchesToLibrary(
+  db: any,
+  profileId: string,
+  matches: ResolvedMatch[],
+  playtimeByLowerName: Map<string, { minutes: number; lastPlayed: string | null }>,
+): Promise<{ inserted: number; updated: number }> {
+  if (matches.length === 0) return { inserted: 0, updated: 0 };
+
+  const matchedGameIds = matches.map((m) => m.gameId);
+  const canonicalOf = new Map<string, string>();
+  const canonChunks = await Promise.all(
+    chunk(matchedGameIds, IN_CHUNK).map((ids) =>
+      db.from('games').select('id, canonical_game_id').in('id', ids),
+    ),
+  );
+  for (const { data: rows } of canonChunks) {
+    for (const r of ((rows ?? []) as any[])) {
+      canonicalOf.set(r.id, r.canonical_game_id ?? r.id);
+    }
+  }
+
+  type AggRow = {
+    row: Record<string, unknown>;
+    _lastPlayedTs: number;
+    _bestProgress: number;
+  };
+  const perCanonical = new Map<string, AggRow>();
+  for (const { entry, gameId } of matches) {
+    const canonicalId = canonicalOf.get(gameId) ?? gameId;
+    const playtime = playtimeByLowerName.get(entry.name.toLowerCase()) ?? null;
+    const lastPlayedAt = playtime?.lastPlayed ?? entry.lastUpdatedDateTime ?? null;
+    const row: Record<string, unknown> = {
+      psn_np_communication_id: entry.npCommId,
+      psn_platform: entry.platform,
+      psn_trophies_earned: entry.earned,
+      psn_trophies_total: entry.total,
+      psn_platinum_earned: entry.hasPlatinum,
+      psn_progress: entry.progress,
+      psn_playtime_minutes: playtime?.minutes ?? null,
+      psn_last_played_at: lastPlayedAt,
+      psn_display_game_id: gameId,
+    };
+    const lastPlayedTs = lastPlayedAt ? Date.parse(lastPlayedAt) : 0;
+    const existing = perCanonical.get(canonicalId);
+    const beats =
+      !existing ||
+      lastPlayedTs > existing._lastPlayedTs ||
+      (lastPlayedTs === existing._lastPlayedTs && entry.progress > existing._bestProgress);
+    if (beats) {
+      perCanonical.set(canonicalId, { row, _lastPlayedTs: lastPlayedTs, _bestProgress: entry.progress });
+    }
+  }
+
+  const canonicalIds = [...perCanonical.keys()];
+  const existingIds = await loadExistingStatusGameIds(db, profileId, canonicalIds);
+
+  const toInsert: any[] = [];
+  const toUpdate: Array<{ game_id: string; row: Record<string, unknown> }> = [];
+  for (const [canonicalId, agg] of perCanonical) {
+    if (!existingIds.has(canonicalId)) {
+      toInsert.push({ profile_id: profileId, game_id: canonicalId, status: 'owned', is_owned: true, ...agg.row });
+    } else {
+      toUpdate.push({ game_id: canonicalId, row: agg.row });
+    }
+  }
+
+  for (const batch of chunk(toInsert, WRITE_CHUNK)) {
+    const { error } = await db.from('user_game_status').insert(batch);
+    if (error) {
+      console.error('[psn/sync-library] insert error:', JSON.stringify(error));
+      throw new Error('Failed to save game statuses.');
+    }
+  }
+
+  for (const { game_id, row } of toUpdate) {
+    const { error } = await db
+      .from('user_game_status')
+      .update(row)
+      .eq('profile_id', profileId)
+      .eq('game_id', game_id);
+    if (error) {
+      console.error('[psn/sync-library] update error (non-fatal):', JSON.stringify(error));
+    }
+  }
+
+  return { inserted: toInsert.length, updated: toUpdate.length };
+}
+
 export const POST: APIRoute = async (context) => {
+  const startedAt = Date.now();
+
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
   const { profile, db } = auth;
 
+  const body = await context.request.json().catch(() => ({} as any));
+  const hasCursor = typeof body.cursor === 'string' && body.cursor.length > 0;
+  const force = body.force === true;
+
   const { data: profileData } = await (db as any)
     .from('profiles')
-    .select('psn_account_id, psn_access_token, psn_refresh_token, psn_token_expires_at, psn_synced_at')
+    .select(
+      'psn_account_id, psn_access_token, psn_refresh_token, psn_token_expires_at, ' +
+      'psn_synced_at, psn_library_sync_snapshot, psn_library_sync_cursor',
+    )
     .eq('id', profile.id)
     .single();
 
@@ -67,26 +318,29 @@ export const POST: APIRoute = async (context) => {
     return json({ error: 'No PlayStation account connected.' }, 400);
   }
 
-  // Two auth modes:
-  //   - "user tokens" (NPSSO paste flow) — psn_refresh_token is present. We
-  //     refresh the access token on demand and persist any rotation.
-  //   - "service token" (username-only connect flow) — psn_refresh_token is
-  //     NULL. We use the shared Chekpoint service token and only read PUBLIC
-  //     data (no playtime, no private games). getServiceAuth handles its own
-  //     refresh cycle against psn_service_auth.
+  // See sync-trophies.ts for the two-auth-mode explainer: service auth for
+  // username-only users (public data only), user tokens for NPSSO users.
   const useServiceAuth = !profileData.psn_refresh_token;
 
-  // Same 1-minute cooldown as Steam import — protects against accidental
-  // double-clicks that would burn Sony API rate limit for no benefit.
-  if (profileData.psn_synced_at) {
+  // Resolve the cursor envelope: explicit body cursor wins, otherwise fall
+  // back to whatever the last call persisted on the profile. Both forms carry
+  // the last fully-processed npCommId from the snapshot's `unmatched` list.
+  const cursor: string | null = hasCursor
+    ? body.cursor
+    : (profileData.psn_library_sync_cursor as any)?.npCommId ?? null;
+  const isFreshStart = !cursor;
+
+  // Debounce fresh starts only. Cursor continuations skip the cooldown — they
+  // are part of an already-in-flight sync, not a new user action.
+  if (profileData.psn_synced_at && isFreshStart && !force) {
     const secondsSince = (Date.now() - new Date(profileData.psn_synced_at).getTime()) / 1000;
-    if (secondsSince < 60) {
-      const wait = Math.ceil(60 - secondsSince);
+    if (secondsSince < COOLDOWN_SECONDS) {
+      const wait = Math.ceil(COOLDOWN_SECONDS - secondsSince);
       return json({ error: `Please wait ${wait}s before syncing again.` }, 429);
     }
   }
 
-  let authPayload;
+  let authPayload: AuthorizationPayload;
   if (useServiceAuth) {
     try {
       authPayload = await getServiceAuth();
@@ -115,414 +369,267 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  // Full trophy-title list (games with at least one trophy earned) across all
-  // platforms. This is our source of truth for the PSN "library".
-  let titles: TrophyTitle[];
-  try {
-    titles = await fetchAllTitles(authPayload, profileData.psn_account_id);
-  } catch (e) {
-    if (isPsnAuthExpired(e)) {
-      return json({
-        error: 'Your PlayStation connection expired. Reconnect by pasting a fresh NPSSO token.',
-        needsReconnect: true,
-      }, 401);
-    }
-    console.error('[psn/sync-library] getUserTitles error:', e);
-    return json({ error: 'PlayStation is temporarily unavailable. Try again in a minute.' }, 502);
-  }
+  // ─────────────────────────── snapshot build or reuse ────────────────────────
+  //
+  // Fresh start (no cursor, no stale snapshot, no force) → walk PSN, DB-match,
+  // write matched rows to user_game_status, snapshot the unmatched queue.
+  // Cursor continuation → load the existing snapshot and keep going.
 
-  if (titles.length === 0) {
-    await (db as any).from('profiles').update({ psn_synced_at: new Date().toISOString() }).eq('id', profile.id);
-    return json({ matched: 0, updated: 0, unmatched: 0, total: 0 });
-  }
+  const existingSnapshot = profileData.psn_library_sync_snapshot as Snapshot | null;
+  const snapshotFresh =
+    !!existingSnapshot?.started_at &&
+    Date.now() - new Date(existingSnapshot.started_at).getTime() < SNAPSHOT_TTL_MS;
+  const canReuseSnapshot =
+    !isFreshStart && !force && snapshotFresh && Array.isArray(existingSnapshot?.unmatched);
 
-  // Playtime is best-effort (PS4/PS5 only, ~50 recent titles). Sony only
-  // returns playtime for the AUTHENTICATED account, so username-only users
-  // (service auth) get an empty map here — no error, just no playtime data.
-  // Failures under user auth are non-fatal — the library still syncs.
-  const playtimeByLowerName = new Map<string, { minutes: number; lastPlayed: string | null }>();
-  if (!useServiceAuth) {
-    const recent = await fetchRecentPlayedGames(authPayload);
-    for (const r of recent) {
-      if (!r.name) continue;
-      const key = r.name.toLowerCase().trim();
-      // If the same game shows up twice (rare — PS4+PS5 remaster), keep the
-      // entry with more minutes.
-      const prev = playtimeByLowerName.get(key);
-      if (!prev || r.playDurationMinutes > prev.minutes) {
-        playtimeByLowerName.set(key, { minutes: r.playDurationMinutes, lastPlayed: r.lastPlayedDateTime });
-      }
-    }
-  }
+  let snapshot: Snapshot;
+  let initialMatchedThisCall = 0;
+  let initialUpdatedThisCall = 0;
 
-  // Collapse titles with the same name across platforms into a single entry.
-  // Persona 5 Royal on PS4 and PS5 have distinct npCommunicationIds but the
-  // same trophyTitleName — user_game_status is UNIQUE(profile_id, game_id) so
-  // we can only store one PSN identifier per game. Prefer the newer platform
-  // (PS5 > PS4 > PS3) and record its ID / progress.
-  type CollapsedTitle = {
-    name: string;
-    npCommId: string;
-    platform: 'PS3' | 'PS4' | 'PS5';
-    earned: number;
-    total: number;
-    hasPlatinum: boolean;
-    progress: number;
-    lastUpdatedDateTime: string | null;
-  };
-  const bestByName = new Map<string, CollapsedTitle>();
-  for (const t of titles) {
-    const platform = primaryPsnPlatform(t.trophyTitlePlatform);
-    if (!platform) continue; // Vita/PSP only — not surfaced in the UI
-    // PSN's trophy API returns titles with a " Trophies" suffix for some
-    // games ("Apex Legends Trophies", "STAR WARS™ Battlefront™ II Trophies")
-    // — it's a label on the trophy set, not the game. Strip it so the IGDB
-    // auto-import search matches ("Apex Legends Trophies" → 0 IGDB hits)
-    // and so recent-played playtime (returned without the suffix) joins
-    // against the same key.
-    const name = t.trophyTitleName?.trim().replace(/\s+Trophies$/i, '').trim();
-    if (!name) continue;
-    const key = name.toLowerCase();
-    const total =
-      (t.definedTrophies?.bronze ?? 0) +
-      (t.definedTrophies?.silver ?? 0) +
-      (t.definedTrophies?.gold ?? 0) +
-      (t.definedTrophies?.platinum ?? 0);
-    const earned =
-      (t.earnedTrophies?.bronze ?? 0) +
-      (t.earnedTrophies?.silver ?? 0) +
-      (t.earnedTrophies?.gold ?? 0) +
-      (t.earnedTrophies?.platinum ?? 0);
-    const candidate: CollapsedTitle = {
-      name,
-      npCommId: t.npCommunicationId,
-      platform,
-      earned,
-      total,
-      // Sony awards a platinum once every non-DLC trophy is earned, so this is
-      // the reliable base-game-100% signal — stored so the library badge works
-      // without a separate psn/sync-trophies pass.
-      hasPlatinum: (t.earnedTrophies?.platinum ?? 0) > 0,
-      progress: t.progress ?? 0,
-      lastUpdatedDateTime: t.lastUpdatedDateTime ?? null,
-    };
-    const prev = bestByName.get(key);
-    if (!prev || PLATFORM_RANK[platform] > PLATFORM_RANK[prev.platform]) {
-      bestByName.set(key, candidate);
-    }
-  }
-
-  const collapsed = Array.from(bestByName.values());
-
-  // Match against games strictly by npCommunicationId. Previously the matcher
-  // had a fuzzy title fallback that resolved first-sight games in one shot,
-  // but it was non-deterministic for games sharing a normalized title (the
-  // 2002 PS2 vs 2016 PS4 Ratchet & Clank picked arbitrarily by `ORDER BY
-  // c.id ASC`) and the backfill cemented the wrong pick onto games.
-  // psn_np_communication_id for every future user. All first-sight seeding
-  // now happens in the IGDB auto-import pass below where we can layer
-  // deterministic filters; ambiguous cases are queued for admin review.
-  const matchBatches = await Promise.all(
-    chunk(collapsed, TITLE_CHUNK).map((entries) =>
-      (db as any).rpc('match_psn_games', {
-        psn_np_comm_ids: entries.map((e) => e.npCommId),
-      }),
-    ),
-  );
-
-  type MatchRow = { id: string; psn_np_communication_id: string };
-  const matches: MatchRow[] = [];
-  const seenGameIds = new Set<string>();
-  for (const { data, error } of matchBatches) {
-    if (error) {
-      console.error('[psn/sync-library] match_psn_games error:', JSON.stringify(error));
-      return json({ error: 'Failed to match games.' }, 500);
-    }
-    for (const row of (data ?? []) as MatchRow[]) {
-      if (seenGameIds.has(row.id)) continue;
-      seenGameIds.add(row.id);
-      matches.push(row);
-    }
-  }
-
-  // IGDB auto-import pass — for PSN titles not already mapped, do an IGDB
-  // `search` narrowed by three layered filters before auto-importing:
-  //   1) PSN platform (platforms contains PS3/PS4/PS5 IGDB id)
-  //   2) Allowed game types (main/expansion/standalone/remake/remaster/
-  //      expanded) — drops DLCs, bundles, and ports that would wrong-match
-  //   3) first_release_date <= the user's lastUpdatedDateTime — the user can't
-  //      have earned trophies before the game was released, so any IGDB entry
-  //      dated after that is impossible by construction. This is what kills
-  //      the remake-vs-port edge case: a hypothetical PS4 Classic port of a
-  //      PS2 game would still release at port-time, so it's included, but a
-  //      later remake with no trophies on this npCommId is excluded. IGDB's
-  //      `search` already considers alternative_names, so trademark /
-  //      capitalization variants ("STAR WARS Battlefront II" ↔ "Star Wars:
-  //      Battlefront II") resolve naturally.
-  // Only auto-import single-hit results. 0 hits or 2+ hits → admin log. We
-  // never guess — the previous "best-effort title match" approach is the very
-  // thing this PR is removing.
-  const matchedNpCommIds = new Set(matches.map((m) => m.psn_np_communication_id));
-  const unmatchedCollapsed = collapsed.filter((c) => !matchedNpCommIds.has(c.npCommId));
-
-  const autoImportCandidates = unmatchedCollapsed.slice(0, IGDB_AUTO_IMPORT_CAP);
-  const deferredUnmatched = unmatchedCollapsed.slice(IGDB_AUTO_IMPORT_CAP);
-  const toLog: typeof collapsed = [...deferredUnmatched];
-
-  for (const entry of autoImportCandidates) {
+  if (canReuseSnapshot) {
+    snapshot = existingSnapshot!;
+  } else {
+    // Fresh walk.
+    let titles: TrophyTitle[];
     try {
-      const platformId = IGDB_PLATFORM_BY_PSN[entry.platform];
-      // PSN's trophyTitleName carries noisy punctuation IGDB's fuzzy `search`
-      // sometimes chokes on: ™®© ("Apex Legends™"), curly apostrophes
-      // ("Marvel's Spider-Man", "Uncharted: Drake's Fortune"), and em/en
-      // dashes. Strip or normalize all of them before the query.
-      const searchName = entry.name
-        .replace(/[™®©]/g, '')
-        .replace(/[‘’‛]/g, "'")   // ‘ ’ ‛ → '
-        .replace(/[“”‟]/g, '"')   // “ ” ‟ → "
-        .replace(/[–—−]/g, '-')   // – — − → -
-        .replace(/\s+/g, ' ')
-        .trim();
-      // Release upper bound from the user's own trophy-earn data. If PSN
-      // reported trophies for this title with lastUpdatedDateTime = T, the
-      // game released at some point ≤ T. Converted to IGDB's unix-seconds
-      // first_release_date. Missing timestamp → no bound (fall back to
-      // platform + type filters only).
-      const lastUpdatedUnix = entry.lastUpdatedDateTime
-        ? Math.floor(new Date(entry.lastUpdatedDateTime).getTime() / 1000)
-        : null;
-      const dateClause = Number.isFinite(lastUpdatedUnix as number)
-        ? ` & first_release_date <= ${lastUpdatedUnix}`
-        : '';
-      const rows = await igdbFetch(
-        'games',
-        `
-          search "${escapeIgdbString(searchName)}";
-          fields id, name, platforms.id, game_type, first_release_date;
-          where platforms = (${platformId}) & game_type = (0,2,4,8,9,10)${dateClause};
-          limit 5;
-        `,
-      );
-      const hits = (Array.isArray(rows) ? rows : []) as Array<{
-        id?: number;
-        name?: string;
-        game_type?: number;
-        first_release_date?: number;
-      }>;
-      if (hits.length === 0) {
-        toLog.push(entry);
-        continue;
-      }
-      // Pick one. 1-hit cases are trivial. For 2+ hits the heuristic:
-      //   1) Prefer the most recent release ≤ lastUpdatedUnix. The WHERE
-      //      already filtered to ≤ bound, so "most recent" is the right side
-      //      of the remake-vs-port ambiguity: if the user earned trophies
-      //      after a remaster shipped, they're probably on the remaster.
-      //   2) Ties broken by preferring game_type=0 (main_game) over
-      //      expansion/remake/remaster (which are secondary choices for an
-      //      ambiguous title lookup).
-      //   3) If no hit has a usable first_release_date, we can't
-      //      disambiguate — log and move on rather than guess, matching
-      //      the fail-safe intent of the ID-only matcher migration.
-      const hitsWithDate = hits.filter((h) => Number.isFinite(h.first_release_date));
-      if (hitsWithDate.length === 0) {
-        toLog.push(entry);
-        continue;
-      }
-      hitsWithDate.sort((a, b) => {
-        const d = (b.first_release_date ?? 0) - (a.first_release_date ?? 0);
-        if (d !== 0) return d;
-        // game_type 0 (main_game) wins over everything else as the safer
-        // default choice for a title lookup.
-        const aMain = a.game_type === 0 ? 0 : 1;
-        const bMain = b.game_type === 0 ? 0 : 1;
-        return aMain - bMain;
-      });
-      const pick = hitsWithDate[0];
-      const igdbId = Number(pick.id);
-      if (!Number.isFinite(igdbId)) {
-        toLog.push(entry);
-        continue;
-      }
-      const result = await importGameByIgdbId(db, igdbId);
-      if (!result.ok) {
-        console.error('[psn/sync-library] auto-import failed:', entry.name, result.error);
-        toLog.push(entry);
-        continue;
-      }
-      // Seed the mapping on the imported row. The unique index on games.
-      // psn_np_communication_id prevents two games from claiming the same
-      // npCommId; the `is null` guard prevents clobbering a mapping someone
-      // else wrote concurrently.
-      const { error: mapErr } = await (db as any)
-        .from('games')
-        .update({ psn_np_communication_id: entry.npCommId })
-        .eq('id', result.game.id)
-        .is('psn_np_communication_id', null);
-      if (mapErr) {
-        console.error('[psn/sync-library] auto-import mapping write error (non-fatal):',
-          JSON.stringify(mapErr));
-      }
-      if (!seenGameIds.has(result.game.id)) {
-        seenGameIds.add(result.game.id);
-        matches.push({
-          id: result.game.id,
-          psn_np_communication_id: entry.npCommId,
-        });
-      }
+      titles = await fetchAllTitles(authPayload, profileData.psn_account_id);
     } catch (e) {
-      console.error('[psn/sync-library] IGDB search error for', entry.name, e);
-      toLog.push(entry);
-    }
-  }
-
-  // Log the leftovers so Sam/Bill can see what the matcher + IGDB pass missed
-  // and manually import real games from an admin page. Fire-and-forget.
-  if (toLog.length > 0) {
-    (db as any).rpc('log_unmatched_psn_titles', {
-      np_comm_ids: toLog.map((e) => e.npCommId),
-      titles: toLog.map((e) => e.name),
-      platforms: toLog.map((e) => e.platform),
-    }).then(({ error }: any) => {
-      if (error) {
-        console.error('[psn/sync-library] log_unmatched_psn_titles error (non-fatal):',
-          JSON.stringify(error));
+      if (isPsnAuthExpired(e)) {
+        return json({
+          error: 'Your PlayStation connection expired. Reconnect by pasting a fresh NPSSO token.',
+          needsReconnect: true,
+        }, 401);
       }
-    });
-  }
-
-  if (matches.length === 0) {
-    await (db as any).from('profiles').update({ psn_synced_at: new Date().toISOString() }).eq('id', profile.id);
-    return json({ matched: 0, updated: 0, unmatched: titles.length, total: titles.length });
-  }
-
-  // Resolve matched ids to canonical rows — ownership + trophy progress belong
-  // on the main game, not the collapsed edition. Multiple editions collapsing
-  // to the same canonical fold into one row; keep the most-recently-played
-  // edition's PSN metadata (fallback: higher trophy progress %).
-  const matchedGameIds = matches.map((m) => m.id);
-  const canonicalOf = new Map<string, string>();
-  const canonChunks = await Promise.all(
-    chunk(matchedGameIds, IN_CHUNK).map((ids) =>
-      (db as any).from('games').select('id, canonical_game_id').in('id', ids),
-    ),
-  );
-  for (const { data: rows } of canonChunks) {
-    for (const r of ((rows ?? []) as any[])) {
-      canonicalOf.set(r.id, r.canonical_game_id ?? r.id);
+      console.error('[psn/sync-library] getUserTitles error:', e);
+      return json({ error: 'PlayStation is temporarily unavailable. Try again in a minute.' }, 502);
     }
-  }
 
-  // Match rows now carry npCommId directly (the DB match returns it; the IGDB
-  // import pass populates it from the collapsed entry), so the collapsed
-  // lookup moves from name → npCommId. Previously the title path produced
-  // rows keyed by display name, which required a lowercased-name map here.
-  const collapsedByNpCommId = new Map(collapsed.map((c) => [c.npCommId, c]));
+    const collapsed = collapseTitles(titles);
 
-  type AggRow = {
-    row: Record<string, unknown>;
-    _lastPlayedTs: number;
-    _bestProgress: number;
-  };
-  const perCanonical = new Map<string, AggRow>();
-  for (const match of matches) {
-    const psnEntry = collapsedByNpCommId.get(match.psn_np_communication_id);
-    if (!psnEntry) continue;
-    const canonicalId = canonicalOf.get(match.id) ?? match.id;
-    const playtime = playtimeByLowerName.get(psnEntry.name.toLowerCase()) ?? null;
-    const lastPlayedAt = playtime?.lastPlayed ?? psnEntry.lastUpdatedDateTime ?? null;
-    const row: Record<string, unknown> = {
-      psn_np_communication_id: psnEntry.npCommId,
-      psn_platform: psnEntry.platform,
-      psn_trophies_earned: psnEntry.earned,
-      psn_trophies_total: psnEntry.total,
-      psn_platinum_earned: psnEntry.hasPlatinum,
-      psn_progress: psnEntry.progress,
-      psn_playtime_minutes: playtime?.minutes ?? null,
-      psn_last_played_at: lastPlayedAt,
-      // Library rendering uses this edition's title/cover; the row still keys
-      // on the canonical id for review + aggregation.
-      psn_display_game_id: match.id,
+    // Playtime — PS4/PS5 recent-played list. Only populated for user-token
+    // auth (service token can't see playtime). Non-fatal on failure.
+    const playtimeByLowerName = new Map<string, { minutes: number; lastPlayed: string | null }>();
+    if (!useServiceAuth) {
+      try {
+        const recent = await fetchRecentPlayedGames(authPayload);
+        for (const r of recent) {
+          if (!r.name) continue;
+          const key = r.name.toLowerCase().trim();
+          const prev = playtimeByLowerName.get(key);
+          if (!prev || r.playDurationMinutes > prev.minutes) {
+            playtimeByLowerName.set(key, { minutes: r.playDurationMinutes, lastPlayed: r.lastPlayedDateTime });
+          }
+        }
+      } catch (e) {
+        console.error('[psn/sync-library] fetchRecentPlayedGames (non-fatal):', e);
+      }
+    }
+
+    // DB fast-path match — anything already seeded on games.psn_np_communication_id.
+    const matchBatches = await Promise.all(
+      chunk(collapsed, TITLE_CHUNK).map((entries) =>
+        (db as any).rpc('match_psn_games', {
+          psn_np_comm_ids: entries.map((e) => e.npCommId),
+        }),
+      ),
+    );
+    type MatchRow = { id: string; psn_np_communication_id: string };
+    const dbMatches: MatchRow[] = [];
+    const seenGameIds = new Set<string>();
+    for (const { data, error } of matchBatches) {
+      if (error) {
+        console.error('[psn/sync-library] match_psn_games error:', JSON.stringify(error));
+        return json({ error: 'Failed to match games.' }, 500);
+      }
+      for (const row of (data ?? []) as MatchRow[]) {
+        if (seenGameIds.has(row.id)) continue;
+        seenGameIds.add(row.id);
+        dbMatches.push(row);
+      }
+    }
+
+    // Write the DB-matched games to the library immediately so the user sees
+    // their library populate on the very first call, while the IGDB pass
+    // churns in the background across subsequent cursor calls.
+    const collapsedByNpCommId = new Map(collapsed.map((c) => [c.npCommId, c]));
+    const initialResolved: ResolvedMatch[] = [];
+    for (const m of dbMatches) {
+      const entry = collapsedByNpCommId.get(m.psn_np_communication_id);
+      if (entry) initialResolved.push({ entry, gameId: m.id });
+    }
+    try {
+      const { inserted, updated } = await writeMatchesToLibrary(
+        db,
+        profile.id,
+        initialResolved,
+        playtimeByLowerName,
+      );
+      initialMatchedThisCall = inserted;
+      initialUpdatedThisCall = updated;
+    } catch (e: any) {
+      return json({ error: e?.message || 'Failed to save game statuses.' }, 500);
+    }
+
+    // Build the unmatched snapshot, sorted by npCommId for stable cursoring.
+    const matchedIds = new Set(dbMatches.map((m) => m.psn_np_communication_id));
+    const unmatched = collapsed
+      .filter((c) => !matchedIds.has(c.npCommId))
+      .sort((a, b) => a.npCommId.localeCompare(b.npCommId));
+
+    const playtimeObject: Record<string, { minutes: number; lastPlayed: string | null }> = {};
+    for (const [k, v] of playtimeByLowerName) playtimeObject[k] = v;
+
+    snapshot = {
+      started_at: new Date().toISOString(),
+      unmatched,
+      playtime: playtimeObject,
+      total_titles: collapsed.length,
+      initial_matched: initialResolved.length,
     };
-    const lastPlayedTs = lastPlayedAt ? Date.parse(lastPlayedAt) : 0;
 
-    const existing = perCanonical.get(canonicalId);
-    const beats =
-      !existing ||
-      lastPlayedTs > existing._lastPlayedTs ||
-      (lastPlayedTs === existing._lastPlayedTs && psnEntry.progress > existing._bestProgress);
-    if (beats) {
-      perCanonical.set(canonicalId, {
-        row,
-        _lastPlayedTs: lastPlayedTs,
-        _bestProgress: psnEntry.progress,
-      });
+    await (db as any)
+      .from('profiles')
+      .update({ psn_library_sync_snapshot: snapshot })
+      .eq('id', profile.id);
+  }
+
+  // ─────────────────────────── IGDB batch pass ────────────────────────────────
+
+  const remainingUnmatched = cursor
+    ? snapshot.unmatched.filter((u) => u.npCommId > cursor)
+    : snapshot.unmatched;
+
+  // Rebuild the playtime map from the snapshot so writeMatchesToLibrary can
+  // apply playtime to newly-matched games in continuation calls.
+  const playtimeByLowerName = new Map<string, { minutes: number; lastPlayed: string | null }>();
+  for (const [k, v] of Object.entries(snapshot.playtime ?? {})) {
+    playtimeByLowerName.set(k, v);
+  }
+
+  let batchMatched = 0;
+  let batchUpdated = 0;
+  let batchUnmatched = 0;
+  let lastProcessedId = cursor ?? '';
+  let processedThisCall = 0;
+
+  if (remainingUnmatched.length > 0) {
+    // Multiquery batches of 10 — IGDB rate-limits at 4 req/s and each
+    // multiquery counts as one request regardless of sub-query count, so 10
+    // titles per HTTP is the sweet spot between rate-limit efficiency and
+    // import latency per batch.
+    outer: for (const batch of chunk(remainingUnmatched, MULTIQUERY_BATCH)) {
+      if (Date.now() - startedAt > TIME_BUDGET_MS) break;
+
+      const subs = batch.map((entry, i) => ({
+        name: `q${i}`,
+        body: buildIgdbSubquery(entry),
+      }));
+
+      let results: Map<string, any[]> | null = null;
+      try {
+        results = await igdbMultiQuery('games', subs);
+      } catch (e) {
+        console.error('[psn/sync-library] multiquery error:', e);
+      }
+
+      const batchResolved: ResolvedMatch[] = [];
+      for (let i = 0; i < batch.length; i++) {
+        if (Date.now() - startedAt > TIME_BUDGET_MS) {
+          // Partial batch — stop here but keep already-imported entries so
+          // the cursor advances to the last one we fully processed.
+          break outer;
+        }
+        const entry = batch[i];
+        const hits = results?.get(`q${i}`) ?? null;
+        const igdbId = hits ? pickIgdbId(hits) : null;
+        if (!igdbId) {
+          batchUnmatched++;
+          lastProcessedId = entry.npCommId;
+          processedThisCall++;
+          continue;
+        }
+        try {
+          const result = await importGameByIgdbId(db, igdbId);
+          if (!result.ok) {
+            console.error('[psn/sync-library] auto-import failed:', entry.name, result.error);
+            batchUnmatched++;
+            lastProcessedId = entry.npCommId;
+            processedThisCall++;
+            continue;
+          }
+          // Seed the npCommId mapping on games — the entire fleet benefits
+          // next time anyone's library contains this title. The `is null`
+          // guard + unique index on games.psn_np_communication_id prevents
+          // clobbering concurrent writes.
+          const { error: mapErr } = await (db as any)
+            .from('games')
+            .update({ psn_np_communication_id: entry.npCommId })
+            .eq('id', result.game.id)
+            .is('psn_np_communication_id', null);
+          if (mapErr) {
+            console.error('[psn/sync-library] mapping write (non-fatal):', JSON.stringify(mapErr));
+          }
+          batchResolved.push({ entry, gameId: result.game.id });
+        } catch (e) {
+          console.error('[psn/sync-library] import error for', entry.name, e);
+          batchUnmatched++;
+        }
+        lastProcessedId = entry.npCommId;
+        processedThisCall++;
+      }
+
+      if (batchResolved.length > 0) {
+        try {
+          const { inserted, updated } = await writeMatchesToLibrary(
+            db,
+            profile.id,
+            batchResolved,
+            playtimeByLowerName,
+          );
+          batchMatched += inserted;
+          batchUpdated += updated;
+        } catch (e: any) {
+          console.error('[psn/sync-library] library write error:', e);
+          // Budget exhausted via a failed write — bail; cursor isn't
+          // advanced past these entries so the next call retries them.
+          break;
+        }
+      }
     }
   }
 
-  // Existing user_game_status rows keyed by canonical — don't clobber manual
-  // statuses (playing/completed/dropped/etc.). Only new rows get status='owned';
-  // existing rows just get PSN metadata refreshed.
-  const canonicalIds = [...perCanonical.keys()];
-  const existingByGameId = new Map<string, string>();
-  const existingChunks = await Promise.all(
-    chunk(canonicalIds, IN_CHUNK).map((ids) =>
-      (db as any)
-        .from('user_game_status')
-        .select('game_id, status')
-        .eq('profile_id', profile.id)
-        .in('game_id', ids),
-    ),
-  );
-  for (const { data: rows } of existingChunks) {
-    for (const r of (rows ?? [])) existingByGameId.set(r.game_id, r.status);
+  const done = snapshot.unmatched.filter((u) => u.npCommId > lastProcessedId).length === 0;
+  const processedTotal = snapshot.unmatched.filter((u) => u.npCommId <= lastProcessedId).length;
+
+  if (done) {
+    await (db as any)
+      .from('profiles')
+      .update({
+        psn_synced_at: new Date().toISOString(),
+        psn_library_sync_cursor: null,
+        psn_library_sync_snapshot: null,
+      })
+      .eq('id', profile.id);
+  } else {
+    await (db as any)
+      .from('profiles')
+      .update({ psn_library_sync_cursor: { npCommId: lastProcessedId } })
+      .eq('id', profile.id);
   }
 
-  const toInsert: any[] = [];
-  const toUpdate: Array<{ game_id: string; row: Record<string, unknown> }> = [];
-
-  for (const [canonicalId, agg] of perCanonical) {
-    if (!existingByGameId.has(canonicalId)) {
-      toInsert.push({
-        profile_id: profile.id,
-        game_id: canonicalId,
-        status: 'owned',
-        is_owned: true,
-        ...agg.row,
-      });
-    } else {
-      toUpdate.push({ game_id: canonicalId, row: agg.row });
-    }
-  }
-
-  for (const batch of chunk(toInsert, WRITE_CHUNK)) {
-    const { error: insertError } = await (db as any).from('user_game_status').insert(batch);
-    if (insertError) {
-      console.error('[psn/sync-library] insert error:', JSON.stringify(insertError));
-      return json({ error: 'Failed to save game statuses.' }, 500);
-    }
-  }
-
-  // .update() is per-row here; the volume is bounded by matches count (usually
-  // < 1000), and there's no bulk RPC yet. If this becomes a hot spot we can
-  // add bulk_update_psn_progress like the Steam bulk-playtime RPC.
-  for (const { game_id, row } of toUpdate) {
-    const { error: updateError } = await (db as any)
-      .from('user_game_status')
-      .update(row)
-      .eq('profile_id', profile.id)
-      .eq('game_id', game_id);
-    if (updateError) {
-      console.error('[psn/sync-library] update error (non-fatal):', JSON.stringify(updateError));
-    }
-  }
-
-  await (db as any).from('profiles').update({ psn_synced_at: new Date().toISOString() }).eq('id', profile.id);
-
+  // Flatten the response: client runs one accumulator across cursor-continuation
+  // calls. matched/updated here are per-call deltas. total_unmatched_remaining
+  // powers a determinate progress bar.
   return json({
-    matched: toInsert.length,
-    updated: toUpdate.length,
-    unmatched: titles.length - matches.length,
-    total: titles.length,
+    matched: initialMatchedThisCall + batchMatched,
+    updated: initialUpdatedThisCall + batchUpdated,
+    unmatched_this_batch: batchUnmatched,
+    processed_this_call: processedThisCall,
+    unmatched_total: snapshot.unmatched.length,
+    unmatched_processed: processedTotal,
+    total: snapshot.total_titles,
+    initial_matched: snapshot.initial_matched,
+    done,
+    nextCursor: done ? null : lastProcessedId,
   });
 };

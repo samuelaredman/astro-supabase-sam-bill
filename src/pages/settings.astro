@@ -361,6 +361,10 @@ function getInitials(u: string) { return u.slice(0, 2).toUpperCase(); }
                 <button class="settings-save-btn" id="psnSyncBtn" onclick="psnSync()">Sync PlayStation library</button>
                 <span id="psnSyncMsg" style="font-size:12px;color:var(--text-secondary)"></span>
               </div>
+              <div id="psnSyncProgress" class="bl-progress" style="display:none;margin-top:10px">
+                <div class="bl-bar"><div class="bl-bar-fill" id="psnSyncBarFill"></div></div>
+                <div class="bl-progress-text" id="psnSyncProgressText"></div>
+              </div>
               <div id="psnSyncResults" class="steam-results" style="display:none"></div>
             </div>
 
@@ -1811,46 +1815,111 @@ async function psnSync() {
   const btn = document.getElementById('psnSyncBtn') as HTMLButtonElement | null;
   const msg = document.getElementById('psnSyncMsg');
   const results = document.getElementById('psnSyncResults');
-  if (!btn || !msg || !results) return;
+  const progressBox = document.getElementById('psnSyncProgress');
+  const barFill = document.getElementById('psnSyncBarFill') as HTMLElement | null;
+  const progressText = document.getElementById('psnSyncProgressText');
+  if (!btn || !msg || !results || !progressBox || !barFill || !progressText) return;
 
   btn.disabled = true;
   btn.textContent = 'Syncing…';
   msg.textContent = 'Fetching your PlayStation library…';
   (msg as HTMLElement).style.color = 'var(--text-secondary)';
   results.style.display = 'none';
+  progressBox.style.display = 'none';
+  barFill.style.width = '0%';
+
+  // Running totals accumulated across cursor-continuation calls. The server
+  // returns per-call deltas; the client is the only place that sees the
+  // whole picture, so we track totals here and render them live after each
+  // batch resolves.
+  let totalMatched = 0;
+  let totalUpdated = 0;
+  let totalUnmatched = 0;
+  let total = 0;
+  let initialMatched = 0;
+  let cursor: string | null = null;
 
   try {
-    const res = await fetch('/api/psn/sync-library', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-    const data = await res.json();
+    // Loop until the server returns done=true or we hit a safety cap.
+    // SAFETY_MAX protects against a server bug that could return
+    // done=false with a non-advancing cursor — 400 cycles is plenty for a
+    // 10,000-title library at 20-30 per batch, which exceeds any realistic
+    // PSN library.
+    const SAFETY_MAX = 400;
+    for (let i = 0; i < SAFETY_MAX; i++) {
+      const payload: Record<string, unknown> = {};
+      if (cursor) payload.cursor = cursor;
 
-    if (!res.ok) {
-      msg.textContent = data.error ?? 'Something went wrong.';
-      (msg as HTMLElement).style.color = '#f87171';
-      if (data.needsReconnect) {
-        setTimeout(() => { window.location.href = '/settings?psn=expired#psn'; }, 1500);
+      const res = await fetch('/api/psn/sync-library', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        msg.textContent = data.error ?? 'Something went wrong.';
+        (msg as HTMLElement).style.color = '#f87171';
+        if (data.needsReconnect) {
+          setTimeout(() => { window.location.href = '/settings?psn=expired#psn'; }, 1500);
+        }
+        progressBox.style.display = 'none';
+        return;
       }
-    } else {
-      msg.textContent = '';
-      results.style.display = 'block';
-      // Each sync processes a bounded batch through IGDB for first-time
-      // matches; unresolved titles aren't missing from Chekpoint, they're
-      // queued for the next pass. The "click Sync again" nudge replaces the
-      // old "X not yet in library" copy that read as a Chekpoint coverage
-      // problem instead of a batch-complete-click-again cue.
-      const stillToGo = data.unmatched > 0;
-      results.innerHTML = `
-        <strong>${stillToGo ? 'Batch imported' : 'Sync complete'}</strong><br>
-        ${data.matched} games added as Owned &nbsp;·&nbsp;
-        ${data.updated} entries refreshed${stillToGo ? ` &nbsp;·&nbsp; ${data.unmatched} still importing` : ''}
-        ${stillToGo
-          ? '<br><span style="color:var(--accent);font-size:12px;font-weight:600">Click Sync again to continue →</span>'
-          : ''}
-        <br><span style="color:var(--text-tertiary);font-size:11px">${data.total} total games in your PlayStation library</span>
-      `;
+
+      totalMatched += Number(data.matched ?? 0);
+      totalUpdated += Number(data.updated ?? 0);
+      totalUnmatched += Number(data.unmatched_this_batch ?? 0);
+      if (Number.isFinite(Number(data.total))) total = Number(data.total);
+      if (Number.isFinite(Number(data.initial_matched))) initialMatched = Number(data.initial_matched);
+
+      // Progress bar: how far through the unmatched queue we are. When
+      // unmatched_total is 0 (all titles hit the DB fast-path), skip the
+      // bar entirely — there's no work to show a bar against.
+      const unmatchedTotal = Number(data.unmatched_total ?? 0);
+      const processed = Number(data.unmatched_processed ?? 0);
+      if (unmatchedTotal > 0) {
+        progressBox.style.display = 'block';
+        const pct = Math.min(100, Math.max(0, Math.round((processed / unmatchedTotal) * 100)));
+        barFill.style.width = pct + '%';
+        progressText.textContent = `Matching library… ${processed.toLocaleString()} / ${unmatchedTotal.toLocaleString()} (${pct}%)`;
+      }
+      msg.textContent = `Imported ${totalMatched.toLocaleString()} so far…`;
+
+      if (data.done) {
+        progressBox.style.display = 'none';
+        msg.textContent = '';
+        results.style.display = 'block';
+        const added = totalMatched;
+        const refreshed = totalUpdated;
+        const unresolved = totalUnmatched;
+        results.innerHTML = `
+          <strong>Sync complete</strong><br>
+          ${added.toLocaleString()} games added as Owned &nbsp;·&nbsp;
+          ${refreshed.toLocaleString()} entries refreshed${unresolved > 0 ? ` &nbsp;·&nbsp; ${unresolved.toLocaleString()} couldn't be matched` : ''}
+          <br><span style="color:var(--text-tertiary);font-size:11px">${total.toLocaleString()} total games in your PlayStation library${initialMatched > 0 ? ` · ${initialMatched.toLocaleString()} via instant match` : ''}</span>
+        `;
+        return;
+      }
+
+      cursor = data.nextCursor ?? null;
+      if (!cursor) {
+        // Belt-and-suspenders: server said not done but gave no cursor.
+        // Surface as an error rather than loop forever.
+        msg.textContent = 'Sync stalled unexpectedly — please try again.';
+        (msg as HTMLElement).style.color = '#f87171';
+        progressBox.style.display = 'none';
+        return;
+      }
     }
+
+    msg.textContent = 'Sync hit the safety cap — reload and click Sync again to continue.';
+    (msg as HTMLElement).style.color = '#f87171';
+    progressBox.style.display = 'none';
   } catch (e) {
     msg.textContent = 'Could not reach server. Please try again.';
     (msg as HTMLElement).style.color = '#f87171';
+    progressBox.style.display = 'none';
   } finally {
     btn.disabled = false;
     btn.textContent = 'Sync PlayStation library';

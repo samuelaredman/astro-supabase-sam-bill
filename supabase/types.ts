@@ -3055,6 +3055,8 @@ export type Database = {
           onboarding_completed_at: string | null
           psn_access_token: string | null
           psn_account_id: string | null
+          psn_library_sync_cursor: Json | null
+          psn_library_sync_snapshot: Json | null
           psn_online_id: string | null
           psn_refresh_token: string | null
           psn_sync_cursor: Json | null
@@ -3130,6 +3132,8 @@ export type Database = {
           onboarding_completed_at?: string | null
           psn_access_token?: string | null
           psn_account_id?: string | null
+          psn_library_sync_cursor?: Json | null
+          psn_library_sync_snapshot?: Json | null
           psn_online_id?: string | null
           psn_refresh_token?: string | null
           psn_sync_cursor?: Json | null
@@ -3205,6 +3209,8 @@ export type Database = {
           onboarding_completed_at?: string | null
           psn_access_token?: string | null
           psn_account_id?: string | null
+          psn_library_sync_cursor?: Json | null
+          psn_library_sync_snapshot?: Json | null
           psn_online_id?: string | null
           psn_refresh_token?: string | null
           psn_sync_cursor?: Json | null
