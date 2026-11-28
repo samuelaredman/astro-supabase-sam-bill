@@ -53,19 +53,17 @@ export const GET: APIRoute = async ({ url }) => {
   const filtered = !!(q || days > 0 || platform || trophy);
 
   // Feed page. Reads from the user_unlocks view, which unions Steam
-  // achievements and PSN trophies into one stream. Column aliases in the view
-  // match the shape the client already renders — display_name, global_percent,
-  // unlock_time, game_title — so only the platform tagging (source,
-  // trophy_type, platform_label) is new. count:exact only when filtered —
-  // otherwise the profile-wide unlock total already came from
-  // get_achievement_stats() (Steam-only right now; trophies are counted
-  // separately in the stream but the top-line stat still reflects Steam
-  // achievements only).
+  // achievements, PSN trophies, and Xbox achievements into one stream.
+  // Always request `count: 'exact'` — get_achievement_stats() counts only
+  // Steam achievements, so trusting that value for the profile-wide total
+  // silently hides PSN/Xbox unlocks from the empty-state check and
+  // pagination math. Postgres count is fast against a view of indexed
+  // profile_id columns anyway.
   let feed = db
     .from("user_unlocks")
     .select(
       "source, display_name, description, icon_url, global_percent, unlock_time, external_id, api_name, game_title, trophy_type, platform_label",
-      filtered ? { count: "exact" } : undefined,
+      { count: "exact" },
     )
     .eq("profile_id", profile.id);
 
@@ -157,12 +155,16 @@ export const GET: APIRoute = async ({ url }) => {
       perfect_games: 0,
       avg_completion: 0,
     };
+    // `unlocked` is the all-platform total from user_unlocks (via `count`
+    // above), not the Steam-only RPC value. perfect_games and avg_completion
+    // still come from the RPC — those are Steam-only summary stats, so a
+    // PSN/Xbox-only user will see 0 for them until the RPC is extended.
     stats = {
-      unlocked: Number(s.unlocked_count ?? 0),
+      unlocked: count ?? Number(s.unlocked_count ?? 0),
       perfectGames: Number(s.perfect_games ?? 0),
       avgCompletion: Number(s.avg_completion ?? 0),
     };
-    total = filtered ? count ?? 0 : stats.unlocked;
+    total = count ?? 0;
 
     // Reduce (source, platform_label) pairs to the label the client shows.
     // Xbox rows with a NULL platform_label — synced before xbox_platform
