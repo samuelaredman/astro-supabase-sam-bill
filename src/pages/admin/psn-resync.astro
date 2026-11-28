@@ -1,0 +1,285 @@
+---
+export const prerender = false;
+import Layout from "../../components/Layout.astro";
+import { resolveSiteAdminProfile } from "../../utils/api";
+import { getSupabaseAdmin } from "../../utils/database";
+import "../../styles/admin.css";
+
+const profile = await resolveSiteAdminProfile(Astro);
+if (!profile) return Astro.redirect('/404');
+
+// Fetch the full PSN-connected user list server-side so the page renders with
+// the table populated immediately. Client-side iteration still uses the same
+// list for per-user status updates.
+const db = getSupabaseAdmin() as any;
+const { data: users } = await db
+  .from('profiles')
+  .select('id, username, psn_online_id, psn_synced_at, psn_trophies_synced_at')
+  .not('psn_account_id', 'is', null)
+  .order('username', { ascending: true });
+
+const rows = (users ?? []) as Array<{
+  id: string;
+  username: string;
+  psn_online_id: string | null;
+  psn_synced_at: string | null;
+  psn_trophies_synced_at: string | null;
+}>;
+
+function fmt(ts: string | null): string {
+  if (!ts) return 'never';
+  const d = new Date(ts);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+---
+
+<Layout title="PSN Resync — Admin" isLoggedIn={true} currentProfile={profile} activeNav="admin" variant="two-col">
+  <main class="feed admin-main">
+    <div class="admin-content">
+      <a href="/admin" class="admin-back-link">← Admin</a>
+
+      <header class="admin-page-header">
+        <div>
+          <h1 class="admin-page-title">PSN Resync</h1>
+          <p class="admin-page-subtitle">
+            Re-run library + trophy sync for every PSN-connected user. Uses admin impersonation
+            against the normal sync endpoints, so the new matcher + bulk-write RPCs apply to
+            everyone — including profiles that synced before the fixes landed. Runs serially
+            with a short delay between users to stay inside Sony's rate limits.
+          </p>
+        </div>
+        <span class="admin-chip admin-chip-accent">{rows.length} user{rows.length === 1 ? '' : 's'}</span>
+      </header>
+
+      <div class="psn-resync-actions">
+        <button class="admin-btn admin-btn-primary" id="resyncLibrariesBtn" disabled={rows.length === 0}>
+          Resync All Libraries
+        </button>
+        <button class="admin-btn admin-btn-primary" id="resyncTrophiesBtn" disabled={rows.length === 0}>
+          Resync All Achievements
+        </button>
+        <button class="admin-btn admin-btn-ghost" id="stopBtn" style="display:none">Stop</button>
+        <span class="psn-resync-overall" id="resyncOverall"></span>
+      </div>
+
+      {rows.length === 0 && <p class="admin-empty">No PSN-connected users yet.</p>}
+
+      {rows.length > 0 && (
+        <div class="admin-list">
+          {rows.map((row) => (
+            <article class="admin-row psn-resync-row" data-profile-id={row.id}>
+              <div class="admin-row-head">
+                <div class="admin-row-title">
+                  @{row.username}
+                  {row.psn_online_id && <span class="psn-resync-online"> · {row.psn_online_id}</span>}
+                </div>
+                <div class="admin-row-meta">
+                  Library {fmt(row.psn_synced_at)} · Trophies {fmt(row.psn_trophies_synced_at)}
+                </div>
+              </div>
+              <div class="admin-row-actions">
+                <span class="psn-resync-status" data-status="idle">Idle</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  </main>
+
+  <style is:global>
+    .psn-resync-actions {
+      display: flex; align-items: center; gap: 12px;
+      flex-wrap: wrap;
+      margin: 16px 0 20px;
+    }
+    .psn-resync-overall {
+      font-size: 13px; color: var(--text-secondary);
+    }
+    .psn-resync-row .admin-row-actions { align-items: center; }
+    .psn-resync-online {
+      font-size: 12px; color: var(--text-tertiary); font-weight: 400;
+    }
+    .psn-resync-status {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--bg-hover);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+    .psn-resync-status[data-status="running"] {
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      color: var(--accent);
+      border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    }
+    .psn-resync-status[data-status="done"] {
+      background: rgba(74, 222, 128, 0.12);
+      color: #4ade80;
+      border-color: rgba(74, 222, 128, 0.35);
+    }
+    .psn-resync-status[data-status="error"] {
+      background: rgba(239, 68, 68, 0.1);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+    .psn-resync-status[data-status="skipped"] {
+      background: var(--bg-hover);
+      color: var(--text-tertiary);
+      border-color: var(--border);
+    }
+  </style>
+
+  <script is:inline>
+    (function () {
+      var libBtn = document.getElementById('resyncLibrariesBtn');
+      var tropBtn = document.getElementById('resyncTrophiesBtn');
+      var stopBtn = document.getElementById('stopBtn');
+      var overall = document.getElementById('resyncOverall');
+      if (!libBtn || !tropBtn || !stopBtn || !overall) return;
+
+      // Delay between per-user requests to keep Sony's API happy. Each user's
+      // own sync may loop (library pagination, trophy pagination with cursor);
+      // this delay is only between user transitions, not internal iterations.
+      var DELAY_BETWEEN_USERS_MS = 1000;
+
+      var running = false;
+      var cancel = false;
+
+      function setStatus(profileId, status, text) {
+        var row = document.querySelector('.psn-resync-row[data-profile-id="' + profileId + '"]');
+        if (!row) return;
+        var el = row.querySelector('.psn-resync-status');
+        if (!el) return;
+        el.setAttribute('data-status', status);
+        el.textContent = text;
+      }
+
+      function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+      // Drive one user's library sync through the auto-loop the regular
+      // sync-library handler expects: pass admin_target_profile_id on every
+      // call, accumulate the exclude list, keep going until can_continue
+      // becomes false or we see no progress for a few iterations.
+      async function resyncOneLibrary(profileId) {
+        var tried = [];
+        var lastUnmatched = null;
+        var noProgressStreak = 0;
+        var CAP = 25;
+        for (var i = 0; i < CAP; i++) {
+          if (cancel) return { ok: false, reason: 'cancelled' };
+          var body = { admin_target_profile_id: profileId };
+          if (i > 0) { body.continuation = true; body.exclude = tried; }
+          var res;
+          try {
+            res = await fetch('/api/psn/sync-library', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+          } catch (e) {
+            return { ok: false, reason: 'network' };
+          }
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok) return { ok: false, reason: data.error || 'HTTP ' + res.status };
+
+          if (Array.isArray(data.tried_npcommids)) {
+            for (var j = 0; j < data.tried_npcommids.length; j++) {
+              if (typeof data.tried_npcommids[j] === 'string') tried.push(data.tried_npcommids[j]);
+            }
+          }
+          var unmatched = Number(data.unmatched || 0);
+          var madeProgress =
+            Number(data.matched || 0) > 0 ||
+            Number(data.updated || 0) > 0 ||
+            (lastUnmatched !== null && unmatched < lastUnmatched);
+          if (!madeProgress) noProgressStreak++; else noProgressStreak = 0;
+          lastUnmatched = unmatched;
+          if (unmatched === 0) return { ok: true, matched: Number(data.matched || 0) + Number(data.updated || 0), unmatched: 0 };
+          if (data.can_continue === false) return { ok: true, matched: Number(data.matched || 0) + Number(data.updated || 0), unmatched: unmatched };
+          if (noProgressStreak >= 3) return { ok: true, matched: Number(data.matched || 0) + Number(data.updated || 0), unmatched: unmatched };
+        }
+        return { ok: true, matched: 0, unmatched: lastUnmatched || 0 };
+      }
+
+      // Drive one user's trophy sync. sync-trophies uses its own cursor on
+      // psn_sync_cursor — each call processes ~25 titles and returns done=false
+      // with a nextCursor until the queue drains.
+      async function resyncOneTrophies(profileId) {
+        var cursor = null;
+        var CAP = 100;
+        for (var i = 0; i < CAP; i++) {
+          if (cancel) return { ok: false, reason: 'cancelled' };
+          var body = { admin_target_profile_id: profileId };
+          if (cursor) body.cursor = cursor;
+          var res;
+          try {
+            res = await fetch('/api/psn/sync-trophies', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+          } catch (e) {
+            return { ok: false, reason: 'network' };
+          }
+          var data = await res.json().catch(function () { return {}; });
+          if (!res.ok) return { ok: false, reason: data.error || 'HTTP ' + res.status };
+          if (data.done === true) return { ok: true, processed: Number(data.processed || 0), total: Number(data.total || 0) };
+          cursor = data.nextCursor || null;
+          if (!cursor) return { ok: true, processed: Number(data.processed || 0), total: Number(data.total || 0) };
+        }
+        return { ok: true, processed: 0, total: 0 };
+      }
+
+      async function runAll(kind) {
+        if (running) return;
+        running = true; cancel = false;
+        libBtn.disabled = true; tropBtn.disabled = true;
+        stopBtn.style.display = '';
+
+        var rows = document.querySelectorAll('.psn-resync-row');
+        var profileIds = [];
+        for (var i = 0; i < rows.length; i++) {
+          profileIds.push(rows[i].getAttribute('data-profile-id'));
+        }
+
+        var okCount = 0, errCount = 0;
+
+        for (var i = 0; i < profileIds.length; i++) {
+          if (cancel) break;
+          var pid = profileIds[i];
+          overall.textContent = (i + 1) + ' / ' + profileIds.length + ' · ' + okCount + ' ok · ' + errCount + ' error';
+          setStatus(pid, 'running', kind === 'lib' ? 'Syncing library…' : 'Syncing trophies…');
+
+          var result = kind === 'lib'
+            ? await resyncOneLibrary(pid)
+            : await resyncOneTrophies(pid);
+
+          if (result.ok) {
+            okCount++;
+            var detail = kind === 'lib'
+              ? ((result.matched || 0) + ' matched' + (result.unmatched ? ' · ' + result.unmatched + ' unmatched' : ''))
+              : ((result.processed || 0) + ' / ' + (result.total || 0) + ' titles');
+            setStatus(pid, 'done', 'Done · ' + detail);
+          } else {
+            errCount++;
+            setStatus(pid, result.reason === 'cancelled' ? 'skipped' : 'error', result.reason || 'Failed');
+          }
+
+          if (i < profileIds.length - 1 && !cancel) await sleep(DELAY_BETWEEN_USERS_MS);
+        }
+
+        overall.textContent = 'Finished · ' + okCount + ' ok · ' + errCount + ' error' + (cancel ? ' · stopped early' : '');
+        running = false; cancel = false;
+        libBtn.disabled = false; tropBtn.disabled = false;
+        stopBtn.style.display = 'none';
+      }
+
+      libBtn.addEventListener('click', function () { runAll('lib'); });
+      tropBtn.addEventListener('click', function () { runAll('trop'); });
+      stopBtn.addEventListener('click', function () { cancel = true; });
+    })();
+  </script>
+</Layout>

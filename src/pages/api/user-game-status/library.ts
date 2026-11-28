@@ -15,12 +15,15 @@ export const GET: APIRoute = async (context) => {
   const username   = p.get('username');
   const page       = Math.max(1, parseInt(p.get('page') || '1'));
   const filter     = p.get('filter') || 'all';
-  const sort       = p.get('sort')   || 'alpha';
+  const sort       = p.get('sort')   || 'completion';
   const search     = (p.get('search') || '').trim();
   const genre      = (p.get('genre') || '').trim();
   const platform   = (p.get('platform') || '').trim();
   const dev        = (p.get('dev') || '').trim();
   const showHidden = p.get('hidden') === 'true';
+  const reviewedParam = p.get('reviewed');
+  const reviewed: 'reviewed' | 'unreviewed' | undefined =
+    reviewedParam === 'reviewed' || reviewedParam === 'unreviewed' ? reviewedParam : undefined;
 
   if (!username) return json({ error: 'username required' }, 400);
 
@@ -74,7 +77,7 @@ export const GET: APIRoute = async (context) => {
   if (p.get('idsOnly') === 'true') {
     return await idsOnly(db, profile.id, {
       isOwn, canSeeWantToPlay, canSeeDropped,
-      filter, sort, search, genre, platform, dev, showHidden,
+      filter, sort, search, genre, platform, dev, showHidden, reviewed,
     });
   }
 
@@ -83,7 +86,7 @@ export const GET: APIRoute = async (context) => {
   if (p.get('letterMap') === 'true') {
     return await letterMap(db, profile.id, {
       isOwn, canSeeWantToPlay, canSeeDropped,
-      filter, sort, search, genre, platform, dev, showHidden,
+      filter, sort, search, genre, platform, dev, showHidden, reviewed,
     });
   }
 
@@ -93,7 +96,7 @@ export const GET: APIRoute = async (context) => {
       isOwn,
       canSeeWantToPlay,
       canSeeDropped,
-      page, filter, sort, search, genre, platform, dev, showHidden,
+      page, filter, sort, search, genre, platform, dev, showHidden, reviewed,
     });
     return json(result);
   } catch (e) {
@@ -120,9 +123,10 @@ type FilterParams = {
   platform: string;
   dev: string;
   showHidden: boolean;
+  reviewed?: 'reviewed' | 'unreviewed';
 };
 
-function buildFilteredQuery(
+async function buildFilteredQuery(
   db: any,
   profileId: string,
   gamesSelect: string,
@@ -130,7 +134,7 @@ function buildFilteredQuery(
   base: 'games' | 'ugs',
   p: FilterParams,
 ) {
-  const { isOwn, canSeeWantToPlay, canSeeDropped, filter, search, genre, platform, dev, showHidden } = p;
+  const { isOwn, canSeeWantToPlay, canSeeDropped, filter, search, genre, platform, dev, showHidden, reviewed } = p;
   // Platform filter is a source-column check on user_game_status
   // (applyPlatformFilter) rather than an IGDB game_platforms join — same
   // rule as queryLibraryPage's own builder.
@@ -186,6 +190,32 @@ function buildFilteredQuery(
     qb = qb.eq(c('status'), filter);
   }
   if (search) qb = qb.ilike(base === 'ugs' ? 'games.title' : 'title', `%${search}%`);
+
+  // Reviewed-status filter — mirrors the main queryLibraryPage. Fetches the
+  // user's published-review game ids and either .in's or .not.in's them.
+  if (reviewed === 'reviewed' || reviewed === 'unreviewed') {
+    const { data: revRows } = await db
+      .from('reviews')
+      .select('game_id')
+      .eq('profile_id', profileId)
+      .eq('status', 'published');
+    const ids = Array.from(new Set(
+      ((revRows ?? []) as Array<{ game_id: string | null }>)
+        .map((r) => r.game_id)
+        .filter((v): v is string => typeof v === 'string')
+    ));
+    const idCol = base === 'ugs' ? 'game_id' : 'id';
+    if (reviewed === 'reviewed') {
+      if (ids.length === 0) {
+        qb = qb.eq(idCol, '00000000-0000-0000-0000-000000000000');
+      } else {
+        qb = qb.in(idCol, ids);
+      }
+    } else if (reviewed === 'unreviewed' && ids.length > 0) {
+      qb = qb.not(idCol, 'in', `(${ids.join(',')})`);
+    }
+  }
+
   return qb;
 }
 
@@ -193,8 +223,8 @@ async function idsOnly(db: any, profileId: string, p: FilterParams) {
   const CHUNK = 1000;
   const ids: string[] = [];
   for (let start = 0; ; start += CHUNK) {
-    const { data: idRows, error: idErr } = await buildFilteredQuery(db, profileId, 'id', 'profile_id', 'games', p)
-      .range(start, start + CHUNK - 1);
+    const qb = await buildFilteredQuery(db, profileId, 'id', 'profile_id', 'games', p);
+    const { data: idRows, error: idErr } = await qb.range(start, start + CHUNK - 1);
     if (idErr) {
       console.error('[library API] idsOnly error:', JSON.stringify(idErr));
       return json({ error: 'Failed to load library' }, 500);
@@ -211,7 +241,8 @@ async function letterMap(db: any, profileId: string, p: FilterParams) {
   const CHUNK = 1000;
   let idx = 0;
   for (let start = 0; ; start += CHUNK) {
-    const { data: rows, error: lmErr } = await buildFilteredQuery(db, profileId, 'id, title', 'profile_id', 'games', p)
+    const qb = await buildFilteredQuery(db, profileId, 'id, title', 'profile_id', 'games', p);
+    const { data: rows, error: lmErr } = await qb
       .order('title', { ascending: true })
       .range(start, start + CHUNK - 1);
     if (lmErr) {
