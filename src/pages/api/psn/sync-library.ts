@@ -21,9 +21,12 @@ const TITLE_CHUNK = 200;
 // IGDB fallback cap. The new match_psn_games (migration 20261127000001)
 // resolves the vast majority of titles against the local games table using
 // title + platform + release-date — IGDB is only needed for the thin tail
-// of truly-new titles. A modest cap keeps us inside Netlify's 10s budget
-// without needing cursor / snapshot pagination.
-const IGDB_FALLBACK_CAP = 20;
+// of truly-new titles. Capped at 10 to keep this part of the sync inside
+// a ~5-8s slice of Netlify's 10s budget; stragglers past the cap are logged
+// to psn_unmatched_titles and picked up by future users' syncs (the first
+// user to resolve a title globally seeds games.psn_np_communication_id for
+// everyone after).
+const IGDB_FALLBACK_CAP = 10;
 
 // Platform priority when the same game ships on multiple PSN platforms. PS5
 // wins over PS4 wins over PS3, matching what a returning player probably
@@ -349,17 +352,15 @@ export const POST: APIRoute = async (context) => {
   // Writing games.psn_np_communication_id for each newly-resolved mapping
   // means the next user with the same title hits the ID fast-path — this
   // is the per-fleet seeding mechanism that makes the sync faster the more
-  // people use it. Unique partial index enforces one npCommId per game.
+  // people use it. One bulk RPC instead of per-row UPDATEs (which blew
+  // Netlify's 10s budget at ~3,000 title matches). The RPC's guard keeps
+  // it safe against concurrent backfills from other users.
   const backfills = resolved.filter((r) => r.backfillMapping);
-  for (const { entry, gameId } of backfills) {
-    const { error } = await (db as any)
-      .from('games')
-      .update({ psn_np_communication_id: entry.npCommId })
-      .eq('id', gameId)
-      .is('psn_np_communication_id', null);
+  if (backfills.length > 0) {
+    const payload = backfills.map((b) => ({ game_id: b.gameId, np_comm_id: b.entry.npCommId }));
+    const { error } = await (db as any).rpc('bulk_set_games_psn_mapping', { p_updates: payload });
     if (error) {
-      // Race with another user's backfill, or constraint conflict. Non-fatal.
-      console.error('[psn/sync-library] mapping backfill (non-fatal):', entry.name, JSON.stringify(error));
+      console.error('[psn/sync-library] bulk_set_games_psn_mapping (non-fatal):', JSON.stringify(error));
     }
   }
 
@@ -462,14 +463,18 @@ export const POST: APIRoute = async (context) => {
     }
   }
 
-  for (const { game_id, row } of toUpdate) {
-    const { error } = await (db as any)
-      .from('user_game_status')
-      .update(row)
-      .eq('profile_id', profile.id)
-      .eq('game_id', game_id);
+  // Bulk-update existing rows via the RPC (migration 20261127000002). One
+  // SQL statement per batch instead of one round-trip per row — the per-row
+  // loop was the dominant time cost for large libraries and the reason big
+  // syncs were timing out at Netlify's 10s budget.
+  for (const batch of chunk(toUpdate, WRITE_CHUNK)) {
+    const payload = batch.map(({ game_id, row }) => ({ game_id, ...row }));
+    const { error } = await (db as any).rpc('bulk_update_psn_library', {
+      p_profile_id: profile.id,
+      p_updates: payload,
+    });
     if (error) {
-      console.error('[psn/sync-library] update error (non-fatal):', JSON.stringify(error));
+      console.error('[psn/sync-library] bulk_update_psn_library (non-fatal):', JSON.stringify(error));
     }
   }
 
