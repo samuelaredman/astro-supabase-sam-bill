@@ -27,6 +27,45 @@ async function getAccessToken(): Promise<string> {
   return cachedToken as string;
 }
 
+/**
+ * Batched IGDB search. Sends up to 10 named sub-queries in a single HTTP
+ * request against /multiquery. Returns a Map keyed by each sub-query name,
+ * holding the array of rows IGDB returned for that sub-query.
+ *
+ * Why this exists: IGDB rate-limits at 4 requests/second regardless of how
+ * many sub-queries are inside each. Firing N serial `igdbFetch` calls for N
+ * titles burns N rate-limit slots; one multiquery with N sub-queries burns 1.
+ * For the PSN sync-library's IGDB auto-import pass, this moves the throughput
+ * ceiling from ~4 titles/sec to ~40 titles/sec.
+ *
+ * Caller builds each sub-query body (same apicalypse syntax as a normal
+ * `igdbFetch`), passes `endpoint` (usually `'games'`), and gets rows back
+ * keyed by whatever `name` they used. Null → whole request failed; a Map
+ * with a missing key for one sub-query means that sub-query had no rows.
+ */
+export async function igdbMultiQuery(
+  endpoint: string,
+  queries: Array<{ name: string; body: string }>,
+  opts?: { timeoutMs?: number },
+): Promise<Map<string, any[]> | null> {
+  if (queries.length === 0) return new Map();
+  if (queries.length > 10) {
+    throw new Error(`igdbMultiQuery: max 10 sub-queries per call, got ${queries.length}`);
+  }
+  const compound = queries
+    .map((q) => `query ${endpoint} "${q.name.replace(/"/g, '\\"')}" {\n${q.body}\n};`)
+    .join('\n');
+  const result = await igdbFetch('multiquery', compound, opts);
+  if (!Array.isArray(result)) return null;
+  const out = new Map<string, any[]>();
+  for (const bucket of result) {
+    if (bucket && typeof bucket.name === 'string' && Array.isArray(bucket.result)) {
+      out.set(bucket.name, bucket.result);
+    }
+  }
+  return out;
+}
+
 export async function igdbFetch(endpoint: string, query: string, opts?: { timeoutMs?: number }) {
   const clientId = import.meta.env.IGDB_CLIENT_ID || process.env.IGDB_CLIENT_ID;
   const token = await getAccessToken();
