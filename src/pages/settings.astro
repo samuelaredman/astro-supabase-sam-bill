@@ -1837,18 +1837,23 @@ async function psnSync() {
   let totalUnmatched = 0;
   let total = 0;
   let initialMatched = 0;
+  // `null` = first call, no cursor yet. Any string (including empty, which
+  // means "start of snapshot's unmatched queue") is a valid continuation.
+  // Treating empty-string as "no cursor" caused a stall on first call for
+  // large libraries where the snapshot build consumed the full time budget.
   let cursor: string | null = null;
+  let consecutiveNoProgress = 0;
 
   try {
     // Loop until the server returns done=true or we hit a safety cap.
-    // SAFETY_MAX protects against a server bug that could return
-    // done=false with a non-advancing cursor — 400 cycles is plenty for a
-    // 10,000-title library at 20-30 per batch, which exceeds any realistic
-    // PSN library.
     const SAFETY_MAX = 400;
     for (let i = 0; i < SAFETY_MAX; i++) {
       const payload: Record<string, unknown> = {};
-      if (cursor) payload.cursor = cursor;
+      // Pass the cursor on any non-first call, even if it's the empty
+      // string. The server distinguishes "key present but empty" (continue
+      // from start of snapshot) from "key absent" (no state in body, fall
+      // back to persisted cursor on the profile).
+      if (cursor !== null) payload.cursor = cursor;
 
       const res = await fetch('/api/psn/sync-library', {
         method: 'POST',
@@ -1902,15 +1907,35 @@ async function psnSync() {
         return;
       }
 
-      cursor = data.nextCursor ?? null;
-      if (!cursor) {
-        // Belt-and-suspenders: server said not done but gave no cursor.
-        // Surface as an error rather than loop forever.
+      const nextCursor = data.nextCursor;
+      if (typeof nextCursor !== 'string') {
+        // True stall: not done, no cursor. Different from an empty-string
+        // cursor, which is a valid "start of queue" marker.
         msg.textContent = 'Sync stalled unexpectedly — please try again.';
         (msg as HTMLElement).style.color = '#f87171';
         progressBox.style.display = 'none';
         return;
       }
+
+      // Detect "no forward progress" loops. The common legit case of this
+      // is the first call after a snapshot build that consumed the whole
+      // time budget → zero IGDB entries processed, cursor stays empty.
+      // A second call should have a fresh budget and make progress. If
+      // three in a row don't, something's structurally broken (e.g. every
+      // batch's multiquery is failing) — bail rather than spinning.
+      const madeProgress = Number(data.processed_this_call ?? 0) > 0;
+      if (!madeProgress && nextCursor === cursor) {
+        consecutiveNoProgress++;
+        if (consecutiveNoProgress >= 3) {
+          msg.textContent = 'Sync isn\'t making progress — please reload and try again.';
+          (msg as HTMLElement).style.color = '#f87171';
+          progressBox.style.display = 'none';
+          return;
+        }
+      } else {
+        consecutiveNoProgress = 0;
+      }
+      cursor = nextCursor;
     }
 
     msg.textContent = 'Sync hit the safety cap — reload and click Sync again to continue.';

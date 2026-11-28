@@ -302,7 +302,15 @@ export const POST: APIRoute = async (context) => {
   const { profile, db } = auth;
 
   const body = await context.request.json().catch(() => ({} as any));
-  const hasCursor = typeof body.cursor === 'string' && body.cursor.length > 0;
+  // Cursor is "truthy string" OR empty string on continuation. Previously we
+  // treated the empty string as "no cursor" via a string.length > 0 check,
+  // which caused a stall on the first call for large libraries: when the
+  // snapshot build consumed the full time budget and no IGDB entries were
+  // processed, we returned nextCursor='' legitimately, but the next call
+  // read it as falsy → fresh start → rebuilt the snapshot from scratch and
+  // looped. Distinguishing "no cursor key" vs "empty-string cursor" fixes
+  // this.
+  const bodyHasCursor = typeof body.cursor === 'string';
   const force = body.force === true;
 
   const { data: profileData } = await (db as any)
@@ -322,13 +330,31 @@ export const POST: APIRoute = async (context) => {
   // username-only users (public data only), user tokens for NPSSO users.
   const useServiceAuth = !profileData.psn_refresh_token;
 
+  // Snapshot presence is the authoritative signal for "we're mid-sync",
+  // NOT cursor presence. An empty-string cursor paired with a fresh
+  // snapshot is a valid "snapshot built, haven't processed any IGDB yet"
+  // state.
+  const existingSnapshot = profileData.psn_library_sync_snapshot as Snapshot | null;
+  const snapshotFresh =
+    !!existingSnapshot?.started_at &&
+    Date.now() - new Date(existingSnapshot.started_at).getTime() < SNAPSHOT_TTL_MS;
+  const hasValidSnapshot = snapshotFresh && Array.isArray(existingSnapshot?.unmatched);
+
   // Resolve the cursor envelope: explicit body cursor wins, otherwise fall
-  // back to whatever the last call persisted on the profile. Both forms carry
-  // the last fully-processed npCommId from the snapshot's `unmatched` list.
-  const cursor: string | null = hasCursor
-    ? body.cursor
-    : (profileData.psn_library_sync_cursor as any)?.npCommId ?? null;
-  const isFreshStart = !cursor;
+  // back to whatever the last call persisted on the profile.
+  const persistedCursor = (profileData.psn_library_sync_cursor as any)?.npCommId;
+  const cursor: string | null = bodyHasCursor
+    ? (body.cursor as string)
+    : typeof persistedCursor === 'string'
+      ? persistedCursor
+      : null;
+
+  // A "fresh start" needs us to walk PSN titles and rebuild — only the case
+  // when we don't have a usable snapshot. Everything else, whether the
+  // client is passing a cursor or not, is a continuation of an existing
+  // sync run.
+  const canReuseSnapshot = hasValidSnapshot && !force;
+  const isFreshStart = !canReuseSnapshot;
 
   // Debounce fresh starts only. Cursor continuations skip the cooldown — they
   // are part of an already-in-flight sync, not a new user action.
@@ -371,16 +397,9 @@ export const POST: APIRoute = async (context) => {
 
   // ─────────────────────────── snapshot build or reuse ────────────────────────
   //
-  // Fresh start (no cursor, no stale snapshot, no force) → walk PSN, DB-match,
-  // write matched rows to user_game_status, snapshot the unmatched queue.
-  // Cursor continuation → load the existing snapshot and keep going.
-
-  const existingSnapshot = profileData.psn_library_sync_snapshot as Snapshot | null;
-  const snapshotFresh =
-    !!existingSnapshot?.started_at &&
-    Date.now() - new Date(existingSnapshot.started_at).getTime() < SNAPSHOT_TTL_MS;
-  const canReuseSnapshot =
-    !isFreshStart && !force && snapshotFresh && Array.isArray(existingSnapshot?.unmatched);
+  // canReuseSnapshot (computed above) → load the existing snapshot and keep
+  // going. Otherwise walk PSN, DB-match, write matched rows to
+  // user_game_status, snapshot the unmatched queue.
 
   let snapshot: Snapshot;
   let initialMatchedThisCall = 0;
