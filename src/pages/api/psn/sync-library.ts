@@ -78,6 +78,12 @@ export const POST: APIRoute = async (context) => {
   if (!auth) return response;
   const { profile, db } = auth;
 
+  // Continuation calls (client auto-looping to drain the IGDB fallback
+  // across multiple requests) skip the cooldown — they're part of the
+  // same user-initiated sync, not a new action to debounce.
+  const body = await context.request.json().catch(() => ({} as any));
+  const isContinuation = body.continuation === true;
+
   const { data: profileData } = await (db as any)
     .from('profiles')
     .select('psn_account_id, psn_access_token, psn_refresh_token, psn_token_expires_at, psn_synced_at')
@@ -93,8 +99,9 @@ export const POST: APIRoute = async (context) => {
   // sync-trophies.ts for the full explainer.
   const useServiceAuth = !profileData.psn_refresh_token;
 
-  // 60s cooldown against accidental double-clicks.
-  if (profileData.psn_synced_at) {
+  // 60s cooldown against accidental double-clicks. Skipped on continuation
+  // calls from the client auto-loop.
+  if (profileData.psn_synced_at && !isContinuation) {
     const secondsSince = (Date.now() - new Date(profileData.psn_synced_at).getTime()) / 1000;
     if (secondsSince < 60) {
       const wait = Math.ceil(60 - secondsSince);
