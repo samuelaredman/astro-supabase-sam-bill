@@ -18,15 +18,13 @@ const IN_CHUNK = 100;
 const WRITE_CHUNK = 500;
 const TITLE_CHUNK = 200;
 
-// IGDB fallback cap. The new match_psn_games (migration 20261127000001)
-// resolves the vast majority of titles against the local games table using
-// title + platform + release-date — IGDB is only needed for the thin tail
-// of truly-new titles. Capped at 10 to keep this part of the sync inside
-// a ~5-8s slice of Netlify's 10s budget; stragglers past the cap are logged
-// to psn_unmatched_titles and picked up by future users' syncs (the first
-// user to resolve a title globally seeds games.psn_np_communication_id for
-// everyone after).
-const IGDB_FALLBACK_CAP = 10;
+// IGDB fallback cap. match_psn_games resolves the vast majority of titles
+// against the local games table — IGDB is only needed for truly-new titles.
+// 20 fits comfortably in the time budget now that the bulk-update RPCs
+// (migration 20261127000002) collapsed the write-stage round trips.
+// Stragglers past the cap log to psn_unmatched_titles and get picked up by
+// future users' syncs via the fleet-seeding side effect.
+const IGDB_FALLBACK_CAP = 20;
 
 // Platform priority when the same game ships on multiple PSN platforms. PS5
 // wins over PS4 wins over PS3, matching what a returning player probably
@@ -229,7 +227,12 @@ export const POST: APIRoute = async (context) => {
   // we can zip back and backfill psn_np_communication_id on title-matched
   // rows — the next user with the same title hits the ID fast-path.
 
-  type MatchRow = { input_index: number; game_id: string; matched_by: 'id' | 'title_platform_date' };
+  // matched_by: 'id' | 'title_date' (new) | 'title_platform_date' (legacy
+  // signature, pre-migration 20261127000003). The specific value only
+  // matters for deciding whether to backfill psn_np_communication_id —
+  // anything other than 'id' means we resolved via title fallback and
+  // should seed the mapping so next user hits the ID fast path.
+  type MatchRow = { input_index: number; game_id: string; matched_by: string };
   const matchBatches: MatchRow[][] = [];
   const titleChunks = chunk(collapsed, TITLE_CHUNK);
   let baseIndex = 0;
