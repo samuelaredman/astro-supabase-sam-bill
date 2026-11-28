@@ -92,10 +92,25 @@ export const POST: APIRoute = async (context) => {
 
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
-  const { profile, db } = auth;
+  const { db } = auth;
 
   const body = await context.request.json().catch(() => ({} as any));
   const force = body.force === true;
+
+  // Admin impersonation: when the caller is a site admin and provides
+  // admin_target_profile_id, run the sync against that profile instead.
+  // Used by /admin/psn-resync to iterate every PSN-connected user. Also
+  // forces a full re-scan (bypasses cooldown + snapshot reuse).
+  let profile: { id: string } = auth.profile;
+  let isAdminImpersonation = false;
+  const adminTarget = typeof body.admin_target_profile_id === 'string' ? body.admin_target_profile_id : null;
+  if (adminTarget) {
+    const { data: adminRow } = await (db as any)
+      .from('site_admins').select('profile_id').eq('profile_id', auth.profile.id).maybeSingle();
+    if (!adminRow) return json({ error: 'Not authorized' }, 403);
+    profile = { id: adminTarget };
+    isAdminImpersonation = true;
+  }
 
   const { data: profileData } = await (db as any)
     .from('profiles')
@@ -124,9 +139,9 @@ export const POST: APIRoute = async (context) => {
   const isFreshStart = !cursor;
 
   // Debounce on fresh starts only. Continuations skip the cooldown, and force
-  // bypasses everything for a full re-scan.
+  // (or admin impersonation) bypasses everything for a full re-scan.
   const lastSync = profileData.psn_trophies_synced_at;
-  if (lastSync && isFreshStart && !force) {
+  if (lastSync && isFreshStart && !force && !isAdminImpersonation) {
     const secondsSince = (Date.now() - new Date(lastSync).getTime()) / 1000;
     if (secondsSince < COOLDOWN_SECONDS) {
       const wait = Math.max(1, Math.ceil(COOLDOWN_SECONDS - secondsSince));

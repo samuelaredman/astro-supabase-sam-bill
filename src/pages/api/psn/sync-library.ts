@@ -76,7 +76,7 @@ function pickIgdbId(hits: any[]): number | null {
 export const POST: APIRoute = async (context) => {
   const { auth, response } = await requireAuth(context);
   if (!auth) return response;
-  const { profile, db } = auth;
+  const { db } = auth;
 
   // Continuation calls (client auto-looping to drain the IGDB fallback
   // across multiple requests) skip the cooldown — they're part of the
@@ -90,6 +90,21 @@ export const POST: APIRoute = async (context) => {
   const excludeNpCommIds = new Set<string>(
     Array.isArray(body.exclude) ? body.exclude.filter((x: unknown) => typeof x === 'string') : [],
   );
+
+  // Admin impersonation: when the caller is a site admin and provides
+  // admin_target_profile_id, run the sync against that profile instead.
+  // Used by /admin/psn-resync to iterate every PSN-connected user. Also
+  // skips the cooldown since admin resyncs are intentional.
+  let profile: { id: string } = auth.profile;
+  let isAdminImpersonation = false;
+  const adminTarget = typeof body.admin_target_profile_id === 'string' ? body.admin_target_profile_id : null;
+  if (adminTarget) {
+    const { data: adminRow } = await (db as any)
+      .from('site_admins').select('profile_id').eq('profile_id', auth.profile.id).maybeSingle();
+    if (!adminRow) return json({ error: 'Not authorized' }, 403);
+    profile = { id: adminTarget };
+    isAdminImpersonation = true;
+  }
 
   const { data: profileData } = await (db as any)
     .from('profiles')
@@ -107,8 +122,8 @@ export const POST: APIRoute = async (context) => {
   const useServiceAuth = !profileData.psn_refresh_token;
 
   // 60s cooldown against accidental double-clicks. Skipped on continuation
-  // calls from the client auto-loop.
-  if (profileData.psn_synced_at && !isContinuation) {
+  // calls from the client auto-loop AND on admin impersonation (intentional).
+  if (profileData.psn_synced_at && !isContinuation && !isAdminImpersonation) {
     const secondsSince = (Date.now() - new Date(profileData.psn_synced_at).getTime()) / 1000;
     if (secondsSince < 60) {
       const wait = Math.ceil(60 - secondsSince);
