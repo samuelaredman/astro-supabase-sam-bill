@@ -11,7 +11,7 @@ import {
   type AuthorizationPayload,
 } from "../../../utils/psn";
 import { getServiceAuth } from "../../../utils/psnService";
-import { igdbMultiQuery, escapeIgdbString } from "../../../utils/igdb";
+import { igdbMultiQuery, igdbFetch, escapeIgdbString } from "../../../utils/igdb";
 import { importGameByIgdbId } from "../../../utils/games";
 
 // Netlify's SSR function budget is 10s. Reserve ~3s for post-processing DB
@@ -531,25 +531,58 @@ export const POST: APIRoute = async (context) => {
   let lastProcessedId = cursor ?? '';
   let processedThisCall = 0;
 
-  if (remainingUnmatched.length > 0) {
-    // Multiquery batches of 10 — IGDB rate-limits at 4 req/s and each
-    // multiquery counts as one request regardless of sub-query count, so 10
-    // titles per HTTP is the sweet spot between rate-limit efficiency and
-    // import latency per batch.
-    outer: for (const batch of chunk(remainingUnmatched, MULTIQUERY_BATCH)) {
-      if (Date.now() - startedAt > TIME_BUDGET_MS) break;
+  // Multiquery is strictly an optimization — we fall back to serial per-title
+  // igdbFetch on the first multiquery failure and don't try multiquery again
+  // for the remainder of this call. Live symptom that forced this: a user's
+  // full-library sync returned "0 added · 1,257 couldn't be matched" because
+  // every multiquery returned null and we had no recovery path. Serial is
+  // ~10x slower (one request per title against the 4 req/s IGDB limit) but
+  // actually resolves games, so it wins.
+  let multiqueryOk = true;
 
-      const subs = batch.map((entry, i) => ({
-        name: `q${i}`,
-        body: buildIgdbSubquery(entry),
-      }));
-
+  async function resolveBatch(
+    batch: UnmatchedEntry[],
+  ): Promise<Map<string, any[] | null>> {
+    const out = new Map<string, any[] | null>();
+    if (multiqueryOk) {
+      const subs = batch.map((entry, i) => ({ name: `q${i}`, body: buildIgdbSubquery(entry) }));
       let results: Map<string, any[]> | null = null;
       try {
         results = await igdbMultiQuery('games', subs);
       } catch (e) {
-        console.error('[psn/sync-library] multiquery error:', e);
+        console.error('[psn/sync-library] multiquery threw:', e);
       }
+      if (results) {
+        for (let i = 0; i < batch.length; i++) {
+          out.set(`q${i}`, results.get(`q${i}`) ?? null);
+        }
+        return out;
+      }
+      console.error(
+        '[psn/sync-library] multiquery returned null; falling back to serial for the rest of this call',
+      );
+      multiqueryOk = false;
+    }
+
+    // Serial fallback — one request per title. Preserves the original
+    // (pre-cursor) behavior proven to resolve games correctly.
+    for (let i = 0; i < batch.length; i++) {
+      if (Date.now() - startedAt > TIME_BUDGET_MS) {
+        // Remaining entries just stay unresolved in this call's map; the
+        // outer loop's budget check will exit before processing them.
+        break;
+      }
+      const rows = await igdbFetch('games', buildIgdbSubquery(batch[i]));
+      out.set(`q${i}`, Array.isArray(rows) ? rows : null);
+    }
+    return out;
+  }
+
+  if (remainingUnmatched.length > 0) {
+    outer: for (const batch of chunk(remainingUnmatched, MULTIQUERY_BATCH)) {
+      if (Date.now() - startedAt > TIME_BUDGET_MS) break;
+
+      const results = await resolveBatch(batch);
 
       const batchResolved: ResolvedMatch[] = [];
       for (let i = 0; i < batch.length; i++) {
@@ -559,7 +592,7 @@ export const POST: APIRoute = async (context) => {
           break outer;
         }
         const entry = batch[i];
-        const hits = results?.get(`q${i}`) ?? null;
+        const hits = results.get(`q${i}`) ?? null;
         const igdbId = hits ? pickIgdbId(hits) : null;
         if (!igdbId) {
           batchUnmatched++;
